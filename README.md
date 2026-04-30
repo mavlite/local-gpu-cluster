@@ -7,10 +7,10 @@
 ![Runtime](https://img.shields.io/badge/runtime-Ollama-000000)
 ![Models](https://img.shields.io/badge/models-Qwen%202.5%20%7C%20Qwen%203.6-blue)
 ![RAG](https://img.shields.io/badge/RAG-AnythingLLM%20%2B%20LanceDB-0a6cf5)
-![Revision](https://img.shields.io/badge/revision-3-lightgrey)
+![Revision](https://img.shields.io/badge/revision-4-lightgrey)
 ![License](https://img.shields.io/badge/license-CC%20BY--SA%204.0-yellow)
 
-End-to-end setup of a single-workstation LLM serving stack on a used Dell Precision T7910 with three RTX 3060 12 GB cards pooled for 36 GB of VRAM. Covers hardware baseline, PCIe topology verification, Ollama multi-GPU configuration, a custom SSE-keepalive proxy for reasoning-class models, an AnythingLLM RAG pipeline over VMware Cloud Foundation documentation, MCP-server integration, and the diagnostic path that produced the chunk-size and embedder-dimension fixes documented later.
+End-to-end setup of a single-workstation LLM serving stack on a used Dell Precision T7910 with three RTX 3060 12 GB cards pooled for 36 GB of VRAM. Covers hardware baseline, PCIe topology verification, Ollama multi-GPU configuration, a custom SSE-keepalive proxy for reasoning-class models, an AnythingLLM RAG pipeline over VMware Cloud Foundation and Keycloak documentation, three custom MCP containers exposing those workspaces (and a live Broadcom TechDocs scraper) to remote agentic clients, an automated documentation-refresh service that keeps the VCF corpus current against the upstream site, and the diagnostic path that produced the chunk-size and embedder-dimension fixes documented later.
 
 > **Scope note.** This document describes one working configuration verified on the author's hardware as of the revision date. Paths, hostnames, and service port numbers are illustrative — adapt to your environment. Upstream software changes quickly; always check current project documentation before acting on version-specific details here.
 
@@ -32,9 +32,23 @@ End-to-end setup of a single-workstation LLM serving stack on a used Dell Precis
   - [3.6 VRAM budget for 131K context](#36-vram-budget-for-131k-context)
 - [4. No-Think Proxy (SSE Keepalive Shim)](#4-no-think-proxy-sse-keepalive-shim)
 - [5. AnythingLLM + `rag-qwen25` RAG Pipeline](#5-anythingllm--rag-qwen25-rag-pipeline)
-- [6. MCP Server Setup](#6-mcp-server-setup)
+- [6. MCP Server Architecture](#6-mcp-server-architecture)
+  - [6.1 Three custom MCP containers](#61-three-custom-mcp-containers)
+  - [6.2 Tool routing and selection](#62-tool-routing-and-selection)
+  - [6.3 Container build pattern](#63-container-build-pattern)
+  - [6.4 Citation formatting helper](#64-citation-formatting-helper)
+  - [6.5 OpenCode client configuration](#65-opencode-client-configuration)
+  - [6.6 External MCP servers (SearXNG, Tavily, Context7)](#66-external-mcp-servers-searxng-tavily-context7)
 - [7. VCF Documentation Scraping & Ingestion](#7-vcf-documentation-scraping--ingestion)
 - [8. The Chunk-Size Fix](#8-the-chunk-size-fix)
+- [9. VCF Documentation Auto-Updater](#9-vcf-documentation-auto-updater)
+  - [9.1 Goal and design constraints](#91-goal-and-design-constraints)
+  - [9.2 Architecture](#92-architecture)
+  - [9.3 Discovery strategy: workspace seeds + one-hop crawl](#93-discovery-strategy-workspace-seeds--one-hop-crawl)
+  - [9.4 Change detection and ingestion](#94-change-detection-and-ingestion)
+  - [9.5 Safety controls](#95-safety-controls)
+  - [9.6 Operational pattern](#96-operational-pattern)
+- [10. SDG (Keycloak) Workspace](#10-sdg-keycloak-workspace)
 - [Appendix A — Directory Layout on the Host](#appendix-a--directory-layout-on-the-host)
 - [Appendix B — Service Port Map](#appendix-b--service-port-map)
 - [Appendix C — Smoke Tests](#appendix-c--smoke-tests)
@@ -45,6 +59,7 @@ End-to-end setup of a single-workstation LLM serving stack on a used Dell Precis
 
 | Rev | Date | Notes |
 |---|---|---|
+| 4 | Apr 2026 | Three custom MCP containers replacing npx-launched servers (`anythingllm-search-mcp`, `broadcom-techdocs-mcp`, `sdg-docs-mcp`). Tool descriptions tightened for routing reliability. `format_source()` helper for human-readable citations. New §9 documenting the Docker-deployed VCF documentation auto-updater (discover-fetch-ingest pipeline with SQLite state and dry-run safety). New §10 documenting the SDG (Keycloak) workspace. |
 | 3 | Apr 2026 | Qwen 3.6 model family adopted (`coder-36`, `coder-long`). Parameter recipes corrected to Qwen's published thinking-mode sampling guidance. §3.4.1 rationale added. Public-posting polish. |
 | 2 | Apr 2026 | Embedder switched from `nomic-embed-text` (768-dim) to `qwen3-embed-compact` (1024-dim). Custom Modelfiles documented. §5.7 re-embedding procedure added. VRAM math at 131K context. |
 | 1 | Apr 2026 | Initial reference: hardware, PCIe verification, Ollama, no-think proxy, AnythingLLM + Qwen 2.5, MCP, VCF scraping, chunk-size fix. |
@@ -545,7 +560,7 @@ LanceDB (AnythingLLM's default) is sufficient. LanceDB is also the only backend 
 
 ### 5.5 Workspace tuning (per-workspace API call)
 
-For the VCF workspace specifically, the defaults are too conservative. The whole set of tuning knobs can be flipped in a single API call:
+Two workspaces are configured: `vcf-reference` (the VCF documentation corpus, ~5,000 chunked documents) and `sdg-documentation` (Keycloak 26.3.3 reference content; see §10). The defaults are too conservative for both. The whole set of tuning knobs can be flipped in a single API call per workspace:
 
 ```bash
 export ALLM_URL="http://localhost:3001"
@@ -577,6 +592,8 @@ Key choices:
 - `queryRefusalResponse` — sentinel string used as the smoke-test. Asking "what's the capital of France?" should return this, not "Paris." If Paris comes back, query mode isn't actually in effect (see §8.5).
 
 Verify with `GET /api/v1/workspace/$WS` and confirm the fields match.
+
+The `sdg-documentation` workspace uses the same call with two changes: `WS=sdg-documentation`, `topN: 12` (slightly more snippets to compensate for Keycloak's denser narrative-style chunks), and an `openAiPrompt` describing SDG/Keycloak content rather than VCF content. The `queryRefusalResponse` is correspondingly adjusted to "Not in the provided SDG documents."
 
 ### 5.6 Pinning as an alternative to RAG
 
@@ -611,21 +628,202 @@ For bulk re-embedding of a large corpus, switch the embedder to `qwen3-embed-cpu
 
 ---
 
-## 6. MCP Server Setup
+## 6. MCP Server Architecture
 
-### 6.1 Servers in use
+### 6.1 Three custom MCP containers
 
-| Server | Purpose | Host |
-|---|---|---|
-| `searxng` | Meta-search; privacy-respecting, self-hosted | Local container |
-| `tavily` | Commercial search API with LLM-friendly result cleaning | Hosted (API key) |
-| `context7` | Live library documentation (npm, pip, crates, Go, Rust, etc.) | Hosted |
-| `anythingllm` | Query the local workspaces from outside AnythingLLM (e.g. from OpenCode) | Local |
-| `broadcom` | Fetches pages from techdocs.broadcom.com and knowledge.broadcom.com as cleaned markdown | Hosted (`broadcom-support-mcp-server`) |
+The MCP layer exposes the local AnythingLLM workspaces (and a live Broadcom TechDocs scraper) to remote agentic clients like OpenCode. Each MCP runs as its own Docker container, listening on its own port, with its own scope and tool naming. This is a deliberate departure from the original `npx mcp-anythingllm` setup: stdio-launched MCPs rebuild on every client reconnect, share a process tree with the editor, and cannot be tuned independently. Containerized SSE servers live independently of the client and are easy to instrument.
 
-### 6.2 SearXNG (local container)
+| Container | Port | Backing data | Purpose |
+|---|---|---|---|
+| `anythingllm-search-mcp` | 3002 | AnythingLLM `vcf-reference` workspace | RAG over the VCF documentation corpus |
+| `broadcom-techdocs-mcp`  | 3003 | Live `techdocs.broadcom.com` | On-demand fetch of pages not yet in the local corpus |
+| `sdg-docs-mcp`           | 3004 | AnythingLLM `sdg-documentation` workspace | RAG over Keycloak 26.3.3 (and future SDG infra docs) |
 
-`/opt/searxng/docker-compose.yml`:
+All three run on the same host as AnythingLLM (`192.168.6.110` in this deployment) and connect to it over the Docker bridge or via `host.docker.internal`. They listen on `0.0.0.0` so OpenCode running on a different machine can reach them over SSE.
+
+### 6.2 Tool routing and selection
+
+MCP tool selection is **description-driven, not name-driven**. When OpenCode connects to an MCP server, it receives a manifest of tool names and docstrings; the agent (Qwen 3.6 in this case) picks tools based on how well each docstring matches the user's question. There is no router middleware — the docstrings *are* the routing logic.
+
+Two practical implications:
+
+**Distinct tool function names per server.** Originally both VCF and SDG MCPs used the same function names (cloned from a single template), causing the agent to call whichever server happened to come first alphabetically — sometimes serving VMware questions out of the Keycloak workspace. The fix was to rename functions explicitly: `search_vcf_docs` / `list_vcf_documents` for VCF, `search_sdg_docs` / `list_sdg_documents` for SDG.
+
+**Asymmetric, opinionated docstrings.** Each tool's docstring should encode three things: what content it covers, when to prefer it over alternatives, and when *not* to use it (with a pointer to the right tool). For VCF specifically:
+
+```python
+@mcp.tool()
+def search_vcf_docs(query: str) -> str:
+    """
+    Query the comprehensive VMware Cloud Foundation (VCF) documentation
+    corpus. This is a full scrape of techdocs.broadcom.com's VCF
+    section plus custom-authored design rule documents.
+
+    PREFER THIS TOOL for ANY question about VCF, NSX, vSphere, vSAN,
+    or VMware Cloud Foundation operations. The corpus is comprehensive
+    and indexed — it should be your first and default choice for VMware
+    questions, not a fallback.
+
+    USE THIS for:
+      - VCF deployment, configuration, or operations questions
+      - NSX networking: T0/T1 gateways, edge nodes, transport zones,
+        TEP configuration, BGP, segments, distributed firewall
+      - vSphere features, vSAN, VCF lifecycle, SDDC Manager
+      - VCF design rules and validation IDs (e.g. VCF-NET-014, VCF-IP-015)
+
+    DO NOT USE for:
+      - Content published AFTER the last corpus scrape — for release notes
+        or KB articles, use broadcom-live instead.
+      - Questions about Keycloak or other SDG infrastructure — use sdg-docs.
+
+    The answer is strictly grounded in the indexed corpus. If the topic
+    isn't covered, the response will say so explicitly rather than
+    hallucinate.
+    """
+```
+
+The "DO NOT USE for X — use Y instead" sentence is the one that actually fixes overlapping-scope routing. The reciprocal exclusion in `broadcom-live`'s and `sdg-docs`'s docstrings completes the routing contract.
+
+### 6.3 Container build pattern
+
+All three MCPs share a Dockerfile pattern. Source lives at `/opt/anythingllm-mcp/`, `/opt/broadcom-techdocs-mcp/`, and `/opt/sdg-mcp/` respectively. Each directory contains:
+
+```
+docker-compose.yml
+Dockerfile
+requirements.txt
+server.py            # the MCP tool definitions
+.env                 # ANYTHINGLLM_API_KEY (mode 600)
+```
+
+`/opt/anythingllm-mcp/server.py` (excerpt — full source omitted; the SDG MCP is structurally identical with renamed functions and the `sdg-documentation` workspace target):
+
+```python
+"""
+Read-only MCP server wrapping AnythingLLM's workspace chat API.
+Runs in HTTP/SSE mode on port 3002 for remote consumption by OpenCode.
+"""
+import os, re
+import httpx
+from mcp.server.fastmcp import FastMCP
+
+API_KEY   = os.environ["ANYTHINGLLM_API_KEY"]
+BASE_URL  = os.environ.get("ANYTHINGLLM_BASE_URL", "http://host.docker.internal:3001")
+WORKSPACE = os.environ.get("ANYTHINGLLM_WORKSPACE", "vcf-reference")
+
+mcp = FastMCP("vcf-reference", host="0.0.0.0", port=3002)
+
+@mcp.tool()
+def search_vcf_docs(query: str) -> str:
+    """<routing-aware docstring as shown in §6.2>"""
+    with httpx.Client(timeout=180.0) as client:
+        r = client.post(
+            f"{BASE_URL}/api/v1/workspace/{WORKSPACE}/chat",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={"message": query, "mode": "query"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        answer = strip_thinking(data.get("textResponse", "(no response)"))
+        sources = data.get("sources", [])
+        if sources:
+            items = sorted({format_source(s) for s in sources})
+            return f"{answer}\n\nSources:\n" + "\n".join(f"- {t}" for t in items)
+        return answer
+
+if __name__ == "__main__":
+    mcp.run(transport="sse")
+```
+
+Build, deploy, and verify:
+
+```bash
+cd /opt/anythingllm-mcp
+sudo docker compose up -d --build
+sudo docker logs anythingllm-search-mcp --tail 20      # expect: Uvicorn running on 0.0.0.0:3002
+timeout 5 curl -sN -H "Accept: text/event-stream" http://192.168.6.110:3002/sse | head -5
+# expect: event: endpoint  +  data: /messages/?session_id=...
+```
+
+A common failure mode after editing: stacked `@mcp.tool()` decorators (paste artifact) produce a "Tool already exists" warning at startup. The tool still works but the duplicate registration is a code-cleanliness issue worth fixing — `grep -c '@mcp.tool()' server.py` should match the number of tool functions defined.
+
+### 6.4 Citation formatting helper
+
+The original tool returned source identifiers as raw cache filenames like `raw-keycloak-26-3-87dc9f0d-a02b-4077-804d-0ac828f8e91e.json`, which is unusable. The improved citations build a human-readable string from the document's metadata fields:
+
+```python
+def format_source(meta: dict) -> str:
+    """Build a human-readable source string from a document's metadata."""
+    chunk_src = meta.get("chunkSource", "")
+    doc_src   = meta.get("docSource", "")
+    if doc_src and chunk_src:
+        try:
+            parts = doc_src.rstrip("/").split("/")
+            guide = parts[-2] if parts[-1] in ("index.html", "") else parts[-1].replace(".html", "")
+            return f"{chunk_src} \u2192 {guide}  ({doc_src})"
+        except Exception:
+            return f"{chunk_src} ({doc_src})"
+    if chunk_src:
+        return chunk_src
+    return meta.get("title") or meta.get("filename") or "untitled"
+```
+
+After this change, citations look like:
+
+```
+Sources:
+- keycloak-26.3.3 → server_admin  (https://www.keycloak.org/docs/26.3.3/server_admin/index.html)
+- vcf-9.0 → nsx-edge-design  (https://techdocs.broadcom.com/.../nsx-edge-design.html)
+```
+
+For VCF documents whose `docSource` field is the literal string `"a text file uploaded by the user."` (a quirk of file-upload ingestion versus URL-fetch ingestion), `chunkSource` alone is used as the fallback. The actual source URL for those documents lives inside the document body's YAML front-matter — see §9.3 for how the auto-updater discovers it.
+
+### 6.5 OpenCode client configuration
+
+OpenCode's `config.json` references the three MCPs as remote SSE endpoints:
+
+```json
+{
+  "mcp": {
+    "vcf-reference": {
+      "type": "remote",
+      "url": "http://192.168.6.110:3002/sse",
+      "timeout": 120000
+    },
+    "broadcom-live": {
+      "type": "remote",
+      "url": "http://192.168.6.110:3003/sse",
+      "timeout": 120000
+    },
+    "sdg-docs": {
+      "type": "remote",
+      "url": "http://192.168.6.110:3004/sse",
+      "timeout": 120000
+    }
+  }
+}
+```
+
+A connection problem ("SSE error: Unable to connect") almost always means one of three things, in order of frequency: (1) the container isn't running because of a Python parse error introduced during a docstring edit, (2) `docker compose up -d --build` rebuilt the image but reused the old container without picking up new volume mounts (`docker compose down && up -d --build` forces a clean recreate), (3) a host firewall rule blocking the new port.
+
+### 6.6 External MCP servers (SearXNG, Tavily, Context7)
+
+Three additional MCPs are configured outside the Docker-container pattern:
+
+- **`searxng`** — local container on port 8888 (see config below); meta-search across DuckDuckGo, Brave, Wikipedia, etc. Free, self-hosted, privacy-preserving.
+- **`tavily`** — hosted commercial search API with LLM-friendly result cleaning. API key required.
+- **`context7`** — hosted, surfaces current library documentation (npm/pip/crates/etc.) inline. API key required.
+
+These are launched via stdio rather than as containers because they're upstream-maintained and don't benefit from the local-container pattern. The OpenCode config has them alongside the remote servers above:
+
+```json
+"searxng": { "type": "local", "command": ["npx", "-y", "mcp-searxng"], "environment": { "SEARXNG_URL": "http://192.168.6.109:8888" } },
+"tavily":  { "type": "local", "command": ["npx", "-y", "tavily-mcp"],  "environment": { "TAVILY_API_KEY": "<key>" } },
+"context7":{ "type": "local", "command": ["npx", "-y", "@upstash/context7-mcp"] }
+```
+
+SearXNG itself runs as `/opt/searxng/docker-compose.yml`:
 
 ```yaml
 services:
@@ -642,70 +840,22 @@ services:
       - INSTANCE_NAME=homelab-searxng
 ```
 
-A minimal `settings.yml` that enables the JSON format MCP clients require:
+with a minimal `settings.yml` enabling JSON output:
 
 ```yaml
 use_default_settings: true
 search:
-  formats:
-    - html
-    - json
+  formats: [html, json]
 server:
   secret_key: "<random 64-char hex>"
   limiter: false
 ```
 
-### 6.3 MCP client configuration
-
-OpenCode's `mcp.json` (or AnythingLLM's agent MCP config) wires the servers together:
-
-```json
-{
-  "mcpServers": {
-    "searxng": {
-      "command": "npx",
-      "args": ["-y", "mcp-searxng"],
-      "env": {
-        "SEARXNG_URL": "http://localhost:8888"
-      }
-    },
-    "tavily": {
-      "command": "npx",
-      "args": ["-y", "tavily-mcp"],
-      "env": {
-        "TAVILY_API_KEY": "<key>"
-      }
-    },
-    "context7": {
-      "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
-    },
-    "anythingllm": {
-      "command": "npx",
-      "args": ["-y", "mcp-anythingllm"],
-      "env": {
-        "ALLM_URL": "http://localhost:3001",
-        "ALLM_API_KEY": "<key>",
-        "ALLM_WORKSPACE": "vcf-reference"
-      }
-    },
-    "broadcom": {
-      "command": "npx",
-      "args": ["-y", "broadcom-support-mcp-server"]
-    }
-  }
-}
-```
-
-### 6.4 Operational notes
-
-- SearXNG should be restarted after any `settings.yml` change — the container caches the config at startup.
-- The broadcom MCP server fetches on demand; it's useful for spot lookups but slow and rate-limited. For anything Qwen will be asked about repeatedly, pre-ingest into the AnythingLLM VCF workspace (§7 below) rather than relying on live fetches.
-- AnythingLLM's own MCP exposure lets OpenCode query the VCF workspace as a tool. This is the path to keep when using OpenCode for VCF-adjacent coding work — the retrieval runs inside AnythingLLM with the tuning from §5.5, not against whatever default chunk strategy OpenCode would use.
-
 ---
 
 ## 7. VCF Documentation Scraping & Ingestion
+
+> The pipeline below describes the **initial bulk scrape** that populates the workspace. For ongoing refresh against the upstream site, see §9 (the auto-updater service that runs periodically and only re-embeds changed pages).
 
 ### 7.1 Source reality
 
@@ -905,6 +1055,187 @@ AnythingLLM does not currently support **semantic** or **structure-aware** split
 
 ---
 
+## 9. VCF Documentation Auto-Updater
+
+### 9.1 Goal and design constraints
+
+The VCF documentation corpus drifts. Broadcom publishes new VCF 9.0 pages, edits older ones, deprecates and removes others. A one-time scrape goes stale fast. The auto-updater is a Docker-deployed service that runs on a cron schedule (default: 03:00 Tuesday and Friday) and keeps the `vcf-reference` workspace in sync against the upstream site, surgically — only re-embedding pages that actually changed.
+
+Three constraints shaped the design:
+
+1. **Be polite to Broadcom.** Rate-limited HTTP, descriptive User-Agent, conditional requests with `If-Modified-Since` / `If-None-Match` headers so a no-change page is a single round-trip.
+2. **Detect change, don't blindly re-embed.** Embedding is the GPU-expensive step; re-embedding 5,000 documents nightly when 5 changed wastes hours of compute. Hash the fetched body and only ingest when the hash actually differs from what's stored.
+3. **Make destructive operations safe by default.** A bug in URL discovery could delete the entire corpus on a single bad run. Ship with `DRY_RUN=true` as default, hard caps on per-run deletion and update counts, and a 3-run grace period before any URL is considered truly removed.
+
+### 9.2 Architecture
+
+The service lives at `/opt/vcf-doc-updater/` and is a single Docker container running cron internally:
+
+```text
+                 ┌──────────────────────────────────────┐
+                 │  vcf-doc-updater (cron-driven)       │
+                 └──────────────────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+        ┌──────────┐    ┌──────────┐    ┌──────────┐
+        │ discover │    │  fetch   │    │  ingest  │
+        └────┬─────┘    └────┬─────┘    └────┬─────┘
+             │               │               │
+             ▼               ▼               ▼
+   workspace seed list  HEAD / cond.GET   AnythingLLM API:
+   + one-hop crawl      compare hash      delete old + upload
+                                          new + reindex
+             │               │               │
+             └───────────────┼───────────────┘
+                             ▼
+                  ┌────────────────────┐
+                  │   state.sqlite     │
+                  │ ─────────────────  │
+                  │ url, location,     │
+                  │ lastmod, etag,     │
+                  │ hash, last_seen    │
+                  └────────────────────┘
+```
+
+Project layout:
+
+```
+/opt/vcf-doc-updater/
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+├── entrypoint.sh           # writes crontab from $SCHEDULE, runs cron -f
+├── discover.py             # workspace + crawl URL discovery
+├── fetcher.py              # HEAD-then-conditional-GET with hash compare
+├── html_to_md.py           # main-content extraction + YAML front-matter
+├── ingester.py             # AnythingLLM upload/remove/reindex client
+├── updater.py              # orchestrator: discover → fetch → ingest
+├── .env                    # ANYTHINGLLM_API_KEY (mode 600)
+└── state/
+    └── state.sqlite        # persistent state, mounted from host
+```
+
+### 9.3 Discovery strategy: workspace seeds + one-hop crawl
+
+The obvious approach — walk the `techdocs.broadcom.com` sitemap — does not work. Broadcom's public sitemap (`/sitemap.xml` with 25 sub-sitemaps) covers the legacy CA Technologies catalog but excludes VMware acquisition content entirely. Sitemap-driven discovery returns 0 VCF URLs. The auto-updater supports sitemap mode for completeness, but the **default and recommended** mode is `workspace+crawl`:
+
+1. **Seed list** comes from the existing AnythingLLM corpus. Each document's source URL is extracted from the YAML front-matter at the top of its `pageContent` field — specifically the `source_url:` line, which the original scrape pipeline embedded. This is read directly from the on-disk JSON cache files at `/opt/anythingllm/storage/documents/custom-documents/` (mounted read-only into the updater container at `/allm-storage`). Reading from disk avoids API endpoint shape dependencies and is dramatically faster than 5,000 API calls.
+
+   The top-level `docSource` field is unreliable for these documents — for content uploaded as files (rather than URL-fetched), AnythingLLM stores `"a text file uploaded by the user."` there. The real URL is inside the document's body front-matter:
+   ```yaml
+   ---
+   title: "VMware Cloud Foundation 9.0"
+   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/...
+   scraped_at: 2026-04-23T01:54:11+00:00
+   ---
+   ```
+
+2. **One-hop link expansion** crawls each seed URL, extracts in-scope `<a href>` links, and adds any new ones to the discovery set. This catches newly-published VCF pages that aren't yet in the corpus. The crawl is the most expensive part of a run (~80 minutes for 5,000 seeds at 1 second per request), so for routine refresh you can run pure `workspace` mode (no crawl) twice a week and full `workspace+crawl` weekly.
+
+A `CRAWL_MAX_SEEDS` env var caps how many seeds get crawled per run, useful for testing or for spreading the cost across multiple runs.
+
+### 9.4 Change detection and ingestion
+
+For each discovered URL, `fetcher.py` performs:
+
+1. Look up stored state (`last_modified`, `etag`, `content_hash`) in SQLite.
+2. If never seen, do a full GET.
+3. Otherwise, send a conditional GET with `If-Modified-Since` and `If-None-Match`. A `304 Not Modified` response means skip.
+4. On 200 OK, hash the body and compare against the stored hash. Headers may have changed cosmetically (cache-busting, load balancer headers) without the content actually changing — the hash is the source of truth.
+
+Only documents that pass step 4 with a different hash proceed to ingestion. Ingestion is delete-then-add: remove the previous version of the document from the AnythingLLM workspace, upload the new converted markdown, and trigger embedding. The HTML-to-markdown conversion (`html_to_md.py`) preserves the YAML front-matter format so subsequent updater runs can re-extract `source_url` from re-ingested content.
+
+### 9.5 Safety controls
+
+The `docker-compose.yml` ships with conservative defaults:
+
+```yaml
+environment:
+  - DRY_RUN=true                  # log what would change; don't change anything
+  - MAX_DELETES_PER_RUN=50        # abort the run if more than 50 documents would be deleted
+  - MAX_UPDATES_PER_RUN=500       # cap updates per run; deferred excess goes to the next run
+  - DELETE_GRACE_RUNS=3           # require a URL to be absent 3 runs in a row before deletion
+  - SCHEDULE=0 3 * * 2,5          # 03:00 Tuesday and Friday
+  - REQUEST_DELAY_S=1.0           # 1 second between HTTP requests to broadcom.com
+```
+
+Each run is recorded in a `runs` table in `state.sqlite` with counters and an `aborted` flag. A weekly check is one query:
+
+```bash
+sudo sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
+  "SELECT id, datetime(started_at,'unixepoch','localtime') AS started,
+          discovered, unchanged, updated, new, deleted, errors, aborted, abort_reason
+   FROM runs ORDER BY id DESC LIMIT 10;"
+```
+
+A healthy steady-state pattern looks like `discovered≈4900, unchanged≈4895, updated≈3, new≈1, deleted≈0, errors=0, aborted=0`. Deviations worth investigating: `discovered` drops by more than 10% between runs (sitemap or crawl problem), `aborted=1` (a safety cap fired — `abort_reason` says which), or sustained `errors > 5%` (rate limiting from upstream).
+
+### 9.6 Operational pattern
+
+Recommended rollout:
+
+1. **Initial dry-runs** (`DRY_RUN=true`, `DISCOVERY_MODE=workspace+crawl`). Run manually two or three times a few hours apart. The first run discovers all 4,900-odd seed URLs and "would upload" up to `MAX_UPDATES_PER_RUN=500` of them; subsequent runs gradually fingerprint the rest.
+2. **Live mode** (`DRY_RUN=false`). Once dry-runs look healthy in the SQLite summary, flip the flag and `docker compose up -d`. Cron drives it from there.
+3. **Mixed cadence over time.** A reasonable steady state is `workspace` mode twice weekly (catches updates to known pages, skips the 80-minute crawl) and `workspace+crawl` once weekly (catches new pages too). Both are achievable with two cron lines.
+
+To trigger an immediate run instead of waiting for the schedule:
+
+```bash
+sudo docker exec vcf-doc-updater python /app/updater.py
+```
+
+Or with a small crawl cap for testing:
+
+```bash
+sudo docker exec -e CRAWL_MAX_SEEDS=20 vcf-doc-updater python /app/updater.py
+```
+
+The same architectural pattern applies to the SDG (Keycloak) workspace, though Keycloak's update cadence is slow enough that manual quarterly refreshes are usually sufficient.
+
+---
+
+## 10. SDG (Keycloak) Workspace
+
+### 10.1 Purpose
+
+The `sdg-documentation` workspace holds reference content for the self-hosted infrastructure stack supporting a Space Engineers community: currently Keycloak 26.3.3, with additional tools (reverse proxy, identity sync, monitoring) to be added as the stack documents itself. This is operationally separate from VCF — the two workspaces have different content, different update cadences, and different MCP-server descriptions to keep agentic routing clean.
+
+### 10.2 Ingestion source
+
+Markdown files for Keycloak 26.3.3 live at `/opt/keycloak-ingest/output/keycloak-26.3.3/`, organized by guide (`server_admin`, `authorization_services`, `securing_apps`, `release_notes`, etc.). Each file has YAML front-matter identifying its source:
+
+```yaml
+---
+source: keycloak-26.3.3
+product: keycloak
+version: 26.3.3
+guide: authorization_services
+source_url: https://www.keycloak.org/docs/26.3.3/authorization_services/index.html
+---
+```
+
+The `source` and `guide` fields drive the `format_source()` citation rendering documented in §6.4 — a search result cites `keycloak-26.3.3 → authorization_services (https://...)` rather than a UUID filename.
+
+### 10.3 Workspace configuration
+
+Same API call as §5.5 for the VCF workspace, with three substitutions:
+
+```bash
+WS=sdg-documentation
+# topN: 12 (slightly higher than VCF's 10 to compensate for Keycloak's denser narrative chunks)
+# queryRefusalResponse: "Not in the provided SDG documents."
+# openAiPrompt: describes Keycloak / SDG infra scope, explicitly excludes VMware/VCF content.
+```
+
+The `openAiPrompt` should mention that each document has a `source: <tool-name>` front-matter field so the answering model can name the originating tool when citing.
+
+### 10.4 MCP exposure
+
+The `sdg-docs-mcp` container at port 3004 (see §6.1) wraps this workspace. Its tool docstrings explicitly exclude VMware/VCF questions and direct the agent to `vcf-reference` for those. This asymmetric exclusion — both `vcf-reference` and `sdg-docs` describe the *other* as where to go for off-topic questions — is what makes routing reliable when both tools are simultaneously available to OpenCode.
+
+---
+
 ## Appendix A — Directory Layout on the Host
 
 ```text
@@ -912,26 +1243,59 @@ AnythingLLM does not currently support **semantic** or **structure-aware** split
 ├── anythingllm/
 │   ├── docker-compose.yml
 │   ├── .env
-│   └── storage/               # LanceDB, documents, workspaces
+│   └── storage/                    # LanceDB collections, document JSON cache, workspaces
+│       └── documents/
+│           └── custom-documents/   # ~5,000 ingested .json files (JSON cache)
 ├── searxng/
 │   ├── docker-compose.yml
 │   └── settings.yml
 ├── nothink-proxy/
-│   ├── app.py
+│   ├── app.py                      # FastAPI proxy (ports 11435 RAG / 11436 agentic)
 │   └── venv/
-└── vcf-ingest/
-    ├── scrape.py
-    └── out/                   # generated .md corpus
+├── anythingllm-mcp/                # VCF MCP container — exposes vcf-reference workspace
+│   ├── docker-compose.yml          #   (port 3002, search_vcf_docs / list_vcf_documents)
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── server.py
+│   └── .env
+├── broadcom-techdocs-mcp/          # Live techdocs.broadcom.com fetcher (port 3003)
+│   ├── docker-compose.yml
+│   ├── server.py
+│   └── cache/
+├── sdg-mcp/                        # SDG/Keycloak MCP container (port 3004,
+│   ├── docker-compose.yml          #   search_sdg_docs / list_sdg_documents)
+│   ├── server.py
+│   └── .env
+├── vcf-doc-updater/                # Auto-refresh service (§9)
+│   ├── docker-compose.yml
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   ├── discover.py
+│   ├── fetcher.py
+│   ├── html_to_md.py
+│   ├── ingester.py
+│   ├── updater.py
+│   ├── .env
+│   ├── state/state.sqlite
+│   └── logs/updater.log
+├── vcf-scrape/                     # Original VCF ingestion source files
+│   └── vcf-docs-md/                #   (organized by section: design, deployment, etc.)
+└── keycloak-ingest/                # Keycloak ingestion source files
+    └── output/keycloak-26.3.3/
 ```
 
 ## Appendix B — Service Port Map
 
-| Port | Service | Bind |
-|---|---|---|
-| 11434 | Ollama | 0.0.0.0 (LAN) |
-| 11435 | No-Think Proxy | 0.0.0.0 (LAN) |
-| 3001  | AnythingLLM | 0.0.0.0 (LAN) |
-| 8888  | SearXNG | 0.0.0.0 (LAN) |
+| Port | Service | Bind | Purpose |
+|---|---|---|---|
+| 11434 | Ollama | 0.0.0.0 (LAN) | Direct generation + embedding API |
+| 11435 | No-Think Proxy (RAG) | 0.0.0.0 (LAN) | Strips `<think>`, keepalives — for AnythingLLM |
+| 11436 | No-Think Proxy (agentic) | 0.0.0.0 (LAN) | Keepalive only — for OpenCode (preserves thinking) |
+| 3001  | AnythingLLM | 0.0.0.0 (LAN) | RAG UI + REST API |
+| 3002  | `anythingllm-search-mcp` | 0.0.0.0 (LAN) | VCF MCP (SSE) — wraps `vcf-reference` workspace |
+| 3003  | `broadcom-techdocs-mcp`  | 0.0.0.0 (LAN) | Live Broadcom TechDocs fetch (SSE) |
+| 3004  | `sdg-docs-mcp`           | 0.0.0.0 (LAN) | SDG MCP (SSE) — wraps `sdg-documentation` workspace |
+| 8888  | SearXNG | 0.0.0.0 (LAN) | Self-hosted meta-search |
 
 ## Appendix C — Smoke Tests
 
@@ -977,6 +1341,27 @@ curl -s -X POST http://localhost:3001/api/v1/workspace/vcf-reference/chat \
   | jq '.textResponse'
 # Expect: reference to /29 or /30 and citation of VCF-NET-014 / VCF-IP-015.
 # If this returns the refusal string instead, re-embedding is needed (§5.7).
+
+# 8. MCP containers are listening
+for port in 3002 3003 3004; do
+  printf "Port $port: "
+  timeout 3 curl -sN -H "Accept: text/event-stream" \
+    "http://localhost:$port/sse" 2>&1 | head -1
+done
+# Expect each: a line starting with "event: endpoint"
+# A "Connection refused" indicates the container isn't running.
+
+# 9. MCP tool routing — VCF query should fire vcf-reference, not sdg-docs
+# (Run from OpenCode and watch the trace; not scriptable from curl alone.)
+# Sample query: "What does VCF-IP-015 require for edge uplink subnet prefixes?"
+# Expected tool call: vcf-reference_search_vcf_docs (NOT sdg-docs_*)
+
+# 10. Auto-updater health
+sudo sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
+  "SELECT id, datetime(started_at,'unixepoch','localtime') AS started,
+          discovered, unchanged, updated, new, deleted, errors, aborted
+   FROM runs ORDER BY id DESC LIMIT 3;"
+# Expect: discovered ~4900, errors=0, aborted=0 in healthy steady state.
 ```
 
 ---
