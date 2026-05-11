@@ -49,12 +49,11 @@ Before you begin, confirm you have:
 - [ ] 1× NVIDIA RTX 3060 (12 GB)
 - [ ] Thermalright Phantom Spirit 120 EVO CPU cooler ✅
 - [ ] be quiet! Power Zone 2 1200W PSU ✅ (verified: 80+ Platinum, dual 12V-2x6, HEC-built)
-- [ ] Fractal Design Define 7 XL case (FD-C-DEF7X-01) — supports up to 9× 140mm fans
+- [ ] **Lian Li Lancool 217 case (SKU LAN217X — Black with walnut wood accent, non-RGB)** — includes 5× pre-installed PWM fans (2× 170mm front + 2× 120mm bottom + 1× 140mm rear), 6-channel PWM fan hub, adjustable GPU support bracket, dual PSU mount positions
 - [ ] 2× GF Computers V620 80mm cooling shroud kits (eBay) — **shrouds only, no fans/power included**
 - [ ] **2-4× Noctua NF-A8 PWM 80mm fans** — quantity depends on shroud (1 vs 2 fans per V620 shroud); confirm before ordering. If each V620 shroud holds 2 fans (typical), you need 4 total
-- [ ] Fan power for V620 shrouds: one of (Noctua NA-FH1 fan hub, OR SATA → 3× 3-pin splitter cable, OR NA-SAC5 + NA-SYC1 Y-cable)
-- [ ] **3× upHere G205 GPU brace supports** (anti-sag jack stands) — one per GPU
-- [ ] **5× ARCTIC P14 Pro PST 140mm chassis fans** (recommended upgrade over Define 7 XL stock GP-14 fans; PST chain on a single motherboard header)
+- [ ] **3× upHere G205 GPU brace supports** (anti-sag jack stands) — one per GPU; the case includes a built-in adjustable bracket as well, providing redundant support for the top GPU
+- [ ] **5× ARCTIC P14 Pro PST 140mm chassis fans** — 3 deployed as top exhaust (PST-chained on a single motherboard header), 2 held as cold spares. The Lancool 217's 5 pre-installed fans cover front + bottom + rear positions
 - [ ] Boot NVMe (1 TB+ recommended) for Proxmox — install in M.2_1 (CPU PCIe 5.0 x4)
 - [ ] Secondary NVMe (2 TB+ recommended) for `/tank` (models + data) — install in M.2_3 or M.2_4 (chipset PCIe 4.0)
 - [ ] Quality PCIe 4.0 x16 riser (LinkUp Ultra) — **only if using vertical mount** (not needed for standard 3-GPU horizontal layout)
@@ -81,10 +80,14 @@ Before you begin, confirm you have:
 
 ### Step 1.1 — Prepare the case
 
-1. Remove both side panels of the Define 7 XL.
-2. Remove the HDD cage if present (frees up 467 mm GPU clearance, rather than 315 mm).
-3. Install the PSU — Power Zone 2 mounts at the bottom, fan facing down. Use the included anti-vibration mounting screws.
-4. Install the motherboard standoffs in the EE-ATX positions per the case manual. Confirm all 9 standoffs are present and seated.
+1. Unbox the Lancool 217. Remove both side panels (tool-less — pull from the rear edge). Verify all 5 pre-installed fans are present and undamaged from shipping (Lian Li uses rubber-grommet isolators that can come loose in transit).
+2. Remove the top panel via the rear pull tab to expose the top fan mounts (this is where the 3× P14 PST top exhaust fans will go).
+3. Decide PSU orientation:
+   - **Traditional rear mount (recommended for this build):** PSU cables exit toward the front of the case. Supports up to 220mm PSU length when the right drive cage is removed. Better cable routing for our 5× GPU power cables. *Remove the right drive cage now if you choose this orientation.*
+   - **Rotated 90° (alternative):** PSU cables exit toward the side panel. Limited to 180mm PSU. Uses the included L-shaped power extension cable.
+4. Install the Power Zone 2 PSU in the chosen orientation, fan facing down toward the bottom dust filter. Use the included anti-vibration screws.
+5. Install the motherboard standoffs in the ATX positions per the Lancool 217 manual. Confirm all 9 standoffs are present and seated.
+6. Identify the location of the built-in 6-channel PWM fan hub behind the motherboard tray — typically pre-routed at the top-right of the rear chamber. Note where its master PWM input cable and SATA power cable terminate (you'll connect these in Step 1.9).
 
 ### Step 1.2 — Install CPU and RAM
 
@@ -134,9 +137,13 @@ For each GPU, install screws to secure to the rear case bracket. **Do not power 
 
 ### Step 1.8 — Install GPU support brackets
 
-1. Position three upHere G205 GPU brace supports on the PSU shroud floor — one under the front edge of each GPU.
-2. Adjust each bracket's telescopic screw so the rubber pad just touches the underside of the GPU's heatsink. The card should be level — neither sagging nor lifted.
-3. The G205's magnetic + rubber base holds it in place without needing screws into the PSU shroud.
+The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray. Use it for the top GPU (V620 #1), and supplement with the 3× upHere G205 jack stands for the other two GPUs and as redundant support on V620 #1.
+
+1. **Built-in bracket → V620 #1** (top, heaviest with shroud): Adjust the case's built-in support bracket vertically so its lip just touches the underside of V620 #1's heatsink.
+2. **upHere G205 #1 → V620 #2** (middle): Place on the PSU shroud floor under the front edge of V620 #2. Adjust the telescopic screw so the rubber pad just touches the underside of the heatsink.
+3. **upHere G205 #2 → RTX 3060** (bottom): Same procedure under the RTX 3060's front edge.
+4. **upHere G205 #3 → V620 #1** (redundant support): Place alongside the case's built-in bracket. V620 + shroud is ~1.5kg; dual support reduces long-term sag risk over 24/7 operation.
+5. The G205's magnetic + rubber base holds it in place without screws into the PSU shroud. Verify each GPU sits level — neither sagging nor lifted.
 
 ### Step 1.9 — Power connections
 
@@ -151,49 +158,69 @@ For each GPU, install screws to secure to the rear case bracket. **Do not power 
 
 The 4× NF-A8 PWM fans on the V620 shrouds need power AND ideally PWM-modulated speed control so they idle quietly when the GPUs aren't under load. There are three approaches; pick one:
 
-**Approach A (recommended): Motherboard PWM with software bridge.**
+**Approach A (recommended): Lancool 217 built-in PWM fan hub + software bridge.**
 
-This gives you V620-temperature-driven fan speed control. Idle is whisper-quiet (~25% PWM, ~1000 RPM, nearly inaudible). Under heavy inference, fans ramp to full automatically.
+The Lancool 217 includes a 6-channel PWM fan hub mounted behind the motherboard tray, pre-wired to a master 4-pin PWM input cable. This eliminates the need for a separate PWM splitter and consolidates all chassis fan control into a single point.
 
-Hardware:
-- 1× 4-way 4-pin PWM fan splitter (any brand, ~$5; or daisy-chain via NA-SYC1 Y-cables)
-- All 4× NF-A8 PWM → splitter → CHA_FAN3 motherboard header
+Hardware (no extra parts needed):
+- All 4× NF-A8 PWM fans → spare channels on the built-in hub (channels 1-4 typically occupied by stock case fans, leaving 5-6 available for NF-A8s; or rearrange as you prefer)
+- Hub master PWM input cable → CHA_FAN3 motherboard header
+- Hub power → SATA connector from PSU
 
-Power budget check: NF-A8 PWM draws 0.08A max @ 12V. 4 fans = 0.32A; ASUS X870E-Creator headers are rated 1A each. Well within budget.
+Power budget check:
+- Built-in hub rated for 24W (2A) at 12V
+- 4× NF-A8 PWM @ 0.08A each = 0.32A
+- Case stock fans (2× 170mm + 2× 120mm + 1× 140mm) total ~0.6A
+- Grand total ~0.92A — well within the hub's 2A budget
 
 BIOS configuration (Step 2.2 covers BIOS broadly):
 - Q-Fan Configuration → CHA_FAN3 → Mode: **PWM**
 - Speed control: **Manual**
-- Set a flat 50% baseline curve as a fail-safe (if the software bridge dies, fans stay at safe speed)
+- Set a flat 50% baseline curve as a fail-safe (if the software bridge dies, all fans on the hub stay at safe speed)
 
-Software setup (defer until after Phase 4 — LXC 151 must be running first):
-- See Step 5.X below for the systemd services that read V620 temps and write motherboard PWM.
+This gives you V620-temperature-driven control for the entire fan ecosystem at once: idle is whisper-quiet (~25% PWM produces low-RPM operation across the 170mm fans = nearly inaudible), and the entire chassis ramps up when V620 edge temp exceeds 80°C. Note that the case's stock fans share the same PWM curve as the NF-A8s — if you want independent fan groups, see Approach B.
 
-**Approach B: Aquacomputer Quadro fan controller (~$70).**
+Software setup (defer until after Phase 5 — LXC 151 must be running first):
+- See Step 5.13 below for the systemd services that read V620 temps and write motherboard PWM.
 
-If you prefer hardware-based control independent of OS state:
+**Approach B: Aquacomputer Quadro fan controller (~$70) — independent fan groups.**
+
+If you want different fan curves for V620 cooling vs the rest of the chassis (e.g., V620 fans aggressive while case fans stay quiet), use a dedicated controller:
 - Buy 1× Aquacomputer Quadro (~$70) and 2× 10K thermistors (~$5 each)
 - Stick one thermistor under each V620's shroud, near the heatsink fins
-- Wire 4× NF-A8 to one Quadro PWM channel; thermistors to two Quadro temp inputs
-- Configure curve via `liquidctl` on Linux: `liquidctl --match Quadro set fan1 speed 30 50 50 70 80 100`
+- Wire 4× NF-A8 to one Quadro PWM channel; case stock fans stay on the Lancool hub
+- Thermistors to two Quadro temp inputs
+- Configure curve via `liquidctl` on Linux
 - Quadro is USB-connected; runs from boot independent of OS
+- Case stock fans on the Lancool hub stay on the motherboard's CPU-temp curve
 
-**Approach C (simplest, but loud): SATA constant 12V.**
+**Approach C (simplest, but loud): SATA constant 12V for V620 fans only.**
 
-Original plan from Round 8: power the fans from a SATA-to-3/4-fan splitter (Noctua NA-FH1, NA-SAC5+NA-SYC1, or third-party). All fans run at constant 12V = full 2200 RPM. Reliable but always loud (4× NF-A8 at full RPM ≈ 24 dB(A) measured at 1m). Use this only if Approach A's software bridge is not desired.
+Bypass the Lancool hub for the V620 fans:
+- Power V620 NF-A8s from a SATA-to-fan splitter at constant 12V (Noctua NA-FH1 hub, NA-SAC5+NA-SYC1, or third-party SATA splitter)
+- Case stock fans stay on the Lancool hub at motherboard-controlled curve
+- V620 fans always at 100% (~24 dB(A) combined) regardless of load
+- Use only if Approach A's software bridge fails or you don't want the complexity
 
-For the rest of this runbook, **Approach A is assumed**. The software bridge implementation appears in Step 5.X below.
+For the rest of this runbook, **Approach A is assumed**. The software bridge implementation appears in Step 5.13 below.
 
 ### Step 1.10 — Install case fans
 
-The Define 7 XL ships with 3× Dynamic X2 GP-14 fans pre-installed. **Replace/supplement with the 5× ARCTIC P14 Pro PST** for significantly higher airflow and static pressure (~72 CFM and 2.4 mm H₂O vs the GP-14's ~64 CFM and 1.16 mm H₂O). This matters because the V620s rely on the case airflow to feed cool air to the NF-A8s on their shrouds.
+The Lancool 217 ships with **5 pre-installed PWM fans**: 2× 170mm front (mounted on a removable bracket that can be repositioned vertically), 2× 120mm reverse-blade on the PSU shroud (aimed UP at the GPU stack), and 1× 140mm rear exhaust. These are well-engineered for compute workloads — **keep them all**.
 
-1. **Remove the 3× stock GP-14 fans** (or relocate two of them to the bottom intake positions if you want bonus airflow — Define 7 XL supports up to 9× 140mm).
-2. **Front intake:** 3× ARCTIC P14 Pro PST — airflow direction into the case. These are your primary cool-air supply for the GPU stack.
-3. **Top exhaust:** 2× ARCTIC P14 Pro PST — airflow direction out of the case. Removes hot air rising from GPUs and CPU.
-4. **Rear exhaust:** keep the single stock GP-14 here, or leave the rear position empty if you've redeployed the stock fans elsewhere.
-5. **PST chain:** the P14 Pro PST has a built-in Y-splitter (PWM Sharing Technology). Chain all 5 fans together — the first fan plugs into a single motherboard PWM header (CHA_FAN1 or similar), and the next 4 daisy-chain off it. The motherboard sees them as one fan with shared RPM signal from the master fan.
-6. Configure BIOS fan curve in Step 2.2 to ramp up at 50°C+ and run silent below.
+Add the 3× ARCTIC P14 Pro PST as **top exhaust** (the only stock position not pre-populated). The remaining 2× P14 PSTs stay as cold spares.
+
+1. **Verify front 170mm fans are in "GPU mode" (lower position)** — they should sit lower on the front fan bracket, aimed at the middle of the case where the GPU stack will be, not the upper position which aims at the CPU socket. If not, loosen the bracket screws, slide the fan mount down, retighten.
+2. **Top exhaust (3× 140mm slots):** Install 3× ARCTIC P14 Pro PST. Airflow direction OUT of the case. Removes hot air rising from CPU + GPUs.
+3. **PST chain for top fans:** The P14 Pro PST has a built-in Y-splitter (PWM Sharing Technology). Chain the 3 top fans together — the master plugs into a single motherboard PWM header (CHA_FAN1 or similar), and the next 2 daisy-chain off it. The motherboard sees them as one fan with shared RPM signal.
+4. **Don't connect top fans to the Lancool hub.** The hub is reserved for fans on the V620 PWM bridge curve (per Step 1.9.1). The top exhaust fans should run on a different motherboard curve (e.g., CPU temp-based) since they're removing heat from above the CPU socket, not the GPU stack.
+5. **Bottom fans are already installed** in the PSU shroud, aimed up at the GPU stack. Do not remove them — they're providing direct GPU undercurrent airflow which directly mitigates the V620 thermal concern. They connect to the Lancool hub at the factory.
+6. **Front 170mm fans are already installed** and connect to the Lancool hub at the factory. Verify the cables are routed through the rear of the front fan bracket to reach the hub behind the motherboard tray.
+7. **Rear exhaust fan is already installed** and connects to the Lancool hub.
+8. **Hold the remaining 2× P14 PSTs as spares.** Possible future uses: replace a failed stock fan, populate a 5th top slot if the case ever supports it, or add 120mm rear cooling if you swap to a different rear fan.
+9. Configure BIOS fan curve in Step 2.2:
+   - **CHA_FAN1** (top exhaust, P14 PST chain): CPU-temp-driven curve, ramp at 50°C+
+   - **CHA_FAN3** (Lancool hub master): Manual, controlled by V620 PWM bridge (per Step 1.9.1)
 
 ### Step 1.11 — Cable management
 
@@ -1145,12 +1172,13 @@ curl http://$LLAMACPP_AMD_IP:8080/v1/models
 
 ### Step 5.13 — V620 fan control software bridge (Approach A from Step 1.9.1)
 
-This sets up the systemd services that read V620 temperatures from inside LXC 151 and translate them into motherboard PWM duty cycle, giving you V620-temp-driven fan speed control.
+This sets up the systemd services that read V620 temperatures from inside LXC 151 and translate them into motherboard PWM duty cycle, giving you V620-temp-driven fan speed control. The motherboard PWM signal then feeds the **Lancool 217's built-in 6-channel PWM fan hub**, which mirrors the duty cycle to all connected fans (4× NF-A8 on V620 shrouds + the case's stock fans wired into the hub).
 
 **Architecture:**
 - Inside LXC 151: a small writer service polls `rocm-smi` every 5s and writes the max V620 edge temp to a shared file
-- On the Proxmox host: a reader service polls that file and writes PWM duty cycle to the motherboard's hwmon endpoint
+- On the Proxmox host: a reader service polls that file and writes PWM duty cycle to the motherboard's hwmon endpoint (CHA_FAN3, where the Lancool hub master input is connected per Step 1.9.1)
 - Bind mount: a host directory `/var/lib/v620-temps/` is mounted into the LXC at the same path
+- Fan-out: the Lancool hub broadcasts the PWM signal to all connected fans (V620 NF-A8s + case stock fans, except top exhaust which is on a separate motherboard header per Step 1.10)
 
 **Step 5.13.1 — Set up the bind mount.** From the Proxmox host:
 
@@ -3334,14 +3362,13 @@ These are issues identified during architectural verification that may affect de
 
 ### Hardware-level risks
 
-**1. NF-A8 PWM airflow may be marginal under sustained V620 load.**
-- Spec: 32.67 CFM, 2.37 mm H₂O static pressure at full 12V (2200 RPM).
-- Two NF-A8s side-by-side over a V620 give roughly 65 CFM of unfocused airflow. V620 is rated for ~225W TDP and was designed for high-static-pressure server fans (50-150 CFM each at 5+ mm H₂O).
-- **Risk:** Thermal throttling under sustained inference load (target+draft both at full GPU utilization for >5 minutes).
-- **Partially mitigated by 5× ARCTIC P14 Pro PST chassis fans** (Step 1.10). With 3× P14 as front intake (~72 CFM each, 2.4 mm H₂O static pressure), the V620 NF-A8s receive dense cool intake air rather than recirculated chassis air. This significantly reduces but does not eliminate the throttling risk, since the NF-A8 itself is the bottleneck pushing air *through* the GPU heatsink.
+**1. NF-A8 PWM airflow may be marginal under sustained V620 load** *(severity downgraded after Lancool 217 case selection)*.
+- Spec: 32.67 CFM, 2.37 mm H₂O static pressure at full 12V (2200 RPM) for each NF-A8.
+- The NF-A8s push air *through* the V620 heatsink, but they need cool air *supplied* to them. With the Lancool 217's combination of high-volume intake (2× 170mm front at 142 CFM each in "GPU mode" lower position) and direct undercurrent (2× 120mm reverse-blade on the PSU shroud aimed up at the GPU stack), the NF-A8s receive abundant cool supply air.
+- **Risk:** Reduced but not eliminated. Under prolonged maximum-power inference (both V620s at full 225W TDP + RTX 3060 at 170W = ~620W of GPU heat sustained for 30+ minutes), the NF-A8 may still be the limiting factor pushing air through the V620 heatsink fin density.
 - **Mitigation A (preferred):** Monitor V620 edge/junction temperatures via `rocm-smi --showtemp` during sustained load. If junction temp exceeds 95°C, throttle GPU clocks: `rocm-smi -d 0 --setperflevel low` or set a lower power cap with `rocm-smi -d 0 --setpoweroverdrive 175` (caps at 175W instead of 225W).
 - **Mitigation B:** Replace NF-A8 with a higher-airflow 80mm fan (Noctua NF-R8 redux-1800 PWM is 31.4 CFM; or a server-grade Delta AFB0812SH at ~52 CFM with notable noise increase).
-- **Mitigation C:** Already implemented — 5× ARCTIC P14 Pro PST as case fans dramatically improve total chassis airflow.
+- **Mitigation C (built-in):** The Lancool 217's case airflow design (front 170mm intake + bottom-shroud 120mm reverse-blade aimed up at GPU stack) directly addresses the upstream supply of cool air to the V620 NF-A8s. This was not available with the originally specified Define 7 XL.
 
 **2. Marvell AQC113CS 10GbE Linux driver has reported regressions on PVE 9.x.**
 - Multiple users on Proxmox forums report the AQC113 link going down after kernel upgrades (working on 6.8.4-2, broken on 6.8.4-4+, intermittent on 6.14.x).

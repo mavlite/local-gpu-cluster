@@ -91,14 +91,14 @@ The big architectural shifts vs. v1: Proxmox VE host with one LXC per service (r
 
 | Component | Spec |
 | --- | --- |
-| Form factor | Full tower (Fractal Design Define 7 XL, sound-dampened, no RGB) |
+| Form factor | Mid-tower (Lian Li Lancool 217 Black, SKU LAN217X — walnut wood front accent, non-RGB, steel side panel, built-in 6-channel PWM fan hub, built-in adjustable GPU support bracket, dual PSU mount positions) |
 | Motherboard | ASUS ProArt X870E-Creator WiFi (ATX, X870E chipset) |
 | CPU | AMD Ryzen 7600 (6c/12t, 65 W TDP, 88 W PPT) |
 | CPU cooler | Thermalright Phantom Spirit 120 EVO (dual tower, 7 heatpipes, twin 120 mm PWM) |
 | RAM | DDR5 (existing — re-used from previous build) |
 | PSU | be quiet! Power Zone 2 1200 W (80+ Platinum efficiency, 140 mm Pure Wings 3 rifle-bearing fan, semi-passive zero-RPM mode, dual 12V-2x6 connectors, HEC OEM platform) |
 | Storage | NVMe boot drive (M.2_1, PCIe 5.0 x4 from CPU) + secondary NVMe for `/tank` (M.2_3, chipset PCIe 4.0 x4) |
-| Chassis fans | 5× ARCTIC P14 Pro PST 140mm (replacing/supplementing the 3× stock Dynamic X2 GP-14): 3× front intake, 2× top exhaust. PST Y-cable chains all 5 fans on a single motherboard header. 400-2500 RPM, 72 CFM, 2.4 mm H₂O static pressure, FDB bearing, zero-RPM <5% PWM |
+| Chassis fans | **Stock (pre-installed in Lancool 217):** 2× 170mm front intake (1550 RPM, 142.56 CFM each, 3.34 mmH₂O — feed cool air directly to GPU stack in "GPU mode" lower position), 2× 120mm reverse-blade bottom intake on PSU shroud (1950 RPM, 71.1 CFM, 1.99 mmH₂O — push air UP into bottom of GPU stack), 1× 140mm rear exhaust (1800 RPM). **Added:** 3× ARCTIC P14 Pro PST 140mm as top exhaust (PST-chained to single motherboard header). 2× P14 PSTs held as cold spares. Total 8 fans deployed, all connected via the case's built-in 6-channel PWM hub. |
 
 The ProArt X870E-Creator is the right board choice for this build for three specific reasons that matter to a Proxmox + multi-GPU deployment:
 
@@ -137,7 +137,7 @@ The 3060 effectively becomes "infrastructure GPU" for the V620 cluster — a wor
 
 ### 1.4 V620 active cooling: shroud kit + 80 mm fans + 12 V Molex
 
-V620s ship without integral fans — they expect a server chassis with high-static-pressure 60–80 mm fans pushing air through their dense passive heatsinks along the length of the card. In a tower like the Define 7 XL, ambient airflow alone won't cool a 300 W passive card; the cards will thermal-throttle within minutes.
+V620s ship without integral fans — they expect a server chassis with high-static-pressure 60–80 mm fans pushing air through their dense passive heatsinks along the length of the card. In a tower case like the Lancool 217, ambient airflow alone won't cool a ~225 W passive card; the cards will thermal-throttle within minutes. The 80mm shroud kit converts each V620 into a self-contained active-cooled card, and the case's 2× 170mm front fans plus 2× 120mm bottom-shroud fans feed it abundant cool air to push through.
 
 The fix is an aftermarket shroud kit that bolts an 80 mm fan to the rear of each card. The kit used here is the [GF Computers V620/V520/BC-160 cooling fan shroud](https://www.ebay.com/itm/285399696488) — a 3D-printed adapter that mounts a standard 80×80×25 mm fan to the rear of the card and channels its airflow through the heatsink fins.
 
@@ -147,21 +147,23 @@ The fix is an aftermarket shroud kit that bolts an 80 mm fan to the rear of each
 | Shroud fans | Noctua NF-A8 PWM (×2 + 1 spare) | Quiet, high static pressure 80 mm |
 | Power | SATA-to-3-pin fan adapter @ 12 V (constant on) | Independent of motherboard control |
 
-Power is supplied directly from the PSU at 12 V via a SATA-to-3-pin adapter, bypassing the motherboard's fan controller entirely. Rationale: the V620s draw constant cooling demand whenever they're powered (even at idle they generate ~30 W per card and rely on forced airflow). Running the shroud fans at constant 12 V is simpler than trying to thread PWM through Proxmox's fan-curve story, and the Noctua NF-A8 PWM at 12 V tops out at ~22 dB(A) per fan — completely inaudible inside the dampened Define 7 XL.
+Historical note: earlier revisions of this design used a SATA-to-fan adapter for constant-12V power to the V620 shroud fans. This was based on the originally-specified Define 7 XL case which lacked an integrated fan hub. With the Lancool 217 case selection, V620 fan power and control is now handled through the case's built-in 6-channel PWM hub, with motherboard PWM signal driven by the software bridge described above. The constant-12V SATA approach remains a valid fallback (Approach C in the runbook) if the software bridge proves unreliable.
 
 For powering and **controlling speed** of the V620 shroud fans, the recommended approach is:
 
-**Approach A (recommended): Motherboard PWM with software bridge.** Plug all 4× NF-A8 PWM fans into a single motherboard CHA_FAN header via a 4-way PWM splitter (~$5). On the Proxmox host, run a systemd service that reads V620 temperatures from inside the V620 LXC (via a shared bind-mount file) and writes PWM duty cycle to the motherboard's hwmon PWM endpoint. Power budget check: 4× NF-A8 PWM @ 0.08A each = 0.32A, well within the X870E-Creator's 1A-per-header rating.
+**Approach A (recommended): Built-in fan hub + software bridge.** The Lancool 217 includes a 6-channel PWM fan hub pre-installed behind the motherboard tray. Plug all 4× NF-A8 PWM fans into spare channels on the hub (the case's own 5 stock fans use other channels). The hub's master PWM input plugs into a single CHA_FAN header on the motherboard. On the Proxmox host, run a systemd service that reads V620 temperatures from inside the V620 LXC (via a shared bind-mount file) and writes PWM duty cycle to that motherboard hwmon endpoint — which the hub then mirrors to all connected fans, including the NF-A8s.
 
-This gives you V620-temperature-driven fan control: idle is whisper-quiet (~25% PWM ≈ 1000 RPM), and fans ramp to full only when V620 edge temp exceeds 80°C. Implementation details are in the runbook (Step 5.13).
+Power budget check: NF-A8 PWM @ 0.08A each × 4 = 0.32A; case stock fans add ~0.6A; the Lancool 217 hub is rated for 24W (2A) at 12V, well within budget for all fans combined. The hub itself draws power from a dedicated SATA connector.
 
-**Approach B: Aquacomputer Quadro fan controller (~$70).** A dedicated USB-controlled hardware fan controller with thermistor temperature inputs. Stick a thermistor on each V620 heatsink, wire fans to one Quadro PWM channel, and configure curves via `liquidctl`. Independent of OS state — works from boot regardless of ROCm/Proxmox health.
+This gives you V620-temperature-driven control for the entire fan ecosystem: idle is whisper-quiet (~25% PWM ≈ low-RPM operation across all fans), and fans ramp to full only when V620 edge temp exceeds 80°C. Implementation details are in the runbook (Step 5.13).
 
-**Approach C (fallback): SATA constant 12V.** Power the fans from a SATA-to-fan splitter at constant 12V (Noctua NA-FH1 hub, third-party SATA splitter, or NA-SAC5+NA-SYC1 combo). Reliable but always full RPM (24 dB(A) combined for 4× NF-A8). Use this only if Approach A fails or you don't want the software complexity.
+**Approach B: Aquacomputer Quadro fan controller (~$70).** A dedicated USB-controlled hardware fan controller with thermistor temperature inputs. Stick a thermistor on each V620 heatsink, wire the V620 fans to one Quadro PWM channel, and configure curves via `liquidctl`. Independent of OS state — works from boot regardless of ROCm/Proxmox health. Bypasses the case's hub entirely.
+
+**Approach C (fallback): SATA constant 12V.** Power the V620 fans from a SATA-to-fan splitter at constant 12V (Noctua NA-FH1 hub, third-party SATA splitter, or NA-SAC5+NA-SYC1 combo). Reliable but always full RPM (24 dB(A) combined for 4× NF-A8). Use this only if Approach A fails or you don't want the software complexity.
 
 ### 1.5 GPU support brackets
 
-V620 cards with the shroud installed weigh ~1.4–1.6 kg each. Three heavy GPUs in a vertical-tower orientation create real cantilever stress on the PCIe slots over time. Three **upHere G205** GPU brace supports (~$10 each, anodized aerospace aluminum, height-adjustable jack-stand design, supports single or dual-slot cards) sit on the PSU shroud floor of the Define 7 XL and prop up the far end of each card. The G205 has a magnetic + rubber-pad base so it doesn't require screws into the PSU shroud, and adjusts via a telescopic screw to dial in exact height per card.
+V620 cards with the shroud installed weigh ~1.4–1.6 kg each. Three heavy GPUs in a vertical-tower orientation create real cantilever stress on the PCIe slots over time. The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray — useful for the top GPU (V620 #1 in PCIE_1). For the remaining two GPUs (V620 #2 and the RTX 3060), three **upHere G205** GPU brace supports (~$10 each, anodized aerospace aluminum, height-adjustable jack-stand design, supports single or dual-slot cards) sit on the PSU shroud floor and prop up the far end of each card. Using all three G205s (one per GPU) plus the case's built-in bracket gives redundant support for the heaviest cards and consistent fitment across all three. The G205 has a magnetic + rubber-pad base so it doesn't require screws into the PSU shroud, and adjusts via a telescopic screw to dial in exact height per card.
 
 ---
 
