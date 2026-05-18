@@ -19,7 +19,10 @@ load_config
 ALLM_VMID="${ANYTHINGLLM_VMID:-154}"
 ALLM_HOSTNAME="${ANYTHINGLLM_HOSTNAME:-anythingllm}"
 ALLM_CORES="${ANYTHINGLLM_CORES:-4}"
-ALLM_MEMORY="${ANYTHINGLLM_MEMORY:-8192}"
+# Bumped from 8 GB to 16 GB after 2026-05-18: with 700+ docs across multiple
+# workspaces + heavy bulk ingest, AnythingLLM's Node V8 heap + lancedb index
+# saturated 8 GB RAM and 512 MB swap (memory and swap both at 99%+ usage).
+ALLM_MEMORY="${ANYTHINGLLM_MEMORY:-16384}"
 ALLM_ROOTFS_SIZE="${ANYTHINGLLM_ROOTFS_SIZE:-32}"
 LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)
 BRIDGE="${BRIDGE:-vmbr0}"
@@ -69,6 +72,7 @@ phase_8_1_create() {
     --hostname "$ALLM_HOSTNAME" \
     --cores "$ALLM_CORES" \
     --memory "$ALLM_MEMORY" \
+    --swap 2048 \
     --rootfs "${LXC_STORAGE}:${ALLM_ROOTFS_SIZE}" \
     --net0 "name=eth0,bridge=${BRIDGE},firewall=0,ip=dhcp,type=veth" \
     --features "nesting=1,keyctl=1" \
