@@ -1,16 +1,25 @@
 # Local GPU Cluster v2 — Deployment Runbook
 
-**Sequential, step-by-step deployment of the v2 cluster: ASUS ProArt X870E-Creator + Ryzen 7600 + 2× V620 + 1× RTX 3060 on Proxmox VE 9.x.**
+**Sequential, step-by-step deployment of the v2 cluster: ASUS ProArt X870E-Creator + Ryzen 7600 + 2× V620 on Proxmox VE 9.x.**
+
+> ### ⚠️ Build-status banner (V620-only pivot, mid-flight)
+> This runbook is mid-pivot from the original "2× V620 + 1× RTX 3060" architecture to "V620-only". V620-only-clean phases (runbook side): **1, 2, 3, 4, 5 (three units), 6 (cutover), 7 (router LXC + API key generation), 8.6 (AnythingLLM), 10 (data migration), 11 (all steps including 11.4 acceptance suite), Monitoring + Backup, Scenario 2 (single-V620 failure recovery), Risks section** (thermal math + kernel pin + privileged-mode mitigation now V620-only). The provisioning scripts under `scripts/` and `scripts/files/router-app.py` still carry pre-pivot code (FAST_URL, no Bearer auth, hardcoded `192.168.6.152` URLs) — tracked as todos #18–#20 in the pivot plan.
+>
+> **What this means for fresh builds today:** Phases 1–11 of the runbook deliver a fully working V620-only inference + router + AnythingLLM stack with Bearer auth, plus the Phase 11.4 acceptance verification suite. The runbook prose path is operable end-to-end. **The supporting scripts under `scripts/` still need updating** (todos #18–#20) — fresh operators following the runbook commands directly will succeed; those who try to run `scripts/bootstrap.sh` will hit the pre-pivot 3060 references.
+>
+> **What this means for cutover from existing v2 cluster:** Phase 6 (Cutover) is operational. Its BLOCKER notice now only requires the router-app.py rewrite (todo #20) before live cutover is safe — until then, run Phase 6 in dry-run mode (skip Step 6.2 cutover, only do pre-cutover audits in Step 6.1).
+>
+> See `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md` for the full pivot plan and outstanding todos.
 
 This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md). The v2 doc explains *why*; this runbook is the exact *how*. Every command is meant to be run in order. Each phase ends with a verification step — do not proceed if it fails.
 
 > **Architecture correction notes (vs. v2 doc rev 1):**
 >
-> 1. Earlier versions described speculative decoding via a cross-LXC `--draft-url` flag. That flag does not exist in upstream llama.cpp. Speculative decoding requires both target and draft models in the same `llama-server` process (via `-md` / `--model-draft`). Corrected: both models live on the V620 LXC; the 3060 LXC handles embeddings and reranking exclusively.
+> 1. Speculative decoding requires both target and draft models in the same `llama-server` process (via `-md` / `--model-draft`). Both models live on the V620 LXC. With the V620-only pivot, embeddings and reranking moved into the same LXC as additional `llama-server` instances pinned per-card via `--main-gpu` (see `local-gpu-cluster-v2.md` §1.3 and Phase 5 below).
 >
-> 2. The "Qwen 3.5 35B" model is technically **Qwen3.5-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. Speculative decoding still works but speedup may be modest since the target model is already fast.
+> 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. Speculative decoding still works but speedup may be modest since the target model is already fast. Qwen3.6 reuses the Qwen3 tokenizer family, so Qwen3-0.6B is a vocab-compatible draft.
 >
-> 3. Proxmox VE 9.1 (released Nov 2025) defaults to Linux kernel 6.17, which has known incompatibilities with the current Debian NVIDIA DKMS packages. This runbook pins the host kernel to 6.14 for stability with NVIDIA workloads (Phase 4).
+> 3. Proxmox VE 9.1 (released Nov 2025) defaults to Linux kernel 6.17. With NVIDIA removed, no kernel pinning is required — AMDGPU is in-tree and stable on 6.17.
 >
 > 4. Modern Proxmox LXC GPU passthrough uses the `dev0:` configuration syntax (or `pct set ... -dev0`), which is more robust to host restarts than raw `lxc.cgroup2.devices.allow` + `lxc.mount.entry` directives. This runbook uses `dev0:` syntax throughout.
 
@@ -24,7 +33,7 @@ This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local
 - [Phase 3 — Proxmox VE 9.x Installation](#phase-3--proxmox-ve-9x-installation)
 - [Phase 4 — Host Configuration](#phase-4--host-configuration)
 - [Phase 5 — Provision the V620 LXC (151 — `llamacpp-amd`)](#phase-5--provision-the-v620-lxc-151--llamacpp-amd)
-- [Phase 6 — Provision the 3060 LXC (152 — `llamacpp-nv`)](#phase-6--provision-the-3060-lxc-152--llamacpp-nv)
+- [Phase 6 — Cutover (live migration from running v2 cluster)](#phase-6--cutover-live-migration-from-running-v2-cluster)
 - [Phase 7 — Deploy the Router LXC (153 — `llm-router`)](#phase-7--deploy-the-router-lxc-153--llm-router)
 - [Phase 8 — Deploy AnythingLLM LXC (154 — `anythingllm`)](#phase-8--deploy-anythingllm-lxc-154--anythingllm)
 - [Phase 9 — Deploy MCP Stack LXC (155 — `mcp-stack`)](#phase-9--deploy-mcp-stack-lxc-155--mcp-stack)
@@ -45,18 +54,17 @@ Before you begin, confirm you have:
 - [ ] ASUS ProArt X870E-Creator WiFi motherboard ✅ (verified: 4 M.2 slots, dual 10GbE+2.5GbE, AM5)
 - [ ] AMD Ryzen 7600 CPU
 - [ ] DDR5 memory (32 GB minimum, 64 GB recommended) — **note: 4 DIMMs limit AMD-validated speed to 3600 MT/s**; 2× 32GB DIMMs run at 5600 MT/s if you want full speed
-- [ ] 2× AMD Radeon Pro V620 (32 GB GDDR6 each)
-- [ ] 1× NVIDIA RTX 3060 (12 GB)
+- [ ] 2× AMD Radeon Pro V620 (32 GB GDDR6 each) — only GPUs in the build; see `local-gpu-cluster-v2.md` §1.3 for the V620-only pivot rationale
 - [ ] Thermalright Phantom Spirit 120 EVO CPU cooler ✅
 - [ ] be quiet! Power Zone 2 1200W PSU ✅ (verified: 80+ Platinum, dual 12V-2x6, HEC-built)
 - [ ] **Lian Li Lancool 217 case (SKU LAN217X — Black with walnut wood accent, non-RGB)** — includes 5× pre-installed PWM fans (2× 170mm front + 2× 120mm bottom + 1× 140mm rear), 6-channel PWM fan hub, adjustable GPU support bracket, dual PSU mount positions
 - [ ] 2× GF Computers V620 80mm cooling shroud kits (eBay) — **shrouds only, no fans/power included**
 - [ ] **2-4× Noctua NF-A8 PWM 80mm fans** — quantity depends on shroud (1 vs 2 fans per V620 shroud); confirm before ordering. If each V620 shroud holds 2 fans (typical), you need 4 total
-- [ ] **3× upHere G205 GPU brace supports** (anti-sag jack stands) — one per GPU; the case includes a built-in adjustable bracket as well, providing redundant support for the top GPU
+- [ ] **2× upHere G205 GPU brace supports** (anti-sag jack stands) — one per V620; the case includes a built-in adjustable bracket as well, providing redundant support for the top V620
 - [ ] **5× ARCTIC P14 Pro PST 140mm chassis fans** — 3 deployed as top exhaust (PST-chained on a single motherboard header), 2 held as cold spares. The Lancool 217's 5 pre-installed fans cover front + bottom + rear positions
-- [ ] Boot NVMe (1 TB+ recommended) for Proxmox — install in M.2_1 (CPU PCIe 5.0 x4)
-- [ ] Secondary NVMe (2 TB+ recommended) for `/tank` (models + data) — install in M.2_3 or M.2_4 (chipset PCIe 4.0)
-- [ ] Quality PCIe 4.0 x16 riser (LinkUp Ultra) — **only if using vertical mount** (not needed for standard 3-GPU horizontal layout)
+- [ ] Boot NVMe (1 TB+ recommended) for Proxmox — install in M.2_1 (CPU PCIe 5.0 x4). Will be formatted **ext4** (LVM-thin for `local-lvm`).
+- [ ] 2× Data NVMe (2 TB+ each, matched capacity) for `/tank` — installed in M.2_3 and M.2_4 (chipset PCIe 4.0). Will be configured as a **ZFS mirror** (single-drive failure tolerant, self-healing via checksums).
+- [ ] Quality PCIe 4.0 x16 riser (LinkUp Ultra) — **only if using vertical mount** (not needed for standard 2-GPU horizontal layout)
 
 **Reference data:**
 - [ ] Old T7910 host accessible (for data migration from v1)
@@ -117,17 +125,20 @@ Before you begin, confirm you have:
 The X870E-Creator has **four** M.2 slots: two PCIe 5.0 (CPU-attached, M.2_1 and M.2_2) and two PCIe 4.0 (chipset-attached, M.2_3 and M.2_4). Populate them carefully:
 
 1. **M.2_1** (top, near CPU socket — PCIe 5.0 x4 from CPU): Boot NVMe goes here. No lane-sharing penalty.
-2. **M.2_3** or **M.2_4** (chipset, lower positions, PCIe 4.0 x4): Secondary NVMe for `/tank`. Either is fine; both are chipset-attached and don't affect GPU lanes.
-3. **Leave M.2_2 empty** — per ASUS spec, populating M.2_2 drops PCIEX16(G5)_2 from x8 to x4, hurting V620 #2 bandwidth.
-4. Install M.2 heatsinks on both drives (the board provides them; pull tabs are tool-free).
+2. **M.2_3** (chipset PCIe 4.0 x4): First `/tank` member.
+3. **M.2_4** (chipset PCIe 4.0 x4): Second `/tank` member. M.2_3 and M.2_4 will be paired as a ZFS mirror in §4.8; they're both chipset-attached and don't affect GPU lanes.
+4. **Leave M.2_2 empty** — per ASUS spec, populating M.2_2 drops PCIEX16(G5)_2 from x8 to x4, hurting V620 #2 bandwidth.
+5. Install M.2 heatsinks on all three drives (the board provides them; pull tabs are tool-free).
 
 ### Step 1.6 — Install GPUs (in this exact order)
 
 1. **PCIE_1 (top slot):** V620 #1 — secure the slot retention clip
 2. **PCIE_2 (middle slot):** V620 #2 — secure the slot retention clip
-3. **PCIE_3 (bottom slot):** RTX 3060 — secure the slot retention clip
+3. **PCIE_3 (bottom slot):** **leave empty** (see PCIE_3 sidebar in Step 1.5 for future-use options)
 
 For each GPU, install screws to secure to the rear case bracket. **Do not power them on yet** — fan shrouds and supports come next.
+
+> **PCIE_3 future-use sidebar.** The bottom slot is PCIe 4.0 x4 from the chipset; populating it doesn't affect the V620 lanes (which live on CPU-attached PCIE_1/PCIE_2). Prioritized options if you later expand: (1) dual-port 10 GbE NIC like Intel X710 ~$100 used for cluster federation, (2) HBA like LSI 9300-8i ~$50 if `/tank` outgrows two NVMes, (3) PCIe USB-C / audio capture for a future local-Whisper LXC's ingest, (4) OCuLink adapter for external GPU (niche; defers cooling/power to a separate rail). Skip eGPU enclosures — OCuLink + external PSU + cooling is more project than a bigger case is worth.
 
 ### Step 1.7 — Install V620 fan shrouds
 
@@ -137,51 +148,64 @@ For each GPU, install screws to secure to the rear case bracket. **Do not power 
 
 ### Step 1.8 — Install GPU support brackets
 
-The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray. Use it for the top GPU (V620 #1), and supplement with the 3× upHere G205 jack stands for the other two GPUs and as redundant support on V620 #1.
+The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray. Use it for the top GPU (V620 #1), and supplement with the 2× upHere G205 jack stands.
 
 1. **Built-in bracket → V620 #1** (top, heaviest with shroud): Adjust the case's built-in support bracket vertically so its lip just touches the underside of V620 #1's heatsink.
 2. **upHere G205 #1 → V620 #2** (middle): Place on the PSU shroud floor under the front edge of V620 #2. Adjust the telescopic screw so the rubber pad just touches the underside of the heatsink.
-3. **upHere G205 #2 → RTX 3060** (bottom): Same procedure under the RTX 3060's front edge.
-4. **upHere G205 #3 → V620 #1** (redundant support): Place alongside the case's built-in bracket. V620 + shroud is ~1.5kg; dual support reduces long-term sag risk over 24/7 operation.
-5. The G205's magnetic + rubber base holds it in place without screws into the PSU shroud. Verify each GPU sits level — neither sagging nor lifted.
+3. **upHere G205 #2 → V620 #1** (redundant support): Place alongside the case's built-in bracket. V620 + shroud is ~1.5 kg; dual support reduces long-term sag risk over 24/7 operation.
+4. The G205's magnetic + rubber base holds it in place without screws into the PSU shroud. Verify each GPU sits level — neither sagging nor lifted.
 
 ### Step 1.9 — Power connections
 
 1. **24-pin ATX** → motherboard
 2. **2× 8-pin EPS** → motherboard CPU power (both required)
 3. **V620 #1:** 2× 8-pin PCIe (use 2 separate PSU cables, not one daisy-chain — 300 W on a single cable is at the safety edge)
-4. **V620 #2:** 2× 8-pin PCIe (one cable acceptable here since you only have 3 PCIe cables in the box; daisy-chain the second connector)
-5. **RTX 3060:** 1× 8-pin PCIe (daisy-chain off V620 #2's cable is fine — 170 W well under safety limit)
-6. **Shroud fans (V620 cooling):** see Step 1.9.1 below for the recommended PWM control approach.
+4. **V620 #2:** 2× 8-pin PCIe (one cable acceptable here; daisy-chain the second connector)
+5. **Shroud fans (V620 cooling):** see Step 1.9.1 below for the recommended PWM control approach.
+
+Total: 4× 8-pin PCIe in use, 2 free PSU PCIe connectors remain (PSU has dual EPS + 4× PCIe 8-pin native). The freed connector from removing the 3060 is the budget headroom for a future third V620 (~225 W sustained, well under the PSU's 340 W remaining headroom at 80% derate; slot count and cooling are the constraints, not power — see `local-gpu-cluster-v2.md` appendix for the math).
 
 ### Step 1.9.1 — V620 shroud fan power and control
 
-The 4× NF-A8 PWM fans on the V620 shrouds need power AND ideally PWM-modulated speed control so they idle quietly when the GPUs aren't under load. There are three approaches; pick one:
+The 4× NF-A8 PWM fans on the V620 shrouds need power AND ideally PWM-modulated speed control so they idle quietly when the GPUs aren't under load. Three approaches; pick the one that matches your wiring:
 
-**Approach A (recommended): Lancool 217 built-in PWM fan hub + software bridge.**
+**Approach A: V620 shroud fans on dedicated motherboard fan headers (recommended for this build).**
 
-The Lancool 217 includes a 6-channel PWM fan hub mounted behind the motherboard tray, pre-wired to a master 4-pin PWM input cable. This eliminates the need for a separate PWM splitter and consolidates all chassis fan control into a single point.
+Plug each V620 shroud fan into its own motherboard 4-pin PWM header — typically CHA_FAN4 and CHA_FAN5 on the ASUS ProArt X870E-Creator. If the shrouds carry 2 fans each, daisy-chain them or use a Y-splitter so each card's pair of fans shares one header. Case stock fans go on a separate header (or the Lancool 217's built-in hub) with their own BIOS curve.
 
-Hardware (no extra parts needed):
-- All 4× NF-A8 PWM fans → spare channels on the built-in hub (channels 1-4 typically occupied by stock case fans, leaving 5-6 available for NF-A8s; or rearrange as you prefer)
-- Hub master PWM input cable → CHA_FAN3 motherboard header
-- Hub power → SATA connector from PSU
+Why this is preferable:
+- **Independent control.** V620 fans ramp aggressively when GPUs are hot; case fans stay quiet on their own profile. No noise penalty for the chassis when only the GPUs need cooling.
+- **Per-card fan failure visibility.** Each header reports its fan's RPM separately via lm-sensors. If one shroud fan dies, the dead RPM shows up immediately in monitoring.
+- **No SATA-power dependency.** Direct PWM headers source from the motherboard's own 12 V rail and PWM signal — fewer cables, no SATA-to-fan adapter.
 
-Power budget check:
-- Built-in hub rated for 24W (2A) at 12V
-- 4× NF-A8 PWM @ 0.08A each = 0.32A
-- Case stock fans (2× 170mm + 2× 120mm + 1× 140mm) total ~0.6A
-- Grand total ~0.92A — well within the hub's 2A budget
+Hardware:
+- V620 #1's NF-A8 shroud fan(s) → **CHA_FAN4** motherboard header
+- V620 #2's NF-A8 shroud fan(s) → **CHA_FAN5** motherboard header
+- Case stock fans → Lancool 217 built-in PWM hub → **CHA_FAN3** (or your chosen case-fan header)
 
 BIOS configuration (Step 2.2 covers BIOS broadly):
-- Q-Fan Configuration → CHA_FAN3 → Mode: **PWM**
-- Speed control: **Manual**
-- Set a flat 50% baseline curve as a fail-safe (if the software bridge dies, all fans on the hub stay at safe speed)
-
-This gives you V620-temperature-driven control for the entire fan ecosystem at once: idle is whisper-quiet (~25% PWM produces low-RPM operation across the 170mm fans = nearly inaudible), and the entire chassis ramps up when V620 edge temp exceeds 80°C. Note that the case's stock fans share the same PWM curve as the NF-A8s — if you want independent fan groups, see Approach B.
+- Q-Fan Configuration → CHA_FAN4 + CHA_FAN5 → Mode: **PWM**, Speed control: **Manual**
+- Flat 75% baseline curve as fail-safe (if the host software bridge dies, fans stay at safe high speed — better to be loud than throttle)
+- CHA_FAN3 (case fans) can stay on a quiet curve driven by CPU or motherboard temp, independent of GPUs
 
 Software setup (defer until after Phase 5 — LXC 151 must be running first):
-- See Step 5.13 below for the systemd services that read V620 temps and write motherboard PWM.
+- See Step 5.13 below. The `v620-fan-bridge.service` supports a space-separated list of PWM paths in `FAN_PWM_PATH`, so it writes the V620-driven duty cycle to both CHA_FAN4 and CHA_FAN5 simultaneously.
+
+**Approach A-alt: Lancool 217 built-in PWM fan hub + single CHA_FAN header (shared curve).**
+
+If you wired the V620 shroud fans into the Lancool 217's 6-channel PWM hub along with the case fans (single header drives everything), set `FAN_PWM_PATH` to that one PWM file. All fans share one curve. Simpler wiring but louder chassis when GPUs are working:
+
+Hardware:
+- All 4× NF-A8 PWM fans → spare channels on the built-in hub (channels 1-4 typically occupied by stock case fans, leaving 5-6 available for NF-A8s)
+- Hub master PWM input cable → one CHA_FAN motherboard header (commonly CHA_FAN3)
+- Hub power → SATA connector from PSU
+
+Power budget check (built-in hub rated 24 W / 2 A at 12 V):
+- 4× NF-A8 PWM @ 0.08 A each = 0.32 A
+- Case stock fans (2× 170mm + 2× 120mm + 1× 140mm) total ~0.6 A
+- Grand total ~0.92 A — well within budget
+
+Trade-off: V620 temp drives the whole chassis. Whisper-quiet at idle, but case fans ramp every time the GPUs are working — even if the case fans themselves are cool. Use Approach A (dedicated headers) if you can.
 
 **Approach B: Aquacomputer Quadro fan controller (~$70) — independent fan groups.**
 
@@ -234,7 +258,7 @@ Add the 3× ARCTIC P14 Pro PST as **top exhaust** (the only stock position not p
 Before powering on:
 
 - [ ] All four PSU connectors firmly seated (24-pin, 2× EPS, GPU power)
-- [ ] All three GPUs locked in slot retention clips
+- [ ] Both V620 GPUs locked in slot retention clips (PCIE_1 + PCIE_2); PCIE_3 empty
 - [ ] No loose screws inside the case
 - [ ] CPU fan and shroud fans connected and routed clear of blades
 - [ ] Front panel cables connected (power button at minimum)
@@ -296,9 +320,9 @@ Navigate to **Advanced → Onboard Devices Configuration → PCIe slots** and co
 
 - PCIE_1: V620 #1 detected
 - PCIE_2: V620 #2 detected
-- PCIE_3: NVIDIA GeForce RTX 3060 detected
+- PCIE_3: empty (intentionally — see Step 1.6 sidebar for future-use options)
 
-If any slot shows empty, power off and re-seat that GPU.
+If a slot that should have a V620 shows empty, power off and re-seat that GPU.
 
 ### Step 2.5 — Save and exit
 
@@ -329,7 +353,7 @@ sync
 # On Windows: use Rufus in DD mode (NOT ISO mode)
 ```
 
-> **Kernel version note:** Proxmox VE 9.1 (Nov 2025+) ships with kernel **6.17** as default. Kernel 6.17 has known DKMS build failures with the current Debian non-free NVIDIA driver packages (550.163.x line). This runbook **pins the kernel to 6.14** in Phase 4 for NVIDIA compatibility. If you're installing fresh PVE 9.0 (kernel 6.14), no pinning needed; if 9.1+ (kernel 6.17), follow the pinning steps in §4.1.
+> **Kernel version note:** Proxmox VE 9.1 (Nov 2025+) ships with kernel **6.17** as default. AMDGPU has full gfx1030 (V620) support in mainline since 6.6; no kernel pinning required. Historical note: earlier revisions of this runbook pinned to 6.14 because of NVIDIA DKMS build failures against 6.17 — with NVIDIA removed, that constraint no longer applies.
 
 ### Step 3.2 — Boot the installer
 
@@ -339,13 +363,30 @@ sync
 
 ### Step 3.3 — Storage configuration
 
+The boot drive uses **ext4 with LVM** (not ZFS). Rationale:
+- Boot drive only hosts Proxmox + LXC rootfs; no need for the ZFS ARC RAM overhead on this drive.
+- The two data NVMes (M.2_3 + M.2_4) will be paired as a ZFS mirror for `/tank` in §4.8 — that's where snapshots, checksumming, and self-healing actually matter (model files, RAG data, MCP state).
+- With ext4, Proxmox exposes `local-lvm` (LVM-thin) for LXC rootfs and `local` (a directory on the root LV) for ISOs/templates.
+
+**Installer steps:**
+
 1. Accept EULA
-2. Target hard disk: select your **boot NVMe** (M.2_1, the smaller drive for Proxmox itself)
+2. Target hard disk: select your **boot NVMe** (M.2_1)
 3. Click "Options"
-4. Filesystem: **zfs (RAID0)** for single-disk setup
-5. Compress: **on**, ashift: **12**, copies: **1**
-6. Hdsize: leave default (full disk)
-7. OK to confirm
+4. Filesystem: **ext4**
+5. Set the advanced options (values below assume a **1 TB boot NVMe**; scale proportionally — see notes):
+   - `hdsize`: leave default (full disk)
+   - `swapsize`: **8** (8 GB — emergency cushion only; you have 128 GB RAM)
+   - `maxroot`: **64** (64 GB for `pve/root` — holds the OS, `/var/log`, and `/var/lib/vz` which is `local` storage. Backups land on `/tank/backups`, not here.)
+   - `minfree`: **32** (32 GB LVM-thin reserve — never let the thin pool fill or it corrupts)
+   - `maxvz`: leave default (auto-computed as `hdsize − maxroot − swapsize − minfree` ≈ 896 GB on a 1 TB drive; this becomes `local-lvm` for LXC rootfs)
+6. OK to confirm
+
+**Scaling for other boot-drive sizes:**
+- **500 GB drive:** `swapsize=8`, `maxroot=48`, `minfree=16` → `local-lvm` ≈ 428 GB
+- **2 TB drive:** same `swapsize=8`, `maxroot=64`, `minfree=32` → `local-lvm` ≈ 1.9 TB (no reason to grow root/swap; the extra space goes to LXC pool)
+
+**Why these aren't the installer defaults:** Proxmox defaults `maxroot` to `hdsize/4` (~250 GB on 1 TB) assuming you'll store backups in `local`. We don't — `tank-backups` (on the ZFS mirror) catches all vzdump output, so a 64 GB root is plenty.
 
 ### Step 3.4 — Country / timezone / keyboard
 
@@ -441,40 +482,17 @@ free -h | head -2
 
 **Estimated time:** 1 hour
 
-### Step 4.1 — Pin kernel to 6.14 (if running PVE 9.1+ with kernel 6.17)
+### Step 4.1 — Kernel version (no pinning required)
 
-PVE 9.1+ defaults to kernel 6.17, which has DKMS build failures with current Debian NVIDIA driver packages. Pin to 6.14 before installing the NVIDIA stack:
+This cluster runs only AMD V620 GPUs via the in-tree `amdgpu` kernel module. AMDGPU has full gfx1030 (RDNA 2) support in mainline since kernel 6.6, including PVE 9.1's default 6.17. **No kernel pinning is required.**
 
-```bash
-# Check current running kernel
-uname -r
-
-# If kernel is 6.17.x: pin to 6.14 series
-# First, ensure 6.14 kernel and headers are installed
-apt install -y proxmox-kernel-6.14 proxmox-headers-6.14
-
-# Pin the latest 6.14 as default
-proxmox-boot-tool kernel list
-# Find a 6.14.x-pve entry like "6.14.11-5-pve"
-
-proxmox-boot-tool kernel pin 6.14.11-5-pve   # adjust to actual version
-
-# Reboot to switch to pinned kernel
-reboot
-
-# After reboot, verify
-uname -r
-# Expect: 6.14.x-pve
-```
-
-If you want to remove the 6.17 kernel later (after confirming 6.14 stability):
+Historical note: earlier revisions of this runbook pinned PVE 9.1's kernel to 6.14 because the NVIDIA RTX 3060 leg required Debian's nvidia-driver package, which had DKMS build failures against 6.17. With NVIDIA removed (see `local-gpu-cluster-v2.md` §1.3 for the pivot rationale), that constraint no longer applies.
 
 ```bash
-# DON'T do this until 6.14 is verified working with all your services
-apt purge proxmox-kernel-6.17 proxmox-headers-6.17
+# Verify kernel
+uname -r
+# Expect: 6.17.x-pve on a fresh PVE 9.1 install. 6.14.x is also fine if you came from an older PVE.
 ```
-
-If you're on PVE 9.0 with kernel 6.14 already, skip this step.
 
 ### Step 4.2 — Enable IOMMU and load VFIO modules
 
@@ -517,110 +535,97 @@ for d in /sys/kernel/iommu_groups/*/devices/*; do
   n=${d#*/iommu_groups/*}; n=${n%%/*}
   printf 'IOMMU Group %s ' "$n"
   lspci -nns "${d##*/}"
-done | sort -V | grep -iE "vga|3d|audio.*nvidia|amd.*audio"
+done | sort -V | grep -iE "vga|3d|display controller|radeon|navi|amd.*audio"
 ```
 
 Expected: each GPU and its audio function in its own dedicated IOMMU group, with no unrelated devices co-grouped. The ProArt X870E-Creator should produce clean groupings.
 
 If groups are bad (multiple GPUs sharing a group with chipset devices), recheck BIOS settings — particularly **ACS Enable**.
 
-### Step 4.4 — Install AMD firmware on host
+### Step 4.4 — AMD firmware + amdgpu autoload on Proxmox
 
-Required for `amdgpu` kernel module to find current firmware blobs:
+**⚠️ Critical:** Do not run `apt install firmware-amd-graphics` on Proxmox VE. Proxmox ships `pve-firmware`, which already contains all AMD GPU firmware blobs (including V620 / gfx1030). The Debian `firmware-amd-graphics` package conflicts with `pve-firmware`; APT will offer to remove `pve-firmware` → which removes `proxmox-default-kernel` and `proxmox-ve` (the meta-package) → which can brick the install. The `pve-apt-hook` is supposed to catch this and abort; if you see that warning, **say no / cancel**.
 
 ```bash
-apt install -y firmware-amd-graphics
+# Verify pve-firmware is installed (it ships with PVE by default)
+dpkg -l pve-firmware
+# Expect: ii  pve-firmware ...
+```
+
+**Add amdgpu to module autoload list.** On a fresh PVE install — especially on the newer 7.0.x kernel branch — `amdgpu` may not autoload via udev for class-0380 "Display controller" devices (V620). Explicitly add it to `/etc/modules` so it loads at boot:
+
+```bash
+# Check what's currently in /etc/modules
+cat /etc/modules
+
+# Add amdgpu if missing (idempotent)
+grep -q "^amdgpu" /etc/modules || echo amdgpu >> /etc/modules
+
+# Rebuild initramfs so the change applies at boot
+update-initramfs -u
+
+# Load it now for the current session (don't wait until reboot)
+modprobe amdgpu
+
+# Verify
+lsmod | grep amdgpu
+# Expect: amdgpu     N      M
+# (where N is the bound device count — should include both V620s)
+```
+
+**Important — three GPUs share amdgpu on this build.** The Ryzen 7600's integrated Raphael iGPU (`7e:00.0`) is also an amdgpu device. After amdgpu loads, `/dev/dri/` contains render nodes for all three GPUs (V620 #1, V620 #2, Raphael iGPU) — typically `renderD128`, `renderD129`, `renderD130`. The mapping is **not** guaranteed to be "V620s first, iGPU last" — it depends on PCIe enumeration order. Map them explicitly:
+
+```bash
+for r in /dev/dri/renderD*; do
+  pci=$(readlink "/sys/class/drm/$(basename $r)/device" 2>/dev/null | awk -F/ '{print $NF}')
+  device=$(lspci -nn -s "$pci" 2>/dev/null | grep -oE '\[[0-9a-f]{4}:[0-9a-f]{4}\]')
+  echo "$r → $pci $device"
+done
+# Expect entries like:
+#   /dev/dri/renderD128 → 0000:03:00.0 [1002:73a1]    V620 #1
+#   /dev/dri/renderD129 → 0000:07:00.0 [1002:73a1]    V620 #2
+#   /dev/dri/renderD130 → 0000:7e:00.0 [1002:164e]    Raphael iGPU (NOT to be passed to LXC 151)
+```
+
+When Phase 5 sets up GPU passthrough to LXC 151, it passes only the V620 render nodes (PCI device ID `1002:73a1`) — the script `scripts/51-lxc-amd.sh` does this filtering automatically; if you set up the LXC manually, exclude `renderD130` (or whichever node maps to the iGPU `7e:00.0`).
+
+```bash
+# If amdgpu still complains about missing firmware in dmesg, run:
+#   apt install --reinstall pve-firmware
+# DO NOT install firmware-amd-graphics from Debian non-free.
 ```
 
 ### Step 4.5 — Verify host sees all GPUs
 
 ```bash
-lspci -nn | grep -iE "vga|3d controller|audio.*nvidia"
-# Expect three GPU entries (2x AMD + 1x NVIDIA) plus their audio functions
+# V620 server cards report PCI class 0380 ("Display controller") — NOT VGA (0300) or
+# 3D controller (0302) — because they're headless inference cards with no display
+# output. The naive `grep "vga|3d"` filter misses them entirely. Filter by AMD/ATI
+# Navi 21 device ID (1002:73a1) or by name instead:
+lspci -nn | grep -iE "navi 21|radeon pro v620|\[1002:73a1\]"
+# Expect: two entries (one per V620). They appear behind Navi 21's internal PCIe
+# switch — addresses typically 03:00.0 (V620 #1 behind 01:00.0/02:00.0) and 07:00.0
+# (V620 #2 behind 05:00.0/06:00.0).
+
+# Sanity: full AMD/ATI listing should also show the Raphael iGPU + switch fabric:
+lspci -nn | grep -iE "amd|ati"
+
+# Note: V620 has NO HDMI audio function (headless server card). The only AMD audio
+# you'll see is the Raphael iGPU at 7e:00.1 + 7e:00.6. This is normal.
 ```
 
 ```bash
 # AMD GPUs should have render nodes after the next reboot
 # After amdgpu loads, check:
 ls -l /dev/dri/
-# Expect: card0, card1, renderD128, renderD129 (one pair per V620)
+# Expect: card0, card1, renderD128, renderD129 (one pair per V620). No renderD130.
 ```
 
 If the AMD GPUs aren't showing render nodes, reboot once more — the kernel module load order on a fresh install sometimes needs a reboot to settle.
 
-### Step 4.6 — Install NVIDIA driver on host
+### Step 4.6 — (Removed) NVIDIA driver install
 
-The host must have the NVIDIA driver loaded for LXC passthrough to work. Two options:
-
-**Option A: Debian non-free package (simpler, but version may lag and DKMS can fail on newer kernels).**
-
-```bash
-# Add non-free-firmware to sources if not present
-cat > /etc/apt/sources.list.d/non-free-firmware.list <<EOF
-deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security trixie-security main contrib non-free non-free-firmware
-EOF
-
-apt update
-
-# Install kernel headers (needed for DKMS module build)
-apt install -y proxmox-headers-$(uname -r)
-
-# Install NVIDIA driver (this builds DKMS modules; takes a few minutes)
-apt install -y nvidia-driver firmware-nvidia-graphics
-```
-
-If DKMS fails (common on kernel 6.17 with current Debian package 550.163.x), confirm the kernel pin from §4.1 took effect: `uname -r` should show `6.14.x-pve`. If still failing, try Option B.
-
-**Option B: NVIDIA `.run` installer with the 580.x driver line (recommended for PVE 9.x).**
-
-```bash
-# Pick a current 580.x driver — verified working: 580.95.05, 580.105.06, 580.126.09
-DRIVER_VERSION=580.105.06   # or newer; check https://www.nvidia.com/en-us/drivers/
-
-# Install kernel headers
-apt install -y proxmox-headers-$(uname -r)
-
-# Download and run installer
-cd /tmp
-wget https://us.download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-chmod +x NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-./NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run --silent --dkms
-
-# Save the .run file — you'll need the same version for the LXC
-mkdir -p /root/nvidia-installer
-mv NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run /root/nvidia-installer/
-```
-
-When the installer prompts (if not running `--silent`):
-- Kernel module type: **NVIDIA Proprietary** (better Wayland/desktop support) or **MIT/GPL** (open kernel module — works for compute, recommended for headless servers)
-- Sign kernel module: **Yes** (if you have Secure Boot enabled — but our BIOS step disabled it, so this can be **No**)
-- Register DKMS module: **Yes** (rebuilds on kernel updates)
-- Run nvidia-xconfig: **No** (headless host)
-
-Reboot to load the new module:
-
-```bash
-reboot
-```
-
-After reboot:
-
-```bash
-# Confirm NVIDIA module loaded
-lsmod | grep nvidia
-# Expect: nvidia, nvidia_modeset, nvidia_uvm, nvidia_drm
-
-# Confirm the GPU is visible
-nvidia-smi
-# Expect: tabular output listing the RTX 3060
-
-# Note the driver version — you'll need to match it exactly inside the 3060 LXC
-nvidia-smi --query-gpu=driver_version --format=csv,noheader
-# Save this version (e.g., 580.105.06)
-```
-
-**Save the NVIDIA driver version and `.run` file** — the LXC needs the same userspace version as the host kernel module.
+This step previously installed the NVIDIA host driver for RTX 3060 passthrough. With the 3060 removed (see `local-gpu-cluster-v2.md` §1.3 for pivot rationale), no NVIDIA driver is required. The renumbering is intentional — Step 4.7 follows directly.
 
 ### Step 4.7 — Identify device major numbers
 
@@ -631,39 +636,42 @@ ls -l /dev/dri/render* /dev/kfd
 # Example output:
 # crw-rw---- 1 root render 226, 128 ... /dev/dri/renderD128   (V620 #1)
 # crw-rw---- 1 root render 226, 129 ... /dev/dri/renderD129   (V620 #2)
-# crw-rw---- 1 root render 226, 130 ... /dev/dri/renderD130   (3060 — yes, NVIDIA also has a render node)
 # crw-rw-rw- 1 root render 234,   0 ... /dev/kfd
-
-# NVIDIA character devices
-ls -l /dev/nvidia*
-# Example:
-# crw-rw-rw- 1 root root 195,   0 ... /dev/nvidia0
-# crw-rw-rw- 1 root root 195, 255 ... /dev/nvidiactl
-# crw-rw-rw- 1 root root 195, 254 ... /dev/nvidia-modeset
-# crw-rw-rw- 1 root root 240,   0 ... /dev/nvidia-uvm
-# crw-rw-rw- 1 root root 240,   1 ... /dev/nvidia-uvm-tools
 ```
 
 **Record the major numbers from your system** — they vary by kernel build:
 - AMD render: typically `226`
 - AMD KFD: typically `234`
-- NVIDIA character: typically `195`
-- NVIDIA UVM: typically `240`
-- NVIDIA caps: typically `506` (varies more)
 
-You'll need these in Phases 5 and 6.
+You'll need these in Phase 5 when configuring LXC 151's GPU passthrough.
 
-### Step 4.8 — Set up ZFS storage for shared models
+### Step 4.8 — Set up ZFS mirror for shared models
+
+The two data NVMes in M.2_3 and M.2_4 are paired as a **ZFS mirror** (RAID-1 equivalent). Properties of this layout:
+- **Redundancy:** survives single-drive failure. The remaining drive serves reads with no downtime; replace and `zpool replace` to rebuild.
+- **Self-healing:** ZFS checksums every block. On a mirror, mismatched checksums between the two copies are auto-repaired from the good copy. Plain mdadm RAID-1 can detect mismatches but can't tell which copy is correct — ZFS can.
+- **Snapshots:** instant, atomic, copy-on-write. Phase 9's backup strategy depends on `zfs snapshot` / `zfs send`.
+- **Compression:** `lz4` saves ~30-50% on model files and config data with negligible CPU cost.
+- **Usable capacity:** equals one drive (mirroring, not striping). Two 2 TB drives → 2 TB usable.
 
 ```bash
-# Identify your secondary NVMe (the one for /tank, NOT the boot drive)
+# Identify your two data NVMes (NOT the boot drive on nvme0n1)
 lsblk -d -o NAME,SIZE,MODEL
-# Look for the larger NVMe that's not currently mounted
+# You should see three nvme devices — boot (smaller or matched) plus the two data drives.
 
-# Create the pool (replace nvme1n1 with your actual device)
-SECONDARY_NVME=/dev/nvme1n1   # ADJUST THIS
+# Confirm device IDs by-id (preferred over /dev/nvmeXnY which can re-enumerate)
+ls -l /dev/disk/by-id/ | grep -i nvme | grep -v part
+# Use the nvme-eui... or nvme-Model_Serial... entries below.
 
-zpool create -o ashift=12 tank $SECONDARY_NVME
+# Create the mirrored pool — ADJUST device paths to match your hardware
+DATA_NVME_A=/dev/disk/by-id/nvme-XXXXXXXX   # ADJUST: first data drive (M.2_3)
+DATA_NVME_B=/dev/disk/by-id/nvme-YYYYYYYY   # ADJUST: second data drive (M.2_4)
+
+zpool create -o ashift=12 \
+    -O compression=lz4 \
+    -O atime=off \
+    -O xattr=sa \
+    tank mirror "$DATA_NVME_A" "$DATA_NVME_B"
 
 # Create datasets
 zfs create tank/models
@@ -671,14 +679,27 @@ zfs create tank/anythingllm
 zfs create tank/mcp
 zfs create tank/backups
 
-# Set properties tuned for model files (large, sequential reads)
-zfs set compression=lz4 tank/models
-zfs set atime=off tank/models
+# Per-dataset tuning — recordsize=1M is optimal for large sequential reads (GGUF models)
 zfs set recordsize=1M tank/models
 
 # Verify
+zpool status tank
+# Expect: pool: tank, state: ONLINE, config shows "mirror-0" with both drives ONLINE
+
 zfs list
 # Expect: tank, tank/models, tank/anythingllm, tank/mcp, tank/backups
+```
+
+**ZFS ARC tuning (important — boot drive is ext4, but `/tank` is ZFS):**
+
+ZFS will use up to 50% of host RAM for ARC by default. On this 128 GB system that's 64 GB — more than you want, given LXCs need RAM for model inference. Cap ARC at a sensible value:
+
+```bash
+# Cap ARC at 16 GB (adjust based on your RAM and workload)
+echo "options zfs zfs_arc_max=17179869184" > /etc/modprobe.d/zfs.conf
+update-initramfs -u
+# Takes effect on next reboot, or live with:
+echo 17179869184 > /sys/module/zfs/parameters/zfs_arc_max
 ```
 
 ### Step 4.9 — Add ZFS storage to Proxmox
@@ -723,8 +744,8 @@ sed -i 's/^enable: 1/enable: 0/' /etc/pve/firewall/cluster.fw 2>/dev/null
 **Stop and verify before proceeding:**
 - [ ] IOMMU active in `dmesg`
 - [ ] Clean IOMMU groups (each GPU isolated)
-- [ ] `nvidia-smi` works on host, shows the 3060
-- [ ] `ls /dev/dri/` shows renderD128, renderD129, renderD130
+- [ ] No `nvidia-smi` on host (no NVIDIA hardware): `which nvidia-smi || echo OK`
+- [ ] `ls /dev/dri/` shows renderD128, renderD129 (NOT renderD130 — 3060 absent)
 - [ ] `zfs list` shows `tank/models`
 - [ ] Ubuntu 24.04 template downloaded
 
@@ -742,7 +763,7 @@ pct create 151 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --cores 8 \
   --memory 32768 \
   --swap 8192 \
-  --rootfs local-zfs:64 \
+  --rootfs local-lvm:64 \
   --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
   --features nesting=1 \
   --unprivileged 1 \
@@ -868,13 +889,20 @@ cd /opt
 git clone https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
 
-# Build with HIP backend, targeting V620's gfx1030 architecture
+# Build with HIP backend, targeting V620's gfx1030 architecture.
+# Extra flags for V620-only build:
+#   -DGGML_HIP_GRAPHS=ON  kernel-graph capture, ~1-3% throughput gain on gfx1030, no downside.
+#   -DGGML_OPENMP=ON      better CPU-thread scaling on Ryzen 7600 prompt-eval paths.
+#   -DLLAMA_BUILD_SERVER=ON  explicit (default in recent llama.cpp, but pin it).
 HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
 cmake -S . -B build \
     -DGGML_HIP=ON \
     -DGPU_TARGETS=gfx1030 \
     -DCMAKE_BUILD_TYPE=Release \
-    -DLLAMA_CURL=ON
+    -DLLAMA_CURL=ON \
+    -DLLAMA_BUILD_SERVER=ON \
+    -DGGML_HIP_GRAPHS=ON \
+    -DGGML_OPENMP=ON
 
 # Build (takes ~10 minutes)
 cmake --build build --config Release -j$(nproc)
@@ -916,12 +944,19 @@ exit
 
 **Download from host:**
 
-The Qwen 3.5 family includes both target (35B-A3B, MoE with 3B active params) and draft (0.8B dense). Both are needed for speculative decoding. Recommended quantizations:
+The V620-only LXC hosts three llama-server processes (chat + embed + rerank). All four model files live in `/tank/models`:
 
-| File | Repo | Approx size |
-| --- | --- | --- |
-| Target: Qwen3.5-35B-A3B Q4_K_M | `unsloth/Qwen3.5-35B-A3B-GGUF` | ~22 GB |
-| Draft: Qwen3.5-0.8B Q4_K_M | `unsloth/Qwen3.5-0.8B-GGUF` | ~600 MB |
+| File | Repo | Approx size | Used by |
+| --- | --- | --- | --- |
+| Target: Qwen3.6-35B-A3B UD-Q4_K_M | `unsloth/Qwen3.6-35B-A3B-GGUF` | ~22 GB | `llamacpp-chat.service` (port 8080) |
+| Draft: Qwen3-0.6B Q4_K_M (tokenizer-compatible with Qwen3.6) | `unsloth/Qwen3-0.6B-GGUF` | ~400 MB | `llamacpp-chat.service` (`--model-draft`) |
+| Embedder: Qwen3-Embedding-0.6B Q8_0 | `Qwen/Qwen3-Embedding-0.6B-GGUF` | ~1.0 GB | `llamacpp-embed.service` (port 8082) |
+| Reranker: BGE Reranker v2-m3 (GGUF) | see note below | ~1.5 GB | `llamacpp-rerank.service` (port 8083) |
+
+**Reranker GGUF availability.** `BAAI/bge-reranker-v2-m3` doesn't always ship a pre-built GGUF on HuggingFace. Two paths:
+- **(a)** convert via `convert_hf_to_gguf.py` from the llama.cpp source tree, OR
+- **(b)** fall back to `Qwen/Qwen3-Reranker-0.6B-GGUF` which ships GGUF directly and works with `--reranking --pooling rank` identically.
+Smoke-test the chosen reranker on V620 before the cutover (Phase 6 Step 6.1.5).
 
 ```bash
 cd /tank/models
@@ -929,19 +964,34 @@ cd /tank/models
 # Use llama-server's built-in HF downloader (recommended — handles multi-shard automatically)
 # Or wget directly:
 
-# Target: Qwen 3.5 35B-A3B (MoE) Q4_K_M
-# Note: this is multi-shard. Verify exact filenames at https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF
-wget -O qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
-  "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-Q4_K_M-00001-of-00002.gguf"
-wget -O qwen3.5-35b-a3b-q4_k_m-00002-of-00002.gguf \
-  "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/resolve/main/Qwen3.5-35B-A3B-Q4_K_M-00002-of-00002.gguf"
+# Target: Qwen3.6 35B-A3B (MoE) UD-Q4_K_M (Unsloth Dynamic — single file, ~22 GB).
+# Verify current file list at https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
+wget -O qwen3.6-35b-a3b-ud-q4_k_m.gguf \
+  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 
 # Draft: Qwen 3.5 0.8B Q4_K_M
-wget -O qwen3.5-0.8b-q4_k_m.gguf \
-  "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"
+wget -O qwen3-0.6b-q4_k_m.gguf \
+  "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+
+# Embedder: Qwen3-Embedding-0.6B Q8_0 (uses --pooling last; do NOT use cls — see Step 5.11.2)
+wget -O qwen3-embedding-0.6b-q8_0.gguf \
+  "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf"
+
+# Reranker: BGE v2-m3 (or Qwen3-Reranker-0.6B if BGE GGUF not available)
+# Verify URL before running; both options shown:
+# Option A — BGE Reranker v2-m3 (if a community GGUF exists):
+# wget -O bge-reranker-v2-m3.gguf "<community-mirror-URL>"
+# Option B — Qwen3-Reranker-0.6B (ships GGUF officially):
+wget -O qwen3-reranker-0.6b-q8_0.gguf \
+  "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B-GGUF/resolve/main/Qwen3-Reranker-0.6B-Q8_0.gguf"
 
 # Verify checksums against published values on the model card
 sha256sum *.gguf
+
+# Pin the embedder SHA — Phase 6 cutover compares against this to detect re-quantization
+# that would invalidate AnythingLLM's existing vector DB.
+sha256sum qwen3-embedding-0.6b-q8_0.gguf | awk '{print $1}' > /tank/models/.embedder-sha
+cat /tank/models/.embedder-sha
 
 chmod 644 *.gguf
 ```
@@ -950,13 +1000,13 @@ chmod 644 *.gguf
 
 ```bash
 # Inside the LXC, the systemd unit can reference a HF repo:
-# --hf-repo unsloth/Qwen3.5-35B-A3B-GGUF:Q4_K_M --hf-repo-draft unsloth/Qwen3.5-0.8B-GGUF:Q4_K_M
+# --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --hf-repo-draft unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 # This auto-downloads to LLAMA_CACHE on first start.
 ```
 
-**URL stability caveat:** Hugging Face URLs and exact quant filenames change as new quantization algorithms (e.g. Unsloth Dynamic 2.0) are released. Verify the current file list at `https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/tree/main` before running `wget`. The `Q4_K_M` quant variant is recommended as a quality/size sweet spot.
+**URL stability caveat:** Hugging Face URLs and exact quant filenames change as new quantization algorithms (e.g. Unsloth Dynamic 2.0) are released. Verify the current file list at `https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main` before running `wget`. The `UD-Q4_K_M` (Unsloth Dynamic) quant is recommended as a quality/size sweet spot — slightly better than vanilla Q4_K_M at the same ~22 GB size.
 
-**About Qwen 3.5 35B-A3B specifically:**
+**About Qwen3.6 35B-A3B specifically:**
 - It's an **MoE model**: 35 B total parameters, 3 B activated per token. Inference is closer to a 3 B model in throughput while VRAM cost is still ~22 GB at Q4_K_M.
 - Default behavior: **thinking mode enabled** (generates `<think>...</think>` blocks). The 0.8 B draft defaults to non-thinking.
 - The `mmproj` vision projector file is optional — only needed if you want vision input. Skip it for text-only RAG/coding.
@@ -976,8 +1026,8 @@ Run llama-server with both models for a quick test:
 cd /opt/llama.cpp
 
 ./build/bin/llama-server \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
-    --model-draft /opt/models/qwen3.5-0.8b-q4_k_m.gguf \
+    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf \
+    --model-draft /opt/models/qwen3-0.6b-q4_k_m.gguf \
     --host 0.0.0.0 \
     --port 8080 \
     --ctx-size 32768 \
@@ -1030,7 +1080,7 @@ watch -n 1 rocm-smi --showuse --showmemuse --showtemp
 ```bash
 cd /opt/llama.cpp
 ./build/bin/llama-server \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
+    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf \
     --tensor-split 1,1 \
     --n-gpu-layers all \
     --port 8080 &
@@ -1061,27 +1111,69 @@ llama.cpp's Flash Attention has known performance issues on V620 (`gfx1030`) —
 ```bash
 # Benchmark without flash attention
 ./build/bin/llama-bench \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
+    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf \
     -ngl all \
     -fa 0
 
 # Benchmark with flash attention
 ./build/bin/llama-bench \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
+    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf \
     -ngl all \
     -fa 1
 ```
 
 Compare the `tg128` row's t/s value. Use whichever is higher in the production systemd unit. (As of llama.cpp main branch in early 2026, FA is often slower on V620 — but this evolves with each release, so verify on your specific build.)
 
-### Step 5.11 — Create production systemd unit
+### Step 5.11 — Generate API key + create three production systemd units
 
-Inside the LXC, decide based on your benchmark (§5.10) whether to set `--flash-attn` to `on`, `off`, or leave at the default `auto` (which lets llama.cpp decide):
+The V620 LXC hosts three llama-server processes:
+- `llamacpp-chat.service` (port 8080, tensor-split across both V620s)
+- `llamacpp-embed.service` (port 8082, pinned to V620 #1)
+- `llamacpp-rerank.service` (port 8083, pinned to V620 #2)
+
+All three share a single `LLAMACPP_API_KEY` (Bearer auth) and the same llama.cpp binary built in §5.6. Inside the LXC:
+
+#### Step 5.11.1 — Generate LLAMACPP_API_KEY
 
 ```bash
-cat > /etc/systemd/system/llama-server.service <<'EOF'
+# Idempotent — re-running does not duplicate the key
+if ! grep -q "^LLAMACPP_API_KEY=" /etc/llamacpp.env 2>/dev/null; then
+    echo "LLAMACPP_API_KEY=$(openssl rand -hex 32)" >> /etc/llamacpp.env
+fi
+chmod 600 /etc/llamacpp.env
+chown root:root /etc/llamacpp.env
+
+# Record the key for use in /etc/router.env (Phase 7.1.5) and AnythingLLM (Phase 8.6)
+awk -F= '/^LLAMACPP_API_KEY=/{print "LLAMACPP_API_KEY=" $2}' /etc/llamacpp.env
+```
+
+#### Step 5.11.2 — Warm-up script (used by ExecStartPost on chat unit)
+
+```bash
+cat > /usr/local/bin/warm-chat.sh <<'EOF'
+#!/bin/bash
+# Fire a tiny completion after llamacpp-chat starts so the first user request
+# doesn't pay the cold-start latency (model load from /tank takes ~10-30s on
+# first run). Reads the API key from /etc/llamacpp.env.
+sleep 5
+. /etc/llamacpp.env
+curl -s -m 30 http://localhost:8080/v1/chat/completions \
+    -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+    > /dev/null
+EOF
+chmod +x /usr/local/bin/warm-chat.sh
+```
+
+#### Step 5.11.3 — `llamacpp-chat.service` (port 8080, tensor-split)
+
+Decide based on your benchmark (§5.10) whether to set `--flash-attn` to `on`, `off`, or leave at the default `auto`.
+
+```bash
+cat > /etc/systemd/system/llamacpp-chat.service <<'EOF'
 [Unit]
-Description=llama.cpp server (V620 ROCm — Qwen 3.5 35B-A3B + 0.8B draft)
+Description=llama.cpp chat (V620 ROCm — Qwen3.6-35B-A3B UD-Q4_K_M + Qwen3-0.6B draft, tensor-split 1,1)
 After=network-online.target
 Wants=network-online.target
 
@@ -1089,29 +1181,86 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/llama.cpp
+EnvironmentFile=/etc/llamacpp.env
 Environment="HIP_VISIBLE_DEVICES=0,1"
 Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+Environment="GPU_MAX_HW_QUEUES=2"
 Environment="GGML_HIP_UMA=0"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m.gguf \
-    --model-draft /opt/models/qwen3.5-0.8b-q4_k_m.gguf \
-    --alias rag-qwen3.5 \
-    --host 0.0.0.0 \
-    --port 8080 \
+    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m.gguf \
+    --model-draft /opt/models/qwen3-0.6b-q4_k_m.gguf \
+    --alias rag-qwen3.6 \
+    --host 0.0.0.0 --port 8080 \
+    --api-key ${LLAMACPP_API_KEY} \
     --ctx-size 131072 \
     --n-gpu-layers all \
     --n-gpu-layers-draft all \
     --tensor-split 1,1 \
     --threads 8 \
-    --batch-size 512 \
-    --ubatch-size 512 \
-    --cache-type-k q8_0 \
-    --cache-type-v q8_0 \
+    --batch-size 512 --ubatch-size 512 \
+    --cache-type-k q8_0 --cache-type-v q8_0 \
     --cont-batching \
-    --parallel 2 \
-    --spec-draft-n-max 16 \
-    --spec-draft-n-min 0 \
+    --parallel 4 \
+    --cache-reuse 1024 \
+    --mlock \
+    --spec-draft-n-max 16 --spec-draft-n-min 0 \
     --flash-attn auto \
+    --log-prefix \
+    --metrics
+ExecStartPost=/usr/local/bin/warm-chat.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Key flag rationale (V620-only adjustments):
+
+- `--api-key ${LLAMACPP_API_KEY}` enforces Bearer auth on llama-server. The key is loaded via `EnvironmentFile=/etc/llamacpp.env` — never inline in the unit file (would leak via `systemctl show` + vzdump).
+- `--parallel 4` enables 4 concurrent KV slots (vs. the old `--parallel 2`). Each slot at 128K ctx q8_0 ≈ 3-4 GB, so total ~16 GB of slot KV on top of the 22 GB weights. Fits comfortably in the 64 GB pool with ~25 GB headroom for embed + rerank co-tenants.
+- `--cache-reuse 1024` (was 256) — system-prompt prefix reuse window of 1024 tokens. RAG system prompts are typically 1-4K tokens; the old 256-token window was sub-optimal. Adds ~1 slot's worth of KV but we have headroom.
+- `--mlock` pins the model in VRAM, prevents demand paging under bulk-embed contention.
+- `--log-prefix` writes prompt prefix to journald — required for spec-decode acceptance-rate scraping. Has privacy implications: see journald retention config below (Step 5.11.6).
+- `HIP_FORCE_DEV_KERNARG=1` shaves ~2-5% off small-kernel paths on gfx1030.
+- `GPU_MAX_HW_QUEUES=2` caps ROCm queue context-switching when 4 chat slots compete on each card.
+- `--alias rag-qwen3.6` triggers the router's strip-thinking heuristic (`^rag-|-rag$`).
+- **Optional:** `--reasoning-format deepseek` moves `<think>...</think>` to `message.reasoning_content`, simplifying the router. Default `auto` leaves them in `message.content`.
+
+#### Step 5.11.4 — `llamacpp-embed.service` (port 8082, V620 #1)
+
+```bash
+cat > /etc/systemd/system/llamacpp-embed.service <<'EOF'
+[Unit]
+Description=llama.cpp embedder (V620 #1 — Qwen3-Embedding-0.6B Q8_0, --pooling last)
+After=network-online.target llamacpp-chat.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+EnvironmentFile=/etc/llamacpp.env
+Environment="HIP_VISIBLE_DEVICES=0"
+Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+    --model /opt/models/qwen3-embedding-0.6b-q8_0.gguf \
+    --alias qwen3-embed \
+    --host 0.0.0.0 --port 8082 \
+    --api-key ${LLAMACPP_API_KEY} \
+    --main-gpu 0 \
+    --n-gpu-layers all \
+    --embeddings \
+    --pooling last \
+    --ctx-size 8192 \
+    --cont-batching \
+    --parallel 8 \
+    --batch-size 2048 --ubatch-size 512 \
+    --flash-attn off \
+    --mlock \
     --metrics
 Restart=on-failure
 RestartSec=10
@@ -1119,30 +1268,107 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl daemon-reload
-systemctl enable --now llama-server
-systemctl status llama-server --no-pager
 ```
 
-Key flag rationale (verified against upstream `tools/server/README.md`):
+Critical correctness note: `--pooling last`, NOT `cls`. Qwen3-Embedding-0.6B uses the final `<|endoftext|>` token for pooling. Using `cls` produces semantically wrong embeddings and silently invalidates AnythingLLM's vector DB. Embedding dim = 1024.
 
-- `--n-gpu-layers all` is the modern idiom; older docs use `999` which still works.
-- `--flash-attn auto` (default) lets llama.cpp pick. Override to `off` if §5.10 benchmark shows FA hurts on V620.
-- `--alias rag-qwen3.5` — model name reported via `/v1/models`. Names matching `^rag-|-rag$` trigger the router's automatic strip-thinking heuristic (§7.3).
-- `--cache-type-k q8_0 --cache-type-v q8_0` — quantize KV cache to 8-bit. Supported types: `f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1`.
-- `--metrics` — exposes Prometheus-compatible `/metrics` endpoint (used in monitoring layer).
-- **Optional flag worth considering:** `--reasoning-format deepseek` — moves `<think>...</think>` content to a separate `message.reasoning_content` field in the response, simplifying the router's strip logic. Default is `auto` which leaves them in `message.content`.
-- **Optional flag for power saving:** `--sleep-idle-seconds 600` unloads the model from RAM/VRAM after 10 minutes of inactivity; next request reloads. Useful if the cluster is shared with a desktop workload.
+#### Step 5.11.5 — `llamacpp-rerank.service` (port 8083, V620 #2)
 
-**Why no `--api-key`:** llama-server does support native API key validation via `--api-key KEY`; we omit it because the router LXC enforces access control upstream and the V620 LXC isn't directly LAN-exposed. Add it if your network model requires per-backend auth.
+**Important — match the model path to your chosen reranker GGUF.** If you picked Option A (BGE Reranker v2-m3) in Step 5.7, change `--model /opt/models/qwen3-reranker-0.6b-q8_0.gguf` below to `--model /opt/models/bge-reranker-v2-m3.gguf` (or whatever filename you actually downloaded). The default shown is Option B (Qwen3-Reranker-0.6B), which ships GGUF officially and is the fallback in the runbook.
+
+```bash
+cat > /etc/systemd/system/llamacpp-rerank.service <<'EOF'
+[Unit]
+Description=llama.cpp reranker (V620 #2 — Qwen3-Reranker-0.6B by default; BGE if downloaded)
+After=network-online.target llamacpp-chat.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+EnvironmentFile=/etc/llamacpp.env
+Environment="HIP_VISIBLE_DEVICES=1"
+Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+    --model /opt/models/qwen3-reranker-0.6b-q8_0.gguf \
+    --alias bge-rerank \
+    --host 0.0.0.0 --port 8083 \
+    --api-key ${LLAMACPP_API_KEY} \
+    --main-gpu 1 \
+    --n-gpu-layers all \
+    --embeddings --pooling rank \
+    --reranking \
+    --ctx-size 8192 \
+    --cont-batching \
+    --parallel 4 \
+    --flash-attn off \
+    --mlock \
+    --metrics
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Correctness note: `--reranking` opens the `/v1/rerank` endpoint, but the underlying mechanism requires `--embeddings --pooling rank` together (per llama.cpp upstream best practice). If you went with BGE Reranker GGUF instead of Qwen3-Reranker, update the `--model` path accordingly.
+
+#### Step 5.11.6 — journald retention + SSH hardening
+
+The chat unit's `--log-prefix` writes prompt content to journald. Bound the retention to avoid both disk fill and long-tail prompt exposure via `pct exec ... journalctl`:
+
+```bash
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/retention.conf <<'EOF'
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=7day
+EOF
+systemctl restart systemd-journald
+
+# SSH hardening — disable password auth + root password login.
+# Push the Proxmox host's SSH public key into this LXC's authorized_keys before running these,
+# or you'll lock yourself out. Use `pct exec 151 -- bash` to keep host-side access.
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart ssh 2>/dev/null || systemctl restart sshd
+```
+
+#### Step 5.11.7 — Enable and start all three units
+
+```bash
+systemctl daemon-reload
+systemctl enable --now llamacpp-chat llamacpp-embed llamacpp-rerank
+
+# Cold-start load is dominated by reading the 22 GB chat model from /tank over PCIe.
+# Wait up to 120s for all three to report `active`. Bail out with a journalctl pointer
+# if any unit hasn't become active within that window.
+for attempt in $(seq 1 24); do
+  states=$(systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank 2>/dev/null | tr '\n' ' ')
+  echo "[${attempt}/24] $states"
+  echo "$states" | grep -qv "active" || break
+  sleep 5
+done
+systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank
+# Expect: three lines of "active"
+
+# If any unit shows "failed" or "activating" after 120s, inspect:
+journalctl -u llamacpp-chat --since "5 min ago" --no-pager | tail -40
+```
+
+The warm-up script (`/usr/local/bin/warm-chat.sh`, Step 5.11.2) sleeps 5s then fires a small completion. That's fine when systemd reaches `active` (which only happens after the model is loaded), because `ExecStartPost` runs after the model load. The 5s sleep is just slack for socket bind.
 
 Watch logs to confirm clean startup:
 
 ```bash
-journalctl -u llama-server -f
+journalctl -u llamacpp-chat -f
 # Wait for: "main: server is listening on http://0.0.0.0:8080"
-# Then Ctrl-C
+# Then Ctrl-C and check the other two:
+journalctl -u llamacpp-embed --since "2 min ago" | tail -20
+journalctl -u llamacpp-rerank --since "2 min ago" | tail -20
 ```
 
 ### Step 5.12 — Verify from outside the LXC
@@ -1154,21 +1380,40 @@ pct exec 151 -- ip -4 addr show eth0 | grep inet | awk '{print $2}'
 # Note this IP — likely 192.168.6.151 or DHCP-assigned
 ```
 
-From your local machine:
+From the Proxmox host (or any LAN host that has the LLAMACPP_API_KEY):
 
 ```bash
 LLAMACPP_AMD_IP=192.168.6.151   # adjust to your actual IP
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
 
-curl http://$LLAMACPP_AMD_IP:8080/v1/models
-# Expect: JSON listing the model
+# Chat (port 8080)
+curl -sf -H "Authorization: Bearer $LLAMACPP_KEY" http://$LLAMACPP_AMD_IP:8080/v1/models | jq .
+
+# Embedder (port 8082) — verify dim=1024 (--pooling last correctness)
+curl -sf -X POST -H "Authorization: Bearer $LLAMACPP_KEY" -H "Content-Type: application/json" \
+    -d '{"input":"hello"}' http://$LLAMACPP_AMD_IP:8082/v1/embeddings | jq '.data[0].embedding | length'
+# Expect: 1024 — if you see a different dim, the embedder is using wrong pooling.
+
+# Reranker (port 8083) — verify Paris ranks first for "capital of France"
+curl -sf -X POST -H "Authorization: Bearer $LLAMACPP_KEY" -H "Content-Type: application/json" \
+    -d '{"query":"capital of France","documents":["Paris is in France","Berlin is in Germany"]}' \
+    http://$LLAMACPP_AMD_IP:8083/v1/rerank | jq '.results[0].document'
+# Expect: "Paris is in France"
+
+# Auth-gate test: request without Bearer should 403
+curl -s -o /dev/null -w "%{http_code}\n" http://$LLAMACPP_AMD_IP:8080/v1/models
+# Expect: 401 (llama-server returns 401 for missing auth, not 403)
 ```
 
 **Stop and verify before proceeding:**
 - [ ] `rocminfo` shows two `gfx1030` agents
-- [ ] llama-server systemd unit is active
-- [ ] V620 stack responds on port 8080
-- [ ] Both GPUs split work during a test generation
-- [ ] Speculative decoding acceptance rate >0.5 in logs
+- [ ] All three systemd units active: `pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank` prints "active" three times
+- [ ] Chat (8080), embed (8082), rerank (8083) all respond with valid `Authorization: Bearer` headers
+- [ ] Unauthed request to any of the three returns 401 (auth gate works)
+- [ ] Embedding dim returned is 1024 (confirms `--pooling last` is correct)
+- [ ] Reranker scores "Paris is in France" higher than "Berlin is in Germany"
+- [ ] Both GPUs split work during chat generation (`rocm-smi --showuse` shows activity on both)
+- [ ] Speculative decoding acceptance rate >0.6 in `journalctl -u llamacpp-chat | grep acceptance`
 
 ### Step 5.13 — V620 fan control software bridge (Approach A from Step 1.9.1)
 
@@ -1228,7 +1473,7 @@ chmod +x /usr/local/bin/v620-temp-publish.sh
 cat > /etc/systemd/system/v620-temp-publish.service <<'EOF'
 [Unit]
 Description=V620 GPU temperature publisher
-After=network-online.target llama-server.service
+After=network-online.target llamacpp-chat.service
 Wants=network-online.target
 
 [Service]
@@ -1255,53 +1500,65 @@ exit
 apt install -y lm-sensors
 sensors-detect --auto  # answer yes to all defaults; identifies nuvoton/IT8xxx superio chip
 
-# After detection, find the right pwm endpoint
-sensors  # lists all hwmon devices
+# After detection, find the right pwm endpoint(s) for the V620 shroud fans.
+# Per Step 1.9.1 Approach A, the V620 shrouds plug into CHA_FAN4 + CHA_FAN5 (independent
+# motherboard headers, NOT through the Lancool 217 hub). You need to identify which
+# /sys/class/hwmon/hwmonX/pwmN file corresponds to each of those two headers.
+sensors  # lists all hwmon devices + per-fan RPM (look for fan4_input, fan5_input)
 ls /sys/class/hwmon/
 
-# Typically on ASUS X870E boards you'll see hwmon entries like:
-#   nct6798-isa-0290 (the superio fan/sensor chip)
-# CHA_FAN3 maps to one of the pwm files. Confirm by changing it temporarily:
-echo 1 > /sys/class/hwmon/hwmon3/pwm4_enable   # adjust hwmon3/pwm4
-echo 64 > /sys/class/hwmon/hwmon3/pwm4         # 25% — listen for fans slowing
-echo 255 > /sys/class/hwmon/hwmon3/pwm4        # 100% — listen for fans speeding up
+# Typically on ASUS X870E you'll see hwmon entries like:
+#   nct6798-isa-0290 (the SuperI/O fan/sensor chip)
+# Probe each pwmN by switching to manual mode and listening:
+echo 1 > /sys/class/hwmon/hwmon3/pwm5_enable   # adjust hwmon3/pwm5 — try CHA_FAN4 first
+echo 64 > /sys/class/hwmon/hwmon3/pwm5         # 25% — listen for THAT shroud fan slowing
+echo 255 > /sys/class/hwmon/hwmon3/pwm5        # 100% — listen for it ramping up
+# Repeat for the other header (pwm6 if CHA_FAN5 lives there, etc.)
 ```
 
-When you've found the pwm file that visibly changes the V620 shroud fans' speed, note its full path. Below we assume `/sys/class/hwmon/hwmon3/pwm4` — substitute yours.
+When you've identified both pwm files that drive the V620 shroud fans, note both full paths. Below we assume `/sys/class/hwmon/hwmon3/pwm5` and `/sys/class/hwmon/hwmon3/pwm6` — substitute yours.
 
-**Step 5.13.4 — Install the host fan control bridge.**
+**Step 5.13.4 — Install the host fan control bridge (writes to BOTH headers in lockstep).**
 
 ```bash
 cat > /usr/local/bin/v620-fan-bridge.sh <<'EOF'
 #!/bin/bash
-# Read V620 max edge temp from LXC 151 (via shared bind mount)
-# and write PWM duty cycle to motherboard fan header.
+# Read V620 max edge temp from LXC 151 (via shared bind mount) and write the
+# same PWM duty cycle to every V620-shroud motherboard header.
 
 TEMP_FILE="/var/lib/v620-temps/current-temp"
-PWM="/sys/class/hwmon/hwmon3/pwm4"          # ADJUST after sensors-detect
-ENABLE="${PWM}_enable"
+# List every PWM endpoint the V620 shroud fans live on. Both ramp in lockstep.
+# If your build has only one PWM (Lancool 217 hub model), just list one.
+PWMS=(
+    /sys/class/hwmon/hwmon3/pwm5    # ADJUST: CHA_FAN4 (V620 #1 shroud fan)
+    /sys/class/hwmon/hwmon3/pwm6    # ADJUST: CHA_FAN5 (V620 #2 shroud fan)
+)
 
-# Set manual mode
-echo 1 > "$ENABLE"
+# Switch every PWM to manual mode
+for p in "${PWMS[@]}"; do
+    echo 1 > "${p}_enable" 2>/dev/null || true
+done
 
 while true; do
     if [ -r "$TEMP_FILE" ]; then
         TEMP=$(cat "$TEMP_FILE" 2>/dev/null)
         TEMP=${TEMP:-65}  # safe default if read fails
 
-        # Map temp → PWM duty (0-255)
+        # Map temp → PWM duty (0-255). Same curve applies to all V620 PWMs.
         if   [ "$TEMP" -lt 50 ]; then PWM_VAL=64    # ~25% — quiet idle
         elif [ "$TEMP" -lt 60 ]; then PWM_VAL=102   # ~40%
         elif [ "$TEMP" -lt 70 ]; then PWM_VAL=153   # ~60%
         elif [ "$TEMP" -lt 80 ]; then PWM_VAL=204   # ~80%
         else                          PWM_VAL=255   # 100% — full cooling
         fi
-
-        echo "$PWM_VAL" > "$PWM"
     else
-        # File missing → safe fail-over to 75%
-        echo 192 > "$PWM"
+        # Temp file missing (LXC down) → safe fail-over to 75%
+        PWM_VAL=192
     fi
+
+    for p in "${PWMS[@]}"; do
+        echo "$PWM_VAL" > "$p"
+    done
     sleep 5
 done
 EOF
@@ -1333,10 +1590,14 @@ systemctl enable --now v620-fan-bridge.service
 # On host
 journalctl -u v620-fan-bridge -f &
 cat /var/lib/v620-temps/current-temp   # current V620 max temp
-cat /sys/class/hwmon/hwmon3/pwm4       # current PWM duty (0-255)
+# Read every PWM the bridge is driving (per Step 5.13.4 you have a PWMS=(...) array):
+cat /sys/class/hwmon/hwmon3/pwm5       # current PWM duty on CHA_FAN4 (0-255)
+cat /sys/class/hwmon/hwmon3/pwm6       # current PWM duty on CHA_FAN5 (0-255)
+# Confirm both fans are responding (RPM should track PWM):
+sensors | grep -E "fan4|fan5"          # nct67xx labels for CHA_FAN4 / CHA_FAN5
 
 # Stress test: trigger heavy V620 load and watch fans ramp
-pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/models/qwen3.5-35b-a3b-q4_k_m.gguf -ngl 999 -t 4 -n 128 -p 512'
+pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/models/qwen3.6-35b-a3b-ud-q4_k_m.gguf -ngl 999 -t 4 -n 128 -p 512'
 # In another shell: watch fans ramp from ~25% to ~80-100% as V620s heat up
 # After test ends, watch fans return to ~25% within a minute
 ```
@@ -1357,374 +1618,335 @@ pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/mo
 
 ---
 
-## Phase 6 — Provision the 3060 LXC (152 — `llamacpp-nv`)
+## Phase 6 — Cutover (live migration from running v2 cluster)
 
-**Estimated time:** 1 hour
+> ### ⚠️ BLOCKER — One remaining upstream dependency before Phase 6 cutover is safe
+>
+> ~~1. Phase 5 expansion.~~ ✅ **DONE** (Phase 5 now defines `llamacpp-chat.service`, `llamacpp-embed.service`, `llamacpp-rerank.service` with `EnvironmentFile=/etc/llamacpp.env` and `--api-key`).
+>
+> 2. **Phase 7 router-app.py rewrite — still required.** Phase 7's Step 7.3 currently ships `router-app.py` with `FAST_URL` / `FAST_ALIASES` (referenced the deleted 3060 fast-chat service) and no auth middleware. Phase 6's cutover assumes the rewritten version: drop `FAST_URL`/`FAST_ALIASES`, add `Authorization: Bearer` middleware (validates `ROUTER_API_KEY`), add `httpx` headers `Authorization: Bearer ${LLAMACPP_API_KEY}` on upstream calls, add `asyncio.Semaphore` admission control (chat=1, embed=4), add `prometheus-fastapi-instrumentator`, add `slowapi` per-IP rate limit, add fail-open SSE on upstream 5xx, restrict `/metrics` to allowlist IPs. Until this is done, Phase 6 Step 6.2.E (router restart picks up new code) is a no-op — the router will keep routing as if the 3060 LXC still exists. Tracked as todos #18 (scripts/53-lxc-router.sh) and #20 (scripts/files/router-app.py) in the pivot plan.
+>
+> ~~3. Phase 11 verification suite.~~ ✅ **PARTIAL** — Step 6.3 below includes inline fallback verification tests (auth gates, embed dim, rerank correctness, concurrent VRAM, rate limit). Full Phase 11 expansion is a separate todo (#13) but Phase 6 is no longer blocked on it.
+>
+> See `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md` for full unit contents, router code requirements, and verification checklists.
 
-### Step 6.1 — Create the LXC
+**When to run this phase:** Only when migrating an EXISTING running cluster from "2× V620 + 1× 3060" to "2× V620 only". For fresh builds, all required services (chat + embed + rerank) are deployed during Phase 5 — skip directly from Phase 5 to Phase 7.
 
-```bash
-# Back on the Proxmox host
-pct create 152 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
-  --hostname llamacpp-nv \
-  --cores 4 \
-  --memory 16384 \
-  --swap 4096 \
-  --rootfs local-zfs:48 \
-  --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
-  --features nesting=1 \
-  --unprivileged 1 \
-  --ostype ubuntu \
-  --start 0
-```
+**Estimated time:** 1 hour, with ~30 seconds of chat-client SSE reconnect during the cutover window. Add ~1 hour for the optional bulk re-embed (Step 6.6) if the embedder GGUF changed.
 
-### Step 6.2 — Configure NVIDIA passthrough (modern `dev0:` syntax)
+The cluster previously ran a separate "3060 LXC" (`llamacpp-nv`, VMID 152) hosting the embedder + reranker + a fast-chat service. With the pivot to V620-only, those workloads moved into LXC 151 as additional `llama-server` processes pinned per-card via `--main-gpu`. This phase walks through a non-destructive cutover, with rollback path if anything goes wrong.
 
-Same approach as the V620 LXC — use `pct set` with `dev0:` style entries from the host:
+### Step 6.1 — Pre-cutover preparation (no service impact)
 
 ```bash
-# Find the GID owning the NVIDIA character devices on the host (typically 'video' = 44, but verify)
-NVIDIA_GID=$(stat -c '%g' /dev/nvidia0)
-echo "NVIDIA_GID=$NVIDIA_GID"
+# 1. Snapshot the existing AnythingLLM vector DB
+zfs snapshot tank/anythingllm@pre-pivot-$(date +%Y%m%d-%H%M)
 
-# Apply mount and devices
-pct set 152 --mp0 /tank/models,mp=/opt/models,ro=1
-pct set 152 --dev0 /dev/nvidia0,gid=$NVIDIA_GID
-pct set 152 --dev1 /dev/nvidiactl,gid=$NVIDIA_GID
-pct set 152 --dev2 /dev/nvidia-uvm,gid=$NVIDIA_GID
-pct set 152 --dev3 /dev/nvidia-uvm-tools,gid=$NVIDIA_GID
+# 2. Final backup of LXC 152 (for rollback). Verify the archive is accessible.
+PRE_CUTOVER_BACKUP=$(vzdump 152 --storage tank-backups --mode snapshot --compress zstd 2>&1 | \
+    awk -F"'" '/creating vzdump archive/{print $2}')
+echo "Pre-cutover backup: $PRE_CUTOVER_BACKUP"
+ls -lh "$PRE_CUTOVER_BACKUP" || { echo "Backup archive missing — abort"; exit 1; }
 
-# nvidia-caps subdir contents (may vary by kernel — check with `ls /dev/nvidia-caps/`)
-if [ -d /dev/nvidia-caps ]; then
-    for cap in /dev/nvidia-caps/nvidia-cap*; do
-        idx=$((idx + 1))
-        # Use a high index to avoid collision with the dev[0-3] above
-        case $cap in
-            *cap1) pct set 152 --dev4 ${cap},gid=$NVIDIA_GID ;;
-            *cap2) pct set 152 --dev5 ${cap},gid=$NVIDIA_GID ;;
-        esac
-    done
+# 3. Verify embedder GGUF SHA stability (vector DB depends on this being byte-identical).
+#    The result is written to /tank/.phase6-embed-trigger (on ZFS — survives reboot) so
+#    Step 6.6 can read it later, possibly hours/days after Step 6.1.
+EMBEDDER_FILE=/tank/models/qwen3-embedding-0.6b-q8_0.gguf
+EXISTING_SHA=$(sha256sum "$EMBEDDER_FILE" 2>/dev/null | awk '{print $1}')
+echo "Existing embedder SHA: ${EXISTING_SHA:-<absent>}"
+# Compare against the canonical SHA recorded in /tank/models/.embedder-sha (set on first download).
+CANONICAL_SHA=$(cat /tank/models/.embedder-sha 2>/dev/null)
+if [ -z "$EXISTING_SHA" ] || [ -z "$CANONICAL_SHA" ] || [ "$EXISTING_SHA" != "$CANONICAL_SHA" ]; then
+    echo "EMBED_GGUF_CHANGED=true" > /tank/.phase6-embed-trigger
+    echo "Embedder SHA differs from canonical. Step 6.6 (re-embed) is REQUIRED."
+else
+    echo "EMBED_GGUF_CHANGED=false" > /tank/.phase6-embed-trigger
+    echo "Embedder unchanged. Step 6.6 (re-embed) is SKIPPABLE."
 fi
 
-# nvidia-modeset (only if your driver build includes it)
-[ -e /dev/nvidia-modeset ] && pct set 152 --dev6 /dev/nvidia-modeset,gid=$NVIDIA_GID
-```
-
-Verify:
-
-```bash
-pct config 152 | grep -E "^(dev|mp)"
-# Expect dev0..dev5 (or dev6) entries pointing at /dev/nvidia* and /dev/nvidia-caps/*
-```
-
-**Fallback to legacy syntax if `dev0:` fails:** Edit `/etc/pve/lxc/152.conf` and add:
-
-```
-mp0: /tank/models,mp=/opt/models,ro=1
-lxc.cgroup2.devices.allow: c 195:* rwm
-lxc.cgroup2.devices.allow: c 240:* rwm
-lxc.cgroup2.devices.allow: c 506:* rwm
-lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
-lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
-lxc.apparmor.profile: unconfined
-lxc.cap.drop:
-```
-
-Major numbers vary by kernel (195, 240, 506 are typical) — verify with `ls -l /dev/nvidia*` on the host (recorded in §4.7).
-
-### Step 6.3 — Start and enter the LXC
-
-```bash
-pct start 152
-pct enter 152
-```
-
-### Step 6.4 — Install matching NVIDIA userspace
-
-You need the **exact same driver version** inside the LXC as on the host. The simplest path: copy the `.run` file you saved in §4.6 into the LXC.
-
-```bash
-# Get the version from the host
-DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
-echo "Host driver: $DRIVER_VERSION"
-
-# Push the saved installer into the LXC (run from host)
-exit  # exit LXC if you're in it
-pct push 152 /root/nvidia-installer/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run \
-    /root/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-
-pct enter 152
-
-# In LXC: install userspace ONLY (no kernel module — host has it)
-DRIVER_VERSION=$(cat /proc/driver/nvidia/version 2>/dev/null | grep -oP 'NVRM.*?\K[0-9.]+' | head -1)
-chmod +x /root/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-/root/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run --no-kernel-module --silent --no-questions
-
-# Or interactively (more control over install options):
-# /root/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run --no-kernel-module
-```
-
-If the `.run` file isn't available on the host (you used Option A in §4.6), download it directly inside the LXC:
-
-```bash
-apt update && apt install -y wget build-essential cmake git curl
-
-# Match the host version exactly
-DRIVER_VERSION=580.105.06   # CHANGE TO MATCH YOUR HOST'S nvidia-smi output
-
-wget "https://us.download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run" -O /tmp/nvidia.run
-chmod +x /tmp/nvidia.run
-
-# Install userspace only — host has the kernel module
-/tmp/nvidia.run --no-kernel-module --silent --no-questions
-```
-
-Confirm:
-
-```bash
-nvidia-smi
-# Expect: same output as on the host, listing the RTX 3060
-```
-
-If you get `Failed to initialize NVML: Driver/library version mismatch`, the userspace and kernel module versions don't match. Re-check both with:
-
-```bash
-# Userspace version (from inside LXC)
-cat /proc/driver/nvidia/version
-nvidia-smi -q | grep "Driver Version"
-
-# Kernel module version (from host)
-modinfo nvidia | grep ^version
-```
-
-These must be identical. If not, reinstall the userspace at the matching version.
-
-### Step 6.5 — Install CUDA toolkit
-
-```bash
-# Download CUDA repository keyring
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
-dpkg -i /tmp/cuda-keyring.deb
-apt update
-
-# Install CUDA toolkit (without driver — we have userspace already)
-apt install -y cuda-toolkit-12-6
-
-# Add CUDA to PATH
-cat >> ~/.bashrc <<EOF
-export PATH=/usr/local/cuda-12.6/bin:\$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:\$LD_LIBRARY_PATH
-EOF
-source ~/.bashrc
-```
-
-### Step 6.6 — Verify NVIDIA setup
-
-```bash
-nvidia-smi
-# Expect: tabular output listing the RTX 3060 with driver version matching the host
-```
-
-If you get "Failed to initialize NVML: Driver/library version mismatch" — the LXC's userspace driver version doesn't exactly match the host's kernel module. Reinstall with the precise version.
-
-If you get "no devices were found" — the cgroup allow lines or the device passthrough are wrong. Re-check Step 6.2.
-
-### Step 6.7 — Build llama.cpp with CUDA
-
-```bash
-cd /opt
-git clone https://github.com/ggml-org/llama.cpp.git
-cd llama.cpp
-
-cmake -B build \
-    -DGGML_CUDA=ON \
-    -DCMAKE_CUDA_ARCHITECTURES=86 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLAMA_CURL=ON
-
-# Build (takes ~5 minutes on the 7600's 4 allocated cores)
-cmake --build build --config Release -j$(nproc)
-```
-
-`CMAKE_CUDA_ARCHITECTURES=86` targets the 3060's Ampere `sm_86`. This avoids building bloat for unused GPU generations.
-
-Verify:
-
-```bash
-./build/bin/llama-server --version
-./build/bin/llama-server --list-devices 2>&1 | head -10
-# Expect: line mentioning CUDA0 (RTX 3060)
-```
-
-### Step 6.8 — Download embedder and reranker models
-
-**On the Proxmox host:**
-
-```bash
-cd /tank/models
-
-# Embedder (qwen3-embedding 0.6B, ~600 MB)
-wget -O qwen3-embedding-0.6b.gguf \
-  "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/qwen3-embedding-0.6b-q8_0.gguf"
-
-# Reranker (BGE Reranker v2 m3, ~600 MB)
-wget -O bge-reranker-v2-m3-q4_k_m.gguf \
-  "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf"
-
-chmod 644 qwen3-embedding-0.6b.gguf bge-reranker-v2-m3-q4_k_m.gguf
-```
-
-### Step 6.9 — Create two llama-server systemd units
-
-Inside the LXC. Note that **per upstream `tools/server/README.md`, the reranking endpoint requires `--embedding --pooling rank` together** — `--reranking` is the alias that opens the endpoint, but the underlying mechanism uses pooling type `rank`. We set both explicitly to be safe.
-
-**Embedder service** (Qwen 3 Embedding 0.6B, produces 1024-dim vectors):
-
-```bash
-cat > /etc/systemd/system/llama-embed.service <<'EOF'
-[Unit]
-Description=llama.cpp embedding server (qwen3-embedding 0.6B)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/llama.cpp
-Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3-embedding-0.6b.gguf \
-    --alias qwen3-embedding \
-    --host 0.0.0.0 \
-    --port 8082 \
-    --embeddings \
-    --pooling last \
-    --ctx-size 32768 \
-    --n-gpu-layers all \
-    --batch-size 512 \
-    --ubatch-size 512 \
-    --threads 4 \
-    --metrics
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-**Two important Qwen3 Embedding quirks** (from the official model card):
-
-1. **Pooling type must be `last`, not `cls`** — Qwen3 Embedding uses the final `<|endoftext|>` token as the sentence representation. Setting `--pooling cls` will produce incorrect embeddings that don't match published benchmarks.
-
-2. **`<|endoftext|>` token must be appended manually** — Qwen3 Embedding expects the input to end with the special `<|endoftext|>` token. The router (or any client) must append it. In FastAPI router code:
-
-   ```python
-   # When forwarding embedding requests to the 3060 LXC
-   if "input" in body:
-       if isinstance(body["input"], str):
-           body["input"] = body["input"].rstrip() + "<|endoftext|>"
-       elif isinstance(body["input"], list):
-           body["input"] = [s.rstrip() + "<|endoftext|>" for s in body["input"]]
-   ```
-
-3. **Client-side normalization required** — `llama-server` does not currently support the `--embd-normalize` flag; embeddings come back unnormalized. Either normalize client-side (L2 norm) or accept that cosine-similarity comparisons need explicit norm division. AnythingLLM normalizes by default, so this is mostly transparent for our pipeline, but is important to know if you build custom RAG code against this endpoint.
-
-**Reranker service** (bge-reranker-v2-m3):
-
-```bash
-cat > /etc/systemd/system/llama-rerank.service <<'EOF'
-[Unit]
-Description=llama.cpp reranker (bge-reranker-v2-m3)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/llama.cpp
-Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/bge-reranker-v2-m3-q4_k_m.gguf \
-    --alias bge-reranker-v2-m3 \
-    --host 0.0.0.0 \
-    --port 8083 \
-    --embeddings \
-    --pooling rank \
-    --reranking \
-    --ctx-size 8192 \
-    --n-gpu-layers all \
-    --threads 4 \
-    --metrics
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-Notes on the flags:
-
-- `--embeddings` (plural) is the canonical form per upstream docs; `--embedding` is also accepted as alias.
-- `--pooling cls` for the embedder (Qwen 3 Embedding uses `[CLS]` token pooling; some embedders use `mean` or `last` — check the model card).
-- `--pooling rank` is required for reranking even with `--reranking` set, per the server README.
-- `--alias` sets the model name reported by `/v1/models`.
-- `--metrics` enables the Prometheus `/metrics` endpoint on each service.
-
-Enable both:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now llama-embed llama-rerank
-systemctl status llama-embed llama-rerank --no-pager
-```
-
-### Step 6.10 — Smoke test embedder and reranker
-
-```bash
-# Embedding produces 1024-dim vectors
-curl -s http://localhost:8082/v1/embeddings \
+# 4. Generate API keys (idempotent — re-running does not corrupt existing keys).
+pct exec 151 -- bash -c '
+  mkdir -p /etc
+  if ! grep -q "^LLAMACPP_API_KEY=" /etc/llamacpp.env 2>/dev/null; then
+    echo "LLAMACPP_API_KEY=$(openssl rand -hex 32)" >> /etc/llamacpp.env
+  fi
+  chmod 600 /etc/llamacpp.env
+  chown root:root /etc/llamacpp.env
+'
+pct exec 153 -- bash -c '
+  mkdir -p /etc
+  if ! grep -q "^ROUTER_API_KEY=" /etc/router.env 2>/dev/null; then
+    echo "ROUTER_API_KEY=$(openssl rand -hex 32)" >> /etc/router.env
+  fi
+  chmod 600 /etc/router.env
+  chown root:root /etc/router.env
+'
+# Copy LLAMACPP_API_KEY to LXC 153 (router needs it to authenticate upstream calls).
+# Idempotent: replace existing line if present, otherwise append.
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+pct exec 153 -- bash -c "
+  if grep -q '^LLAMACPP_API_KEY=' /etc/router.env 2>/dev/null; then
+    sed -i 's|^LLAMACPP_API_KEY=.*|LLAMACPP_API_KEY=$LLAMACPP_KEY|' /etc/router.env
+  else
+    echo 'LLAMACPP_API_KEY=$LLAMACPP_KEY' >> /etc/router.env
+  fi
+"
+
+# 5. Smoke-test reranker endpoint manually before relying on it for cutover.
+#    Requires llamacpp-rerank.service to exist in LXC 151 (Phase 5 expansion delivers this).
+RKEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+pct exec 151 -- curl -sf -X POST -H "Authorization: Bearer $RKEY" \
     -H "Content-Type: application/json" \
-    -d '{"model":"qwen3-embedding","input":"dimension probe"}' | \
-  jq '.data[0].embedding | length'
-# Expect: 1024
+    -d '{"query":"capital of France","documents":["Paris is in France","Berlin is in Germany"]}' \
+    http://localhost:8083/v1/rerank | head -c 200
+# Expect: JSON with "results" array; "Paris is in France" should score higher.
 
-# Reranker
-curl -s http://localhost:8083/v1/rerank \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "bge-reranker-v2-m3",
-        "query": "what is the capital of France?",
-        "documents": ["Paris is the capital", "Berlin is in Germany", "London is in England"]
-    }' | jq
-# Expect: scored results with Paris ranked highest
+# 6. MCP audit: detect AND remediate hardcoded 192.168.6.152 / port 8081 references.
+#    All commands run INSIDE LXC 155 (the file list lives in its /tmp, not the host's).
+if pct exec 155 -- grep -rqE "192\.168\.6\.152|llamacpp-nv|:8081" /opt/ /etc/ 2>/dev/null; then
+    echo "MCP has stale references — applying rewrites:"
+    pct exec 155 -- bash -c '
+      grep -rlE "192\.168\.6\.152|llamacpp-nv|:8081" /opt/ /etc/ 2>/dev/null > /tmp/mcp-files-to-fix
+      cat /tmp/mcp-files-to-fix
+      while read -r f; do
+        [ -n "$f" ] && sed -i "s|192\.168\.6\.152|192.168.6.151|g; s|llamacpp-nv|llamacpp-amd|g; s|:8081|:8082|g" "$f"
+      done < /tmp/mcp-files-to-fix
+      cd /opt/mcp-stack && docker compose restart || true
+    '
+else
+    echo "MCP audit clean — no stale references."
+fi
+
+# 7. Record AnythingLLM state — does it talk to router or direct to 152?
+#    Use the AnythingLLM API rather than reading the sqlite file (avoids file-lock risk).
+ALLM_KEY=$(pct exec 154 -- awk -F= '/^ANYTHINGLLM_API_KEY=/{sub(/^ANYTHINGLLM_API_KEY=/,""); gsub(/^"|"$/,""); print}' /opt/anythingllm/.env 2>/dev/null)
+pct exec 154 -- curl -sf -H "Authorization: Bearer $ALLM_KEY" \
+    http://localhost:3001/api/v1/system | python3 -c '
+import sys, json
+data = json.load(sys.stdin)
+for k, v in data.items():
+    if isinstance(v, str) and ("192.168.6." in v or "http" in v):
+        print(f"{k}: {v}")
+' 2>/dev/null || echo "Could not read AnythingLLM state — verify manually via UI Settings → AI Providers"
 ```
+
+### Step 6.2 — Cutover (chat clients see brief SSE reconnect)
 
 ```bash
-# Verify VRAM usage on the 3060
-nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv
-# Expect: ~3000-4500 MiB used out of 12288 (lots of headroom)
+# A. LXC 151: install the new embed + rerank systemd units (requires Phase 5 expansion — see BLOCKER above).
+pct exec 151 -- systemctl daemon-reload
+
+# B. LXC 153: update router env file with new URLs (idempotent).
+pct exec 153 -- bash -c '
+  cat > /tmp/router-env-new <<EOF
+V620_URL=http://192.168.6.151:8080
+EMBED_URL=http://192.168.6.151:8082
+RERANK_URL=http://192.168.6.151:8083
+CHAT_CONCURRENCY=1
+EMBED_CONCURRENCY=4
+MAX_CHAT_INPUT_TOKENS=100000
+MAX_EMBED_INPUT_TOKENS=8192
+RATE_LIMIT_CHAT=60/minute
+RATE_LIMIT_EMBED=200/minute
+METRICS_ALLOWED_IPS=127.0.0.1,192.168.6.150
+EOF
+  # Preserve existing API key lines
+  grep -E "^(ROUTER_API_KEY|LLAMACPP_API_KEY)=" /etc/router.env >> /tmp/router-env-new
+  install -m 600 -o root -g root /tmp/router-env-new /etc/router.env
+'
+# Do not restart router yet — wait until embed/rerank services on 151 are up (Step D).
+
+# C. LXC 153: install new router-app.py with auth middleware + semaphores + Prometheus.
+#    This is deployed by re-running scripts/53-lxc-router.sh from the host (Phase 7 provisioning).
+#    The script is idempotent — running it overwrites router-app.py and restarts the service.
+#    REQUIRES: scripts/files/router-app.py has been rewritten with the new auth/admission code
+#    AND scripts/53-lxc-router.sh deploys it. Both are listed in the BLOCKER notice above.
+SCRIPTS_DIR="${SCRIPTS_DIR:-/root/local-gpu-cluster/scripts}"   # adjust to your clone location
+[ -f "$SCRIPTS_DIR/53-lxc-router.sh" ] || { echo "scripts dir not found: $SCRIPTS_DIR"; exit 1; }
+bash "$SCRIPTS_DIR/53-lxc-router.sh" 153
+
+# D. Start the new embed + rerank services on 151.
+pct exec 151 -- systemctl start llamacpp-embed llamacpp-rerank
+sleep 10
+pct exec 151 -- systemctl is-active llamacpp-embed llamacpp-rerank
+# Re-derive LLAMACPP_KEY in case Step 6.1 and Step 6.2 are running in separate shell sessions
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+# Confirm /health endpoints respond before continuing
+for port in 8082 8083; do
+  pct exec 151 -- curl -sf -H "Authorization: Bearer $LLAMACPP_KEY" \
+      "http://localhost:${port}/health" || { echo "Port $port not healthy — abort cutover"; exit 1; }
+done
+
+# E. Restart router — routes now hit 151. Chat unit is still using old flags (no API key);
+#    new router would 401 on upstream calls without the LLAMACPP_API_KEY upgrade in step F.
+#    To avoid a window of broken auth, run E and F as a tight pair below.
+pct exec 153 -- systemctl restart llm-router
+
+# F. Restart chat on 151 IMMEDIATELY after the router restart. This picks up
+#    --api-key, --parallel 4, --cache-reuse 1024, --mlock, etc. Chat clients see
+#    a ~30s SSE disconnect during F; router's degraded-mode event is emitted.
+pct exec 151 -- systemctl restart llamacpp-chat
+
+# G. AnythingLLM (LXC 154): fix the ALLM_LLM_TOKEN_LIMIT mismatch
+#    Previously 262144 (256K) which exceeds llama-server's --ctx-size 131072 (128K).
+#    Result: silent chat failure mid-conversation at overflow.
+pct exec 154 -- sed -i 's/^ALLM_LLM_TOKEN_LIMIT=.*/ALLM_LLM_TOKEN_LIMIT=131072/' /opt/anythingllm/.env
+# Update embedder URL if previously direct-to-152 (Step 6.1.7 informed which).
+pct exec 154 -- sed -i 's|http://192\.168\.6\.152:8082|http://192.168.6.151:8082|g' /opt/anythingllm/.env
+pct exec 154 -- bash -c 'cd /opt/anythingllm && docker compose restart'
+
+# H. MCP (LXC 155): if Step 6.1.6 applied rewrites, the restart already happened there.
+#    Otherwise this is a no-op.
 ```
 
-### Step 6.11 — Note the LXC IP
+### Step 6.3 — Run Phase 11 verification (auth gates, RAG smoke test, concurrent VRAM)
+
+If Phase 11 passes, proceed to Step 6.5 (decommission) after a 24-hour soak. If it fails, proceed to Step 6.4 (rollback) before anything is destroyed.
+
+> **If Phase 11 hasn't been expanded yet** (it's listed in the BLOCKER above), here is the minimum manual checklist to run before considering the cutover stable:
+>
+> ```bash
+> # 1. Auth gate: router refuses requests without Bearer key
+> curl -s -o /dev/null -w "%{http_code}\n" http://192.168.6.153:8000/v1/chat/completions
+> # Expect: 403
+>
+> # 2. Auth gate: router accepts requests with key
+> ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+> curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+>   -d '{"model":"qwen3-35b","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+>   http://192.168.6.153:8000/v1/chat/completions
+>
+> # 3. Embedding dim correctness (1024 = correct --pooling last on Qwen3-Embedding-0.6B)
+> curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+>   -d '{"input":"hello"}' http://192.168.6.153:8000/v1/embeddings | jq '.data[0].embedding | length'
+> # Expect: 1024
+>
+> # 4. Rerank correctness
+> curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+>   -d '{"query":"capital of France","documents":["Paris is in France","Berlin is in Germany"]}' \
+>   http://192.168.6.153:8000/v1/rerank | jq '.results[0].document'
+> # Expect: "Paris is in France"
+>
+> # 5. Concurrent-load VRAM (chat stream + 100 embed batch overlap)
+> KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+> pct exec 151 -- bash -c "
+>   curl -s -H 'Authorization: Bearer $KEY' http://localhost:8080/v1/chat/completions -X POST \
+>     -H 'Content-Type: application/json' \
+>     -d '{\"messages\":[{\"role\":\"user\",\"content\":\"essay\"}],\"stream\":true,\"max_tokens\":200}' &
+>   sleep 2
+>   for i in \$(seq 1 100); do
+>     curl -s -H 'Authorization: Bearer $KEY' http://localhost:8082/v1/embeddings -X POST \
+>       -H 'Content-Type: application/json' -d \"{\\\"input\\\":\\\"d \$i\\\"}\" > /dev/null &
+>   done
+>   wait
+>   rocm-smi --showmeminfo vram --showuse
+> "
+> # Expect both V620s at 18-20 GB, > 80% util during overlap; no OOM in journalctl
+>
+> # 6. No errors in last 30 min
+> pct exec 151 -- journalctl -u llamacpp-chat -u llamacpp-embed -u llamacpp-rerank --since "30 min ago" \
+>   | grep -iE "oom|hip error|out of memory" || echo "OK — clean"
+> ```
+
+### Step 6.4 — Rollback (if verification fails)
 
 ```bash
-exit  # Exit back to host
-pct exec 152 -- ip -4 addr show eth0 | grep inet | awk '{print $2}'
-# Note this IP — will be needed for router configuration
+# 1. Revert router env to point at 192.168.6.152.
+pct exec 153 -- sed -i '
+  s|^V620_URL=.*|V620_URL=http://192.168.6.151:8080|;
+  s|^EMBED_URL=.*|EMBED_URL=http://192.168.6.152:8082|;
+  s|^RERANK_URL=.*|RERANK_URL=http://192.168.6.152:8083|
+' /etc/router.env
+pct exec 153 -- systemctl restart llm-router
+
+# 2. Stop new services on 151 (LXC 152 still owns embed + rerank duties)
+pct exec 151 -- systemctl stop llamacpp-embed llamacpp-rerank
+
+# 3. Revert chat unit flags — the additive flags (--parallel, --cache-reuse, --mlock,
+#    --log-prefix) are safe even pre-cutover, but --api-key requires clients to send it.
+#    If your pre-cutover clients didn't use API keys, restart chat without --api-key:
+pct exec 151 -- bash -c 'systemctl revert llamacpp-chat 2>/dev/null; systemctl daemon-reload'
+pct exec 151 -- systemctl restart llamacpp-chat
+
+# 4. AnythingLLM token limit can stay at 131072 (it's a bug fix either way).
+#    Embedder URL: if reverting, also revert to 192.168.6.152:8082.
+
+# LXC 152 was not stopped during cutover, so the cluster returns to pre-cutover state.
+echo "Rollback complete. Run Phase 11 verification again to confirm."
 ```
 
-**Stop and verify before proceeding:**
-- [ ] `nvidia-smi` works inside the LXC
-- [ ] llama-embed and llama-rerank both active
-- [ ] Embedding endpoint returns 1024-dim vectors
-- [ ] Reranker endpoint returns scored results
-- [ ] VRAM utilization is reasonable (~30% of 12 GB)
+### Step 6.5 — Decommission LXC 152 (only after 24h green metrics)
+
+```bash
+# Soak check before stopping
+pct exec 153 -- journalctl -u llm-router --since "24 hours ago" | grep -iE "error|fail|5[0-9]{2}" | wc -l
+# Expect: very low count (< 10 over 24h)
+
+# Stop LXC 152
+pct stop 152
+# Verify the cluster still works (chat / embed / rerank all healthy via router) for 1 hour
+sleep 3600   # or wait manually
+
+# FINAL archive before destroy — verify it's readable
+FINAL_BACKUP=$(vzdump 152 --storage tank-backups --mode snapshot --compress zstd 2>&1 | \
+    awk -F"'" '/creating vzdump archive/{print $2}')
+echo "Final archive: $FINAL_BACKUP"
+ls -lh "$FINAL_BACKUP" || { echo "Final archive missing — DO NOT destroy 152"; exit 1; }
+
+# Last chance to abort
+read -r -p "Destroy LXC 152 permanently? Type EXACTLY 'destroy 152' to confirm: " CONFIRM
+[ "$CONFIRM" = "destroy 152" ] || { echo "Aborted."; exit 0; }
+pct destroy 152
+pct list | awk '$1 ~ /^(151|153|154|155)$/'   # expect 4 entries, no 152
+
+# Remove 152 from any UI-configured backup jobs:
+#   Datacenter → Backup → edit any job with VMID list containing 152
+# Remove 152 from any DNS / /etc/hosts entries on management workstations:
+#   sed -i '/llamacpp-nv/d' /etc/hosts   (on each client)
+```
+
+### Step 6.6 — Bulk re-embed (only if Step 6.1.3 detected an embedder GGUF change)
+
+```bash
+# Read the trigger flag set in Step 6.1.3
+source /tank/.phase6-embed-trigger 2>/dev/null
+if [ "$EMBED_GGUF_CHANGED" != "true" ]; then
+    echo "Embedder unchanged — skipping re-embed."
+else
+    echo "Embedder changed — re-embed required. Procedure:"
+    # Pre-snapshot already taken in Step 6.1.1
+    # 1. In AnythingLLM UI: Workspaces → each workspace → delete all documents
+    # 2. Re-ingest from source via Phase 10.4 procedure
+    # 3. Verify a known query returns expected citation
+    # Expected time: ~15-30 min for 5K docs on V620 with --parallel 8
+    # Note: chat history citations from before the re-embed may become unstable
+
+    # Update the canonical SHA pin so future cutovers don't re-trigger
+    sha256sum /tank/models/qwen3-embedding-0.6b-q8_0.gguf | awk '{print $1}' > /tank/models/.embedder-sha
+fi
+```
+
+### Step 6.7 — Hardware decommission (next planned power-down window)
+
+```bash
+# Power off the host. Disconnect the 8-pin PCIe power cable that fed PCIE_3 (3060).
+# If your previous build had a third G205 brace supporting the 3060, remove it now
+# (V620-only builds use 2× G205 + 1× built-in case bracket — see Step 1.8).
+# Remove the RTX 3060 from PCIE_3.
+# Power on.
+
+# Verify
+lspci | grep -i vga
+# Expect: only 2x AMD V620 entries. No NVIDIA device.
+```
+
+PCIE_3 (PCIe 4.0 x4 from chipset) is now empty. Prioritized future-use options, by likelihood:
+1. **Dual-port 10 GbE NIC** (Intel X710, ~$100 used) — for cluster federation if a second host is added.
+2. **HBA** (LSI 9300-8i, ~$50) — only if `/tank` outgrows its two NVMes.
+3. **PCIe USB-C / audio capture** — for a future local-Whisper LXC's audio ingest.
+4. **OCuLink adapter for external GPU** — niche; defers cooling/power to a separate rail.
+
+Populating PCIE_3 does not affect the V620 PCIe lanes (they're on CPU-attached PCIE_1 + PCIE_2).
 
 ---
 
@@ -1739,13 +1961,57 @@ pct create 153 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname llm-router \
   --cores 2 \
   --memory 4096 \
-  --rootfs local-zfs:8 \
+  --rootfs local-lvm:8 \
   --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
   --features nesting=0 \
   --unprivileged 1 \
   --ostype ubuntu \
   --start 1
 ```
+
+### Step 7.1.5 — Generate API keys (fresh builds only — skip if you ran Phase 6)
+
+Phase 6's cutover generates `/etc/llamacpp.env` (on LXC 151) and `/etc/router.env` (on LXC 153) as part of pre-cutover prep. For **fresh builds that never touch Phase 6**, the same keys must be generated here so the router has an upstream-auth key (LLAMACPP_API_KEY) and clients have a router-auth key (ROUTER_API_KEY). Run from the Proxmox host:
+
+```bash
+# 1. LLAMACPP_API_KEY lives on LXC 151 (used by llama-server units in Phase 5 + by router for upstream)
+pct exec 151 -- bash -c '
+  mkdir -p /etc
+  if ! grep -q "^LLAMACPP_API_KEY=" /etc/llamacpp.env 2>/dev/null; then
+    echo "LLAMACPP_API_KEY=$(openssl rand -hex 32)" >> /etc/llamacpp.env
+  fi
+  chmod 600 /etc/llamacpp.env
+  chown root:root /etc/llamacpp.env
+'
+
+# 2. ROUTER_API_KEY lives on LXC 153 (used by AnythingLLM + any other clients)
+pct exec 153 -- bash -c '
+  mkdir -p /etc
+  if ! grep -q "^ROUTER_API_KEY=" /etc/router.env 2>/dev/null; then
+    echo "ROUTER_API_KEY=$(openssl rand -hex 32)" >> /etc/router.env
+  fi
+  chmod 600 /etc/router.env
+  chown root:root /etc/router.env
+'
+
+# 3. Copy LLAMACPP_API_KEY to LXC 153 (router authenticates upstream calls with it).
+#    Idempotent: replace if present, else append.
+#    Quoting note: the outer bash -c "..." is double-quoted, so the host shell
+#    expands $LLAMACPP_KEY BEFORE passing the string to pct exec. The inner single
+#    quotes around sed/echo arguments are processed by the LXC's bash AFTER the
+#    host expansion already replaced $LLAMACPP_KEY with its value. Both echo and
+#    sed see the literal key value, not the variable name.
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+pct exec 153 -- bash -c "
+  if grep -q '^LLAMACPP_API_KEY=' /etc/router.env 2>/dev/null; then
+    sed -i 's|^LLAMACPP_API_KEY=.*|LLAMACPP_API_KEY=$LLAMACPP_KEY|' /etc/router.env
+  else
+    echo 'LLAMACPP_API_KEY=$LLAMACPP_KEY' >> /etc/router.env
+  fi
+"
+```
+
+**Record these keys somewhere safe** — you'll paste `ROUTER_API_KEY` into AnythingLLM's UI in Phase 8.6.
 
 ### Step 7.2 — Set up Python environment
 
@@ -1764,7 +2030,9 @@ chown router:router /opt/llm-router
 sudo -u router bash -c '
   python3 -m venv /opt/llm-router/venv
   /opt/llm-router/venv/bin/pip install --upgrade pip
-  /opt/llm-router/venv/bin/pip install fastapi "uvicorn[standard]" httpx
+  /opt/llm-router/venv/bin/pip install \
+    fastapi "uvicorn[standard]" httpx \
+    slowapi prometheus-fastapi-instrumentator
 '
 ```
 
@@ -1775,12 +2043,16 @@ Create `/opt/llm-router/app.py` with the corrected logic (note: removed cross-LX
 ```bash
 cat > /opt/llm-router/app.py <<'PYEOF'
 """
-LLM cluster router.
-- /v1/chat/completions       -> V620 stack (port 8080) with speculative decoding native
-- /v1/embeddings             -> 3060 embedder (port 8082)
-- /v1/rerank                 -> 3060 reranker (port 8083)
+LLM cluster router (V620-only).
+- /v1/chat/completions       -> V620 chat on LXC 151 (port 8080) with in-process speculative decoding
+- /v1/embeddings             -> V620 embedder on LXC 151 (port 8082, --main-gpu 0, --pooling last)
+- /v1/rerank                 -> V620 reranker on LXC 151 (port 8083, --main-gpu 1)
 - SSE keepalive on streaming responses
 - Per-request <think> block decision (header > body > system prompt > model name > default)
+- NOTE: This is the pre-pivot router code. The full V620-only rewrite (Bearer auth,
+  asyncio.Semaphore admission control, prometheus-fastapi-instrumentator, slowapi
+  rate limit, fail-open SSE) is delivered by scripts/files/router-app.py — that
+  version overwrites this file at deploy time. The skeleton below is illustrative.
 """
 
 import asyncio
@@ -1793,8 +2065,8 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 
 V620_URL    = os.environ.get("V620_URL",   "http://192.168.6.151:8080")
-EMBED_URL   = os.environ.get("EMBED_URL",  "http://192.168.6.152:8082")
-RERANK_URL  = os.environ.get("RERANK_URL", "http://192.168.6.152:8083")
+EMBED_URL   = os.environ.get("EMBED_URL",  "http://192.168.6.151:8082")
+RERANK_URL  = os.environ.get("RERANK_URL", "http://192.168.6.151:8083")
 KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "12"))
 
 THINK_RE     = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -1955,10 +2227,18 @@ Wants=network-online.target
 Type=simple
 User=router
 WorkingDirectory=/opt/llm-router
+# Defaults below are overridden by EnvironmentFile values when /etc/router.env exists.
+# Phase 7.1.5 creates it for fresh builds; Phase 6.1.4 creates it for cutover migrations.
+# The full env contract is in /etc/router.env:
+#   V620_URL, EMBED_URL, RERANK_URL, KEEPALIVE_INTERVAL,
+#   ROUTER_API_KEY, LLAMACPP_API_KEY  (auth — router uses LLAMACPP_API_KEY for upstream calls),
+#   CHAT_CONCURRENCY, EMBED_CONCURRENCY, MAX_CHAT_INPUT_TOKENS, MAX_EMBED_INPUT_TOKENS,
+#   RATE_LIMIT_CHAT, RATE_LIMIT_EMBED, METRICS_ALLOWED_IPS  (admission + rate limit + metrics auth)
 Environment="V620_URL=http://192.168.6.151:8080"
-Environment="EMBED_URL=http://192.168.6.152:8082"
-Environment="RERANK_URL=http://192.168.6.152:8083"
+Environment="EMBED_URL=http://192.168.6.151:8082"
+Environment="RERANK_URL=http://192.168.6.151:8083"
 Environment="KEEPALIVE_INTERVAL=12"
+EnvironmentFile=-/etc/router.env
 ExecStart=/opt/llm-router/venv/bin/uvicorn app:app \\
     --host 0.0.0.0 --port 8000 \\
     --timeout-keep-alive 300 \\
@@ -2022,7 +2302,7 @@ pct create 154 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname anythingllm \
   --cores 4 \
   --memory 8192 \
-  --rootfs local-zfs:32 \
+  --rootfs local-lvm:32 \
   --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
   --features nesting=1,keyctl=1 \
   --unprivileged 1 \
@@ -2128,31 +2408,48 @@ Browse to `http://192.168.6.154:3001/`:
 
 ### Step 8.6 — Configure LLM and embedder providers
 
+> **Prerequisites for this step:**
+> - Phase 7 router LXC (153) is deployed and `curl -sf http://192.168.6.153:8000/healthz` returns 200.
+> - Phase 5 V620 LXC (151) has all three services running: `pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank` should print "active" three times.
+> - `ROUTER_API_KEY` is set in `/etc/router.env` on LXC 153 (generated in Phase 7.1.5 for fresh builds, Phase 6.1.4 for cutover migrations).
+> - `LLAMACPP_API_KEY` is set in `/etc/llamacpp.env` on LXC 151 (same generation steps).
+
 In AnythingLLM UI: **Settings → AI Providers → LLM Preference**
 
 - Provider: **Generic OpenAI**
-- Base URL: `http://192.168.6.153:8000/v1` (the router)
-- API Key: `sk-anything` (any non-empty string — llama.cpp doesn't validate)
-- Chat Model Name: query the V620's actual model name from `curl http://192.168.6.151:8080/v1/models | jq -r .data[0].id`
-- Token context window: `131072`
+- Base URL: `http://192.168.6.153:8000/v1` (the router on LXC 153)
+- API Key: the value of `ROUTER_API_KEY` from `/etc/router.env` on LXC 153 — required (the rewritten V620-only router enforces Bearer auth; a placeholder like `sk-anything` returns 403). AnythingLLM's Generic OpenAI provider accepts the raw hex key as-is; no `sk-` prefix needed.
+- Chat Model Name: query the actual model id. Two equivalent ways:
+   - Via router (matches AnythingLLM's traffic path): `curl -H "Authorization: Bearer $ROUTER_API_KEY" http://192.168.6.153:8000/v1/models | jq -r .data[0].id`
+   - Direct to llama-server (verification only — bypasses router): `curl -H "Authorization: Bearer $LLAMACPP_API_KEY" http://192.168.6.151:8080/v1/models | jq -r .data[0].id` using the LLAMACPP_API_KEY from `/etc/llamacpp.env` inside LXC 151
+- Token context window: `131072` — **must match llama.cpp's `--ctx-size 131072`** (the V620 chat unit's context window). Values higher cause silent chat failure mid-conversation when the request exceeds llama.cpp's actual context.
 - Max Tokens: `8192`
+
+> ⚠️ **Important — script-vs-config mismatch warning:** The provisioning script `scripts/54-lxc-anythingllm.sh` currently sets `ALLM_LLM_TOKEN_LIMIT=262144` in `/opt/anythingllm/.env` (a leftover from when llama.cpp was configured with a 256K context). When you set "131072" in the UI above, AnythingLLM persists the UI value in its database and the UI wins at runtime. However, if the AnythingLLM container is recreated (e.g., `docker compose down && up`), it re-bootstraps from `.env` and reverts to 262144. **Either** (a) fix the script first by editing line 36 to `ALLM_LLM_TOKEN_LIMIT=131072` and re-running it, **or** (b) edit `/opt/anythingllm/.env` directly post-deploy. The runbook's Phase 6.2.G cutover step (Step G in Step 6.2) automates option (b) with a one-shot `sed` command for existing v2 clusters.
 
 Click **Save Changes**.
 
 **Settings → AI Providers → Embedder Preference**:
 
 - Provider: **Generic OpenAI**
-- Base URL: `http://192.168.6.153:8000/v1` (router routes embeddings to 3060)
-- API Key: `sk-anything`
-- Embedding Model Name: query from `curl http://192.168.6.152:8082/v1/models | jq -r .data[0].id`
-- Embedding dimension: **1024**
+- Base URL: `http://192.168.6.153:8000/v1` (router forwards `/v1/embeddings` to V620 LXC 151 port 8082). The router authenticates its upstream call using `LLAMACPP_API_KEY` (loaded from `/etc/router.env` — Phase 7.1.5 for fresh builds, Phase 6.1.4 for cutover migrations copies that key into the router's env). Clients (including AnythingLLM) authenticate to the router using `ROUTER_API_KEY`.
+- API Key: the value of `ROUTER_API_KEY` from `/etc/router.env` on LXC 153 (generated in Phase 7.1.5 for fresh builds or Phase 6.1.4 for cutover migrations)
+- Embedding Model Name: query the actual model id. Two equivalent ways:
+   - Via router: `curl -H "Authorization: Bearer $ROUTER_API_KEY" http://192.168.6.153:8000/v1/models | jq -r '.data[] | select(.id | ascii_downcase | contains("embed")) | .id'` (filter for embedder among multi-service router responses; portable across jq versions)
+   - Direct to embedder (verification): `curl -H "Authorization: Bearer $LLAMACPP_API_KEY" http://192.168.6.151:8082/v1/models | jq -r .data[0].id`
+- Embedding dimension: **1024** (Qwen3-Embedding-0.6B with `--pooling last` → confirms correct pooling — if you see a different dim, the embedder unit is misconfigured)
 - Max embed chunk length: `2500`
 
 Click **Save Changes**.
 
-**Settings → AI Providers → Reranker** (if option exists):
+**Settings → AI Providers → Reranker** (if AnythingLLM exposes this option in your version):
 
-- Configure to use the router's `/v1/rerank` endpoint
+- Provider: **Generic OpenAI**
+- Base URL: `http://192.168.6.153:8000/v1` (router forwards `/v1/rerank` to V620 LXC 151 port 8083)
+- API Key: same `ROUTER_API_KEY` as LLM Preference
+- Reranker Model Name: `bge-reranker-v2-m3` (or whatever model id `curl -H "Authorization: Bearer $LLAMACPP_API_KEY" http://192.168.6.151:8083/v1/models | jq -r .data[0].id` returns)
+
+> **Note:** Not all AnythingLLM versions expose a dedicated Reranker provider in the UI. If yours doesn't, the `/v1/rerank` endpoint is still available to direct callers (router, MCP tools) — it's just not auto-wired into AnythingLLM's RAG pipeline. The reranker improves retrieval quality but is not strictly required; the embedder alone produces functional RAG.
 
 ### Step 8.7 — Configure text splitting (chunk size fix from v1)
 
@@ -2189,7 +2486,7 @@ pct create 155 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname mcp-stack \
   --cores 2 \
   --memory 4096 \
-  --rootfs local-zfs:16 \
+  --rootfs local-lvm:16 \
   --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
   --features nesting=1,keyctl=1 \
   --unprivileged 1 \
@@ -2458,14 +2755,14 @@ If the count is 0 or much smaller than expected, the workspace-attach step faile
 
 ### Step 10.5 — Verify embedding completion
 
-The `/v1/workspace/$ws/update-embeddings` calls in §10.4 trigger immediate embedding via the router → 3060 LXC. Embedding runs synchronously per request, so the curl returns once embeddings are persisted. For a 5,000-document corpus, expect 30–60 minutes total wall-clock time on a 3060.
+The `/v1/workspace/$ws/update-embeddings` calls in §10.4 trigger immediate embedding via the router → V620 LXC 151 (port 8082). Embedding runs synchronously per request, so the curl returns once embeddings are persisted. For a 5,000-document corpus, expect ~15–30 minutes total wall-clock time on a V620 with `--parallel 8` (vs the prior 30–60 min budget when the embedder ran on the smaller 3060).
 
-While embedding runs, monitor the 3060 in another shell:
+While embedding runs, monitor the V620 embedder in another shell:
 
 ```bash
 # In another shell on the Proxmox host
-pct exec 152 -- watch -n 1 nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
-# Expect: utilization spikes during embedding, modest VRAM growth
+pct exec 151 -- watch -n 1 'rocm-smi --showmeminfo vram --showuse | grep -E "VRAM|GPU\["'
+# Expect: V620 #1 utilization spikes during embedding (--main-gpu 0 pinning); modest VRAM growth on top of chat's allocation
 ```
 
 Verify embedding completion:
@@ -2543,9 +2840,9 @@ curl -s -X POST "http://192.168.6.154:3001/api/v1/workspace/vcf-reference/chat" 
 
 ## Phase 11 — Final Verification
 
-**Estimated time:** 30 minutes
+**Estimated time:** 30-45 minutes for the full suite.
 
-Run the full smoke test suite from `local-gpu-cluster-v2.md` Appendix C. Each test should pass.
+This phase covers (1) IP plan + DHCP records, (2) deployment record, (3) the **acceptance verification suite** (Step 11.4) which exercises auth gates, embedder correctness, reranker correctness, concurrent VRAM load, rate limiting, and an end-to-end RAG smoke test. Step 11.4 is the same suite that Phase 6 Step 6.3 falls back to inline — running it here for fresh builds is the canonical post-deploy gate.
 
 ### Step 11.1 — Save the IP plan
 
@@ -2553,11 +2850,11 @@ Run the full smoke test suite from `local-gpu-cluster-v2.md` Appendix C. Each te
 # Save your final IP plan to /etc/hosts on each LXC for clean references
 cat >> /etc/hosts <<EOF
 192.168.6.151  llamacpp-amd
-192.168.6.152  llamacpp-nv
 192.168.6.153  llm-router
 192.168.6.154  anythingllm
 192.168.6.155  mcp-stack
 EOF
+# Note: 192.168.6.152 (llamacpp-nv, the old 3060 LXC) is intentionally omitted.
 ```
 
 Repeat on each LXC.
@@ -2568,7 +2865,7 @@ In your router's admin panel, create static DHCP reservations for each LXC's MAC
 
 ```bash
 # From Proxmox host
-for vmid in 151 152 153 154 155; do
+for vmid in 151 153 154 155; do
     mac=$(pct config $vmid | grep ^net0 | grep -oP 'hwaddr=\K[0-9A-F:]+' || \
           pct exec $vmid -- ip link show eth0 | grep ether | awk '{print $2}')
     echo "VMID $vmid: $mac"
@@ -2588,26 +2885,235 @@ cat > /root/deployment-record/deployment.md <<EOF
 **Deployed:** $(date)
 **Proxmox version:** $(pveversion | head -1)
 **Kernel:** $(uname -r)
+**GPU stack:** 2× AMD Radeon Pro V620 (ROCm only; no NVIDIA hardware)
 **Driver versions:**
-- NVIDIA: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader)
+- AMDGPU kernel module: $(modinfo amdgpu 2>/dev/null | awk '/^version:/{print $2}' | head -1)
 - ROCm: $(pct exec 151 -- rocminfo 2>/dev/null | grep "Runtime Version" | head -1)
 
 **LXCs:**
 - 151 llamacpp-amd: $(pct exec 151 -- ip -4 addr show eth0 | grep inet | awk '{print $2}')
-- 152 llamacpp-nv: $(pct exec 152 -- ip -4 addr show eth0 | grep inet | awk '{print $2}')
 - 153 llm-router: $(pct exec 153 -- ip -4 addr show eth0 | grep inet | awk '{print $2}')
 - 154 anythingllm: $(pct exec 154 -- ip -4 addr show eth0 | grep inet | awk '{print $2}')
 - 155 mcp-stack: $(pct exec 155 -- ip -4 addr show eth0 | grep inet | awk '{print $2}')
 
-**Models loaded on V620 stack:**
-$(pct exec 151 -- curl -s http://localhost:8080/v1/models | jq -r '.data[].id' 2>/dev/null)
-
-**Models loaded on 3060 stack:**
-$(pct exec 152 -- curl -s http://localhost:8082/v1/models | jq -r '.data[].id' 2>/dev/null)
+**Services on V620 LXC 151:**
+- Chat (port 8080): $(pct exec 151 -- curl -sf -H "Authorization: Bearer \$(awk -F= '/^LLAMACPP_API_KEY=/{print \$2}' /etc/llamacpp.env)" http://localhost:8080/v1/models 2>/dev/null | jq -r '.data[].id' 2>/dev/null)
+- Embed (port 8082): $(pct exec 151 -- curl -sf -H "Authorization: Bearer \$(awk -F= '/^LLAMACPP_API_KEY=/{print \$2}' /etc/llamacpp.env)" http://localhost:8082/v1/models 2>/dev/null | jq -r '.data[].id' 2>/dev/null)
+- Rerank (port 8083): $(pct exec 151 -- curl -sf -H "Authorization: Bearer \$(awk -F= '/^LLAMACPP_API_KEY=/{print \$2}' /etc/llamacpp.env)" http://localhost:8083/v1/models 2>/dev/null | jq -r '.data[].id' 2>/dev/null)
 
 EOF
 cat /root/deployment-record/deployment.md
 ```
+
+### Step 11.4 — Acceptance verification suite
+
+Run from the Proxmox host. All commands assume `LLAMACPP_API_KEY` and `ROUTER_API_KEY` are set in their respective env files (Phase 5.11.1 + Phase 7.1.5). The suite is 14 checks split into 5 groups.
+
+```bash
+# Helper variables — re-derive at runtime so it's safe to copy any test in isolation
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+
+# Pre-flight: wait for all three services on LXC 151 to actually serve requests.
+# Even after `systemctl is-active` returns "active", llama-server may still be
+# loading model weights for ~30-60s on cold start. Don't run the suite until all
+# three /v1/models endpoints return 200 with the auth header.
+echo "Pre-flight: waiting for chat/embed/rerank to accept requests..."
+for port in 8080 8082 8083; do
+  for attempt in $(seq 1 30); do
+    code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $LLAMACPP_KEY" \
+            --max-time 5 "http://192.168.6.151:${port}/v1/models")
+    [ "$code" = "200" ] && { echo "  151:${port} ready"; break; }
+    sleep 2
+  done
+done
+```
+
+**Group 1 — Hardware + host (no NVIDIA, two V620s):**
+
+```bash
+# 1.1 Host has no NVIDIA artifacts
+which nvidia-smi && echo "FAIL: nvidia-smi still present" || echo "OK — no NVIDIA on host"
+
+# 1.2 Default kernel (no manual pin required for V620-only)
+uname -r   # Expect: 6.17.x-pve on PVE 9.1; 6.14.x is also fine on older PVE
+
+# 1.3 AMDGPU exposes both V620 render nodes
+ls /dev/dri/   # Expect: card0, card1, renderD128, renderD129 (no renderD130)
+ls /dev/kfd
+
+# 1.4 Four LXCs present, no 152
+pct list | awk '$1 ~ /^(151|153|154|155)$/'
+pct list | awk '$1 == "152"' | wc -l   # Expect: 0
+```
+
+**Group 2 — Service health + auth gates:**
+
+```bash
+# 2.1 All three llama-server units active on LXC 151
+pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank
+# Expect: active, active, active (three lines)
+
+# 2.2 Direct endpoint health (Bearer required)
+for port in 8080 8082 8083; do
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $LLAMACPP_KEY" \
+               http://192.168.6.151:${port}/health)
+  echo "151:${port} -> ${http_code}"   # Expect: 200
+done
+
+# 2.3 Auth gate works (unauthed request returns 401)
+for port in 8080 8082 8083; do
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://192.168.6.151:${port}/health)
+  echo "151:${port} unauthed -> ${http_code}"   # Expect: 401
+done
+
+# 2.4 Router refuses unauthed requests
+http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+             -X POST -H "Content-Type: application/json" \
+             -d '{"messages":[{"role":"user","content":"ping"}]}' \
+             http://192.168.6.153:8000/v1/chat/completions)
+echo "router unauthed -> ${http_code}"   # Expect: 403
+
+# 2.5 Router accepts authed request
+http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+             -X POST -H "Authorization: Bearer $ROUTER_KEY" \
+             -H "Content-Type: application/json" \
+             -d '{"model":"qwen3-35b","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+             http://192.168.6.153:8000/v1/chat/completions)
+echo "router authed -> ${http_code}"   # Expect: 200
+```
+
+**Group 3 — Embedder + reranker correctness:**
+
+```bash
+# 3.1 Embedding dim = 1024 (verifies --pooling last correctness for Qwen3-Embedding-0.6B)
+dim=$(curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+       -d '{"input":"hello"}' http://192.168.6.153:8000/v1/embeddings | jq '.data[0].embedding | length')
+echo "embed dim: ${dim}"   # Expect: 1024 — anything else means wrong pooling
+
+# 3.2 Two embeddings of identical input are bit-identical (determinism check)
+e1=$(curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+      -d '{"input":"hello"}' http://192.168.6.153:8000/v1/embeddings | jq -c '.data[0].embedding')
+e2=$(curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+      -d '{"input":"hello"}' http://192.168.6.153:8000/v1/embeddings | jq -c '.data[0].embedding')
+[ "$e1" = "$e2" ] && echo "OK — embeddings deterministic" || echo "FAIL — embedder is non-deterministic"
+
+# 3.3 Reranker scores semantically — "Paris is in France" must rank above "Berlin is in Germany"
+top=$(curl -sf -X POST -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+       -d '{"query":"capital of France","documents":["Paris is in France","Berlin is in Germany"]}' \
+       http://192.168.6.153:8000/v1/rerank | jq -r '.results[0].document')
+echo "rerank top: ${top}"   # Expect: "Paris is in France"
+```
+
+**Group 4 — Concurrent load (VRAM + slot contention):**
+
+```bash
+# 4.1 Chat streaming + 100 parallel embed requests overlap — verify no OOM, both cards work
+pct exec 151 -- bash -c "
+  KEY=\$(awk -F= '/^LLAMACPP_API_KEY=/{print \$2}' /etc/llamacpp.env)
+  # Launch a long-ish chat completion in background
+  curl -s -H \"Authorization: Bearer \$KEY\" http://localhost:8080/v1/chat/completions \\
+    -X POST -H 'Content-Type: application/json' \\
+    -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Write a 200-word essay about V620 GPUs.\"}],\"stream\":true,\"max_tokens\":200}' > /tmp/chat.out &
+  CHAT_PID=\$!
+  sleep 2
+  # Fire 100 small embed requests in parallel
+  for i in \$(seq 1 100); do
+    curl -s -H \"Authorization: Bearer \$KEY\" http://localhost:8082/v1/embeddings \\
+      -X POST -H 'Content-Type: application/json' -d \"{\\\"input\\\":\\\"doc \$i\\\"}\" > /dev/null &
+  done
+  wait \$CHAT_PID
+  wait   # wait for all embed jobs
+  # Snapshot VRAM after overlap
+  rocm-smi --showmeminfo vram --showuse
+"
+# Expect: both V620s 18-22 GB used; > 60% util during overlap window; no OOM in journal
+
+# 4.2 No OOM / HIP errors in journal over the last 30 min
+pct exec 151 -- journalctl -u llamacpp-chat -u llamacpp-embed -u llamacpp-rerank --since '30 min ago' \
+  | grep -iE "oom|hip error|out of memory|cuda error" \
+  && echo "FAIL — see errors above" || echo "OK — clean journals"
+
+# 4.3 Spec-decode acceptance rate >= 0.6 over recent requests
+pct exec 151 -- journalctl -u llamacpp-chat --since '10 min ago' \
+  | grep -oP 'accept_rate=\K[0-9.]+' | tail -5
+# Expect: values >= 0.6; lower means the draft model isn't matching the workload
+```
+
+**Group 5 — Router admission control + rate limit + RAG E2E:**
+
+```bash
+# 5.1 Router rate limit kicks in (slowapi 60/min default for chat)
+echo "Firing 80 requests rapidly to test rate limit..."
+codes=$(for i in $(seq 1 80); do
+  curl -s -o /dev/null -w "%{http_code} " -H "Authorization: Bearer $ROUTER_KEY" \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"model":"x","messages":[{"role":"user","content":"q"}],"max_tokens":1}' \
+    http://192.168.6.153:8000/v1/chat/completions
+done)
+echo "$codes" | tr ' ' '\n' | sort | uniq -c
+# Expect: some 429s after ~60 (rate limit), plus 200s — confirms rate limiter is active
+
+# 5.2 Router /metrics endpoint is gated (only METRICS_ALLOWED_IPS pass)
+http_code=$(curl -s -o /dev/null -w "%{http_code}" http://192.168.6.153:8000/metrics)
+echo "/metrics from non-allowed IP -> ${http_code}"   # Expect: 403 (or 404 if hidden)
+
+# 5.3 E2E RAG smoke test
+# Workspace name and AnythingLLM API key
+WS_SLUG=verify-rag
+ALLM_KEY=$(pct exec 154 -- awk -F= '/^ANYTHINGLLM_API_KEY=/{sub(/^ANYTHINGLLM_API_KEY=/,""); gsub(/^"|"$/,""); print}' /opt/anythingllm/.env 2>/dev/null)
+TEST_DOC=$'The squishy lampson is a fictional creature with three eyes, native to the
+forests of Drelnar. It feeds primarily on phosphorescent moss.'
+
+# Create a temporary workspace via API
+curl -sf -X POST "http://192.168.6.154:3001/api/v1/workspace/new" \
+  -H "Authorization: Bearer $ALLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"$WS_SLUG\"}" > /dev/null
+
+# Upload the doc (note: API shape varies by AnythingLLM version; this is one common path)
+echo "$TEST_DOC" > /tmp/squishy.txt
+curl -sf -X POST "http://192.168.6.154:3001/api/v1/document/upload" \
+  -H "Authorization: Bearer $ALLM_KEY" \
+  -F "file=@/tmp/squishy.txt" > /dev/null
+
+# Attach + embed
+curl -sf -X POST "http://192.168.6.154:3001/api/v1/workspace/$WS_SLUG/update-embeddings" \
+  -H "Authorization: Bearer $ALLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"adds":["squishy.txt"]}' > /dev/null
+
+# Wait for embedding to complete (poll workspace until docCount > 0 or 30s timeout).
+# This is more reliable than a fixed sleep because the embedder model warm-up time
+# varies (cold = ~5-15s, warm = ~1s).
+for attempt in $(seq 1 15); do
+  docCount=$(curl -sf "http://192.168.6.154:3001/api/v1/workspace/$WS_SLUG" \
+    -H "Authorization: Bearer $ALLM_KEY" 2>/dev/null \
+    | jq -r '.workspace.documents | length // 0')
+  [ "${docCount:-0}" -gt 0 ] && { echo "embedding done"; break; }
+  sleep 2
+done
+
+# Query and check the citation pulls the squishy passage
+response=$(curl -sf -X POST "http://192.168.6.154:3001/api/v1/workspace/$WS_SLUG/chat" \
+  -H "Authorization: Bearer $ALLM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"How many eyes does a squishy lampson have?","mode":"query"}')
+echo "$response" | jq -r '.textResponse'
+# Expect: response mentions "three" and "eyes" — confirms full RAG path works
+
+# Clean up
+curl -sf -X DELETE "http://192.168.6.154:3001/api/v1/workspace/$WS_SLUG" \
+  -H "Authorization: Bearer $ALLM_KEY" > /dev/null
+rm -f /tmp/squishy.txt
+```
+
+**Acceptance gate — proceed only if all 14 checks above pass.** If any FAIL:
+- Group 1 failures → re-check Phase 1 (hardware) and Phase 4 (host config).
+- Group 2 failures → re-check Phase 5 (units active + Bearer auth) and Phase 7 (router auth middleware).
+- Group 3 failures → most commonly `--pooling` is wrong; fix in Phase 5 unit file.
+- Group 4 failures → reduce `--parallel`, drop `--ctx-size`, or check VRAM allocation math.
+- Group 5 failures → router code (`scripts/files/router-app.py`) is missing rate limit or IP allowlist features; see todo #20 in the pivot plan.
 
 ---
 
@@ -2628,7 +3134,7 @@ The full system has three layers of state to back up:
    - Day of week: Daily
    - Start time: 03:00
    - Selection mode: Include selected VMs
-   - Containers: 151, 152, 153, 154, 155
+   - Containers: 151, 153, 154, 155 (V620-only; LXC 152 was destroyed in the Phase 6 cutover. Existing UI backup jobs created pre-pivot must be hand-edited to remove 152, otherwise the job logs "no such container 152" each run.)
    - Mode: Snapshot
    - Compression: zstd
    - Retention: keep-daily=7, keep-weekly=4, keep-monthly=3
@@ -2639,7 +3145,7 @@ This keeps a week of dailies, four weekly snapshots, and three monthly archives.
 
 ```bash
 # Backup all LXCs at once
-vzdump 151 152 153 154 155 \
+vzdump 151 153 154 155 \
     --storage tank-backups \
     --mode snapshot \
     --compress zstd \
@@ -2720,7 +3226,7 @@ rsync -aP /tank/models/ /mnt/external-backup/models/
 
 ### Recommended baseline strategy
 
-1. **Daily vzdump** of all 5 LXCs to `tank-backups` (retention: 7d/4w/3m)
+1. **Daily vzdump** of all 4 LXCs (`151 153 154 155`) to `tank-backups` (retention: 7d/4w/3m)
 2. **Daily ZFS snapshots** of `tank/anythingllm` and `tank/mcp` (retention: 14 days)
 3. **Weekly off-host copy** of vzdump archives to PBS or external storage
 4. **Skip** `/tank/models` backups (just record which models were loaded)
@@ -2734,7 +3240,7 @@ rsync -aP /tank/models/ /mnt/external-backup/models/
 TEST_BACKUP=tank-backups:backup/vzdump-lxc-153-2026_05_10-03_00_01.tar.zst
 
 # Restore as a new VMID for testing (don't overwrite the running container)
-pct restore 999 $TEST_BACKUP --storage local-zfs --rootfs local-zfs:8
+pct restore 999 $TEST_BACKUP --storage local-lvm --rootfs local-lvm:8
 
 # Start it and verify
 pct start 999
@@ -2769,9 +3275,19 @@ apt install -y postfix mailutils
 # Or use a relay smarthost (Gmail, SendGrid, etc.)
 
 # Per LXC, edit each critical service to add OnFailure
-# Inside LXC 151, 152, 153
+# Inside LXC 151 and 153 (152 was destroyed in Phase 6 cutover)
+# For LXC 151: post-Phase-5-expansion you have three units (llamacpp-chat, llamacpp-embed, llamacpp-rerank).
+# Drop the notify.conf into each. Pre-expansion the single unit is named llama-server.service.
 mkdir -p /etc/systemd/system/<service>.service.d/
-cat > /etc/systemd/system/llama-server.service.d/notify.conf <<EOF
+for unit in llamacpp-chat llamacpp-embed llamacpp-rerank; do
+  [ -f "/etc/systemd/system/${unit}.service" ] || continue
+  cat > "/etc/systemd/system/${unit}.service.d/notify.conf" <<EOF
+[Unit]
+OnFailure=service-failure-notify@%n.service
+EOF
+done
+# Fallback for pre-Phase-5-expansion (single llama-server unit):
+[ -f /etc/systemd/system/llama-server.service ] && cat > /etc/systemd/system/llama-server.service.d/notify.conf <<EOF
 [Unit]
 OnFailure=service-failure-notify@%n.service
 EOF
@@ -2824,12 +3340,19 @@ check() {
     return 0
 }
 
-# V620 stack
-check "V620 llama-server" "http://192.168.6.151:8080/v1/models" "data"
-
-# 3060 services
-check "3060 embedder" "http://192.168.6.152:8082/v1/models" "data"
-check "3060 reranker" "http://192.168.6.152:8083/v1/models" "data"
+# V620 LXC 151 — chat + embed + rerank services (auth required)
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env 2>/dev/null)
+check_authed() {
+    local name=$1 url=$2 pattern=$3
+    if ! response=$(curl -sf --max-time 10 -H "Authorization: Bearer $LLAMACPP_KEY" "$url" 2>&1); then
+        ALERTS+=("DOWN: $name ($url)")
+        return 1
+    fi
+    echo "$response" | grep -q "$pattern" || ALERTS+=("BAD RESPONSE: $name ($url)")
+}
+check_authed "V620 chat (151:8080)"   "http://192.168.6.151:8080/v1/models" "data"
+check_authed "V620 embedder (151:8082)" "http://192.168.6.151:8082/v1/models" "data"
+check_authed "V620 reranker (151:8083)" "http://192.168.6.151:8083/v1/models" "data"
 
 # Router
 check "Router health" "http://192.168.6.153:8000/healthz" '"ok":true'
@@ -2842,16 +3365,35 @@ for port in 3002 3003 3004; do
     check "MCP port $port" "http://192.168.6.155:$port/sse" "endpoint" || true
 done
 
-# GPU temperature checks
-TEMP_AMD=$(pct exec 151 -- rocm-smi --showtemp 2>/dev/null | grep -oP "(?<=Temperature \(Sensor edge\) \(C\):\s)[\d.]+" | head -1)
-TEMP_NV=$(pct exec 152 -- nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits)
+# GPU temperature checks — both V620 cards via rocm-smi (no NVIDIA in V620-only build)
+TEMP_AMD_0=$(pct exec 151 -- rocm-smi -d 0 --showtemp 2>/dev/null | grep -oP "(?<=Temperature \(Sensor edge\) \(C\):\s)[\d.]+" | head -1)
+TEMP_AMD_1=$(pct exec 151 -- rocm-smi -d 1 --showtemp 2>/dev/null | grep -oP "(?<=Temperature \(Sensor edge\) \(C\):\s)[\d.]+" | head -1)
 
-if [ -n "$TEMP_AMD" ] && [ "${TEMP_AMD%.*}" -gt 85 ]; then
-    ALERTS+=("V620 #1 temperature $TEMP_AMD°C — investigate cooling")
+if [ -n "$TEMP_AMD_0" ] && [ "${TEMP_AMD_0%.*}" -gt 85 ]; then
+    ALERTS+=("V620 #1 temperature $TEMP_AMD_0°C — investigate cooling")
 fi
-if [ -n "$TEMP_NV" ] && [ "$TEMP_NV" -gt 85 ]; then
-    ALERTS+=("3060 temperature ${TEMP_NV}°C — investigate cooling")
+if [ -n "$TEMP_AMD_1" ] && [ "${TEMP_AMD_1%.*}" -gt 85 ]; then
+    ALERTS+=("V620 #2 temperature $TEMP_AMD_1°C — investigate cooling")
 fi
+
+# ZFS pool health
+zpool status tank 2>/dev/null | grep -q "state: ONLINE" || ALERTS+=("tank ZFS pool NOT ONLINE")
+
+# Backup-storage free space (alert if <10% free)
+BACKUP_FREE_PCT=$(df /tank/backups 2>/dev/null | awk 'NR==2 {print 100-int($5)}')
+if [ -n "$BACKUP_FREE_PCT" ] && [ "$BACKUP_FREE_PCT" -lt 10 ]; then
+    ALERTS+=("/tank/backups <10% free (${BACKUP_FREE_PCT}%)")
+fi
+
+# Per-card VRAM headroom (alert if either V620 hits >90% used — risk of OOM under bulk embed)
+for gpu in 0 1; do
+    VRAM_LINE=$(pct exec 151 -- rocm-smi -d $gpu --showmeminfo vram 2>/dev/null | grep -i "used")
+    [ -z "$VRAM_LINE" ] && continue
+    USED_BYTES=$(echo "$VRAM_LINE" | grep -oE '[0-9]+' | tail -1)
+    TOTAL_BYTES=34359738368  # 32 GiB per V620 (approximate; rocm-smi reports in bytes)
+    [ -n "$USED_BYTES" ] && PCT=$(( USED_BYTES * 100 / TOTAL_BYTES ))
+    [ -n "$PCT" ] && [ "$PCT" -gt 90 ] && ALERTS+=("V620 #$((gpu+1)) VRAM ${PCT}% used (>90% — OOM risk)")
+done
 
 # Send alerts only on transitions (don't spam every 5 min)
 if [ ${#ALERTS[@]} -gt 0 ]; then
@@ -2887,7 +3429,7 @@ pct create 156 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname monitoring \
   --cores 2 \
   --memory 4096 \
-  --rootfs local-zfs:32 \
+  --rootfs local-lvm:32 \
   --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
   --features nesting=1,keyctl=1 \
   --unprivileged 1 \
@@ -2937,27 +3479,50 @@ global:
   evaluation_interval: 30s
 
 scrape_configs:
-  - job_name: 'llama-v620'
+  # llama-server's --metrics endpoint requires Bearer auth in the V620-only build.
+  # Credentials live in a separate file (mode 600) so the key never lands in this YAML
+  # (which would otherwise leak via vzdump backups). After running this Phase, mount or
+  # copy the key inside the monitoring LXC:
+  #   echo "$LLAMACPP_API_KEY" > /etc/prometheus/llamacpp-api-key
+  #   chmod 600 /etc/prometheus/llamacpp-api-key
+  # Exclude /etc/prometheus/llamacpp-api-key from any backup that travels off-host
+  # (or encrypt the off-host copy with age).
+  - job_name: 'llama-chat'
     static_configs:
       - targets: ['192.168.6.151:8080']
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/llamacpp-api-key
 
   - job_name: 'llama-embed'
     static_configs:
-      - targets: ['192.168.6.152:8082']
+      - targets: ['192.168.6.151:8082']
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/llamacpp-api-key
 
   - job_name: 'llama-rerank'
     static_configs:
-      - targets: ['192.168.6.152:8083']
+      - targets: ['192.168.6.151:8083']
     metrics_path: /metrics
-  
-  # Add node-exporter on each LXC for system metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/llamacpp-api-key
+
+  # Router's /metrics is gated by METRICS_ALLOWED_IPS in /etc/router.env on LXC 153.
+  # Add the monitoring LXC's IP (192.168.6.156) to that allowlist so this scrape works.
+  - job_name: 'llm-router'
+    static_configs:
+      - targets: ['192.168.6.153:8000']
+    metrics_path: /metrics
+
+  # Add node-exporter on each LXC for system metrics (152 omitted — destroyed in pivot)
   - job_name: 'node-exporter'
     static_configs:
       - targets:
         - '192.168.6.151:9100'
-        - '192.168.6.152:9100'
         - '192.168.6.153:9100'
         - '192.168.6.154:9100'
         - '192.168.6.155:9100'
@@ -2974,8 +3539,8 @@ docker compose up -d
 #### Step 3: Install node-exporter on each LXC
 
 ```bash
-# Run on each LXC (151, 152, 153, 154, 155)
-for vmid in 151 152 153 154 155; do
+# Run on each LXC (V620-only: 151, 153, 154, 155 — 152 was destroyed in the pivot)
+for vmid in 151 153 154 155; do
     pct exec $vmid -- bash -c '
         cd /opt
         wget https://github.com/prometheus/node_exporter/releases/download/v1.9.0/node_exporter-1.9.0.linux-amd64.tar.gz
@@ -3016,11 +3581,12 @@ Import dashboards:
 
 ### Critical metrics to watch
 
-- **llama.cpp**: `llamacpp:requests_processing`, `llamacpp:tokens_predicted_seconds`, `llamacpp:kv_cache_tokens`
-- **Spec decode acceptance**: log-derived — parse from `journalctl -u llama-server | grep acceptance`
-- **GPU temperature**: per-card via rocm-smi/nvidia-smi
-- **GPU memory**: per-card utilization vs. total
-- **System load**: 1m/5m load average per LXC
+- **llama.cpp**: `llamacpp:requests_processing`, `llamacpp:tokens_predicted_seconds`, `llamacpp:kv_cache_tokens` (per-service: chat / embed / rerank)
+- **Spec decode acceptance**: log-derived — parse from `journalctl -u llamacpp-chat | grep acceptance`
+- **GPU temperature**: per-card via `rocm-smi -d 0 --showtemp` and `rocm-smi -d 1 --showtemp` (V620 only — no `nvidia-smi` in V620-only build)
+- **GPU memory + utilization**: `rocm-smi --showmeminfo vram --showuse` per card
+- **Router**: per-route latency P50/P99, in-flight gauge, rate-limit 429 count, upstream 5xx count (via `prometheus-fastapi-instrumentator` in router-app.py)
+- **System load**: 1m/5m load average per LXC (via node-exporter)
 - **Disk space**: `/tank/models`, `/tank/anythingllm`, LXC root
 
 ---
@@ -3048,30 +3614,84 @@ pct stop <vmid> --force
 pct start <vmid>
 ```
 
-### Scenario 2 — Single GPU failure
+### Scenario 2 — Single V620 GPU failure
 
-**Symptoms:** `rocm-smi` or `nvidia-smi` reports an error or doesn't see one of the GPUs; llama-server fails to start.
+**Symptoms:** `rocm-smi` reports an error or doesn't see one of the V620 cards; `pct exec 151 -- systemctl status llamacpp-chat` shows failed-to-start; logs mention HIP/HSA initialization errors.
 
-**For V620 failure:** The cluster can limp along on the surviving V620 with reduced capacity.
+**Impact in V620-only architecture:** With both V620s allocated across chat (tensor-split), embed (V620 #1), and rerank (V620 #2), a single-card failure degrades all three services — not just chat. Specifically:
+- If **V620 #0** fails: embedder (pinned to `--main-gpu 0`) becomes unavailable; chat loses half its weights/KV (tensor-split breaks).
+- If **V620 #1** fails: reranker (pinned to `--main-gpu 1`) becomes unavailable; chat loses the other half of its weights/KV.
+
+Recovery limps the cluster along on the surviving card with reduced capacity (single 32 GB pool instead of 64 GB).
+
+**Step 1: Identify which V620 failed.**
 
 ```bash
-# Inside LXC 151
-# Edit llama-server.service to use only the working GPU
-# Change: --tensor-split 1,1
-# To:     --tensor-split 1,0   (or 0,1 depending on which failed)
-# Also change: HIP_VISIBLE_DEVICES=0   (or 1)
-
-systemctl daemon-reload
-systemctl restart llama-server
-
-# Reduce context size — single V620 has only 32 GB VRAM
-# Add: --ctx-size 65536 (was 131072)
+pct exec 151 -- rocm-smi --showid
+# If only one GPU is listed, the missing index is the failed one.
+# Note: --main-gpu indexes (0, 1) align with what rocm-smi lists; if rocm-smi shows only
+# one card, treat the missing slot as failed.
 ```
 
-**For 3060 failure:** Embedding and reranking are unavailable. Workarounds:
+**Step 2: Reconfigure chat to use only the surviving V620.**
 
-- Switch AnythingLLM to use a CPU embedder (slow but functional)
-- Or temporarily run embedding on a V620 (steal capacity from chat)
+```bash
+# Inside LXC 151 — edit /etc/systemd/system/llamacpp-chat.service
+# Suppose V620 #1 failed (only V620 #0 survives).
+# Change:
+#   Environment="HIP_VISIBLE_DEVICES=0,1"
+#   --tensor-split 1,1
+#   --ctx-size 131072
+#   --parallel 4
+# To:
+#   Environment="HIP_VISIBLE_DEVICES=0"
+#   --tensor-split 1,0     (or remove the flag — single GPU defaults to all-on-one)
+#   --ctx-size 32768       (single V620 has only 32 GB VRAM — weights 22 GB + KV ~5 GB)
+#   --parallel 2           (cut concurrent slots to fit 32 GB)
+
+pct exec 151 -- systemctl daemon-reload
+pct exec 151 -- systemctl restart llamacpp-chat
+```
+
+**Step 3: Stop the service that pinned to the failed card.**
+
+If V620 #1 failed (reranker uses `--main-gpu 1`), stop the reranker — it can't run on the surviving card without also reconfiguring (which would cause it to compete with embed for the same card):
+
+```bash
+pct exec 151 -- systemctl stop llamacpp-rerank
+# The router (LXC 153) will start returning upstream 502s on /v1/rerank.
+```
+
+> ⚠️ **Dependency on router rewrite (todo #20):** The "fail-open SSE" graceful-degradation behavior — where the router emits a `service degraded` event instead of propagating raw 502s to AnythingLLM — is delivered by the rewritten `scripts/files/router-app.py` (tracked as todo #20 in the pivot plan). Until that lands, AnythingLLM will see raw 502s on `/v1/rerank` and may fail entire RAG queries instead of falling back to plain top-K retrieval. Workaround for current pre-rewrite clusters: in AnythingLLM Settings → AI Providers → Reranker, set the provider to "Disabled" until the failed V620 is replaced.
+
+If V620 #0 failed (embedder uses `--main-gpu 0`):
+
+```bash
+pct exec 151 -- systemctl stop llamacpp-embed
+# AnythingLLM's RAG ingest is now broken until either (a) the card is replaced and
+# the service restarted, or (b) the embedder is reconfigured to the surviving card
+# (see Step 4 below).
+```
+
+**Step 4 (optional): Move the small service to the surviving card if you can spare ~1.5 GB.**
+
+The reranker is ~1.5 GB or the embedder is ~1.2 GB; either fits on top of a degraded-mode chat (22 GB weights + 5 GB KV = ~27 GB used on a 32 GB card; ~5 GB headroom). To re-home the orphaned small service to the surviving card:
+
+```bash
+# Edit the orphaned service's unit:
+#   Environment="HIP_VISIBLE_DEVICES=<surviving_card>"
+#   --main-gpu <surviving_card>
+# Reduce chat's --parallel to 1 if VRAM is tight.
+
+pct exec 151 -- systemctl daemon-reload
+pct exec 151 -- systemctl restart llamacpp-chat llamacpp-embed llamacpp-rerank
+```
+
+**Step 5: Plan replacement.**
+
+V620s are passively-cooled server cards; failure modes include the active 80 mm NF-A8 shroud fan dying (overheat → throttle → eventual silicon damage). Before replacing the card, replace the NF-A8 on the surviving card (it likely shares the same wear pattern). Source replacement V620s from server-pull sellers; verify gfx1030 identification on the new card before deploying.
+
+**Note:** This runbook no longer covers a separate "RTX 3060 failure" path — the 3060 was removed in the V620-only pivot (see `local-gpu-cluster-v2.md` §1.3). If you are running a pre-pivot cluster with an active 3060 LXC 152, the old failure-recovery path (CPU embedder fallback or borrow V620 capacity) still applies, but you should be on the pivot path instead.
 
 ### Scenario 3 — Backup restore (LXC level)
 
@@ -3087,45 +3707,70 @@ pct destroy 154
 
 # Restore from backup
 pct restore 154 tank-backups:backup/vzdump-lxc-154-2026_05_10-03_00_01.tar.zst \
-    --storage local-zfs
+    --storage local-lvm
 
 # Start it
 pct start 154
 ```
 
-### Scenario 4 — Full host reinstall
+### Scenario 4 — Full host reinstall (boot drive failure)
 
-**When:** Boot drive failure, ZFS pool corruption on the boot drive, accidental Proxmox uninstall, etc.
+**When:** Boot drive (M.2_1) failure, LVM-thin pool corruption, accidental Proxmox uninstall, etc.
 
-**Prerequisites:** You have backups on `/tank/backups` (which lives on the secondary NVMe — survives boot drive failure if the boot drive is what failed).
+**Prerequisites:** Backups live on `/tank/backups`, which is on the **ZFS mirror across M.2_3 + M.2_4**. The mirror is independent of the boot drive, so a boot-drive failure leaves all backups intact. (For a `/tank` drive failure, see Scenario 4b below.)
 
 **Procedure:**
 
 1. Replace the boot drive if hardware failure
-2. Reinstall Proxmox VE 9.x per Phase 3
-3. Re-create the ZFS pool import:
+2. Reinstall Proxmox VE 9.x per Phase 3 (ext4, same installer options)
+3. Import the existing ZFS mirror — do NOT recreate it:
    ```bash
-   # Don't recreate /tank — import the existing pool
+   # The /tank pool survives on M.2_3 + M.2_4; just import it
    zpool import tank
-   zfs list
-   # Verify all datasets are present
+   zpool status tank   # confirm both mirror members ONLINE
+   zfs list            # confirm all datasets present
    ```
 4. Re-add storage definitions:
    ```bash
    pvesm add dir tank-backups --path /tank/backups --content backup,iso,vztmpl
    ```
-5. Re-do Phase 4 (host configuration: IOMMU, NVIDIA driver, etc.)
+5. Re-do Phase 4 (host configuration: IOMMU, NVIDIA driver, ZFS ARC cap, etc.)
 6. Restore each LXC from backup:
    ```bash
-   for vmid in 151 152 153 154 155; do
+   for vmid in 151 153 154 155; do
        BACKUP=$(ls -t /tank/backups/dump/vzdump-lxc-${vmid}-*.tar.zst | head -1)
-       pct restore $vmid $BACKUP --storage local-zfs
+       pct restore $vmid $BACKUP --storage local-lvm
        pct start $vmid
    done
    ```
 7. Run Phase 11 verification
 
 Estimated full-recovery time: 2-3 hours from a failed boot drive.
+
+### Scenario 4b — Single `/tank` mirror member failure
+
+**When:** One of the two data NVMes (M.2_3 or M.2_4) fails. The pool remains ONLINE in **DEGRADED** state — no downtime, no data loss.
+
+**Procedure:**
+
+1. Identify the failed device:
+   ```bash
+   zpool status tank
+   # Look for FAULTED, UNAVAIL, or DEGRADED next to one mirror member
+   ```
+2. Physically replace the failed NVMe with a same-or-larger drive (power off if not hot-swappable).
+3. Identify the new device's by-id path:
+   ```bash
+   ls -l /dev/disk/by-id/ | grep nvme | grep -v part
+   ```
+4. Replace within the pool — ZFS resilvers (rebuilds) automatically:
+   ```bash
+   zpool replace tank /dev/disk/by-id/nvme-OLD_FAILED_ID /dev/disk/by-id/nvme-NEW_DRIVE_ID
+   zpool status tank   # watch resilver progress; expect a few minutes to hours depending on data size
+   ```
+5. When `zpool status` shows both members ONLINE and no scrub/resilver in progress, you're back to fully-redundant.
+
+**Estimated recovery time:** 15 min hands-on + resilver time (~10-30 min per TB used). Zero downtime for running LXCs throughout.
 
 ### Scenario 5 — Network outage / connectivity loss
 
@@ -3141,7 +3786,7 @@ systemctl restart networking
 ifreload -a
 
 # Check LXC has IP
-for vmid in 151 152 153 154 155; do
+for vmid in 151 153 154 155; do
     ip=$(pct exec $vmid -- ip -4 addr show eth0 | grep inet | awk '{print $2}' || echo "no IP")
     echo "VMID $vmid: $ip"
 done
@@ -3178,17 +3823,19 @@ docker compose up -d
 
 ```bash
 # Verify checksum
-sha256sum /tank/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf
+sha256sum /tank/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf
 
 # Compare against the published checksum on Hugging Face
 
 # If mismatched, redownload
 cd /tank/models
-mv qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf.corrupt
-wget -O qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf <URL>
+mv qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf.corrupt
+wget -O qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf <URL>
 
-# Restart V620 service
-pct exec 151 -- systemctl restart llama-server
+# Restart V620 chat service (post-Phase-5-expansion unit name is llamacpp-chat;
+# pre-expansion clusters use the older llama-server name)
+pct exec 151 -- systemctl restart llamacpp-chat 2>/dev/null \
+  || pct exec 151 -- systemctl restart llama-server
 ```
 
 ### Scenario 8 — Disaster recovery checklist
@@ -3219,24 +3866,12 @@ pct exec 151 -- rocminfo | grep gfx1030
 # Run interactively to see error
 pct enter 151
 cd /opt/llama.cpp
-./build/bin/llama-server --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf --port 8080
+./build/bin/llama-server --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m-00001-of-00002.gguf --port 8080
 ```
 
-### `Failed to initialize NVML: Driver/library version mismatch`
+### (Removed) `Failed to initialize NVML` — was an NVIDIA-only failure mode
 
-The host kernel module and LXC userspace versions don't match.
-
-```bash
-# On host
-nvidia-smi --query-gpu=driver_version --format=csv,noheader
-# Note the version
-
-# Inside LXC 152
-nvidia-smi --query-gpu=driver_version --format=csv,noheader
-# Should match exactly
-
-# If different, reinstall LXC userspace at the matching version per Step 6.4
-```
+This troubleshooting entry covered NVML version mismatches between the host's NVIDIA kernel module and the LXC's userspace driver. The V620-only build has no NVIDIA hardware, no `nvidia-driver`, and no `nvidia-smi` — this failure mode no longer applies. If you see this error, check whether you accidentally installed nvidia-driver and remove it: `apt purge -y nvidia-driver firmware-nvidia-graphics`.
 
 ### Speculative decoding acceptance rate is low (<40%)
 
@@ -3303,33 +3938,48 @@ pct exec 155 -- docker logs <container-name> --tail 50
 ### Useful one-liners
 
 ```bash
-# Status of all GPU stacks
-for vmid in 151 152; do
-    echo "=== LXC $vmid ==="
-    pct exec $vmid -- systemctl --no-pager --type=service --state=running | grep llama
-done
+# Status of GPU stack (LXC 151 only — V620-only build; LXC 152 was destroyed in Phase 6)
+echo "=== LXC 151 (V620 chat + embed + rerank) ==="
+pct exec 151 -- systemctl --no-pager --type=service --state=running | grep llama
 
 # All LXC IPs
-for vmid in 151 152 153 154 155; do
+for vmid in 151 153 154 155; do
     echo "VMID $vmid: $(pct exec $vmid -- hostname -I 2>/dev/null | awk '{print $1}')"
 done
 
 # Backup all LXCs now
-vzdump 151 152 153 154 155 --storage tank-backups --mode snapshot --compress zstd
+vzdump 151 153 154 155 --storage tank-backups --mode snapshot --compress zstd
 
-# Restart everything in dependency order
-pct restart 151        # V620 stack first
+# Restart everything in dependency order (simple — no health gates)
+pct restart 151        # V620 LXC: chat + embed + rerank
 sleep 30
-pct restart 152        # 3060 stack
+pct restart 153        # Router (depends on 151 being healthy)
 sleep 15
-pct restart 153        # Router
-sleep 5
-pct restart 154        # AnythingLLM
+pct restart 154        # AnythingLLM (depends on 153 router endpoint)
 sleep 5
 pct restart 155        # MCP stack
 
+# OR — health-gated restart (waits for each service to become healthy before continuing)
+# This catches the case where the next sleep is too short for a slow cold start.
+restart_with_gate() {
+    local vmid=$1 check_cmd=$2 timeout=${3:-90}
+    pct restart "$vmid"
+    local start=$SECONDS
+    until eval "$check_cmd" >/dev/null 2>&1; do
+        [ $((SECONDS - start)) -ge "$timeout" ] && { echo "LXC $vmid did not become healthy in ${timeout}s"; return 1; }
+        sleep 5
+    done
+    echo "LXC $vmid healthy"
+}
+LKEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env 2>/dev/null)
+restart_with_gate 151 "pct exec 151 -- curl -sf -H 'Authorization: Bearer $LKEY' http://localhost:8080/v1/models | grep -q data" 180 || exit 1
+restart_with_gate 153 "pct exec 153 -- curl -sf http://localhost:8000/healthz | grep -q ok" 60 || exit 1
+restart_with_gate 154 "pct exec 154 -- curl -sf http://localhost:3001/api/ping | grep -q online" 60 || exit 1
+pct restart 155
+
 # Check spec decode acceptance rate
-pct exec 151 -- journalctl -u llama-server -n 100 --no-pager | grep -i acceptance | tail -5
+pct exec 151 -- journalctl -u llamacpp-chat -n 100 --no-pager | grep -i acceptance | tail -5
+# (unit name is llamacpp-chat after the Phase 5 expansion; pre-expansion it was llama-server)
 ```
 
 ### File / data inventory
@@ -3365,7 +4015,7 @@ These are issues identified during architectural verification that may affect de
 **1. NF-A8 PWM airflow may be marginal under sustained V620 load** *(severity downgraded after Lancool 217 case selection)*.
 - Spec: 32.67 CFM, 2.37 mm H₂O static pressure at full 12V (2200 RPM) for each NF-A8.
 - The NF-A8s push air *through* the V620 heatsink, but they need cool air *supplied* to them. With the Lancool 217's combination of high-volume intake (2× 170mm front at 142 CFM each in "GPU mode" lower position) and direct undercurrent (2× 120mm reverse-blade on the PSU shroud aimed up at the GPU stack), the NF-A8s receive abundant cool supply air.
-- **Risk:** Reduced but not eliminated. Under prolonged maximum-power inference (both V620s at full 225W TDP + RTX 3060 at 170W = ~620W of GPU heat sustained for 30+ minutes), the NF-A8 may still be the limiting factor pushing air through the V620 heatsink fin density.
+- **Risk:** Reduced but not eliminated. Under prolonged maximum-power inference (both V620s at full 225W sustained ≈ 450W of GPU heat for 30+ minutes; spec TDP is 300W per card but measured draw on this generation is closer to 225W under llama.cpp-style workloads), the NF-A8 may still be the limiting factor pushing air through the V620 heatsink fin density.
 - **Mitigation A (preferred):** Monitor V620 edge/junction temperatures via `rocm-smi --showtemp` during sustained load. If junction temp exceeds 95°C, throttle GPU clocks: `rocm-smi -d 0 --setperflevel low` or set a lower power cap with `rocm-smi -d 0 --setpoweroverdrive 175` (caps at 175W instead of 225W).
 - **Mitigation B:** Replace NF-A8 with a higher-airflow 80mm fan (Noctua NF-R8 redux-1800 PWM is 31.4 CFM; or a server-grade Delta AFB0812SH at ~52 CFM with notable noise increase).
 - **Mitigation C (built-in):** The Lancool 217's case airflow design (front 170mm intake + bottom-shroud 120mm reverse-blade aimed up at GPU stack) directly addresses the upstream supply of cool air to the V620 NF-A8s. This was not available with the originally specified Define 7 XL.
@@ -3374,7 +4024,7 @@ These are issues identified during architectural verification that may affect de
 - Multiple users on Proxmox forums report the AQC113 link going down after kernel upgrades (working on 6.8.4-2, broken on 6.8.4-4+, intermittent on 6.14.x).
 - **Risk:** Primary uplink fails after a kernel update, leaving the node accessible only via the 2.5GbE Realtek port (or not at all if you only configured the 10GbE port).
 - **Mitigation A:** Always configure both NICs in `/etc/network/interfaces` from day one — bridge the 10GbE as `vmbr0` and the 2.5GbE as `vmbr1`, with the 2.5GbE as a backup default route at higher metric. If 10GbE fails, the 2.5GbE stays online.
-- **Mitigation B:** Pin the kernel version (which we already do for NVIDIA reasons — 6.14) and don't auto-upgrade.
+- **Mitigation B:** Pin the kernel version to a known-good release and disable auto-upgrade for `proxmox-kernel-*` packages. (Note: kernel 6.14 pinning was previously documented here for NVIDIA DKMS reasons; with NVIDIA removed in the V620-only pivot, pinning is now an OPTIONAL defensive measure against AQC113 regressions, not a required NVIDIA workaround.)
 - **Mitigation C:** If the 10GbE never works on PVE 9.x, fall back to a known-good 10GbE PCIe NIC (Intel X550-T2, X710, or Mellanox ConnectX-4) in the chipset PCIe 4.0 x4 slot.
 
 **3. Phantom Spirit 120 EVO is overkill for a 65W Ryzen 7600.**
@@ -3399,12 +4049,13 @@ These are issues identified during architectural verification that may affect de
 - Multiple guides (kextcache.com, Strix Halo Proxmox guide) recommend **privileged** containers for ROCm reliability, citing the KFD driver handshake.
 - This runbook starts with unprivileged + `apparmor.profile: unconfined` for better isolation.
 - **Risk:** `rocm-smi` returns errors, llama.cpp HIP backend fails to initialize, or sustained workloads cause KFD crashes.
-- **Mitigation:** Switch the V620 LXC (151) to privileged mode if issues occur. Edit `/etc/pve/lxc/151.conf`, change `unprivileged: 1` to `unprivileged: 0`, and remove the `lxc.apparmor.profile: unconfined` line. Restart. The 3060 LXC (152) and Docker LXCs (154/155) can stay unprivileged.
+- **Mitigation:** Switch the V620 LXC (151) to privileged mode if issues occur. Edit `/etc/pve/lxc/151.conf`, change `unprivileged: 1` to `unprivileged: 0`, and remove the `lxc.apparmor.profile: unconfined` line. Restart. The Docker LXCs (154 AnythingLLM, 155 MCP) can stay unprivileged — only the GPU-passthrough LXC has the KFD-handshake risk.
 
 **7. Marvell AQC113 atlantic driver may break on kernel 6.17+.**
-- We pin to 6.14 for NVIDIA driver compatibility, which also keeps us on a kernel where AQC113 is more reliably supported.
-- **Risk:** When NVIDIA eventually supports 6.17 and we unpin, the AQC113 may regress.
-- **Mitigation:** Test 10GbE link state immediately after any kernel upgrade. Have the 2.5GbE fallback configured.
+- With the V620-only pivot, kernel pinning is no longer mandatory (no NVIDIA DKMS dependency). The default PVE 9.1 kernel is 6.17. AQC113 may exhibit driver regressions on 6.17+.
+- **Risk:** 10 GbE link drops after a kernel upgrade.
+- **Mitigation A:** Configure both NICs (10 GbE primary + 2.5 GbE backup) from day one so a link failure doesn't lock you out.
+- **Mitigation B:** Optionally pin to a known-good kernel (e.g., 6.14) as a defensive measure — see Risk #2 Mitigation B above. This is a tradeoff: pinned kernels accumulate security debt over time. Default recommendation is to stay on the latest PVE kernel and test 10 GbE link state immediately after any upgrade; roll back via `proxmox-boot-tool kernel pin` if regressed.
 
 **8. Speculative decoding on a MoE target (35B-A3B) may have lower acceptance rates than expected.**
 - Speculative decoding healthy acceptance rate for dense pairs is 0.57-0.70.

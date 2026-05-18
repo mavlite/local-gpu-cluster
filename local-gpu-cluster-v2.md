@@ -1,19 +1,25 @@
 # Local GPU Cluster v2 — Technical Reference
 
-**ASUS ProArt X870E-Creator · Ryzen 7600 · 2× AMD V620 32 GB + 1× NVIDIA RTX 3060 12 GB · Proxmox VE 9.x · llama.cpp · AnythingLLM · MCP**
+**ASUS ProArt X870E-Creator · Ryzen 7600 · 2× AMD V620 32 GB · Proxmox VE 9.x · llama.cpp · AnythingLLM · MCP**
 
 ![Platform](https://img.shields.io/badge/platform-Proxmox%20VE%209-informational)
 ![Hypervisor](https://img.shields.io/badge/containers-LXC%20%2B%20Docker-blue)
 ![GPU-AMD](https://img.shields.io/badge/GPU-2%C3%97%20V620%2032GB-red)
-![GPU-NV](https://img.shields.io/badge/GPU-1%C3%97%20RTX%203060%2012GB-76b900)
 ![Runtime](https://img.shields.io/badge/runtime-llama.cpp-000000)
 ![Models](https://img.shields.io/badge/models-Qwen%203.5%20family-blue)
 ![RAG](https://img.shields.io/badge/RAG-AnythingLLM%20%2B%20LanceDB-0a6cf5)
 ![SpecDecode](https://img.shields.io/badge/feature-speculative%20decoding-orange)
-![Revision](https://img.shields.io/badge/revision-1-lightgrey)
+![Revision](https://img.shields.io/badge/revision-2-lightgrey)
 ![License](https://img.shields.io/badge/license-CC%20BY--SA%204.0-yellow)
 
-End-to-end build of the second-generation local LLM cluster. Replaces the v1 setup (Dell T7910 + 3× RTX 3060) with a purpose-built workstation: ASUS ProArt X870E-Creator, Ryzen 7600, 64 GB pooled VRAM across two AMD V620 server cards, and a 3060 acting as **assistive infrastructure** for the V620 cluster — running the speculative-decoding draft model, the embedder, and the reranker.
+> ### ⚠️ V620-only pivot in effect
+> This v2 reference originally described "2× V620 + 1× RTX 3060" with the 3060 acting as a separate workload-isolation tier (embedder + reranker + a small "fast" chat model on its own LXC). The 3060 has been removed. The cluster now runs **everything on the two V620s** as additional `llama-server` processes pinned per-card via `--main-gpu`. See §1.3 for the rationale.
+>
+> Sections in this document that still describe the pre-pivot 3060 LXC, FAST_URL routing, or NVIDIA-specific setup are being progressively rewritten. For the **canonical, V620-only operational configuration** — including systemd unit files, API key generation, monitoring, backup, Phase 6 cutover procedure, and Phase 11.4 acceptance verification suite — refer to [`setup-runbook.md`](./setup-runbook.md), which is fully V620-only-clean through Phase 11.
+>
+> Tracking: `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md`. This v2 doc's full inline rewrite is todo #16 (substantial work; the runbook is the authoritative source until the rewrite lands).
+
+End-to-end build of the second-generation local LLM cluster. Replaces the v1 setup (Dell T7910 + 3× RTX 3060) with a purpose-built workstation: ASUS ProArt X870E-Creator, Ryzen 7600, 64 GB pooled VRAM across two AMD V620 server cards. With the V620-only pivot, all inference (chat + embedder + reranker) runs on the V620 pool — there is no longer a separate NVIDIA tier.
 
 The big architectural shifts vs. v1: Proxmox VE host with one LXC per service (replacing bare-metal Ubuntu), llama.cpp replacing Ollama for performance and speculative-decoding support, and a request-aware router replacing the dual-port no-think proxy.
 
@@ -25,7 +31,7 @@ The big architectural shifts vs. v1: Proxmox VE host with one LXC per service (r
 
 - [1. Hardware](#1-hardware)
   * [1.1 Host: ASUS ProArt X870E-Creator + Ryzen 7600](#11-host-asus-proart-x870e-creator--ryzen-7600)
-  * [1.2 GPUs: 2× AMD Radeon Pro V620 + 1× NVIDIA RTX 3060](#12-gpus-2-amd-radeon-pro-v620--1-nvidia-rtx-3060)
+  * [1.2 GPUs: 2× AMD Radeon Pro V620](#12-gpus-2-amd-radeon-pro-v620--1-nvidia-rtx-3060)
   * [1.3 Why this GPU mix](#13-why-this-gpu-mix)
   * [1.4 V620 active cooling: shroud kit + 80 mm fans + 12 V Molex](#14-v620-active-cooling-shroud-kit--80-mm-fans--12-v-molex)
   * [1.5 GPU support brackets](#15-gpu-support-brackets)
@@ -108,32 +114,38 @@ The ProArt X870E-Creator is the right board choice for this build for three spec
 
 The 7600 is intentionally a lightweight CPU. For LLM inference, the CPU is just a coordinator — the GPUs do the work — and the 65 W chip lets the Phantom Spirit cooler run nearly silent. If the host is later repurposed as a daily driver where CPU compute matters, swap to a 7950X (170 W TDP) and step the cooler up to a 360 mm AIO.
 
-### 1.2 GPUs: 2× AMD Radeon Pro V620 + 1× NVIDIA RTX 3060
+### 1.2 GPUs: 2× AMD Radeon Pro V620
 
-| Spec | V620 | 3060 |
-| --- | --- | --- |
-| Architecture | RDNA 2 (Navi 21, `gfx1030`) | Ampere (GA106, `sm_86`) |
-| VRAM | 32 GB GDDR6 | 12 GB GDDR6 |
-| Memory bandwidth | 512 GB/s | 360 GB/s |
-| FP16 compute | ~38 TFLOPS | ~12.7 TFLOPS |
-| TDP | 300 W (passive — needs forced air) | 170 W |
-| Form factor | Dual-slot, full-height, **passive** (server card) | Dual-slot, axial fan |
-| PCIe | 4.0 x16 → operates at 4.0 x8 (CPU slots 1+2) or x4 (chipset slot 3) on this board |
-| Pool | **64 GB** combined across the two V620s | Standalone |
+| Spec | V620 |
+| --- | --- |
+| Architecture | RDNA 2 (Navi 21, `gfx1030`) |
+| VRAM | 32 GB GDDR6 |
+| Memory bandwidth | 512 GB/s |
+| FP16 compute | ~38 TFLOPS |
+| TDP | 300 W (passive — needs forced air); measured sustained ~225 W under llama.cpp workloads |
+| Form factor | Dual-slot, full-height, **passive** (server card) |
+| PCIe | 4.0 x16 → operates at 4.0 x8 on this board's CPU-attached slots (PCIE_1 + PCIE_2) |
+| Pool | **64 GB** combined across the two V620s |
 
-The V620 is AMD's professional inference card based on the same Navi 21 silicon as the 6900 XT but configured for high-density server deployments — passive cooling, ECC GDDR6 (configurable), full-height dual-slot. ROCm 6.x officially supports it (`gfx1030` target). The 3060 is unchanged from v1 — a known-good Ampere card with mature CUDA support.
+The V620 is AMD's professional inference card based on the same Navi 21 silicon as the 6900 XT but configured for high-density server deployments — passive cooling, ECC GDDR6 (configurable), full-height dual-slot. ROCm 6.x and 7.x officially support it (`gfx1030` target).
 
-### 1.3 Why this GPU mix
+### 1.3 Why this GPU mix (V620-only)
 
-Two design decisions drove this configuration:
+**Why V620s for primary inference.** The previous v1 setup pooled 36 GB across three 3060s and was VRAM-limited — large models at high context filled the pool with no headroom for concurrent requests. Two V620s pool 64 GB, nearly double, while reducing card count from three to two — fewer slots, fewer power connectors, fewer thermal hot-spots. The V620's higher FP16 throughput and 512 GB/s bandwidth (vs. 360 GB/s on the 3060) helps with the Qwen 3.5 35B target model.
 
-**Why V620s for primary inference.** The previous setup pooled 36 GB across three 3060s and was VRAM-limited at the high end — large models at high context filled the pool with no headroom for concurrent requests (see v1 §3.6). Stepping up to two V620s nearly doubles pooled VRAM to 64 GB while reducing card count from three to two — fewer slots, fewer power connectors, fewer thermal hot-spots. The V620's higher FP16 throughput and 512 GB/s bandwidth (vs. 360 GB/s on the 3060) also help with the Qwen 3.5 35B target model.
+**Why no NVIDIA tier.** Earlier revisions of this document described a "2× V620 + 1× RTX 3060" hybrid where the 3060 ran the embedder + reranker + a small fast-chat model as a workload-isolation tier. **That tier has been removed.** All embedding, reranking, and chat now run as separate `llama-server` processes inside a single V620 LXC, with per-card pinning via `--main-gpu`:
 
-**Why keep a 3060 instead of a third V620.** Two reasons. First, V620s require active cooling that isn't built into the card — adding a third means another shroud, another fan, another 300 W of heat. Second, dedicating the 3060 to **embedding and reranking workloads** isolates them from the V620 chat pool. RAG ingestion (5,000-document re-embeds) never queues behind interactive chat traffic, and the embedder + reranker have low VRAM requirements that leave the 3060 with substantial headroom for ad-hoc workloads (Whisper transcription, small vision models, etc.).
+- **Chat** (Qwen 3.5 35B-A3B + 0.8B draft for spec decode): tensor-split across both V620s (`--tensor-split 1,1`).
+- **Embedder** (Qwen3-Embedding-0.6B Q8_0): pinned to V620 #1 via `--main-gpu 0` and `HIP_VISIBLE_DEVICES=0`. Uses `--pooling last` (Qwen3-Embedding uses the final `<|endoftext|>` token; `cls` produces wrong embeddings).
+- **Reranker** (BGE Reranker v2-m3 OR Qwen3-Reranker-0.6B): pinned to V620 #2 via `--main-gpu 1` and `HIP_VISIBLE_DEVICES=1`. Uses `--embeddings --pooling rank --reranking`.
 
-The 3060 effectively becomes "infrastructure GPU" for the V620 cluster — a workload-isolation tier rather than a competitor for the same workloads.
+VRAM budget (steady state, 128K chat context, q8_0 KV, `--parallel 4`): chat 22 GB weights + 10–14 GB slot KV split across cards + draft 2.1 GB + embedder 1.2 GB on card #1 + reranker 1.5 GB on card #2 ≈ **37–41 GB used of the 64 GB pool**. Per-card ≈ 17–19 GB. ~25 GB headroom for parallel sequences and bulk-embed bursts.
 
-> **Note on speculative decoding architecture:** llama.cpp's speculative decoding requires both target and draft models in the **same** `llama-server` process (via `-md` / `--model-draft` flag) — they cannot communicate across LXCs or over the network. The corrected architecture loads both Qwen 3.5 35B (target, ~22 GB) and Qwen 3.5 0.8B (draft, ~600 MB) into the V620 LXC together. The 0.8B draft is small enough to coexist with the 35B target in the V620 VRAM pool without measurable cost.
+**Trade-off accepted.** The 3060 used to isolate bulk RAG ingest from interactive chat at the hardware level. With the V620-only topology, that isolation moves up the stack to the router (LXC 153): `asyncio.Semaphore`-based admission control, per-IP rate limiting via `slowapi`, fail-open SSE on upstream 5xx, and a priority lane that throttles bulk embed when chat has in-flight requests. A 5K-document re-embed will briefly contend with chat for compute (~15–25 minutes total wall-clock on V620 with `--parallel 8`, vs the prior 30–60 minutes on the 3060). For typical workloads where bulk ingest is rare, this is the right trade.
+
+**Future expansion.** PCIE_3 (bottom slot, PCIe 4.0 x4 from chipset) is now empty. Prioritized future-use options: 10 GbE NIC for cluster federation (Intel X710), HBA if `/tank` outgrows two NVMes (LSI 9300-8i), PCIe audio capture for a future Whisper LXC, or an OCuLink adapter for an external GPU. Adding a third V620 is power-feasible (~340 W headroom at 80% derate of the 1200 W PSU; matches the user's memory note that 3060s drew ~120 W measured vs 170 W spec → V620s similarly under-draw vs 300 W TDP), but slot count and cooling are the constraints, not power.
+
+> **Note on speculative decoding architecture:** llama.cpp's speculative decoding requires both target and draft models in the **same** `llama-server` process (via `-md` / `--model-draft` flag) — they cannot communicate across LXCs or over the network. The architecture loads both Qwen 3.5 35B (target, ~22 GB) and Qwen 3.5 0.8B (draft, ~600 MB) into the V620 chat process together. The 0.8B draft is small enough to coexist with the 35B target in the V620 VRAM pool without measurable cost.
 
 ### 1.4 V620 active cooling: shroud kit + 80 mm fans + 12 V Molex
 
@@ -163,7 +175,7 @@ This gives you V620-temperature-driven control for the entire fan ecosystem: idl
 
 ### 1.5 GPU support brackets
 
-V620 cards with the shroud installed weigh ~1.4–1.6 kg each. Three heavy GPUs in a vertical-tower orientation create real cantilever stress on the PCIe slots over time. The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray — useful for the top GPU (V620 #1 in PCIE_1). For the remaining two GPUs (V620 #2 and the RTX 3060), three **upHere G205** GPU brace supports (~$10 each, anodized aerospace aluminum, height-adjustable jack-stand design, supports single or dual-slot cards) sit on the PSU shroud floor and prop up the far end of each card. Using all three G205s (one per GPU) plus the case's built-in bracket gives redundant support for the heaviest cards and consistent fitment across all three. The G205 has a magnetic + rubber-pad base so it doesn't require screws into the PSU shroud, and adjusts via a telescopic screw to dial in exact height per card.
+V620 cards with the shroud installed weigh ~1.4–1.6 kg each. Two heavy GPUs in a vertical-tower orientation still create real cantilever stress on the PCIe slots over time. The Lancool 217 includes a built-in adjustable GPU support bracket on the motherboard tray — useful for the top GPU (V620 #1 in PCIE_1). For the second V620 (PCIE_2) and as redundant support for the top card, two **upHere G205** GPU brace supports (~$10 each, anodized aerospace aluminum, height-adjustable jack-stand design, supports single or dual-slot cards) sit on the PSU shroud floor and prop up the far end of each card. Using 2× G205 + the built-in bracket gives redundant support for the heaviest card and consistent fitment for the second. The G205 has a magnetic + rubber-pad base so it doesn't require screws into the PSU shroud, and adjusts via a telescopic screw to dial in exact height per card. Pre-pivot builds that ran a 3060 in PCIE_3 used a third G205 for it — no longer needed.
 
 ---
 
@@ -308,12 +320,13 @@ Reserve static DHCP leases on your router for each LXC IP so MCP/AnythingLLM end
 
 | Service | LXC name | IP |
 | --- | --- | --- |
-| llama.cpp ROCm (V620) | `llamacpp-amd` | 192.168.6.151 |
-| llama.cpp CUDA (3060) | `llamacpp-nv` | 192.168.6.152 |
-| Router | `llm-router` | 192.168.6.153 |
+| llama.cpp ROCm V620 (chat + embed + rerank, three llama-server units) | `llamacpp-amd` | 192.168.6.151 |
+| Router (auth + admission + Prometheus) | `llm-router` | 192.168.6.153 |
 | AnythingLLM | `anythingllm` | 192.168.6.154 |
 | MCP stack | `mcp-stack` | 192.168.6.155 |
-| SearXNG | `searxng` | 192.168.6.156 |
+| SearXNG (optional) | `searxng` | 192.168.6.156 |
+
+Note: LXC 152 (`llamacpp-nv`, the old 3060 LXC) was destroyed in the V620-only pivot. Pre-pivot builds had a separate NVIDIA LXC at `192.168.6.152` for embedder + reranker — that role is now served by additional `llama-server` instances inside LXC 151 (ports 8082 and 8083).
 
 ---
 
@@ -566,7 +579,7 @@ Build time is ~10 minutes on the 7600.
 
 ### 5.5 Model selection and download
 
-Per the Qwen 3.5 model family, the V620 stack runs the **35B target model**. The 0.8B draft variant goes on the 3060 (§6.4).
+Per the Qwen 3.5 model family, the V620 stack runs the **35B target model + 0.8B draft** in the same `llama-server` process for speculative decoding (`--model-draft`). Pre-pivot designs ran the draft on a separate 3060 LXC, but llama.cpp's spec-decode requires both models in the same process — the in-process design is the only correct architecture and is documented in `setup-runbook.md` Phase 5.
 
 Model | Size | Quant | Context | Use
 --- | --- | --- | --- | ---
@@ -1569,9 +1582,9 @@ sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
 
 | LXC | IP | Port | Service | Notes |
 | --- | --- | --- | --- | --- |
-| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | llama-server (V620, 35B target + 0.8B draft) | Speculative decoding native via `-md` flag |
-| `llamacpp-nv` (152) | 192.168.6.152 | 8082 | llama-server (3060, embedder) | qwen3-embedding 0.6B |
-| `llamacpp-nv` (152) | 192.168.6.152 | 8083 | llama-server (3060, reranker) | bge-reranker-v2-m3 |
+| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | `llamacpp-chat.service` (V620 tensor-split, 35B target + 0.8B draft) | Speculative decoding native via `-md`; Bearer auth via `LLAMACPP_API_KEY` |
+| `llamacpp-amd` (151) | 192.168.6.151 | 8082 | `llamacpp-embed.service` (V620 #1 via `--main-gpu 0`) | Qwen3-Embedding-0.6B Q8_0, `--pooling last`, dim 1024 |
+| `llamacpp-amd` (151) | 192.168.6.151 | 8083 | `llamacpp-rerank.service` (V620 #2 via `--main-gpu 1`) | BGE-Reranker-v2-m3 or Qwen3-Reranker-0.6B fallback |
 | `llm-router` (153) | 192.168.6.153 | 8000 | FastAPI router | per-request strip + keepalive |
 | `anythingllm` (154) | 192.168.6.154 | 3001 | AnythingLLM | Docker |
 | `anythingllm` (154) | 192.168.6.154 | (n/a) | vcf-doc-updater | internal cron, no port |

@@ -25,7 +25,7 @@ AMD_CORES="${AMD_CORES:-8}"
 AMD_MEMORY="${AMD_MEMORY:-32768}"
 AMD_SWAP="${AMD_SWAP:-8192}"
 AMD_ROOTFS_SIZE="${AMD_ROOTFS_SIZE:-64}"
-LXC_STORAGE="${LXC_STORAGE:-local-zfs}"
+LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)
 BRIDGE="${BRIDGE:-vmbr0}"
 LXC_TEMPLATE_NAME="${LXC_TEMPLATE_NAME:-ubuntu-24.04-standard_24.04-2_amd64.tar.zst}"
 LXC_TEMPLATE_STORAGE="${LXC_TEMPLATE_STORAGE:-local}"
@@ -34,23 +34,43 @@ AMD_GPU_TARGET="${AMD_GPU_TARGET:-gfx1030}"
 ROCM_RELEASE="${ROCM_RELEASE:-latest}"
 
 # ---------- llama-server tunables (overridable via config.env) ----------
-# Hardware: 2x V620 = 64 GB VRAM total. Model ~22 GB + KV cache fits 256K @ q8_0.
+# V620-only build: 2x V620 = 64 GB VRAM total. Chat unit ~22 GB weights + draft + KV cache.
+# Verified model availability on HF (2026-05-17):
+#   unsloth/Qwen3.6-35B-A3B-GGUF                Q file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (~22 GB)
+#   unsloth/Qwen3-0.6B-GGUF                     Q file: Qwen3-0.6B-Q4_K_M.gguf (~400 MB)
+# Qwen3.6 reuses Qwen3 tokenizer/vocab → Qwen3-0.6B is a vocab-compatible draft for the 35B target.
 LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3.6-35B-A3B-GGUF}"
-LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q4_K_M}"
-LLAMA_ALIAS="${LLAMA_ALIAS:-qwen3.6-coder}"
-LLAMA_CTX="${LLAMA_CTX:-262144}"             # 256K native; set 131072 for 128K
-LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"       # q8_0 ~16GB @ 128K, ~32GB @ 256K. Use q4_0 to halve.
-LLAMA_PARALLEL="${LLAMA_PARALLEL:-2}"        # concurrent slots (each gets ctx-size/parallel tokens)
-LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1}"  # even split across both V620s
+LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q4_K_M}"      # Unsloth Dynamic Q4_K_M (slightly better than vanilla at same size)
+LLAMA_ALIAS="${LLAMA_ALIAS:-rag-qwen3.6}"          # matches AnythingLLM ALLM_LLM_MODEL
+LLAMA_CTX="${LLAMA_CTX:-131072}"                   # 128K; AnythingLLM ALLM_LLM_TOKEN_LIMIT must equal this
+LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~10-14GB @ 128K with --parallel 4
+LLAMA_PARALLEL="${LLAMA_PARALLEL:-4}"              # 4 concurrent slots (was 2 pre-pivot)
+LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-1024}"     # prompt-prefix reuse window for RAG system prompts
+LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1}"
 LLAMA_THREADS="${LLAMA_THREADS:-8}"
+LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
-# Speculative decoding: draft model runs in same HIP process as target.
-# Qwen3-0.6B shares the Qwen3 tokenizer family — should be vocab-compatible.
-# Set LLAMA_DRAFT_REPO="" to disable spec decode.
+# Speculative decoding (in-process draft on the V620 chat unit).
+# Qwen3.6 small variants don't exist on HF; Qwen3-0.6B is tokenizer-compatible.
 LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-unsloth/Qwen3-0.6B-GGUF}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
 LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
 LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
+
+# ---------- Embedder unit (V620 #1) ----------
+EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
+EMBED_HF_QUANT="${EMBED_HF_QUANT:-Q8_0}"
+EMBED_ALIAS="${EMBED_ALIAS:-qwen3-embed}"
+EMBED_CTX="${EMBED_CTX:-8192}"
+EMBED_PARALLEL="${EMBED_PARALLEL:-8}"
+EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
+
+# ---------- Reranker unit (V620 #2) ----------
+RERANK_HF_REPO="${RERANK_HF_REPO:-Qwen/Qwen3-Reranker-0.6B-GGUF}"
+RERANK_HF_QUANT="${RERANK_HF_QUANT:-Q8_0}"
+RERANK_ALIAS="${RERANK_ALIAS:-bge-rerank}"
+RERANK_CTX="${RERANK_CTX:-8192}"
+RERANK_PARALLEL="${RERANK_PARALLEL:-4}"
 
 # ----------------------------------------------------------------------------
 # 5.1 — Create LXC
@@ -84,16 +104,29 @@ phase_5_2_passthrough() {
   local render_gid video_gid
   render_gid="$(getent group render | cut -d: -f3 || true)"
   video_gid="$(getent group video  | cut -d: -f3 || true)"
-  [[ -n "$render_gid" ]] || die "Host has no 'render' group. Install firmware-amd-graphics and reboot."
+  [[ -n "$render_gid" ]] || die "Host has no 'render' group. Ensure pve-firmware is installed and amdgpu is loaded, then reboot."
   log "render_gid=$render_gid  video_gid=$video_gid"
 
-  # Detect render nodes for V620s — runbook says renderD128, renderD129.
-  # We pass through whichever first two render nodes are AMD by checking /sys.
+  # The host has THREE GPUs bound to amdgpu: 2× V620 plus the Ryzen 7600's integrated
+  # Raphael iGPU. Each gets a render node under /dev/dri/. We need to pass ONLY the
+  # V620 render nodes to LXC 151 — pass-through the iGPU's node would be wrong.
+  #
+  # Map render nodes → PCI addresses, then keep only the V620 ones (device 1002:73a1).
   local amd_renders=()
-  for r in /dev/dri/renderD128 /dev/dri/renderD129; do
-    [[ -e "$r" ]] && amd_renders+=("$r")
+  for r in /dev/dri/renderD*; do
+    [[ -e "$r" ]] || continue
+    local pci_addr device_id
+    pci_addr="$(basename "$(readlink -f "/sys/class/drm/$(basename "$r")/device" 2>/dev/null)" 2>/dev/null)"
+    [[ -n "$pci_addr" ]] || continue
+    device_id="$(lspci -nn -s "$pci_addr" 2>/dev/null | grep -oE '\[1002:73a1\]' || true)"
+    if [[ -n "$device_id" ]]; then
+      amd_renders+=("$r")
+      log "V620 render node: $r → $pci_addr"
+    else
+      log "Skipping non-V620 render node: $r → $pci_addr"
+    fi
   done
-  [[ ${#amd_renders[@]} -ge 2 ]] || warn "Expected 2 AMD render nodes; found ${#amd_renders[@]}. Continuing with what we have."
+  [[ ${#amd_renders[@]} -eq 2 ]] || die "Expected exactly 2 V620 render nodes (PCI ID 1002:73a1); found ${#amd_renders[@]}. Check 'lspci -nn | grep 73a1' and 'ls /dev/dri/' on the host."
 
   # Use pct_set_if_changed so re-runs don't churn a running LXC.
   pct_set_if_changed "$AMD_VMID" mp0 "$MODELS_DIR,mp=/opt/models,ro=1"
@@ -199,11 +232,42 @@ GUEST
 # ----------------------------------------------------------------------------
 # 5.11 — Install production systemd unit
 # ----------------------------------------------------------------------------
-phase_5_11_systemd() {
-  step "5.11 — Install llama-server systemd unit"
+phase_5_11_1_api_key() {
+  step "5.11.1 — Generate LLAMACPP_API_KEY on LXC $AMD_VMID"
+  pct exec "$AMD_VMID" -- bash -se <<'GUEST'
+    set -Eeuo pipefail
+    mkdir -p /etc
+    if ! grep -q "^LLAMACPP_API_KEY=" /etc/llamacpp.env 2>/dev/null; then
+      apt install -y openssl >/dev/null 2>&1 || true
+      echo "LLAMACPP_API_KEY=$(openssl rand -hex 32)" >> /etc/llamacpp.env
+    fi
+    chmod 600 /etc/llamacpp.env
+    chown root:root /etc/llamacpp.env
+GUEST
+  ok "LLAMACPP_API_KEY persisted to /etc/llamacpp.env (mode 600)"
+}
 
-  # Build the optional draft / spec-decode flag block on the host so we can
-  # inject conditional `--hf-repo-draft ...` lines without bash-in-heredoc hell.
+phase_5_11_2_warmup() {
+  step "5.11.2 — Install warm-chat.sh ExecStartPost helper"
+  pct exec "$AMD_VMID" -- bash -se <<'GUEST'
+    set -Eeuo pipefail
+    cat > /usr/local/bin/warm-chat.sh <<'EOF'
+#!/bin/bash
+# Warm-up the chat unit after startup so the first user request doesn't pay cold-start.
+sleep 5
+. /etc/llamacpp.env
+curl -s -m 30 http://localhost:8080/v1/chat/completions \
+    -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+    > /dev/null
+EOF
+    chmod +x /usr/local/bin/warm-chat.sh
+GUEST
+}
+
+phase_5_11_3_chat_unit() {
+  step "5.11.3 — Install llamacpp-chat.service (V620 tensor-split)"
   local draft_lines=""
   if [[ -n "$LLAMA_DRAFT_REPO" ]]; then
     draft_lines="    --hf-repo-draft ${LLAMA_DRAFT_REPO}:${LLAMA_DRAFT_QUANT} \\
@@ -212,7 +276,6 @@ phase_5_11_systemd() {
     --spec-draft-n-min ${LLAMA_SPEC_NMIN} \\"
   fi
 
-  # Pass tunables through to the heredoc as env vars.
   pct exec "$AMD_VMID" -- env \
     "LLAMA_HF_REPO=$LLAMA_HF_REPO" \
     "LLAMA_HF_QUANT=$LLAMA_HF_QUANT" \
@@ -220,14 +283,23 @@ phase_5_11_systemd() {
     "LLAMA_CTX=$LLAMA_CTX" \
     "LLAMA_KV_TYPE=$LLAMA_KV_TYPE" \
     "LLAMA_PARALLEL=$LLAMA_PARALLEL" \
+    "LLAMA_CACHE_REUSE=$LLAMA_CACHE_REUSE" \
     "LLAMA_TENSOR_SPLIT=$LLAMA_TENSOR_SPLIT" \
     "LLAMA_THREADS=$LLAMA_THREADS" \
+    "LLAMA_FLASH_ATTN=$LLAMA_FLASH_ATTN" \
     "DRAFT_LINES=$draft_lines" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
-    cat > /etc/systemd/system/llama-server.service <<EOF
+    # Remove the pre-pivot unit name if present (clean migration)
+    if [ -f /etc/systemd/system/llama-server.service ]; then
+      systemctl stop llama-server 2>/dev/null || true
+      systemctl disable llama-server 2>/dev/null || true
+      rm -f /etc/systemd/system/llama-server.service
+    fi
+
+    cat > /etc/systemd/system/llamacpp-chat.service <<EOF
 [Unit]
-Description=llama.cpp server (V620 ROCm) — ${LLAMA_HF_REPO}:${LLAMA_HF_QUANT} @ ${LLAMA_CTX} ctx
+Description=llama.cpp chat (V620 ROCm tensor-split — ${LLAMA_HF_REPO}:${LLAMA_HF_QUANT} + draft)
 After=network-online.target
 Wants=network-online.target
 
@@ -235,48 +307,192 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/opt/llama.cpp
-# V620 = gfx1030. HSA override pins LLVM target. UMA off forces dedicated VRAM use.
+EnvironmentFile=/etc/llamacpp.env
 Environment="HIP_VISIBLE_DEVICES=0,1"
 Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+Environment="GPU_MAX_HW_QUEUES=2"
 Environment="GGML_HIP_UMA=0"
 Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --hf-repo ${LLAMA_HF_REPO}:${LLAMA_HF_QUANT} \\
     --alias ${LLAMA_ALIAS} \\
-    --host 0.0.0.0 \\
-    --port 8080 \\
+    --host 0.0.0.0 --port 8080 \\
+    --api-key \${LLAMACPP_API_KEY} \\
     --ctx-size ${LLAMA_CTX} \\
     --n-gpu-layers all \\
     --tensor-split ${LLAMA_TENSOR_SPLIT} \\
     --threads ${LLAMA_THREADS} \\
-    --batch-size 2048 \\
-    --ubatch-size 512 \\
-    --cache-type-k ${LLAMA_KV_TYPE} \\
-    --cache-type-v ${LLAMA_KV_TYPE} \\
+    --batch-size 2048 --ubatch-size 512 \\
+    --cache-type-k ${LLAMA_KV_TYPE} --cache-type-v ${LLAMA_KV_TYPE} \\
     --cont-batching \\
     --parallel ${LLAMA_PARALLEL} \\
+    --cache-reuse ${LLAMA_CACHE_REUSE} \\
 ${DRAFT_LINES}
-    --flash-attn auto \\
+    --flash-attn ${LLAMA_FLASH_ATTN} \\
     --reasoning-format deepseek \\
     --jinja \\
     --mlock \\
+    --log-prefix \\
     --metrics
+ExecStartPost=/usr/local/bin/warm-chat.sh
 Restart=on-failure
 RestartSec=10
-# Allow ample time for first-time HF download (~22 GB) and model load.
 TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
     mkdir -p /opt/models/.cache
     systemctl daemon-reload
-    systemctl enable llama-server
+    systemctl enable llamacpp-chat
 GUEST
-  warn "llama-server is enabled but not started — first start downloads ~22 GB."
-  warn "Start manually when ready: pct exec $AMD_VMID -- systemctl start llama-server"
-  warn "Tail logs:               pct exec $AMD_VMID -- journalctl -u llama-server -f"
+  ok "llamacpp-chat.service installed (enabled, not started — first start downloads model)"
+}
+
+phase_5_11_4_embed_unit() {
+  step "5.11.4 — Install llamacpp-embed.service (V620 #1, --pooling last)"
+  pct exec "$AMD_VMID" -- env \
+    "EMBED_HF_REPO=$EMBED_HF_REPO" \
+    "EMBED_HF_QUANT=$EMBED_HF_QUANT" \
+    "EMBED_ALIAS=$EMBED_ALIAS" \
+    "EMBED_CTX=$EMBED_CTX" \
+    "EMBED_PARALLEL=$EMBED_PARALLEL" \
+    "EMBED_POOLING=$EMBED_POOLING" \
+    bash -se <<'GUEST'
+    set -Eeuo pipefail
+    cat > /etc/systemd/system/llamacpp-embed.service <<EOF
+[Unit]
+Description=llama.cpp embedder (V620 #1 — ${EMBED_HF_REPO}:${EMBED_HF_QUANT}, --pooling ${EMBED_POOLING})
+After=network-online.target llamacpp-chat.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+EnvironmentFile=/etc/llamacpp.env
+Environment="HIP_VISIBLE_DEVICES=0"
+Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+Environment="LLAMA_CACHE=/opt/models/.cache"
+ExecStart=/opt/llama.cpp/build/bin/llama-server \\
+    --hf-repo ${EMBED_HF_REPO}:${EMBED_HF_QUANT} \\
+    --alias ${EMBED_ALIAS} \\
+    --host 0.0.0.0 --port 8082 \\
+    --api-key \${LLAMACPP_API_KEY} \\
+    --main-gpu 0 \\
+    --n-gpu-layers all \\
+    --embeddings \\
+    --pooling ${EMBED_POOLING} \\
+    --ctx-size ${EMBED_CTX} \\
+    --cont-batching \\
+    --parallel ${EMBED_PARALLEL} \\
+    --batch-size 2048 --ubatch-size 512 \\
+    --flash-attn off \\
+    --mlock \\
+    --metrics
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable llamacpp-embed
+GUEST
+  ok "llamacpp-embed.service installed (enabled, not started)"
+}
+
+phase_5_11_5_rerank_unit() {
+  step "5.11.5 — Install llamacpp-rerank.service (V620 #2, --reranking)"
+  pct exec "$AMD_VMID" -- env \
+    "RERANK_HF_REPO=$RERANK_HF_REPO" \
+    "RERANK_HF_QUANT=$RERANK_HF_QUANT" \
+    "RERANK_ALIAS=$RERANK_ALIAS" \
+    "RERANK_CTX=$RERANK_CTX" \
+    "RERANK_PARALLEL=$RERANK_PARALLEL" \
+    bash -se <<'GUEST'
+    set -Eeuo pipefail
+    cat > /etc/systemd/system/llamacpp-rerank.service <<EOF
+[Unit]
+Description=llama.cpp reranker (V620 #2 — ${RERANK_HF_REPO}:${RERANK_HF_QUANT}, --reranking)
+After=network-online.target llamacpp-chat.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/llama.cpp
+EnvironmentFile=/etc/llamacpp.env
+Environment="HIP_VISIBLE_DEVICES=1"
+Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
+Environment="HIP_FORCE_DEV_KERNARG=1"
+Environment="LLAMA_CACHE=/opt/models/.cache"
+ExecStart=/opt/llama.cpp/build/bin/llama-server \\
+    --hf-repo ${RERANK_HF_REPO}:${RERANK_HF_QUANT} \\
+    --alias ${RERANK_ALIAS} \\
+    --host 0.0.0.0 --port 8083 \\
+    --api-key \${LLAMACPP_API_KEY} \\
+    --main-gpu 1 \\
+    --n-gpu-layers all \\
+    --embeddings --pooling rank \\
+    --reranking \\
+    --ctx-size ${RERANK_CTX} \\
+    --cont-batching \\
+    --parallel ${RERANK_PARALLEL} \\
+    --flash-attn off \\
+    --mlock \\
+    --metrics
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable llamacpp-rerank
+GUEST
+  ok "llamacpp-rerank.service installed (enabled, not started)"
+}
+
+phase_5_11_6_journald_ssh() {
+  step "5.11.6 — journald retention + SSH hardening"
+  pct exec "$AMD_VMID" -- bash -se <<'GUEST'
+    set -Eeuo pipefail
+    mkdir -p /etc/systemd/journald.conf.d
+    cat > /etc/systemd/journald.conf.d/retention.conf <<'EOF'
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=7day
+EOF
+    systemctl restart systemd-journald 2>/dev/null || true
+
+    # SSH hardening — disable password + root password login.
+    # Operator must push their public key to /root/.ssh/authorized_keys before this lands.
+    apt install -y openssh-server >/dev/null 2>&1 || true
+    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+GUEST
+}
+
+phase_5_11_systemd() {
+  phase_5_11_1_api_key
+  phase_5_11_2_warmup
+  phase_5_11_3_chat_unit
+  phase_5_11_4_embed_unit
+  phase_5_11_5_rerank_unit
+  phase_5_11_6_journald_ssh
+  warn "Three llama-server units installed (enabled, not started). First-start downloads:"
+  warn "  - Chat target ~22 GB"
+  warn "  - Draft ~600 MB"
+  warn "  - Embedder ~1 GB"
+  warn "  - Reranker ~1.5 GB"
+  warn "Start with: pct exec $AMD_VMID -- systemctl start llamacpp-chat llamacpp-embed llamacpp-rerank"
+  warn "Tail logs:  pct exec $AMD_VMID -- journalctl -u llamacpp-chat -f"
 }
 
 # ----------------------------------------------------------------------------
