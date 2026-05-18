@@ -129,7 +129,11 @@ phase_5_2_passthrough() {
   [[ ${#amd_renders[@]} -eq 2 ]] || die "Expected exactly 2 V620 render nodes (PCI ID 1002:73a1); found ${#amd_renders[@]}. Check 'lspci -nn | grep 73a1' and 'ls /dev/dri/' on the host."
 
   # Use pct_set_if_changed so re-runs don't churn a running LXC.
-  pct_set_if_changed "$AMD_VMID" mp0 "$MODELS_DIR,mp=/opt/models,ro=1"
+  # Bind mount is read-WRITE because llama-server uses /opt/models/.cache as the
+  # HuggingFace download target (via LLAMA_CACHE env in the chat/embed/rerank units).
+  # The model files themselves live on /tank/models on the host's ZFS mirror, so
+  # they're redundant + checksummed regardless of how the LXC accesses them.
+  pct_set_if_changed "$AMD_VMID" mp0 "$MODELS_DIR,mp=/opt/models"
   pct_set_if_changed "$AMD_VMID" dev0 "/dev/kfd,gid=$render_gid"
   local i=1
   for r in "${amd_renders[@]}"; do

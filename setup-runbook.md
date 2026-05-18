@@ -781,8 +781,12 @@ RENDER_GID=$(getent group render | cut -d: -f3)
 VIDEO_GID=$(getent group video | cut -d: -f3)
 echo "RENDER_GID=$RENDER_GID VIDEO_GID=$VIDEO_GID"
 
-# Apply mount and devices
-pct set 151 --mp0 /tank/models,mp=/opt/models,ro=1
+# Apply mount and devices. The bind mount is read-WRITE because llama-server
+# uses /opt/models/.cache as the HuggingFace download target (via LLAMA_CACHE
+# env var in the chat/embed/rerank units). Model files themselves live on
+# /tank/models on the host's ZFS mirror — redundant + checksummed regardless
+# of how the LXC reads/writes them.
+pct set 151 --mp0 /tank/models,mp=/opt/models
 pct set 151 --dev0 /dev/kfd,gid=$RENDER_GID
 pct set 151 --dev1 /dev/dri/renderD128,gid=$RENDER_GID
 pct set 151 --dev2 /dev/dri/renderD129,gid=$RENDER_GID
@@ -796,13 +800,13 @@ pct config 151 | grep -E "^(dev|mp)"
 # dev0: /dev/kfd,gid=104
 # dev1: /dev/dri/renderD128,gid=104
 # dev2: /dev/dri/renderD129,gid=104
-# mp0: /tank/models,mp=/opt/models,ro=1
+# mp0: /tank/models,mp=/opt/models
 ```
 
 **Fallback to legacy raw syntax if `dev0:` style fails** (older PVE versions, unusual hardware): edit `/etc/pve/lxc/151.conf` directly and add:
 
 ```
-mp0: /tank/models,mp=/opt/models,ro=1
+mp0: /tank/models,mp=/opt/models
 lxc.cgroup2.devices.allow: c 226:128 rwm
 lxc.cgroup2.devices.allow: c 226:129 rwm
 lxc.cgroup2.devices.allow: c 234:* rwm
