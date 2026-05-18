@@ -58,17 +58,62 @@ done
 
 apt_install_if_missing lm-sensors
 
-step "Install host fan-bridge script + service ($(echo "$FAN_PWMS" | wc -w) PWM target(s))"
+# Resolve each configured PWM path to its (chip_name, pwm_suffix) pair so the
+# bridge can find the right hwmon entry at startup even when the kernel assigns
+# a different hwmonN number after reboot. The configured paths are only used to
+# look up the chip name once, at install time.
+PAIRS=""
+for p in $FAN_PWMS; do
+  hwmon_dir="$(dirname "$p")"
+  pwm_name="$(basename "$p")"
+  chip_name="$(cat "$hwmon_dir/name" 2>/dev/null || true)"
+  [[ -n "$chip_name" ]] || die "Cannot read chip name from $hwmon_dir/name. Verify $p exists."
+  PAIRS+="$chip_name:$pwm_name "
+done
+PAIRS="${PAIRS% }"
 
-# Use printf so we can safely interpolate the host's PWM list into the script body
+step "Install host fan-bridge script + service ($(echo "$FAN_PWMS" | wc -w) PWM target(s)) [resolver pairs: $PAIRS]"
+
+# Use printf so we can safely interpolate the host's PAIRS list into the script body
 write_file_if_changed /usr/local/bin/v620-fan-bridge.sh 0755 <<EOF
 #!/bin/bash
 # v620-fan-bridge.sh — reads /var/lib/v620-temps/current-temp (published by
 # the LXC 151 publisher) and translates max V620 edge temp into a PWM duty cycle
-# applied to every PWM target listed below.
+# applied to every PWM target resolved below.
+#
+# Resolved at startup by chip name (e.g., "nct6799:pwm5") because hwmonN
+# numbering is not stable across reboots.
 
 TEMP_FILE="/var/lib/v620-temps/current-temp"
-PWMS=( $FAN_PWMS )
+PAIRS=( $PAIRS )
+
+resolve_pair() {
+    local pair="\$1"
+    local chip="\${pair%%:*}"
+    local suffix="\${pair#*:}"
+    for h in /sys/class/hwmon/hwmon*; do
+        [ "\$(cat \$h/name 2>/dev/null)" = "\$chip" ] || continue
+        echo "\$h/\$suffix"
+        return 0
+    done
+    return 1
+}
+
+PWMS=()
+for pair in "\${PAIRS[@]}"; do
+    p="\$(resolve_pair "\$pair")"
+    if [ -n "\$p" ] && [ -w "\$p" ]; then
+        PWMS+=( "\$p" )
+        echo "v620-fan-bridge: \$pair -> \$p" >&2
+    else
+        echo "v620-fan-bridge: WARNING could not resolve \$pair — skipping" >&2
+    fi
+done
+
+if [ "\${#PWMS[@]}" -eq 0 ]; then
+    echo "v620-fan-bridge: FATAL no PWMs resolved, exiting" >&2
+    exit 1
+fi
 
 # Switch every PWM to manual mode
 for p in "\${PWMS[@]}"; do
