@@ -65,8 +65,15 @@ LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
 EMBED_HF_QUANT="${EMBED_HF_QUANT:-Q8_0}"
 EMBED_ALIAS="${EMBED_ALIAS:-qwen3-embed}"
-EMBED_CTX="${EMBED_CTX:-8192}"
-EMBED_PARALLEL="${EMBED_PARALLEL:-8}"
+# IMPORTANT: llama.cpp divides --ctx-size by --parallel for per-slot context.
+# AnythingLLM's EMBEDDING_MODEL_MAX_CHUNK_LENGTH=8192 means chunks up to 8192
+# tokens can be sent. So per-slot ctx MUST be >= 8192 or embed will fail with
+# "400 request (N tokens) exceeds the available context size (M tokens)".
+# 32768 / 4 = 8192 per slot. Matches AnythingLLM's chunk cap exactly.
+# Pre-pivot value 8192 / 8 = 1024 per slot caused ~58/103 doc embed failures
+# on VCF release-notes ingestion (2026-05-18).
+EMBED_CTX="${EMBED_CTX:-32768}"
+EMBED_PARALLEL="${EMBED_PARALLEL:-4}"
 EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
 
 # ---------- Reranker unit (V620 #2) ----------
