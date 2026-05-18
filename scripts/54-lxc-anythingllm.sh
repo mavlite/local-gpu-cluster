@@ -165,6 +165,10 @@ EOF
     bash -se <<'GUEST'
     set -Eeuo pipefail
     mkdir -p /opt/anythingllm /opt/anythingllm-data/storage
+    # AnythingLLM image runs as UID 1000 (anythingllm user). Without this chown,
+    # the container crash-loops on Prisma "unable to open database file" because
+    # the storage dir is owned by container-root. Per Mintplex Docker docs.
+    chown -R 1000:1000 /opt/anythingllm-data
 
     # Pinning to :latest is OK for a personal lab; pin to a digest if you need
     # reproducible builds. The image takes ~5 min to pull on first run.
