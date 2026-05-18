@@ -97,8 +97,11 @@ allm_curl() {
 # ----------------------------------------------------------------------------
 workspace_exists() {
   local slug="$1"
+  # AnythingLLM returns {"workspace": []} when not found, or
+  # {"workspace": [{..., "slug": "<slug>", ...}]} when found. The old check
+  # just grepped for the literal '"workspace"' which matched the empty case too.
   allm_curl GET "/workspace/$slug" 2>/dev/null \
-    | grep -q '"workspace"'
+    | grep -qE '"slug"[[:space:]]*:[[:space:]]*"'"$slug"'"'
 }
 
 create_workspace() {
