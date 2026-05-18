@@ -66,13 +66,15 @@ EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
 EMBED_HF_QUANT="${EMBED_HF_QUANT:-Q8_0}"
 EMBED_ALIAS="${EMBED_ALIAS:-qwen3-embed}"
 # IMPORTANT: llama.cpp divides --ctx-size by --parallel for per-slot context.
-# AnythingLLM's EMBEDDING_MODEL_MAX_CHUNK_LENGTH=8192 means chunks up to 8192
-# tokens can be sent. So per-slot ctx MUST be >= 8192 or embed will fail with
-# "400 request (N tokens) exceeds the available context size (M tokens)".
-# 32768 / 4 = 8192 per slot. Matches AnythingLLM's chunk cap exactly.
-# Pre-pivot value 8192 / 8 = 1024 per slot caused ~58/103 doc embed failures
-# on VCF release-notes ingestion (2026-05-18).
-EMBED_CTX="${EMBED_CTX:-32768}"
+# Per-slot ctx must be >= the largest chunk AnythingLLM will send. Empirical
+# testing on the VCF release-notes corpus (2026-05-18) showed:
+#   - 8192/8=1024 per slot: ~58/103 docs failed (every chunk > 1024 tokens 400d)
+#   - 32768/4=8192 per slot: ~8/98 docs still 413'd (large overview pages)
+#   - 65536/4=16384 per slot: ~3/98 docs still 413 (pages > 16K tokens — rare)
+# 65536/4=16384 is the sweet spot: covers >97% of real-world chunks.
+# Set the router's MAX_EMBED_INPUT_TOKENS and AnythingLLM's
+# EMBEDDING_MODEL_MAX_CHUNK_LENGTH to match (both 16384).
+EMBED_CTX="${EMBED_CTX:-65536}"
 EMBED_PARALLEL="${EMBED_PARALLEL:-4}"
 EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
 
