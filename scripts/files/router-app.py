@@ -247,6 +247,16 @@ async def chat(
     stream = body.get("stream", False)
     url = f"{V620_URL}/v1/chat/completions"
 
+    # Qwen3.6 chat-template thinking-mode toggle: when the requested model alias
+    # matches rag-*, disable reasoning at the template level. Qwen3.6 emits its
+    # chain-of-thought as plain content (not wrapped in <think>...</think>) so
+    # the regex stripper can't catch it — RAG UIs end up showing the analysis
+    # AND blowing through max_tokens before the actual answer finishes.
+    # Honor the client if they explicitly set chat_template_kwargs themselves.
+    if RAG_MODEL_RE.search(body.get("model", "")):
+        ctk = body.setdefault("chat_template_kwargs", {})
+        ctk.setdefault("enable_thinking", False)
+
     # Token-budget admission control. Use /tokenize on the chat upstream.
     messages = body.get("messages", [])
     text = _approx_text_from_messages(messages)
