@@ -89,10 +89,23 @@ phase_5_1_create() {
     --rootfs "${LXC_STORAGE}:${AMD_ROOTFS_SIZE}" \
     --net0 "name=eth0,bridge=${BRIDGE},firewall=0,ip=dhcp,type=veth" \
     --features nesting=1 \
-    --unprivileged 1 \
+    --unprivileged 0 \
     --ostype ubuntu \
     --start 0
-  ok "Created LXC $AMD_VMID."
+
+  # Privileged + AppArmor=unconfined is the ONLY reliable combination for ROCm + KFD
+  # passthrough on Proxmox VE as of mid-2026. Unprivileged LXCs (even with AppArmor
+  # unconfined) hit HSA_STATUS_ERROR_OUT_OF_RESOURCES when rocminfo / llama-server
+  # tries to allocate KFD queues — the user namespace prevents the necessary thread
+  # and event resources. Trade-off: a compromise of llama-server gets host-equivalent
+  # privileges. Mitigation: this LXC has minimal Python deps + SSH key-only auth
+  # (Phase 5.11.6), and only the GPU-passthrough LXC is privileged — LXC 153 (router),
+  # 154 (AnythingLLM), 155 (MCP) all stay unprivileged.
+  if ! grep -q "^lxc.apparmor.profile:" "/etc/pve/lxc/${AMD_VMID}.conf" 2>/dev/null; then
+    echo "lxc.apparmor.profile: unconfined" >> "/etc/pve/lxc/${AMD_VMID}.conf"
+  fi
+
+  ok "Created LXC $AMD_VMID (AppArmor: unconfined for ROCm KFD access)."
 }
 
 # ----------------------------------------------------------------------------
@@ -100,6 +113,20 @@ phase_5_1_create() {
 # ----------------------------------------------------------------------------
 phase_5_2_passthrough() {
   step "5.2 — Configure GPU passthrough"
+
+  # Ensure AppArmor=unconfined on the LXC config (covers the case where the LXC
+  # was created before this script learned to set it). ROCm's KFD ioctls are
+  # blocked by the default LXC AppArmor profile.
+  if ! grep -q "^lxc.apparmor.profile: *unconfined" "/etc/pve/lxc/${AMD_VMID}.conf" 2>/dev/null; then
+    log "Adding lxc.apparmor.profile: unconfined to /etc/pve/lxc/${AMD_VMID}.conf"
+    # Remove any prior apparmor line (could be a different profile) then append.
+    sed -i '/^lxc\.apparmor\.profile:/d' "/etc/pve/lxc/${AMD_VMID}.conf"
+    echo "lxc.apparmor.profile: unconfined" >> "/etc/pve/lxc/${AMD_VMID}.conf"
+    if pct status "$AMD_VMID" 2>/dev/null | grep -q running; then
+      log "LXC is running — restart needed for AppArmor change to take effect."
+      log "  pct reboot $AMD_VMID"
+    fi
+  fi
 
   local render_gid video_gid
   render_gid="$(getent group render | cut -d: -f3 || true)"
@@ -171,7 +198,11 @@ phase_5_4_rocm() {
     set -Eeuo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt update
-    apt install -y wget gnupg2 build-essential cmake git curl
+    apt install -y wget gnupg2 build-essential cmake git curl \
+                   libssl-dev ca-certificates pkg-config
+    # libssl-dev is required for llama.cpp's --hf-repo HTTPS download. Without it,
+    # the build silently disables HTTPS and llama-server fails at first start with
+    # "HTTPS is not supported. Please rebuild with -DLLAMA_OPENSSL=ON".
 
     # Pull the latest amdgpu-install .deb. The 'latest' URL alias serves
     # the current stable; pin via ROCM_RELEASE for a specific minor (e.g. "6.4").
@@ -225,7 +256,11 @@ phase_5_6_build() {
         -DGGML_HIP=ON \
         -DGPU_TARGETS="$AMD_GPU_TARGET" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DLLAMA_CURL=ON
+        -DLLAMA_CURL=ON \
+        -DLLAMA_OPENSSL=ON \
+        -DLLAMA_BUILD_SERVER=ON \
+        -DGGML_HIP_GRAPHS=ON \
+        -DGGML_OPENMP=ON
 
     cmake --build build --config Release -j"$(nproc)"
 
@@ -258,13 +293,26 @@ phase_5_11_2_warmup() {
     cat > /usr/local/bin/warm-chat.sh <<'EOF'
 #!/bin/bash
 # Warm-up the chat unit after startup so the first user request doesn't pay cold-start.
-sleep 5
-. /etc/llamacpp.env
-curl -s -m 30 http://localhost:8080/v1/chat/completions \
-    -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
-    > /dev/null
+# Best-effort: the unit's ExecStartPost is prefixed with "-" so failure here won't
+# kill llama-server. This script polls for up to 30 minutes (covers first-time HF
+# model download of ~22 GB on slow networks), then exits 0 regardless.
+. /etc/llamacpp.env 2>/dev/null
+for attempt in $(seq 1 360); do
+    if curl -sf -m 5 -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
+        http://localhost:8080/v1/models >/dev/null 2>&1; then
+        # Server is up — fire a tiny completion to fully warm caches
+        curl -s -m 30 http://localhost:8080/v1/chat/completions \
+            -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"x","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+            > /dev/null 2>&1
+        exit 0
+    fi
+    sleep 5
+done
+# Server didn't come up in 30 min — log and exit 0 anyway (we're best-effort)
+echo "warm-chat: server didn't bind to :8080 within 30 minutes" >&2
+exit 0
 EOF
     chmod +x /usr/local/bin/warm-chat.sh
 GUEST
@@ -339,7 +387,7 @@ ${DRAFT_LINES}
     --mlock \\
     --log-prefix \\
     --metrics
-ExecStartPost=/usr/local/bin/warm-chat.sh
+ExecStartPost=-/usr/local/bin/warm-chat.sh
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=1800
@@ -565,7 +613,9 @@ main() {
   local ip; ip="$(lxc_get_ip "$AMD_VMID" || true)"
   ok "LXC $AMD_VMID ($AMD_HOSTNAME) ready at IP: ${ip:-unknown}"
   echo "  Start the model server when ready:"
-  echo "    pct exec $AMD_VMID -- systemctl start llama-server"
+  echo "    pct exec $AMD_VMID -- systemctl start llamacpp-chat llamacpp-embed llamacpp-rerank"
+  echo "  Tail download progress (first start pulls ~25 GB across the three units):"
+  echo "    pct exec $AMD_VMID -- journalctl -u llamacpp-chat -f"
 }
 
 main "$@"
