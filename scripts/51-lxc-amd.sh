@@ -70,8 +70,14 @@ EMBED_PARALLEL="${EMBED_PARALLEL:-8}"
 EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
 
 # ---------- Reranker unit (V620 #2) ----------
-RERANK_HF_REPO="${RERANK_HF_REPO:-Qwen/Qwen3-Reranker-0.6B-GGUF}"
-RERANK_HF_QUANT="${RERANK_HF_QUANT:-Q8_0}"
+# Qwen/Qwen3-Reranker-0.6B-GGUF is GATED on HF (returns HTTP 401 without an HF_TOKEN
+# and accepted license). Default to BGE Reranker v2-m3 via gpustack's ungated GGUF
+# mirror — same role, slightly different scoring distribution, no auth needed.
+# To use Qwen3-Reranker instead: accept the license at
+# https://huggingface.co/Qwen/Qwen3-Reranker-0.6B-GGUF, add HF_TOKEN=hf_... to
+# /etc/llamacpp.env on LXC 151, and override RERANK_HF_REPO in config.env.
+RERANK_HF_REPO="${RERANK_HF_REPO:-gpustack/bge-reranker-v2-m3-GGUF}"
+RERANK_HF_QUANT="${RERANK_HF_QUANT:-Q4_K_M}"
 RERANK_ALIAS="${RERANK_ALIAS:-bge-rerank}"
 RERANK_CTX="${RERANK_CTX:-8192}"
 RERANK_PARALLEL="${RERANK_PARALLEL:-4}"
