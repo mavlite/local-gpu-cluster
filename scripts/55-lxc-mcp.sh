@@ -33,9 +33,9 @@ ANYTHINGLLM_IP="${ANYTHINGLLM_IP:-192.168.6.154}"
 
 # Default MCP set from the runbook. Override in config.env (MCPS=(a b c)).
 # Note: declaring MCPS unconditionally would shadow any value from config.env,
-# so we test array length instead of `declare -p` (which sees the array as
-# already declared even when empty).
-if [[ ${#MCPS[@]:-0} -eq 0 ]]; then
+# so we test for unset-or-empty without tripping `set -u`. (${#arr[@]:-0} is
+# invalid bash — :- can't be combined with the array-length syntax.)
+if [[ -z "${MCPS+x}" ]] || (( ${#MCPS[@]} == 0 )); then
   MCPS=(anythingllm-mcp broadcom-techdocs-mcp sdg-mcp)
 fi
 
