@@ -29,7 +29,8 @@ ALLM_API_KEY="${ALLM_API_KEY:-}"
 
 # Workspaces to create/configure. Each line: slug|prompt|topN|refusal
 # Override with WORKSPACES=("slug1|prompt1|10|refusal1" ...) in config.env.
-if [[ ${#WORKSPACES[@]:-0} -eq 0 ]]; then
+# (${#arr[@]:-0} is invalid bash — :- can't be combined with array-length syntax.)
+if [[ -z "${WORKSPACES+x}" ]] || (( ${#WORKSPACES[@]} == 0 )); then
   WORKSPACES=(
     "vcf-reference|You are a technical reference assistant for VMware Cloud Foundation (VCF). Answer questions using ONLY the content retrieved from the attached VCF documentation. If the answer is not in the retrieved context, say so — do not fall back on general VMware knowledge. Cite which document each claim comes from when possible.|10|Not in the provided VCF documents."
     "sdg-documentation|You are a technical reference assistant for SDG infrastructure (Keycloak and related self-hosted tools). Answer questions using ONLY the content retrieved from the attached documentation. Each document has a source: <tool-name> field — name the originating tool when citing.|12|Not in the provided SDG documents."
