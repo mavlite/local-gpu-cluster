@@ -80,6 +80,11 @@ phase_8_1_create() {
 phase_8_2_bind_mount() {
   step "8.2 — Bind-mount $ALLM_STORAGE_MOUNT into LXC"
   mkdir -p "$ALLM_STORAGE_MOUNT"
+  # Unprivileged LXC: container-root (UID 0) maps to host UID 100000. Without this chown,
+  # mkdir inside the LXC under /opt/anythingllm-data/ fails with EACCES. Idempotent.
+  if [[ "$(stat -c '%u:%g' "$ALLM_STORAGE_MOUNT")" != "100000:100000" ]]; then
+    chown -R 100000:100000 "$ALLM_STORAGE_MOUNT"
+  fi
   pct_set_if_changed "$ALLM_VMID" mp0 "$ALLM_STORAGE_MOUNT,mp=/opt/anythingllm-data"
   ensure_lxc_started "$ALLM_VMID"
 }
