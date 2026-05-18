@@ -51,8 +51,12 @@ LLAMA_THREADS="${LLAMA_THREADS:-8}"
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
 # Speculative decoding (in-process draft on the V620 chat unit).
-# Qwen3.6 small variants don't exist on HF; Qwen3-0.6B is tokenizer-compatible.
-LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-unsloth/Qwen3-0.6B-GGUF}"
+# DISABLED by default for Qwen3.6 target because Qwen3.6 has a different tokenizer
+# from Qwen3 — llama.cpp will reject the draft with "draft model vocab type must
+# match target model". Re-enable only if you find a Qwen3.6-family small variant.
+# Workaround: 35B-A3B is MoE with ~3B active params, so it's already fast without
+# spec decode. Loss is ~1.5-2× throughput; acceptable trade-off.
+LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
 LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
 LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
@@ -381,6 +385,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --parallel ${LLAMA_PARALLEL} \\
     --cache-reuse ${LLAMA_CACHE_REUSE} \\
 ${DRAFT_LINES}
+    --no-mmproj \\
     --flash-attn ${LLAMA_FLASH_ATTN} \\
     --reasoning-format deepseek \\
     --jinja \\
