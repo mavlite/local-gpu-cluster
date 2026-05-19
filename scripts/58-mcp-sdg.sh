@@ -37,7 +37,17 @@ load_config
 MCP_VMID="${MCP_VMID:-155}"
 MCP_SDG_PORT="${MCP_SDG_PORT:-3004}"
 ANYTHINGLLM_IP="${ANYTHINGLLM_IP:-192.168.6.154}"
-MCP_SDG_WORKSPACE="${MCP_SDG_WORKSPACE:-sdg-documentation}"
+
+# Workspaces to expose. Each gets a query_<slug> and search_<slug> tool pair.
+# Override with MCP_WORKSPACES=foo,bar in config.env if you add corpora.
+MCP_WORKSPACES="${MCP_WORKSPACES:-sdg-documentation,vcf-reference}"
+
+# Human-readable descriptions for each workspace. These get surfaced in the
+# tool docstring so the calling LLM picks the right tool. Override per
+# workspace via env vars like MCP_WORKSPACE_DESC_SDG_DOCUMENTATION=...
+MCP_WORKSPACE_DESC_SDG_DOCUMENTATION="${MCP_WORKSPACE_DESC_SDG_DOCUMENTATION:-OPNsense (firewall/routing), Keycloak (identity), TrueNAS Scale + OpenZFS (storage). Mix of official docs (vendor) and community blogs (homenetworkguy, ServeTheHome, 45drives, Phase Two, Baeldung, n-k.de, Inteca, Thomas-Krenn, Zenarmor). ~4000 docs total. Use for any infra/SRE question on these stacks.}"
+MCP_WORKSPACE_DESC_VCF_REFERENCE="${MCP_WORKSPACE_DESC_VCF_REFERENCE:-VMware Cloud Foundation 9.0+ official documentation from techdocs.broadcom.com (Tier A release notes, Tier B deployment/lifecycle/security/licensing, Tier C everything else). ~5600 docs. Use for VCF, vSphere, vSAN, NSX, vCenter, SDDC Manager, Aria/vROps questions.}"
+
 SERVER_SRC="$LGC_DIR/files/mcp-sdg-server.py"
 
 [[ -r "$SERVER_SRC" ]] || die "MCP server source missing: $SERVER_SRC"
@@ -94,18 +104,38 @@ phase_write_env() {
   pct exec "$MCP_VMID" -- env \
     "ALLM_API_KEY=$ALLM_API_KEY" \
     "ALLM_URL=http://${ANYTHINGLLM_IP}:3001/api/v1" \
-    "WORKSPACE=$MCP_SDG_WORKSPACE" \
+    "MCP_WORKSPACES=$MCP_WORKSPACES" \
+    "MCP_WORKSPACE_DESC_SDG_DOCUMENTATION=$MCP_WORKSPACE_DESC_SDG_DOCUMENTATION" \
+    "MCP_WORKSPACE_DESC_VCF_REFERENCE=$MCP_WORKSPACE_DESC_VCF_REFERENCE" \
     "MCP_PORT=$MCP_SDG_PORT" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
-    cat > /etc/mcp-sdg.env <<EOF
-ALLM_URL=${ALLM_URL}
-ALLM_API_KEY=${ALLM_API_KEY}
-WORKSPACE=${WORKSPACE}
-MCP_PORT=${MCP_PORT}
-MCP_HOST=0.0.0.0
-EOF
-    chmod 600 /etc/mcp-sdg.env
+    # Write env vars via a Python rewrite to handle special chars in
+    # descriptions (quotes, slashes, etc.) safely. A here-doc with shell
+    # variable expansion would mishandle values containing $, `, or \.
+    python3 - <<'PY'
+import os
+keys = [
+    "ALLM_URL",
+    "ALLM_API_KEY",
+    "MCP_WORKSPACES",
+    "MCP_WORKSPACE_DESC_SDG_DOCUMENTATION",
+    "MCP_WORKSPACE_DESC_VCF_REFERENCE",
+    "MCP_PORT",
+]
+lines = []
+for k in keys:
+    v = os.environ.get(k, "")
+    # systemd EnvironmentFile uses KEY=VALUE; quote if there's special chars
+    if any(c in v for c in '"\\\n'):
+        # systemd doesn't support multi-line; replace newlines with spaces
+        v = v.replace("\n", " ").replace("\r", " ")
+    lines.append(f"{k}={v}")
+lines.append("MCP_HOST=0.0.0.0")
+with open("/etc/mcp-sdg.env", "w") as f:
+    f.write("\n".join(lines) + "\n")
+os.chmod("/etc/mcp-sdg.env", 0o600)
+PY
 GUEST
   ok "Env file written."
 }
@@ -153,7 +183,12 @@ main() {
   step "Phase 58 complete."
   local mcp_ip
   mcp_ip="$(pct exec "$MCP_VMID" -- hostname -I 2>/dev/null | awk '{print $1}')"
-  ok "sdg-docs MCP server is up at http://${mcp_ip:-<LXC 155 IP>}:${MCP_SDG_PORT}/sse"
+  ok "MCP bridge is up at http://${mcp_ip:-<LXC 155 IP>}:${MCP_SDG_PORT}/sse"
+  ok "Workspaces exposed: $MCP_WORKSPACES"
+  echo
+  echo "Per workspace, two tools are registered:"
+  echo "  query_<workspace_underscored>(question)       — full RAG synthesis"
+  echo "  search_<workspace_underscored>(query, top_n)  — raw vector chunks"
   echo
   echo "Smoke test from the host:"
   echo "  curl -N -m 10 http://${mcp_ip:-...}:${MCP_SDG_PORT}/sse | head -3"
