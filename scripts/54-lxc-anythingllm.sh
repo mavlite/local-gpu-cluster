@@ -78,6 +78,8 @@ phase_8_1_create() {
     --features "nesting=1,keyctl=1" \
     --unprivileged 1 \
     --ostype ubuntu \
+    --onboot 1 \
+    --startup order=3,up=5 \
     --start 0
 }
 

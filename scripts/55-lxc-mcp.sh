@@ -57,6 +57,8 @@ phase_9_1_create() {
     --features "nesting=1,keyctl=1" \
     --unprivileged 1 \
     --ostype ubuntu \
+    --onboot 1 \
+    --startup order=4 \
     --start 1
   sleep 5
 }

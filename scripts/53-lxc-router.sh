@@ -68,6 +68,8 @@ phase_7_1_create() {
     --features nesting=0 \
     --unprivileged 1 \
     --ostype ubuntu \
+    --onboot 1 \
+    --startup order=2,up=5 \
     --start 1
   sleep 5
 }
