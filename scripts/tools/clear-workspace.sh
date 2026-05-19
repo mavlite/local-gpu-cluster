@@ -69,11 +69,17 @@ if [[ ! "$confirm" =~ ^[Yy] ]]; then
   exit 1
 fi
 
-# Build the deletes payload — docs[i].docpath is what update-embeddings expects
+# Build the deletes payload — docs[i].docpath is what update-embeddings expects.
+# Stash the workspace JSON to a temp file so the Python call can read it as
+# argv (combining stdin-pipe with a heredoc-script doesn't work: heredoc
+# overrides stdin and json.load reads nothing).
 deletes_tmp="$(mktemp -t clear-workspace-deletes.XXXXXX.json)"
-echo "$ws_json" | python3 - "$deletes_tmp" <<'PY'
+ws_tmp="$(mktemp -t clear-workspace-ws.XXXXXX.json)"
+printf '%s' "$ws_json" > "$ws_tmp"
+python3 - "$ws_tmp" "$deletes_tmp" <<'PY'
 import json, sys
-d = json.load(sys.stdin)
+with open(sys.argv[1]) as f:
+    d = json.load(f)
 ws = d.get('workspace', [])
 if isinstance(ws, list): ws = ws[0] if ws else {}
 docs = ws.get('documents', [])
@@ -82,10 +88,11 @@ for doc in docs:
     name = doc.get('docpath') or doc.get('filename')
     if name:
         deletes.append(name)
-with open(sys.argv[1], 'w') as f:
+with open(sys.argv[2], 'w') as f:
     json.dump({"deletes": deletes}, f)
 print(f'Queued {len(deletes)} deletes')
 PY
+rm -f "$ws_tmp"
 
 echo "==> Posting deletes to /workspace/$WORKSPACE/update-embeddings..."
 resp="$(curl -sS -X POST \
