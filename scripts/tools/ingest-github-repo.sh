@@ -34,6 +34,10 @@
 #                     Example: docs/documentation/server_admin/topics/realms.adoc
 #                     with PATH_STRIP=docs/documentation/ and URL_KEEP_DEPTH=1
 #                     → URL_BASE/server_admin/
+#   URL_LOWERCASE     Set to 1 to lowercase the URL path after PATH_STRIP and
+#                     transforms. Use when the rendered site lowercases paths
+#                     (e.g., TrueNAS Hugo: repo content/SCALE/GettingStarted/
+#                     → URL /docs/scale/gettingstarted/).
 #   CLONE_DIR         where to clone (default /tank/gh-cache/<repo-name>)
 #   STATE_DIR         resumable state files (default $CLONE_DIR/.ingest-state)
 #   ALLM_API_KEY      from config.env if unset
@@ -147,6 +151,15 @@ for rel in "${files[@]}"; do
     if [[ -n "$URL_EXT_FROM" ]] && [[ "$url_rel" == *"$URL_EXT_FROM" ]]; then
       url_rel="${url_rel%$URL_EXT_FROM}${URL_EXT_TO}"
     fi
+  fi
+
+  # Optional URL lowercase normalization for sites that lowercase paths
+  # (e.g., TrueNAS Hugo site: repo has content/SCALE/GettingStarted/ but
+  # the live URL is /docs/scale/gettingstarted/). Applied AFTER the
+  # path transforms above so the original file-system case is preserved
+  # for git log + title generation, but citations land on real URLs.
+  if [[ "${URL_LOWERCASE:-0}" == "1" ]]; then
+    url_rel="$(echo "$url_rel" | tr '[:upper:]' '[:lower:]')"
   fi
   rendered_url="$URL_BASE/$url_rel"
 
