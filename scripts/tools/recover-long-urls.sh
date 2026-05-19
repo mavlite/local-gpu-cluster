@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# recover-long-urls.sh — fallback ingest path for URLs whose AnythingLLM
-# filename would exceed Linux NAME_MAX (255 bytes).
+# recover-long-urls.sh — ingest URLs via trafilatura clean-text extraction,
+# bypassing AnythingLLM's /document/upload-link.
 #
-# AnythingLLM's /document/upload-link endpoint constructs the storage filename
-# by URL-encoding the source URL into the basename. For deeply-nested doc URLs
-# (e.g., VCF runbook procedures, 400+ char URLs), the result exceeds the 255
-# byte filesystem limit and the upload fails with ENAMETOOLONG.
+# Originally a fallback for URLs whose AnythingLLM filename would exceed
+# Linux NAME_MAX (255 bytes) — AnythingLLM builds filenames from the URL,
+# and deeply-nested doc URLs (400+ chars) fail with ENAMETOOLONG. Now also
+# the preferred path for community content where we want:
+#   - clean text without nav chrome / build hashes / footer boilerplate
+#   - custom DOC_PREFIX tag (e.g. "[COMMUNITY] homenetworkguy.com")
+#   - real publication date extracted from page metadata
 #
-# This script bypasses /document/upload-link entirely:
+# Mechanism:
 #   1. Fetch each URL ourselves via trafilatura (cleans boilerplate)
-#   2. POST the extracted text to /api/v1/document/raw-text with a SHORT
-#      hash-derived filename (vcf-<slug>-<sha1prefix>.json)
-#   3. Optionally add to a workspace + trigger embedding with --embed
+#   2. Extract publication date + author from page metadata
+#   3. POST the extracted text to /api/v1/document/raw-text with a SHORT
+#      hash-derived filename
+#   4. Optionally add to a workspace + trigger embedding with --embed
 #
 # Requirements: a trafilatura venv at /opt/vcf-scraper-venv. Install with:
 #   apt install -y python3-venv
@@ -20,6 +24,10 @@
 #
 # Usage:
 #   scripts/tools/recover-long-urls.sh <url-list> <workspace-slug> [--embed]
+#
+# Optional env:
+#   DOC_PREFIX        metadata.docSource tag, e.g. "[COMMUNITY] homenetworkguy"
+#                     default: "URL via raw-text recovery (long-URL fallback)"
 
 set -Eeuo pipefail
 
@@ -60,11 +68,12 @@ while IFS= read -r url; do
 
   printf "[%4d/%d] fetching+extracting: %s\n" "$I" "$TOTAL" "$url"
 
-  result=$("$VENV_PY" - "$url" "$ALLM" "$ALLM_API_KEY" <<'PY'
+  result=$("$VENV_PY" - "$url" "$ALLM" "$ALLM_API_KEY" "${DOC_PREFIX:-}" <<'PY'
 import sys, json, hashlib, urllib.request
 import trafilatura
 
 url, allm, key = sys.argv[1], sys.argv[2], sys.argv[3]
+doc_prefix = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else "URL via raw-text recovery (long-URL fallback)"
 
 try:
     fetched = trafilatura.fetch_url(url)
@@ -74,6 +83,19 @@ try:
     if not text or len(text) < 200:
         print(json.dumps({"err": f"extracted text too short: {len(text or '')} chars"})); sys.exit(0)
 
+    # Pull publication date + other metadata for version-drift visibility.
+    # trafilatura.extract_metadata returns a Document with .date, .author, etc.
+    # Failure is non-fatal — we just leave 'published' as None.
+    published = None
+    author = None
+    try:
+        meta = trafilatura.extract_metadata(fetched)
+        if meta is not None:
+            published = getattr(meta, "date", None) or None
+            author = getattr(meta, "author", None) or None
+    except Exception:
+        pass
+
     slug = url.split('/')[-1].replace('.html', '')[:80]
     url_hash = hashlib.sha1(url.encode()).hexdigest()[:8]
     title = f"recovered-{slug}-{url_hash}"
@@ -82,9 +104,10 @@ try:
         "textContent": text,
         "metadata": {
             "title": title,
-            "docSource": "URL via raw-text recovery (long-URL fallback)",
+            "docSource": doc_prefix,
             "chunkSource": f"link://{url}",
-            "published": None,
+            "published": published,
+            "author": author,
             "wordCount": len(text.split()),
             "url": url,
         }
