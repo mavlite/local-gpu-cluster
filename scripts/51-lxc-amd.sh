@@ -341,12 +341,21 @@ GUEST
 
 phase_5_11_3_chat_unit() {
   step "5.11.3 — Install llamacpp-chat.service (V620 tensor-split)"
+  # IMPORTANT: draft_lines MUST end with `\\\n` when non-empty so that
+  # substitution into the heredoc (right before `--no-mmproj` — see below)
+  # produces a proper systemd continuation. When empty, this variable
+  # expands to nothing and `--no-mmproj` slots in directly after
+  # --cache-reuse. The previous layout (standalone ${DRAFT_LINES} line)
+  # produced a BLANK LINE in ExecStart= when draft was disabled, which
+  # systemd treats as end-of-line — silently dropping --no-mmproj and
+  # every flag after it.
   local draft_lines=""
   if [[ -n "$LLAMA_DRAFT_REPO" ]]; then
     draft_lines="    --hf-repo-draft ${LLAMA_DRAFT_REPO}:${LLAMA_DRAFT_QUANT} \\
     --n-gpu-layers-draft all \\
     --spec-draft-n-max ${LLAMA_SPEC_NMAX} \\
-    --spec-draft-n-min ${LLAMA_SPEC_NMIN} \\"
+    --spec-draft-n-min ${LLAMA_SPEC_NMIN} \\
+"
   fi
 
   pct exec "$AMD_VMID" -- env \
@@ -401,8 +410,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --cont-batching \\
     --parallel "${LLAMA_PARALLEL}" \\
     --cache-reuse "${LLAMA_CACHE_REUSE}" \\
-${DRAFT_LINES}
-    --no-mmproj \\
+${DRAFT_LINES}    --no-mmproj \\
     --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
