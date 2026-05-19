@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# ingest-github-repo.sh — clone a GitHub doc repo and ingest its text files
+# into an AnythingLLM workspace via /document/raw-text.
+#
+# Why this instead of the URL-scrape path (`ingest-urls.sh`)?
+#   - Source files are clean text (.rst / .md) — no nav chrome, no footer
+#     boilerplate, no per-page build hash leaking into chunks.
+#   - We can compute the rendered docs URL deterministically for citations
+#     (e.g. source/manual/firstrun.rst → https://docs.opnsense.org/manual/firstrun.html).
+#   - We get a real publication date from `git log` for free — surfaces in
+#     metadata so future retrieval / reranking can prefer fresher content.
+#
+# Usage:
+#   ingest-github-repo.sh <repo-url> <workspace-slug> <doc-prefix> \
+#                         <url-base> <path-strip> [--embed]
+#
+# Positional:
+#   repo-url      e.g.  https://github.com/opnsense/docs
+#   workspace     e.g.  sdg-documentation
+#   doc-prefix    metadata.docSource tag, e.g. "[OFFICIAL] opnsense/docs"
+#   url-base      citation URL stem, e.g. https://docs.opnsense.org
+#   path-strip    file-path prefix that's NOT in the URL (e.g. "source/")
+#
+# Optional env:
+#   FILE_GLOB         find -name pattern, default *.rst
+#   FILE_EXCLUDE      grep -E regex of relative paths to skip
+#   URL_EXT_FROM      file extension to strip when building URL, default .rst
+#   URL_EXT_TO        URL extension to append, default .html
+#   CLONE_DIR         where to clone (default /tank/gh-cache/<repo-name>)
+#   STATE_DIR         resumable state files (default $CLONE_DIR/.ingest-state)
+#   ALLM_API_KEY      from config.env if unset
+#   ALLM              base API URL, default http://192.168.6.154:3001/api/v1
+
+set -Eeuo pipefail
+
+REPO_URL="${1:?Usage: $0 <repo-url> <workspace> <doc-prefix> <url-base> <path-strip> [--embed]}"
+WORKSPACE="${2:?workspace slug required}"
+DOC_PREFIX="${3:?doc-prefix required (e.g. \"[OFFICIAL] opnsense/docs\")}"
+URL_BASE="${4:?url-base required}"
+PATH_STRIP="${5:?path-strip required (e.g. \"source/\")}"
+EMBED_FLAG="${6:-}"
+
+FILE_GLOB="${FILE_GLOB:-*.rst}"
+FILE_EXCLUDE="${FILE_EXCLUDE:-^_themes/}"
+URL_EXT_FROM="${URL_EXT_FROM:-.rst}"
+URL_EXT_TO="${URL_EXT_TO:-.html}"
+URL_BASE="${URL_BASE%/}"
+
+repo_name="$(basename "${REPO_URL%.git}")"
+CLONE_DIR="${CLONE_DIR:-/tank/gh-cache/$repo_name}"
+STATE_DIR="${STATE_DIR:-$CLONE_DIR/.ingest-state}"
+DONE_LIST="$STATE_DIR/done-files.txt"
+DOCNAMES_LIST="$STATE_DIR/document-names.txt"
+ERRORS_LIST="$STATE_DIR/errors.log"
+
+if [[ -z "${ALLM_API_KEY:-}" ]]; then
+  if [[ -f /root/local-gpu-cluster/scripts/config.env ]]; then
+    ALLM_API_KEY="$(grep '^ALLM_API_KEY=' /root/local-gpu-cluster/scripts/config.env 2>/dev/null | cut -d= -f2-)"
+  fi
+fi
+[[ -n "${ALLM_API_KEY:-}" ]] || { echo "ALLM_API_KEY not set" >&2; exit 1; }
+ALLM="${ALLM:-http://192.168.6.154:3001/api/v1}"
+
+mkdir -p "$STATE_DIR"
+touch "$DONE_LIST" "$DOCNAMES_LIST" "$ERRORS_LIST"
+
+# Clone or update the repo. Shallow clone is enough since we use git log for
+# per-file last-modified date — that needs full history, so use --filter=blob:none
+# (treeless) which is fast AND retains commit history for log queries.
+if [[ ! -d "$CLONE_DIR/.git" ]]; then
+  echo "==> Cloning $REPO_URL → $CLONE_DIR"
+  mkdir -p "$(dirname "$CLONE_DIR")"
+  git clone --filter=blob:none "$REPO_URL" "$CLONE_DIR"
+else
+  echo "==> $CLONE_DIR exists; pulling latest"
+  git -C "$CLONE_DIR" pull --ff-only
+fi
+
+# Enumerate target files. Use printf with -print0 so paths with spaces survive.
+mapfile -d '' files < <(
+  cd "$CLONE_DIR"
+  find . -type f -name "$FILE_GLOB" -not -path './.git/*' -print0
+)
+TOTAL=${#files[@]}
+echo "==> $TOTAL candidate files (glob=$FILE_GLOB) in $CLONE_DIR"
+echo "==> $(wc -l < "$DONE_LIST") already done; workspace=$WORKSPACE"
+
+I=0
+for rel in "${files[@]}"; do
+  I=$((I + 1))
+  rel="${rel#./}"
+
+  # Optional exclude pattern
+  if [[ -n "$FILE_EXCLUDE" ]] && echo "$rel" | grep -qE "$FILE_EXCLUDE"; then
+    continue
+  fi
+  if grep -qxF "$rel" "$DONE_LIST" 2>/dev/null; then
+    continue
+  fi
+
+  filepath="$CLONE_DIR/$rel"
+
+  # Compute the rendered URL the citation should link to
+  url_rel="$rel"
+  if [[ -n "$PATH_STRIP" ]]; then
+    url_rel="${url_rel#$PATH_STRIP}"
+  fi
+  if [[ -n "$URL_EXT_FROM" ]] && [[ "$url_rel" == *"$URL_EXT_FROM" ]]; then
+    url_rel="${url_rel%$URL_EXT_FROM}${URL_EXT_TO}"
+  fi
+  rendered_url="$URL_BASE/$url_rel"
+
+  # Last-modified date from git (ISO 8601). Empty string if file is untracked.
+  last_mod="$(git -C "$CLONE_DIR" log -1 --format='%aI' -- "$rel" 2>/dev/null || true)"
+
+  # Title is human-readable and unique-ish: path with separators normalized
+  title="$(echo "$url_rel" | sed 's|/|-|g; s|\.html$||; s|\.md$||; s|\.rst$||')"
+  title="${title:0:120}"  # keep filenames sane
+
+  printf "[%4d/%d] %s → %s (mtime=%s)\n" "$I" "$TOTAL" "$rel" "$rendered_url" "${last_mod:-?}"
+
+  # Build the payload entirely in python — handles JSON escaping of file
+  # contents that may contain backticks, control chars, or backslashes.
+  # Write to a temp file because some .rst files are large and curl/--data-binary
+  # @file is the cleanest path that avoids ARG_MAX/heredoc weirdness.
+  payload_tmp="$(mktemp -t ghingest-payload.XXXXXX.json)"
+  python3 - "$filepath" "$title" "$DOC_PREFIX" "$rendered_url" "${last_mod:-}" "$payload_tmp" <<'PY'
+import json, sys
+filepath, title, doc_prefix, url, published, out_path = sys.argv[1:7]
+with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+    text = f.read()
+payload = {
+    "textContent": text,
+    "metadata": {
+        "title": title,
+        "docSource": doc_prefix,
+        "chunkSource": f"link://{url}",
+        "published": published or None,
+        "wordCount": len(text.split()),
+        "url": url,
+    },
+}
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(payload, f)
+PY
+
+  response="$(curl -sS -m 90 -X POST \
+      -H "Authorization: Bearer $ALLM_API_KEY" \
+      -H "Content-Type: application/json" \
+      --data-binary "@$payload_tmp" \
+      "$ALLM/document/raw-text" 2>&1 || true)"
+  rm -f "$payload_tmp"
+
+  docname="$(echo "$response" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+    docs = d.get('documents', [])
+    if docs and 'location' in docs[0]:
+        print(docs[0]['location'])
+except Exception:
+    pass
+" 2>/dev/null || true)"
+
+  if [[ -n "$docname" ]]; then
+    echo "$rel" >> "$DONE_LIST"
+    echo "$docname" >> "$DOCNAMES_LIST"
+    printf "         ok -> %s\n" "$docname"
+  else
+    echo "$(date -Iseconds) $rel $response" >> "$ERRORS_LIST"
+    printf "         ERROR (logged)\n"
+  fi
+done
+
+echo
+echo "==> Upload phase complete."
+echo "    Successful: $(wc -l < "$DONE_LIST")"
+echo "    Errors:     $(wc -l < "$ERRORS_LIST")"
+
+if [[ "$EMBED_FLAG" == "--embed" ]] && [[ -s "$DOCNAMES_LIST" ]]; then
+  echo
+  echo "==> Adding $(wc -l < "$DOCNAMES_LIST") docs to workspace '$WORKSPACE' + triggering embed..."
+  embed_tmp="$(mktemp -t ghingest-embed.XXXXXX.json)"
+  python3 - "$DOCNAMES_LIST" "$embed_tmp" <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+names = []
+with open(src) as f:
+    for line in f:
+        line = line.strip()
+        if line:
+            names.append(line)
+with open(dst, 'w') as f:
+    json.dump({"adds": names}, f)
+PY
+  curl -sS -X POST \
+      -H "Authorization: Bearer $ALLM_API_KEY" \
+      -H "Content-Type: application/json" \
+      --max-time 1800 \
+      --data-binary "@$embed_tmp" \
+      "$ALLM/workspace/${WORKSPACE}/update-embeddings" \
+    | python3 -c "
+import json, sys
+try:
+    r = json.load(sys.stdin)
+    n = len(r.get('workspace', {}).get('documents', []))
+    print(f'Workspace doc count after embed: {n}')
+except Exception as e:
+    print(f'Embed response not JSON: {e}')"
+  rm -f "$embed_tmp"
+fi
