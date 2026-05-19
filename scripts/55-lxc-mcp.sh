@@ -116,17 +116,33 @@ phase_9_3_migrate() {
     | pct exec "$MCP_VMID" -- tar xzf - -C /
 }
 
+# MCP slug must be a simple identifier — no shell metachars, no path traversal.
+# This is enforced before any value is interpolated into a guest-side command.
+_validate_mcp_slug() {
+  local slug="$1"
+  if [[ ! "$slug" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    die "Invalid MCP slug '$slug': must match [A-Za-z0-9][A-Za-z0-9_.-]*"
+  fi
+}
+
 phase_9_4_rewrite_urls() {
   step "9.4 — Rewrite MCP configs to point at new AnythingLLM IP ($ANYTHINGLLM_IP)"
   for mcp in "${MCPS[@]}"; do
+    _validate_mcp_slug "$mcp"
     if pct exec "$MCP_VMID" -- test -d "/opt/$mcp"; then
-      pct exec "$MCP_VMID" -- bash -c "
-        cd /opt/$mcp
-        [ -f docker-compose.yml ] && \
-          sed -i 's|http://[^:]*:3001|http://$ANYTHINGLLM_IP:3001|g' docker-compose.yml
-        [ -f .env ] && \
-          sed -i 's|ANYTHINGLLM_BASE_URL=.*|ANYTHINGLLM_BASE_URL=http://$ANYTHINGLLM_IP:3001|' .env
-      "
+      # Pass values via `env VAR=val` so they're available inside the quoted
+      # heredoc without unsafe interpolation. ANYTHINGLLM_IP is already
+      # validated by is_ipv4() up top; MCP_SLUG is validated above.
+      pct exec "$MCP_VMID" -- env "MCP_SLUG=$mcp" "ALLM_IP=$ANYTHINGLLM_IP" bash -se <<'GUEST'
+        set -Eeuo pipefail
+        cd "/opt/$MCP_SLUG"
+        if [ -f docker-compose.yml ]; then
+          sed -i "s|http://[^:]*:3001|http://${ALLM_IP}:3001|g" docker-compose.yml
+        fi
+        if [ -f .env ]; then
+          sed -i "s|ANYTHINGLLM_BASE_URL=.*|ANYTHINGLLM_BASE_URL=http://${ALLM_IP}:3001|" .env
+        fi
+GUEST
       ok "Updated $mcp"
     else
       warn "/opt/$mcp not found in LXC — supply it before building."
@@ -137,13 +153,15 @@ phase_9_4_rewrite_urls() {
 phase_9_5_build_and_start() {
   step "9.5 — docker compose up -d for each MCP"
   for mcp in "${MCPS[@]}"; do
+    _validate_mcp_slug "$mcp"
     if pct exec "$MCP_VMID" -- test -f "/opt/$mcp/docker-compose.yml"; then
       log "Bringing up $mcp"
-      pct exec "$MCP_VMID" -- bash -c "
-        cd /opt/$mcp
+      pct exec "$MCP_VMID" -- env "MCP_SLUG=$mcp" bash -se <<'GUEST'
+        set -Eeuo pipefail
+        cd "/opt/$MCP_SLUG"
         docker compose down 2>/dev/null || true
         docker compose up -d --build
-      "
+GUEST
     else
       warn "Skipping $mcp — no docker-compose.yml at /opt/$mcp/"
     fi

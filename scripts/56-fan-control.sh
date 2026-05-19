@@ -62,12 +62,23 @@ apt_install_if_missing lm-sensors
 # bridge can find the right hwmon entry at startup even when the kernel assigns
 # a different hwmonN number after reboot. The configured paths are only used to
 # look up the chip name once, at install time.
+#
+# chip_name and pwm_name are validated against strict character classes before
+# being interpolated into the generated bash script. Hwmon chip names from the
+# kernel are always sane (nct6799, k10temp, amdgpu, etc.) but a corrupted
+# /sys/class/hwmon/*/name file or an unexpected hardware driver could produce
+# something with whitespace or shell metacharacters; the validation makes the
+# generated script's `PAIRS=( ... )` array unambiguous to bash word-splitting.
 PAIRS=""
 for p in $FAN_PWMS; do
   hwmon_dir="$(dirname "$p")"
   pwm_name="$(basename "$p")"
   chip_name="$(cat "$hwmon_dir/name" 2>/dev/null || true)"
   [[ -n "$chip_name" ]] || die "Cannot read chip name from $hwmon_dir/name. Verify $p exists."
+  [[ "$chip_name" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || die "Unexpected chip name '$chip_name' from $hwmon_dir/name (must match [A-Za-z0-9_-]+). Cannot safely embed in the generated bridge script."
+  [[ "$pwm_name" =~ ^pwm[0-9]+$ ]] \
+    || die "Unexpected pwm filename '$pwm_name' from $p (must match pwm[0-9]+)."
   PAIRS+="$chip_name:$pwm_name "
 done
 PAIRS="${PAIRS% }"

@@ -107,8 +107,12 @@ workspace_exists() {
 create_workspace() {
   local slug="$1"
   log "Creating workspace: $slug"
-  allm_curl POST "/workspace/new" \
-    -d "$(printf '{"name":"%s"}' "$slug")" >/dev/null
+  # Use python json.dumps for robust escaping (matches the pattern in
+  # tune_workspace below). printf "%s" would mangle slugs containing
+  # double-quotes, backslashes, or non-ASCII characters.
+  local payload
+  payload="$(python3 -c "import json,sys; print(json.dumps({'name': sys.argv[1]}))" "$slug")"
+  allm_curl POST "/workspace/new" -d "$payload" >/dev/null
 }
 
 tune_workspace() {
