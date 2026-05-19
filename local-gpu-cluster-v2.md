@@ -12,12 +12,10 @@
 ![Revision](https://img.shields.io/badge/revision-2-lightgrey)
 ![License](https://img.shields.io/badge/license-CC%20BY--SA%204.0-yellow)
 
-> ### ⚠️ V620-only pivot in effect
-> This v2 reference originally described "2× V620 + 1× RTX 3060" with the 3060 acting as a separate workload-isolation tier (embedder + reranker + a small "fast" chat model on its own LXC). The 3060 has been removed. The cluster now runs **everything on the two V620s** as additional `llama-server` processes pinned per-card via `--main-gpu`. See §1.3 for the rationale.
+> ### V620-only pivot — complete
+> This v2 reference originally described "2× V620 + 1× RTX 3060" with the 3060 acting as a separate workload-isolation tier. **The 3060 has been removed.** The cluster runs everything on the two V620s as additional `llama-server` processes pinned per-card via `--main-gpu`. See §1.3 for the rationale; §6 (the old CUDA stack) has been retired.
 >
-> Sections in this document that still describe the pre-pivot 3060 LXC, FAST_URL routing, or NVIDIA-specific setup are being progressively rewritten. For the **canonical, V620-only operational configuration** — including systemd unit files, API key generation, monitoring, backup, Phase 6 cutover procedure, and Phase 11.4 acceptance verification suite — refer to [`setup-runbook.md`](./setup-runbook.md), which is fully V620-only-clean through Phase 11.
->
-> Tracking: `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md`. This v2 doc's full inline rewrite is todo #16 (substantial work; the runbook is the authoritative source until the rewrite lands).
+> For the operational deployment commands and per-phase verification, see [`setup-runbook.md`](./setup-runbook.md). For the bootstrap scripts that automate the runbook, see [`scripts/README.md`](./scripts/README.md).
 
 End-to-end build of the second-generation local LLM cluster. Replaces the v1 setup (Dell T7910 + 3× RTX 3060) with a purpose-built workstation: ASUS ProArt X870E-Creator, Ryzen 7600, 64 GB pooled VRAM across two AMD V620 server cards. With the V620-only pivot, all inference (chat + embedder + reranker) runs on the V620 pool — there is no longer a separate NVIDIA tier.
 
@@ -54,12 +52,7 @@ The big architectural shifts vs. v1: Proxmox VE host with one LXC per service (r
   * [5.5 Model selection and download](#55-model-selection-and-download)
   * [5.6 llama-server systemd unit](#56-llama-server-systemd-unit)
   * [5.7 Tensor split tuning across the two V620s](#57-tensor-split-tuning-across-the-two-v620s)
-- [6. llama.cpp CUDA LXC (3060 Stack)](#6-llamacpp-cuda-lxc-3060-stack)
-  * [6.1 Container creation](#61-container-creation)
-  * [6.2 NVIDIA driver + CUDA in LXC](#62-nvidia-driver--cuda-in-lxc)
-  * [6.3 llama.cpp build with CUDA](#63-llamacpp-build-with-cuda)
-  * [6.4 Model loadout: draft, embedder, reranker](#64-model-loadout-draft-embedder-reranker)
-  * [6.5 Three llama-server systemd units](#65-three-llama-server-systemd-units)
+- [6. (removed) llama.cpp CUDA LXC — 3060 stack retired](#6-removed-llamacpp-cuda-lxc--3060-stack-retired)
 - [7. Router LXC (Per-Request Decision + Keepalive)](#7-router-lxc-per-request-decision--keepalive)
   * [7.1 Role and design](#71-role-and-design)
   * [7.2 Routing logic](#72-routing-logic)
@@ -701,207 +694,22 @@ If GPU 0 hits 100% and GPU 1 sits at 70%, layers are over-allocated to GPU 0 —
 
 ---
 
-## 6. llama.cpp CUDA LXC (3060 Stack)
+## 6. (removed) llama.cpp CUDA LXC — 3060 stack retired
 
-### 6.1 Container creation
+The original v2 design ran a separate NVIDIA-backed LXC at VMID 152 (`llamacpp-nv`, IP 192.168.6.152) for the embedder + reranker + a small "fast" chat model. The 3060 has been removed from the build (see §1.3 for rationale). The embedder and reranker moved into LXC 151 as additional `llama-server` processes pinned per-card via `--main-gpu` (V620 #1 → embed, V620 #2 → rerank); the fast-chat tier was deleted entirely.
 
-Same pattern as the AMD LXC, with different VMID and resource sizing:
+This section previously documented:
+- LXC 152 container creation
+- NVIDIA driver + CUDA install in an unprivileged LXC
+- `llama.cpp` build with CUDA backend
+- The draft / embedder / reranker model loadout (now on V620 #1 and V620 #2)
+- Three CUDA `llama-server` systemd units (`llamacpp-draft`, `llamacpp-embed-old`, `llamacpp-rerank-old`)
 
-```bash
-pct create 152 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
-  --hostname llamacpp-nv \
-  --cores 4 \
-  --memory 16384 \
-  --swap 4096 \
-  --rootfs local-zfs:48 \
-  --net0 name=eth0,bridge=vmbr0,firewall=0,ip=dhcp,type=veth \
-  --features nesting=1 \
-  --unprivileged 1 \
-  --ostype ubuntu \
-  --start 0
-```
-
-The 3060 stack runs three small models (draft, embedder, reranker), so resource footprint is much smaller than the V620 stack.
-
-### 6.2 NVIDIA driver + CUDA in LXC
-
-NVIDIA passthrough to LXC is more involved than AMD because the userspace driver and kernel module versions must match exactly between host and container.
-
-**Step 1: Install the NVIDIA driver on the Proxmox host.** Use the `nvidia-driver` package from Debian non-free (or run the official `.run` installer with `--no-kernel-module` to keep drivers but skip module install if you already have one). The host must load `nvidia` kernel modules at boot.
-
-```bash
-# On host
-apt install -y pve-headers-$(uname -r)
-apt install -y nvidia-driver firmware-misc-nonfree
-nvidia-smi                                   # confirm host sees the 3060
-```
-
-**Step 2: Find device nodes and configure cgroup passthrough.** Edit `/etc/pve/lxc/152.conf`:
-
-```
-# Bind-mount shared model storage (read-only)
-mp0: /tank/models,mp=/opt/models,ro=1
-
-# NVIDIA character devices
-lxc.cgroup2.devices.allow: c 195:* rwm
-lxc.cgroup2.devices.allow: c 240:* rwm
-lxc.cgroup2.devices.allow: c 506:* rwm
-lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
-lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
-
-lxc.apparmor.profile: unconfined
-lxc.cap.drop:
-```
-
-Major numbers (195, 240, 506) vary by kernel — verify with `ls -l /dev/nvidia*` on the host.
-
-**Step 3: Install the NVIDIA userspace inside the LXC** without installing the kernel module (the host kernel already has it):
-
-```bash
-pct start 152
-pct enter 152
-
-apt update && apt install -y wget build-essential cmake git
-wget https://us.download.nvidia.com/XFree86/Linux-x86_64/<DRIVER_VERSION>/NVIDIA-Linux-x86_64-<DRIVER_VERSION>.run
-chmod +x NVIDIA-Linux-x86_64-<DRIVER_VERSION>.run
-./NVIDIA-Linux-x86_64-<DRIVER_VERSION>.run --no-kernel-module
-
-# CUDA toolkit (separate package)
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-dpkg -i cuda-keyring_1.1-1_all.deb
-apt update
-apt install -y cuda-toolkit-12-6
-```
-
-`<DRIVER_VERSION>` must match the host's NVIDIA driver version exactly — get it from `nvidia-smi` on the host. Mismatch causes `Failed to initialize NVML: Driver/library version mismatch`.
-
-Verify:
-
-```bash
-nvidia-smi
-# Expect: 1× RTX 3060 listed
-```
-
-### 6.3 llama.cpp build with CUDA
-
-Inside the LXC:
-
-```bash
-cd /opt
-git clone https://github.com/ggerganov/llama.cpp.git
-cd llama.cpp
-
-cmake -B build \
-  -DGGML_CUDA=ON \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLAMA_BUILD_SERVER=ON \
-  -DCMAKE_CUDA_ARCHITECTURES=86
-
-cmake --build build --config Release -j 4
-```
-
-`CMAKE_CUDA_ARCHITECTURES=86` targets Ampere (`sm_86`, the 3060's compute capability). Setting this explicitly (vs. leaving it default) avoids building bloat for unused GPU generations and shaves build time.
-
-### 6.4 Model loadout: draft, embedder, reranker
-
-The 3060's 12 GB hosts three models simultaneously:
-
-| Model | Size | VRAM | Role |
-| --- | --- | --- | --- |
-| qwen3.5:0.8b Q4_K_M | ~600 MB | ~1.5 GB (with KV cache) | Draft model for V620's 35B target |
-| qwen3-embedding:0.6b | ~600 MB | ~1.2 GB | Embeddings for AnythingLLM |
-| bge-reranker-v2-m3 | ~600 MB | ~1.5 GB | Reranker for RAG retrieval |
-| **Total simultaneous load** | | **~4.2 GB** | Leaves ~7 GB headroom |
-
-All three load simultaneously with comfortable margin. llama.cpp serves each as a separate `llama-server` instance on a different port.
-
-### 6.5 Two llama-server systemd units
-
-The 3060 stack runs **two** services: embedder and reranker. (The speculative-decoding draft model is *not* here — it runs on the V620 LXC alongside the target model. See §5.6 and the note at the end of §6.4.)
-
-**`/etc/systemd/system/llama-embed.service`** — embedding service:
-
-```ini
-[Unit]
-Description=llama.cpp embedding server (qwen3-embedding 0.6B)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/llama.cpp
-Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3-embedding-0.6b.gguf \
-    --host 0.0.0.0 \
-    --port 8082 \
-    --embedding \
-    --pooling cls \
-    --ctx-size 8192 \
-    --n-gpu-layers all \
-    --batch-size 512 \
-    --threads 4
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**`/etc/systemd/system/llama-rerank.service`** — reranker:
-
-```ini
-[Unit]
-Description=llama.cpp reranker (bge-reranker-v2-m3)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/llama.cpp
-Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/bge-reranker-v2-m3-q4_k_m.gguf \
-    --host 0.0.0.0 \
-    --port 8083 \
-    --reranking \
-    --ctx-size 8192 \
-    --n-gpu-layers all \
-    --threads 4
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable both:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now llama-embed llama-rerank
-```
-
-Verify VRAM usage on the 3060 after all three are running:
-
-```bash
-nvidia-smi --query-gpu=memory.used,memory.total --format=csv
-# Expect: ~3500-4500 MiB used of 12288 MiB total
-```
-
-The 3060 has substantial VRAM headroom (~7-8 GB free) for future workloads — Whisper transcription, small vision models, alternative reranker variants, etc.
+For the equivalent V620-only configuration that replaced it, see §5 above and [`setup-runbook.md`](./setup-runbook.md) Phase 5 (which documents all three V620 llama-server units in one place).
 
 ### Note on speculative decoding
 
-Speculative decoding for the V620 stack is configured **entirely within the V620 LXC**. Both target (Qwen 3.5 35B) and draft (Qwen 3.5 0.8B) models load in the same `llama-server` process via `-md` flag — see §5.6. The 3060 LXC plays no role in spec decode and runs only embedder/reranker workloads. This architectural choice was driven by llama.cpp's API: spec decode requires both models to share the same process for tokenizer access and KV cache coordination. There is no remote-draft-model API.
-
----
+Speculative decoding requires target + draft in the **same `llama-server` process** (llama.cpp's API mandates shared tokenizer/KV cache state — no remote-draft-model API). The pre-pivot design described running the draft on the 3060 LXC; that was never workable. Both V620s tensor-split the target model and the draft is loaded in the same process via `-md`. As of the Qwen3.6 cutover, speculative decoding is **disabled** because Qwen3.6 uses a different tokenizer (vocab 248,320) than Qwen3 small variants (vocab 151,936) — no vocab-compatible draft exists in the smaller Qwen3.6 lineup yet. The 35B-A3B target activates only 3 B params per token so it's already fast; the lost spec-decode is a ~1.5-2× throughput penalty we accept.
 
 ## 7. Router LXC (Per-Request Decision + Keepalive)
 

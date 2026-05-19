@@ -2,14 +2,8 @@
 
 **Sequential, step-by-step deployment of the v2 cluster: ASUS ProArt X870E-Creator + Ryzen 7600 + 2× V620 on Proxmox VE 9.x.**
 
-> ### ⚠️ Build-status banner (V620-only pivot, mid-flight)
-> This runbook is mid-pivot from the original "2× V620 + 1× RTX 3060" architecture to "V620-only". V620-only-clean phases (runbook side): **1, 2, 3, 4, 5 (three units), 6 (cutover), 7 (router LXC + API key generation), 8.6 (AnythingLLM), 10 (data migration), 11 (all steps including 11.4 acceptance suite), Monitoring + Backup, Scenario 2 (single-V620 failure recovery), Risks section** (thermal math + kernel pin + privileged-mode mitigation now V620-only). The provisioning scripts under `scripts/` and `scripts/files/router-app.py` still carry pre-pivot code (FAST_URL, no Bearer auth, hardcoded `192.168.6.152` URLs) — tracked as todos #18–#20 in the pivot plan.
->
-> **What this means for fresh builds today:** Phases 1–11 of the runbook deliver a fully working V620-only inference + router + AnythingLLM stack with Bearer auth, plus the Phase 11.4 acceptance verification suite. The runbook prose path is operable end-to-end. **The supporting scripts under `scripts/` still need updating** (todos #18–#20) — fresh operators following the runbook commands directly will succeed; those who try to run `scripts/bootstrap.sh` will hit the pre-pivot 3060 references.
->
-> **What this means for cutover from existing v2 cluster:** Phase 6 (Cutover) is operational. Its BLOCKER notice now only requires the router-app.py rewrite (todo #20) before live cutover is safe — until then, run Phase 6 in dry-run mode (skip Step 6.2 cutover, only do pre-cutover audits in Step 6.1).
->
-> See `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md` for the full pivot plan and outstanding todos.
+> ### V620-only pivot — complete and deployed
+> The pivot from "2× V620 + 1× RTX 3060" to "V620-only" is finished. All scripts under `scripts/` and `scripts/files/router-app.py` are V620-clean (Bearer auth, admission control, slowapi rate limit, Prometheus instrumentation, fail-open SSE, `/v1/completions` passthrough, `[CONTEXT N]` marker stripping). `scripts/bootstrap.sh` runs end-to-end. The reference deployment at `gpu-cluster.local` has been validated through Phase 11 and ingested ~1000 docs across two AnythingLLM workspaces. Phase 6 (live cutover from a pre-pivot v2 cluster) is included for historical reference if anyone is migrating; fresh builds use Phases 4-11 directly.
 
 This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md). The v2 doc explains *why*; this runbook is the exact *how*. Every command is meant to be run in order. Each phase ends with a verification step — do not proceed if it fails.
 
@@ -1624,15 +1618,8 @@ pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/mo
 
 ## Phase 6 — Cutover (live migration from running v2 cluster)
 
-> ### ⚠️ BLOCKER — One remaining upstream dependency before Phase 6 cutover is safe
->
-> ~~1. Phase 5 expansion.~~ ✅ **DONE** (Phase 5 now defines `llamacpp-chat.service`, `llamacpp-embed.service`, `llamacpp-rerank.service` with `EnvironmentFile=/etc/llamacpp.env` and `--api-key`).
->
-> 2. **Phase 7 router-app.py rewrite — still required.** Phase 7's Step 7.3 currently ships `router-app.py` with `FAST_URL` / `FAST_ALIASES` (referenced the deleted 3060 fast-chat service) and no auth middleware. Phase 6's cutover assumes the rewritten version: drop `FAST_URL`/`FAST_ALIASES`, add `Authorization: Bearer` middleware (validates `ROUTER_API_KEY`), add `httpx` headers `Authorization: Bearer ${LLAMACPP_API_KEY}` on upstream calls, add `asyncio.Semaphore` admission control (chat=1, embed=4), add `prometheus-fastapi-instrumentator`, add `slowapi` per-IP rate limit, add fail-open SSE on upstream 5xx, restrict `/metrics` to allowlist IPs. Until this is done, Phase 6 Step 6.2.E (router restart picks up new code) is a no-op — the router will keep routing as if the 3060 LXC still exists. Tracked as todos #18 (scripts/53-lxc-router.sh) and #20 (scripts/files/router-app.py) in the pivot plan.
->
-> ~~3. Phase 11 verification suite.~~ ✅ **PARTIAL** — Step 6.3 below includes inline fallback verification tests (auth gates, embed dim, rerank correctness, concurrent VRAM, rate limit). Full Phase 11 expansion is a separate todo (#13) but Phase 6 is no longer blocked on it.
->
-> See `C:\Users\willi\.claude\plans\we-will-pivot-to-squishy-lampson.md` for full unit contents, router code requirements, and verification checklists.
+> ### Phase 6 is for migrators only (fresh builds skip to Phase 7)
+> Phase 5 (`llamacpp-chat`, `llamacpp-embed`, `llamacpp-rerank` systemd units with EnvironmentFile + `--api-key`) and Phase 7 (the router with Bearer auth, admission control, slowapi rate limit, Prometheus, fail-open SSE, IP-gated `/metrics`) are both complete and deployed. The router code in `scripts/files/router-app.py` is the production version. This phase remains for anyone migrating a pre-pivot "2× V620 + 1× 3060" deployment to "V620-only"; fresh builds run Phase 5 then jump straight to Phase 7.
 
 **When to run this phase:** Only when migrating an EXISTING running cluster from "2× V620 + 1× 3060" to "2× V620 only". For fresh builds, all required services (chat + embed + rerank) are deployed during Phase 5 — skip directly from Phase 5 to Phase 7.
 
@@ -2053,10 +2040,11 @@ LLM cluster router (V620-only).
 - /v1/rerank                 -> V620 reranker on LXC 151 (port 8083, --main-gpu 1)
 - SSE keepalive on streaming responses
 - Per-request <think> block decision (header > body > system prompt > model name > default)
-- NOTE: This is the pre-pivot router code. The full V620-only rewrite (Bearer auth,
-  asyncio.Semaphore admission control, prometheus-fastapi-instrumentator, slowapi
-  rate limit, fail-open SSE) is delivered by scripts/files/router-app.py — that
-  version overwrites this file at deploy time. The skeleton below is illustrative.
+- NOTE: The skeleton below is illustrative of the routing decision logic. The
+  production router (Bearer auth, asyncio.Semaphore admission, slowapi rate
+  limit, Prometheus instrumentation, fail-open SSE, /v1/completions passthrough,
+  [CONTEXT N] marker stripping, access logging) lives in
+  scripts/files/router-app.py and is deployed by scripts/53-lxc-router.sh.
 """
 
 import asyncio
@@ -3117,7 +3105,7 @@ rm -f /tmp/squishy.txt
 - Group 2 failures → re-check Phase 5 (units active + Bearer auth) and Phase 7 (router auth middleware).
 - Group 3 failures → most commonly `--pooling` is wrong; fix in Phase 5 unit file.
 - Group 4 failures → reduce `--parallel`, drop `--ctx-size`, or check VRAM allocation math.
-- Group 5 failures → router code (`scripts/files/router-app.py`) is missing rate limit or IP allowlist features; see todo #20 in the pivot plan.
+- Group 5 failures → check that `scripts/files/router-app.py` was deployed and the service restarted (rate limit + IP allowlist features come from this file).
 
 ---
 
@@ -3666,7 +3654,7 @@ pct exec 151 -- systemctl stop llamacpp-rerank
 # The router (LXC 153) will start returning upstream 502s on /v1/rerank.
 ```
 
-> ⚠️ **Dependency on router rewrite (todo #20):** The "fail-open SSE" graceful-degradation behavior — where the router emits a `service degraded` event instead of propagating raw 502s to AnythingLLM — is delivered by the rewritten `scripts/files/router-app.py` (tracked as todo #20 in the pivot plan). Until that lands, AnythingLLM will see raw 502s on `/v1/rerank` and may fail entire RAG queries instead of falling back to plain top-K retrieval. Workaround for current pre-rewrite clusters: in AnythingLLM Settings → AI Providers → Reranker, set the provider to "Disabled" until the failed V620 is replaced.
+The router's "fail-open SSE" behavior emits a `service degraded` event instead of propagating raw 502s, so AnythingLLM falls back to plain top-K retrieval (no rerank) when the reranker is down rather than failing the whole query. This is the current shipped behavior of `scripts/files/router-app.py`.
 
 If V620 #0 failed (embedder uses `--main-gpu 0`):
 

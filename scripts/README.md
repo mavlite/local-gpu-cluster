@@ -26,7 +26,7 @@ runbook for those.
 cd /root && git clone https://github.com/<you>/local-gpu-cluster.git
 cd local-gpu-cluster/scripts
 cp config.env.example config.env
-$EDITOR config.env        # set SECONDARY_NVME at minimum
+$EDITOR config.env        # set DATA_NVME_A and DATA_NVME_B at minimum (ZFS mirror devices)
 
 ./bootstrap.sh --list     # see what will run
 ./bootstrap.sh            # run everything
@@ -34,7 +34,7 @@ $EDITOR config.env        # set SECONDARY_NVME at minimum
 # Or run phase-by-phase
 ./bootstrap.sh --only 40
 ./bootstrap.sh --from 51
-./bootstrap.sh --phases 51,52,53
+./bootstrap.sh --phases 51,53,54
 ```
 
 ## Required config
