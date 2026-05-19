@@ -144,6 +144,25 @@ THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 NOTHINK_HINT = re.compile(r"/no_think|hide thinking|strip reasoning", re.IGNORECASE)
 RAG_MODEL_RE = re.compile(r"(^rag-|-rag$)", re.IGNORECASE)
 
+# AnythingLLM-style RAG chunk markers leak into model output even after explicit
+# prompt-level instructions to suppress them. Qwen3.6 has a strong training prior
+# to write "[CONTEXT 1]", "[Context 0]", "(Context 0, 1)", etc. as citation
+# references to the numbered chunks AnythingLLM passes in the system prompt.
+# These are visible noise to end users. Strip them server-side.
+#
+# Handled patterns:
+#   [CONTEXT 1]              -> ""
+#   [Context 0]              -> ""
+#   (Context 0)              -> ""
+#   (Context 0, 1)           -> ""
+#   (Context 0, Context 1)   -> ""
+#   [CONTEXT 1] [CONTEXT 9]  -> ""   (consecutive, eats interior whitespace)
+# Leading whitespace is consumed so "claim [CTX 1]." -> "claim."
+CONTEXT_MARKER_RE = re.compile(
+    r"\s*[\[\(]\s*(?:CONTEXT|Context|context)\s+\d+(?:\s*,\s*(?:(?:CONTEXT|Context|context)\s+)?\d+)*\s*[\]\)]"
+)
+STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() in ("true", "1", "yes")
+
 
 def should_strip_thinking(body: dict, header_value: Optional[str]) -> bool:
     if header_value is not None:
@@ -226,6 +245,8 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
                         if chunk is None:
                             break
                         out = THINK_RE.sub("", chunk) if strip_thinking else chunk
+                        if STRIP_CONTEXT_MARKERS:
+                            out = CONTEXT_MARKER_RE.sub("", out)
                         yield out.encode()
                 finally:
                     task.cancel()
@@ -290,11 +311,14 @@ async def chat(
                     {"error": "upstream_invalid_json", "detail": r.text[:500]},
                     status_code=502,
                 )
-            if strip:
+            if strip or STRIP_CONTEXT_MARKERS:
                 for choice in data.get("choices", []):
                     msg = choice.get("message", {})
                     if "content" in msg:
-                        msg["content"] = THINK_RE.sub("", msg["content"])
+                        if strip:
+                            msg["content"] = THINK_RE.sub("", msg["content"])
+                        if STRIP_CONTEXT_MARKERS:
+                            msg["content"] = CONTEXT_MARKER_RE.sub("", msg["content"])
             return JSONResponse(data, status_code=r.status_code)
 
 
