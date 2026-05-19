@@ -64,16 +64,24 @@ ALLM="${ALLM:-http://192.168.6.154:3001/api/v1}"
 mkdir -p "$STATE_DIR"
 touch "$DONE_LIST" "$DOCNAMES_LIST" "$ERRORS_LIST"
 
-# Clone or update the repo. Shallow clone is enough since we use git log for
-# per-file last-modified date — that needs full history, so use --filter=blob:none
-# (treeless) which is fast AND retains commit history for log queries.
-if [[ ! -d "$CLONE_DIR/.git" ]]; then
-  echo "==> Cloning $REPO_URL → $CLONE_DIR"
-  mkdir -p "$(dirname "$CLONE_DIR")"
-  git clone --filter=blob:none "$REPO_URL" "$CLONE_DIR"
-else
+# Clone or update the repo. Use --filter=blob:none (treeless) for fast clone
+# that still retains commit history (needed for per-file last-modified date
+# via `git log`). Three states to handle:
+#   - dir has .git        → pull
+#   - dir exists, no .git → bail (don't blindly delete user data)
+#   - dir absent or empty → clone
+if [[ -d "$CLONE_DIR/.git" ]]; then
   echo "==> $CLONE_DIR exists; pulling latest"
   git -C "$CLONE_DIR" pull --ff-only
+elif [[ -d "$CLONE_DIR" ]] && [[ -n "$(ls -A "$CLONE_DIR" 2>/dev/null)" ]]; then
+  echo "ERROR: $CLONE_DIR exists, is non-empty, and has no .git/." >&2
+  echo "       Either remove it (rm -rf $CLONE_DIR) or set CLONE_DIR=<other path>." >&2
+  exit 1
+else
+  echo "==> Cloning $REPO_URL → $CLONE_DIR"
+  mkdir -p "$(dirname "$CLONE_DIR")"
+  rmdir "$CLONE_DIR" 2>/dev/null || true   # remove empty placeholder if any
+  git clone --filter=blob:none "$REPO_URL" "$CLONE_DIR"
 fi
 
 # Enumerate target files. Use printf with -print0 so paths with spaces survive.
