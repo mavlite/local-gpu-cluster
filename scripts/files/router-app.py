@@ -52,6 +52,13 @@ EMBED_URL = os.environ.get("EMBED_URL", "http://192.168.6.151:8082")
 RERANK_URL = os.environ.get("RERANK_URL", "http://192.168.6.151:8083")
 KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "12"))
 
+# Wall-clock cap on a single streaming generation. Without this, a wedged
+# llama-server (OOM, ROCm driver hang) would hold its chat_sem slot forever
+# and deadlock the router once CHAT_CONCURRENCY slots are stuck. Set high
+# enough that legitimate long generations finish (e.g., 1500-token essay at
+# ~30 t/s = ~50s; agent loops with thinking can run minutes).
+MAX_STREAM_SECONDS = int(os.environ.get("MAX_STREAM_SECONDS", "900"))
+
 # Auth: ROUTER_API_KEY gates inbound; LLAMACPP_API_KEY is sent on outbound calls.
 ROUTER_API_KEY = os.environ.get("ROUTER_API_KEY", "")
 LLAMACPP_API_KEY = os.environ.get("LLAMACPP_API_KEY", "")
@@ -265,7 +272,10 @@ DONE_FRAME = b"data: [DONE]\n\n"
 
 async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thinking: bool):
     """Stream upstream SSE, injecting keepalives every KEEPALIVE_INTERVAL seconds and
-    falling open with a `service_degraded` frame if the upstream errors."""
+    falling open with a `service_degraded` frame if the upstream errors. Caps the
+    total stream wall-clock at MAX_STREAM_SECONDS so a wedged upstream can't hold
+    its chat_sem slot forever."""
+    stream_started = time.monotonic()
     async with httpx.AsyncClient(timeout=None) as client:
         try:
             async with client.stream("POST", upstream_url, json=payload, headers=upstream_headers()) as r:
@@ -283,6 +293,10 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
                 task = asyncio.create_task(reader())
                 try:
                     while True:
+                        if time.monotonic() - stream_started > MAX_STREAM_SECONDS:
+                            yield DEGRADED_FRAME
+                            yield DONE_FRAME
+                            return
                         try:
                             chunk = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_INTERVAL)
                         except asyncio.TimeoutError:
@@ -296,7 +310,7 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
                         yield out.encode()
                 finally:
                     task.cancel()
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError):
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException, httpx.RemoteProtocolError):
             yield DEGRADED_FRAME
             yield DONE_FRAME
 
@@ -328,11 +342,12 @@ async def chat(
         ctk.setdefault("enable_thinking", False)
 
     # Token-budget admission control. Use /tokenize on the chat upstream.
+    # count_tokens returns -1 when /tokenize is unreachable (fail-open).
     messages = body.get("messages", [])
     text = _approx_text_from_messages(messages)
     async with httpx.AsyncClient() as client:
         token_count = await count_tokens(client, V620_URL, text)
-    if token_count > MAX_CHAT_INPUT_TOKENS:
+    if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
         log_access("/v1/chat/completions", model, token_count, 0,
                    int((time.monotonic() - started) * 1000), 413, client_ip,
                    error="exceeds_max_chat_input_tokens")
@@ -356,7 +371,7 @@ async def chat(
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
             try:
                 r = await c.post(url, json=body, headers=upstream_headers())
-            except (httpx.ConnectError, httpx.ReadError) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 log_access("/v1/chat/completions", model, token_count, 0,
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error=type(e).__name__)
@@ -410,15 +425,29 @@ async def completions(request: Request):
     client_ip = request.client.host if request.client else "?"
     model = body.get("model", "?")
 
-    # Token-budget admission control on the prompt + suffix
+    # Token-budget admission control on the prompt + suffix.
+    # OpenAI spec allows `prompt` to be str | list[str] | list[int]:
+    #   - str: pass through
+    #   - list[str]: concat with newline
+    #   - list[int]: token IDs — already tokenized, don't call /tokenize (which counts
+    #     by tokenizing text). Just use the length as the token count directly.
     prompt = body.get("prompt", "")
-    if isinstance(prompt, list):
-        prompt = "\n".join(str(p) for p in prompt)
     suffix = body.get("suffix", "") or ""
-    text = f"{prompt}\n{suffix}"
-    async with httpx.AsyncClient() as client:
-        token_count = await count_tokens(client, V620_URL, text)
-    if token_count > MAX_CHAT_INPUT_TOKENS:
+    if isinstance(prompt, list) and prompt and all(isinstance(p, int) for p in prompt):
+        # Pre-tokenized prompt: just count the IDs. Add a rough estimate for suffix.
+        token_count = len(prompt)
+        if isinstance(suffix, str) and suffix:
+            async with httpx.AsyncClient() as client:
+                suf = await count_tokens(client, V620_URL, suffix)
+            if suf != -1:
+                token_count += suf
+    else:
+        if isinstance(prompt, list):
+            prompt = "\n".join(str(p) for p in prompt if isinstance(p, str))
+        text = f"{prompt}\n{suffix}"
+        async with httpx.AsyncClient() as client:
+            token_count = await count_tokens(client, V620_URL, text)
+    if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
         log_access("/v1/completions", model, token_count, 0,
                    int((time.monotonic() - started) * 1000), 413, client_ip,
                    error="exceeds_max_chat_input_tokens")
@@ -440,7 +469,7 @@ async def completions(request: Request):
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
             try:
                 r = await c.post(url, json=body, headers=upstream_headers())
-            except (httpx.ConnectError, httpx.ReadError) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 log_access("/v1/completions", model, token_count, 0,
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error=type(e).__name__)
@@ -491,10 +520,11 @@ async def embeddings(request: Request):
     else:
         text_for_count = ""
 
-    # Token-budget admission control (best-effort)
+    # Token-budget admission control (best-effort). count_tokens returns -1
+    # when /tokenize is unreachable (fail-open).
     async with httpx.AsyncClient() as client:
         token_count = await count_tokens(client, EMBED_URL, text_for_count)
-    if token_count > MAX_EMBED_INPUT_TOKENS:
+    if token_count != -1 and token_count > MAX_EMBED_INPUT_TOKENS:
         raise HTTPException(
             status_code=413,
             detail=f"input is {token_count} tokens, exceeds MAX_EMBED_INPUT_TOKENS={MAX_EMBED_INPUT_TOKENS}",
@@ -505,7 +535,7 @@ async def embeddings(request: Request):
             try:
                 r = await c.post(f"{EMBED_URL}/v1/embeddings", json=body, headers=upstream_headers())
                 return JSONResponse(r.json(), status_code=r.status_code)
-            except (httpx.ConnectError, httpx.ReadError) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 return JSONResponse(
                     {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
                     status_code=502,
@@ -521,7 +551,7 @@ async def rerank(request: Request):
             try:
                 r = await c.post(f"{RERANK_URL}/v1/rerank", json=body, headers=upstream_headers())
                 return JSONResponse(r.json(), status_code=r.status_code)
-            except (httpx.ConnectError, httpx.ReadError) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 return JSONResponse(
                     {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
                     status_code=502,

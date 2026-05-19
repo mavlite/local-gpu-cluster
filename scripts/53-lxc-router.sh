@@ -163,13 +163,44 @@ phase_7_4_systemd() {
 
     # Persist admission/rate-limit/metrics config to /etc/router.env so EnvironmentFile picks them up.
     # API keys are already in /etc/router.env from phase 7.1.5.
+    #
+    # IMPORTANT: This function uses a Python rewrite (not `sed`) because values may
+    # contain characters that `sed` treats specially: `|` (delimiter), `&`
+    # (backreference), `\` (escape), or backreferences `\1`. A value like
+    # `RATE_LIMIT_CHAT="120/minute # commented"` could otherwise corrupt the file.
+    # We also `chmod 600` inside the function so callers don't have to remember to.
     upsert_env() {
       local key="$1" val="$2"
-      if grep -q "^${key}=" /etc/router.env 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" /etc/router.env
-      else
-        echo "${key}=${val}" >> /etc/router.env
-      fi
+      python3 - "$key" "$val" /etc/router.env <<'PY'
+import os, sys, tempfile
+key, val, path = sys.argv[1], sys.argv[2], sys.argv[3]
+prefix = key + "="
+lines = []
+found = False
+try:
+    with open(path) as f:
+        for line in f:
+            if line.startswith(prefix):
+                lines.append(prefix + val + "\n")
+                found = True
+            else:
+                lines.append(line)
+except FileNotFoundError:
+    pass
+if not found:
+    lines.append(prefix + val + "\n")
+# Atomic write
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".router.env.")
+try:
+    with os.fdopen(fd, "w") as f:
+        f.writelines(lines)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except Exception:
+    os.unlink(tmp)
+    raise
+PY
     }
     upsert_env V620_URL "$V620_URL"
     upsert_env EMBED_URL "$EMBED_URL"
@@ -229,15 +260,27 @@ phase_7_5_keepalive_timer() {
 #!/bin/bash
 # Pings the chat model with a 1-token request. Fails silently if the router
 # is unreachable (we don't want a paging dependency).
+#
+# The Authorization header is passed via curl's -H @<file> form (reading from
+# a file) rather than -H "Bearer $KEY" so ROUTER_API_KEY does NOT appear in
+# /proc/<pid>/cmdline / ps output during the curl call. The header file is
+# created with mode 600 in a private tmpdir and removed on exit.
 set -e
 . /etc/router.env  # source ROUTER_API_KEY
+
+tmpdir=$(mktemp -d -t llm-router-keepalive.XXXXXX)
+trap 'rm -rf "$tmpdir"' EXIT
+umask 077
+printf 'Authorization: Bearer %s\n' "$ROUTER_API_KEY" > "$tmpdir/auth"
+
 curl -s -m 30 -o /dev/null \
-    -H "Authorization: Bearer ${ROUTER_API_KEY}" \
+    -H "@$tmpdir/auth" \
     -H "Content-Type: application/json" \
     -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"."}],"max_tokens":1}' \
     http://127.0.0.1:8000/v1/chat/completions || true
 SH
-    chmod +x /usr/local/bin/llm-router-keepalive.sh
+    chmod 0755 /usr/local/bin/llm-router-keepalive.sh
+    chown root:root /usr/local/bin/llm-router-keepalive.sh
 
     cat > /etc/systemd/system/llm-router-keepalive.service <<'EOF'
 [Unit]

@@ -386,22 +386,22 @@ Environment="GPU_MAX_HW_QUEUES=2"
 Environment="GGML_HIP_UMA=0"
 Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \\
-    --hf-repo ${LLAMA_HF_REPO}:${LLAMA_HF_QUANT} \\
-    --alias ${LLAMA_ALIAS} \\
+    --hf-repo "${LLAMA_HF_REPO}:${LLAMA_HF_QUANT}" \\
+    --alias "${LLAMA_ALIAS}" \\
     --host 0.0.0.0 --port 8080 \\
-    --api-key \${LLAMACPP_API_KEY} \\
-    --ctx-size ${LLAMA_CTX} \\
+    --api-key "\${LLAMACPP_API_KEY}" \\
+    --ctx-size "${LLAMA_CTX}" \\
     --n-gpu-layers all \\
-    --tensor-split ${LLAMA_TENSOR_SPLIT} \\
-    --threads ${LLAMA_THREADS} \\
+    --tensor-split "${LLAMA_TENSOR_SPLIT}" \\
+    --threads "${LLAMA_THREADS}" \\
     --batch-size 2048 --ubatch-size 512 \\
-    --cache-type-k ${LLAMA_KV_TYPE} --cache-type-v ${LLAMA_KV_TYPE} \\
+    --cache-type-k "${LLAMA_KV_TYPE}" --cache-type-v "${LLAMA_KV_TYPE}" \\
     --cont-batching \\
-    --parallel ${LLAMA_PARALLEL} \\
-    --cache-reuse ${LLAMA_CACHE_REUSE} \\
+    --parallel "${LLAMA_PARALLEL}" \\
+    --cache-reuse "${LLAMA_CACHE_REUSE}" \\
 ${DRAFT_LINES}
     --no-mmproj \\
-    --flash-attn ${LLAMA_FLASH_ATTN} \\
+    --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
     --mlock \\
@@ -449,17 +449,17 @@ Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
 Environment="HIP_FORCE_DEV_KERNARG=1"
 Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \\
-    --hf-repo ${EMBED_HF_REPO}:${EMBED_HF_QUANT} \\
-    --alias ${EMBED_ALIAS} \\
+    --hf-repo "${EMBED_HF_REPO}:${EMBED_HF_QUANT}" \\
+    --alias "${EMBED_ALIAS}" \\
     --host 0.0.0.0 --port 8082 \\
-    --api-key \${LLAMACPP_API_KEY} \\
+    --api-key "\${LLAMACPP_API_KEY}" \\
     --main-gpu 0 \\
     --n-gpu-layers all \\
     --embeddings \\
-    --pooling ${EMBED_POOLING} \\
-    --ctx-size ${EMBED_CTX} \\
+    --pooling "${EMBED_POOLING}" \\
+    --ctx-size "${EMBED_CTX}" \\
     --cont-batching \\
-    --parallel ${EMBED_PARALLEL} \\
+    --parallel "${EMBED_PARALLEL}" \\
     --batch-size 2048 --ubatch-size 512 \\
     --flash-attn off \\
     --mlock \\
@@ -503,17 +503,17 @@ Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
 Environment="HIP_FORCE_DEV_KERNARG=1"
 Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \\
-    --hf-repo ${RERANK_HF_REPO}:${RERANK_HF_QUANT} \\
-    --alias ${RERANK_ALIAS} \\
+    --hf-repo "${RERANK_HF_REPO}:${RERANK_HF_QUANT}" \\
+    --alias "${RERANK_ALIAS}" \\
     --host 0.0.0.0 --port 8083 \\
-    --api-key \${LLAMACPP_API_KEY} \\
+    --api-key "\${LLAMACPP_API_KEY}" \\
     --main-gpu 1 \\
     --n-gpu-layers all \\
     --embeddings --pooling rank \\
     --reranking \\
-    --ctx-size ${RERANK_CTX} \\
+    --ctx-size "${RERANK_CTX}" \\
     --cont-batching \\
-    --parallel ${RERANK_PARALLEL} \\
+    --parallel "${RERANK_PARALLEL}" \\
     --flash-attn off \\
     --mlock \\
     --metrics
