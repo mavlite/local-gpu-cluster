@@ -133,9 +133,37 @@ app.add_middleware(SlowAPIMiddleware)
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    # NOTE: _error_body is defined later in the file but referenced here at
+    # request time, not import time, so the forward reference is fine.
     return JSONResponse(
-        {"error": "rate_limit_exceeded", "detail": str(exc.detail)},
+        _error_body("rate_limit_exceeded", str(exc.detail)),
         status_code=429,
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Wrap FastAPI's default {"detail": "..."} shape into the OpenAI-style
+    # {"error": {"type": "...", "message": "...", "code": null}} envelope.
+    # Without this, raises like `raise HTTPException(413, detail="...")` go
+    # out as a flat detail field that breaks OpenAI-compatible clients (Zod
+    # validators in AI-SDK / OpenCode reject responses lacking `choices` AND
+    # an `error` object).
+    type_map = {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        413: "request_too_large",
+        429: "rate_limit_exceeded",
+        500: "internal_error",
+        502: "bad_gateway",
+        503: "service_unavailable",
+        504: "gateway_timeout",
+    }
+    return JSONResponse(
+        _error_body(type_map.get(exc.status_code, "error"), str(exc.detail)),
+        status_code=exc.status_code,
     )
 
 
@@ -147,15 +175,15 @@ async def require_bearer(request: Request, call_next):
         return await call_next(request)
     if not ROUTER_API_KEY:
         return JSONResponse(
-            {"error": "router_misconfigured", "detail": "ROUTER_API_KEY not set in /etc/router.env"},
+            _error_body("router_misconfigured", "ROUTER_API_KEY not set in /etc/router.env"),
             status_code=503,
         )
     auth = request.headers.get("authorization", "")
     if not auth.lower().startswith("bearer "):
-        return JSONResponse({"error": "unauthorized", "detail": "missing Bearer token"}, status_code=403)
+        return JSONResponse(_error_body("unauthorized", "missing Bearer token"), status_code=403)
     presented = auth[7:].strip()
     if not secrets.compare_digest(presented, ROUTER_API_KEY):
-        return JSONResponse({"error": "unauthorized", "detail": "invalid Bearer token"}, status_code=403)
+        return JSONResponse(_error_body("unauthorized", "invalid Bearer token"), status_code=403)
     return await call_next(request)
 
 
@@ -263,8 +291,20 @@ def _approx_text_from_messages(messages: list) -> str:
 
 # ---------- Fail-open SSE on upstream 5xx ----------
 
+def _error_body(error_type: str, message: str) -> dict:
+    """OpenAI-compatible error envelope.
+
+    OpenAI SDKs (and AI-SDK / OpenCode's zod schema) expect `error` to be an
+    OBJECT with at least `type` and `message`. Returning {"error": "string"}
+    breaks the client-side validator (it tries to parse the response as
+    either a chat-completion or an error, fails both, and surfaces a
+    cryptic Zod union error to the user). Always emit this envelope shape.
+    """
+    return {"error": {"type": error_type, "message": message, "code": None}}
+
+
 DEGRADED_FRAME = (
-    "data: " + json.dumps({"error": "service_degraded", "detail": "upstream returned an error; retry shortly"})
+    "data: " + json.dumps(_error_body("service_degraded", "upstream returned an error; retry shortly"))
     + "\n\n"
 ).encode()
 DONE_FRAME = b"data: [DONE]\n\n"
@@ -376,7 +416,7 @@ async def chat(
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error=type(e).__name__)
                 return JSONResponse(
-                    {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
+                    _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
             try:
@@ -386,7 +426,7 @@ async def chat(
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error="upstream_invalid_json")
                 return JSONResponse(
-                    {"error": "upstream_invalid_json", "detail": r.text[:500]},
+                    _error_body("upstream_invalid_json", r.text[:500]),
                     status_code=502,
                 )
             if strip or STRIP_CONTEXT_MARKERS:
@@ -474,7 +514,7 @@ async def completions(request: Request):
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error=type(e).__name__)
                 return JSONResponse(
-                    {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
+                    _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
             try:
@@ -484,7 +524,7 @@ async def completions(request: Request):
                            int((time.monotonic() - started) * 1000), 502, client_ip,
                            error="upstream_invalid_json")
                 return JSONResponse(
-                    {"error": "upstream_invalid_json", "detail": r.text[:500]},
+                    _error_body("upstream_invalid_json", r.text[:500]),
                     status_code=502,
                 )
             usage = data.get("usage", {}) or {}
@@ -537,7 +577,7 @@ async def embeddings(request: Request):
                 return JSONResponse(r.json(), status_code=r.status_code)
             except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 return JSONResponse(
-                    {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
+                    _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
 
@@ -553,7 +593,7 @@ async def rerank(request: Request):
                 return JSONResponse(r.json(), status_code=r.status_code)
             except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
                 return JSONResponse(
-                    {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
+                    _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
 
