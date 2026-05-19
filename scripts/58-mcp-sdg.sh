@@ -59,8 +59,12 @@ phase_install_python() {
     set -Eeuo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
-    # Python + venv (apt — only if missing)
-    if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import venv' 2>/dev/null; then
+    # Python + venv: check for ensurepip specifically. The `venv` module
+    # itself ships in stdlib so `import venv` succeeds even without the
+    # python3-venv apt package — but actually creating a venv invokes
+    # ensurepip, which is gated by the apt package on Debian/Ubuntu.
+    if ! python3 -c 'import ensurepip' 2>/dev/null \
+       || ! command -v python3 >/dev/null 2>&1; then
       apt update
       apt install -y python3 python3-venv python3-pip
     fi
