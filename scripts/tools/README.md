@@ -66,6 +66,19 @@ scripts/tools/ingest-github-repo.sh \
   "source/" \
   --embed
 
+# --- D'. GitHub repo with single-page-per-guide rendering (Keycloak AsciiDoc) ---
+# Many topic .adoc files compile into ONE HTML guide page → URL_KEEP_DEPTH=1
+FILE_GLOB="*.adoc" \
+URL_KEEP_DEPTH=1 \
+FILE_EXCLUDE="^docs/(guides|maven-plugin|documentation/(dist|header-maven-plugin|internal_resources|tests|aggregation|topics))/" \
+scripts/tools/ingest-github-repo.sh \
+  https://github.com/keycloak/keycloak \
+  sdg-documentation \
+  "[OFFICIAL] keycloak/docs" \
+  https://www.keycloak.org/docs/latest \
+  "docs/documentation/" \
+  --embed
+
 # --- E. Wipe a workspace before clean re-ingest ---
 scripts/tools/clear-workspace.sh sdg-documentation
 ```
@@ -85,6 +98,7 @@ scripts/tools/clear-workspace.sh sdg-documentation
 | `FILE_EXCLUDE` | `^_themes/` | Regex of relative paths to skip | `ingest-github-repo.sh` |
 | `URL_EXT_FROM` | `.rst` | File extension to strip when building rendered URL | `ingest-github-repo.sh` |
 | `URL_EXT_TO` | `.html` | URL extension to append | `ingest-github-repo.sh` |
+| `URL_KEEP_DEPTH` | (unset) | When set to N, citation URL keeps only first N path components after `PATH_STRIP` + trailing slash. Use for "many files → one rendered page" docs like Keycloak AsciiDoc | `ingest-github-repo.sh` |
 | `CLONE_DIR` | `/tank/gh-cache/<repo>` | Where the repo is cloned | `ingest-github-repo.sh` |
 
 ## Source tagging convention

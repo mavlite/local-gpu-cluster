@@ -22,10 +22,18 @@
 #   path-strip    file-path prefix that's NOT in the URL (e.g. "source/")
 #
 # Optional env:
-#   FILE_GLOB         find -name pattern, default *.rst
+#   FILE_GLOB         find -name pattern, default *.rst (use *.adoc for AsciiDoc)
 #   FILE_EXCLUDE      grep -E regex of relative paths to skip
 #   URL_EXT_FROM      file extension to strip when building URL, default .rst
 #   URL_EXT_TO        URL extension to append, default .html
+#   URL_KEEP_DEPTH    Citation URL mode (default: 1:1 file-to-URL). When set
+#                     to N, keeps only the first N path components after
+#                     PATH_STRIP and appends a trailing slash. Use when many
+#                     source files compile into ONE rendered page per guide
+#                     (e.g., Keycloak AsciiDoc → single HTML per guide).
+#                     Example: docs/documentation/server_admin/topics/realms.adoc
+#                     with PATH_STRIP=docs/documentation/ and URL_KEEP_DEPTH=1
+#                     → URL_BASE/server_admin/
 #   CLONE_DIR         where to clone (default /tank/gh-cache/<repo-name>)
 #   STATE_DIR         resumable state files (default $CLONE_DIR/.ingest-state)
 #   ALLM_API_KEY      from config.env if unset
@@ -112,13 +120,33 @@ for rel in "${files[@]}"; do
 
   filepath="$CLONE_DIR/$rel"
 
-  # Compute the rendered URL the citation should link to
+  # Compute the rendered URL the citation should link to.
+  # Two modes:
+  #   (a) 1:1 file-to-URL mapping (default — OPNsense .rst → .html style):
+  #       just strip PATH_STRIP and swap URL_EXT_FROM → URL_EXT_TO.
+  #   (b) keep-N-components mapping (URL_KEEP_DEPTH set — Keycloak AsciiDoc
+  #       style where many .adoc files compile into ONE single-page guide):
+  #       strip PATH_STRIP, then keep only the first N path components and
+  #       append a trailing slash. The extension transform is skipped because
+  #       the URL points to a guide directory, not a file.
   url_rel="$rel"
   if [[ -n "$PATH_STRIP" ]]; then
     url_rel="${url_rel#$PATH_STRIP}"
   fi
-  if [[ -n "$URL_EXT_FROM" ]] && [[ "$url_rel" == *"$URL_EXT_FROM" ]]; then
-    url_rel="${url_rel%$URL_EXT_FROM}${URL_EXT_TO}"
+  if [[ -n "${URL_KEEP_DEPTH:-}" ]]; then
+    url_rel="$(echo "$url_rel" | awk -F/ -v n="$URL_KEEP_DEPTH" '
+      {
+        max = (NF < n) ? NF : n
+        result = ""
+        for (i = 1; i <= max; i++) result = result (i > 1 ? "/" : "") $i
+        print result
+      }
+    ')"
+    url_rel="${url_rel}/"
+  else
+    if [[ -n "$URL_EXT_FROM" ]] && [[ "$url_rel" == *"$URL_EXT_FROM" ]]; then
+      url_rel="${url_rel%$URL_EXT_FROM}${URL_EXT_TO}"
+    fi
   fi
   rendered_url="$URL_BASE/$url_rel"
 
