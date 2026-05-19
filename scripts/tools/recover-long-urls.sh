@@ -100,15 +100,25 @@ try:
     url_hash = hashlib.sha1(url.encode()).hexdigest()[:8]
     title = f"recovered-{slug}-{url_hash}"
 
+    # Prepend source markers to textContent so provenance + date survive into
+    # the retrieved chunks (AnythingLLM overrides metadata.published with its
+    # own ingestion timestamp, so the date needs to live in the text itself).
+    header_lines = [f"Source: {doc_prefix}", f"URL: {url}"]
+    if published:
+        header_lines.append(f"Last modified: {published}")
+    if author:
+        header_lines.append(f"Author: {author}")
+    text_with_header = "\n".join(header_lines) + "\n\n" + text
+
     payload = {
-        "textContent": text,
+        "textContent": text_with_header,
         "metadata": {
             "title": title,
             "docSource": doc_prefix,
             "chunkSource": f"link://{url}",
             "published": published,
             "author": author,
-            "wordCount": len(text.split()),
+            "wordCount": len(text_with_header.split()),
             "url": url,
         }
     }
