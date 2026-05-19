@@ -38,6 +38,9 @@
 #                     transforms. Use when the rendered site lowercases paths
 #                     (e.g., TrueNAS Hugo: repo content/SCALE/GettingStarted/
 #                     → URL /docs/scale/gettingstarted/).
+#   URL_ENCODE_SPACES Set to 1 to encode spaces in the URL path as %20. Use
+#                     for sites with directory names containing spaces
+#                     (e.g., OpenZFS docs/Basic Concepts/ → /Basic%20Concepts/).
 #   CLONE_DIR         where to clone (default /tank/gh-cache/<repo-name>)
 #   STATE_DIR         resumable state files (default $CLONE_DIR/.ingest-state)
 #   ALLM_API_KEY      from config.env if unset
@@ -161,6 +164,16 @@ for rel in "${files[@]}"; do
   if [[ "${URL_LOWERCASE:-0}" == "1" ]]; then
     url_rel="$(echo "$url_rel" | tr '[:upper:]' '[:lower:]')"
   fi
+
+  # Optional space-to-%20 encoding for sites whose directory names contain
+  # literal spaces (e.g., OpenZFS docs: docs/Basic Concepts/Checksums.rst
+  # → /en/Basic%20Concepts/Checksums.html). Sphinx and Jekyll-style sites
+  # frequently use this pattern. Only encodes spaces — for full URL
+  # encoding of other special characters, switch to URL_ENCODE_PATH=1.
+  if [[ "${URL_ENCODE_SPACES:-0}" == "1" ]]; then
+    url_rel="${url_rel// /%20}"
+  fi
+
   rendered_url="$URL_BASE/$url_rel"
 
   # Last-modified date from git (ISO 8601). Empty string if file is untracked.

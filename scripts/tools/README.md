@@ -100,6 +100,7 @@ scripts/tools/clear-workspace.sh sdg-documentation
 | `URL_EXT_TO` | `.html` | URL extension to append | `ingest-github-repo.sh` |
 | `URL_KEEP_DEPTH` | (unset) | When set to N, citation URL keeps only first N path components after `PATH_STRIP` + trailing slash. Use for "many files → one rendered page" docs like Keycloak AsciiDoc | `ingest-github-repo.sh` |
 | `URL_LOWERCASE` | `0` | Set to `1` to lowercase the URL path. Use when the rendered site lowercases paths (e.g., TrueNAS Hugo) | `ingest-github-repo.sh` |
+| `URL_ENCODE_SPACES` | `0` | Set to `1` to encode spaces as `%20` in URL paths. Use for sites with directory names containing spaces (e.g., OpenZFS `docs/Basic Concepts/`) | `ingest-github-repo.sh` |
 | `CLONE_DIR` | `/tank/gh-cache/<repo>` | Where the repo is cloned | `ingest-github-repo.sh` |
 
 ## Source tagging convention
