@@ -61,12 +61,12 @@ fi
 [[ -n "${ALLM_API_KEY:-}" ]] || { echo "ALLM_API_KEY not set" >&2; exit 1; }
 ALLM="${ALLM:-http://192.168.6.154:3001/api/v1}"
 
-mkdir -p "$STATE_DIR"
-touch "$DONE_LIST" "$DOCNAMES_LIST" "$ERRORS_LIST"
-
-# Clone or update the repo. Use --filter=blob:none (treeless) for fast clone
-# that still retains commit history (needed for per-file last-modified date
-# via `git log`). Three states to handle:
+# Clone or update the repo FIRST — before any state-dir mkdir, otherwise we'd
+# self-trap on the "does $CLONE_DIR exist?" check below (mkdir -p $STATE_DIR
+# would create $CLONE_DIR as a side effect since STATE_DIR is inside it).
+#
+# Use --filter=blob:none (treeless) for fast clone that still retains commit
+# history (needed for per-file last-modified date via `git log`). Three states:
 #   - dir has .git        → pull
 #   - dir exists, no .git → bail (don't blindly delete user data)
 #   - dir absent or empty → clone
@@ -83,6 +83,10 @@ else
   rmdir "$CLONE_DIR" 2>/dev/null || true   # remove empty placeholder if any
   git clone --filter=blob:none "$REPO_URL" "$CLONE_DIR"
 fi
+
+# Now safe to create state dir inside the populated clone
+mkdir -p "$STATE_DIR"
+touch "$DONE_LIST" "$DOCNAMES_LIST" "$ERRORS_LIST"
 
 # Enumerate target files. Use printf with -print0 so paths with spaces survive.
 mapfile -d '' files < <(
