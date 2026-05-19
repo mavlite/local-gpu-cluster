@@ -135,20 +135,31 @@ for rel in "${files[@]}"; do
   # contents that may contain backticks, control chars, or backslashes.
   # Write to a temp file because some .rst files are large and curl/--data-binary
   # @file is the cleanest path that avoids ARG_MAX/heredoc weirdness.
+  #
+  # We prepend "Last modified: <date>" to textContent because AnythingLLM
+  # overrides metadata.published with its own ingestion timestamp. Embedding
+  # the date IN the chunk text means the embedder + LLM can actually see it
+  # during retrieval (so version-drift hints survive into the model's view).
   payload_tmp="$(mktemp -t ghingest-payload.XXXXXX.json)"
   python3 - "$filepath" "$title" "$DOC_PREFIX" "$rendered_url" "${last_mod:-}" "$payload_tmp" <<'PY'
 import json, sys
 filepath, title, doc_prefix, url, published, out_path = sys.argv[1:7]
 with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
     text = f.read()
+# Prepend date + source markers so retrieved chunks always carry provenance.
+header_lines = [f"Source: {doc_prefix}", f"URL: {url}"]
+if published:
+    header_lines.append(f"Last modified: {published}")
+header = "\n".join(header_lines) + "\n\n"
+text_with_header = header + text
 payload = {
-    "textContent": text,
+    "textContent": text_with_header,
     "metadata": {
         "title": title,
         "docSource": doc_prefix,
         "chunkSource": f"link://{url}",
         "published": published or None,
-        "wordCount": len(text.split()),
+        "wordCount": len(text_with_header.split()),
         "url": url,
     },
 }
