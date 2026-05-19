@@ -110,6 +110,8 @@ phase_5_1_create() {
     --features nesting=1 \
     --unprivileged 0 \
     --ostype ubuntu \
+    --onboot 1 \
+    --startup order=1,up=20 \
     --start 0
 
   # Privileged + AppArmor=unconfined is the ONLY reliable combination for ROCm + KFD
