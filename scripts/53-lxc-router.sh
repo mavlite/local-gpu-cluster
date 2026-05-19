@@ -34,10 +34,13 @@ EMBED_URL="${EMBED_URL:-http://${AMD_IP}:8082}"
 RERANK_URL="${RERANK_URL:-http://${AMD_IP}:8083}"
 KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-12}"
 
-# Admission control + rate limit (consumed by router-app.py rewrite)
-CHAT_CONCURRENCY="${CHAT_CONCURRENCY:-1}"
+# Admission control + rate limit (consumed by router-app.py rewrite).
+# CHAT_CONCURRENCY=2 supports parallel agent + sub-agent calls from Cline/OpenCode
+# style tools (single-user but with internal parallelism). Each chat gets ~33 t/s
+# at the upstream's --parallel 4 setup, vs 66 t/s if alone.
+CHAT_CONCURRENCY="${CHAT_CONCURRENCY:-2}"
 EMBED_CONCURRENCY="${EMBED_CONCURRENCY:-4}"
-MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-100000}"
+MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-120000}"
 MAX_EMBED_INPUT_TOKENS="${MAX_EMBED_INPUT_TOKENS:-16384}"  # must match EMBED_CTX/EMBED_PARALLEL per-slot ctx on LXC 151
 RATE_LIMIT_CHAT="${RATE_LIMIT_CHAT:-60/minute}"
 RATE_LIMIT_EMBED="${RATE_LIMIT_EMBED:-200/minute}"
@@ -202,11 +205,67 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+    # Provision the access-log directory (writeable by the router user)
+    mkdir -p /var/log/llm-router
+    chown router:router /var/log/llm-router
+
     systemctl daemon-reload
     systemctl enable llm-router
     # restart so updated /etc/router.env values take effect on re-run
     systemctl restart llm-router
     systemctl status llm-router --no-pager || true
+GUEST
+}
+
+phase_7_5_keepalive_timer() {
+  step "7.5 — Install model-keepalive systemd timer (eliminates cold-start latency)"
+  pct exec "$ROUTER_VMID" -- bash -se <<'GUEST'
+    set -Eeuo pipefail
+    # Tiny periodic ping to the chat model so its weights stay hot in VRAM. The
+    # llamacpp-chat unit doesn't unload weights but the first request after a
+    # long idle period eats a 2-5s warm-up. Hitting it every 5 minutes pre-warms
+    # the cache and keeps p99 latency consistent.
+    cat > /usr/local/bin/llm-router-keepalive.sh <<'SH'
+#!/bin/bash
+# Pings the chat model with a 1-token request. Fails silently if the router
+# is unreachable (we don't want a paging dependency).
+set -e
+. /etc/router.env  # source ROUTER_API_KEY
+curl -s -m 30 -o /dev/null \
+    -H "Authorization: Bearer ${ROUTER_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"."}],"max_tokens":1}' \
+    http://127.0.0.1:8000/v1/chat/completions || true
+SH
+    chmod +x /usr/local/bin/llm-router-keepalive.sh
+
+    cat > /etc/systemd/system/llm-router-keepalive.service <<'EOF'
+[Unit]
+Description=Periodic warm-up ping to the LLM chat model
+After=llm-router.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/llm-router-keepalive.sh
+EOF
+
+    cat > /etc/systemd/system/llm-router-keepalive.timer <<'EOF'
+[Unit]
+Description=Periodic warm-up ping every 5 minutes
+After=llm-router.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now llm-router-keepalive.timer
+    systemctl status llm-router-keepalive.timer --no-pager || true
 GUEST
 }
 
@@ -216,6 +275,7 @@ main() {
   phase_7_2_python_env
   phase_7_3_deploy_app
   phase_7_4_systemd
+  phase_7_5_keepalive_timer
 
   step "Phase 7 complete."
   local ip; ip="$(lxc_get_ip "$ROUTER_VMID" || true)"

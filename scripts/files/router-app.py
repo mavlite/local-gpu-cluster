@@ -3,6 +3,7 @@ LLM cluster router (V620-only — Phase 7 of setup-runbook.md).
 
 All upstreams live on LXC 151:
   POST /v1/chat/completions  -> V620 chat (port 8080, tensor-split, in-process spec decode)
+  POST /v1/completions       -> V620 chat (legacy completions / FIM passthrough)
   POST /v1/embeddings        -> V620 embedder (port 8082, --main-gpu 0, --pooling last)
   POST /v1/rerank            -> V620 reranker (port 8083, --main-gpu 1, --reranking)
   GET  /v1/models            -> aggregated list from chat + embed + rerank
@@ -11,7 +12,7 @@ All upstreams live on LXC 151:
 
 Features (V620-only build):
   - Bearer auth on inbound (ROUTER_API_KEY) and outbound (LLAMACPP_API_KEY).
-  - asyncio.Semaphore admission control (chat=1, embed=4).
+  - asyncio.Semaphore admission control (chat=N, embed=4).
   - Per-route token-budget admission via upstream /tokenize calls (chat input cap,
     embed input cap; reject 413 if over budget).
   - slowapi per-IP rate limiting.
@@ -20,15 +21,19 @@ Features (V620-only build):
     AnythingLLM can fall back without breaking the stream.
   - SSE keepalive (`: ping` every KEEPALIVE_INTERVAL seconds) during long generations.
   - Per-request <think>...</think> stripping (header > body field > system prompt > model alias).
+  - Per-request [CONTEXT N] / (Context 0, 1) marker stripping (Qwen3.6 prior).
   - Qwen3 Embedding compliance: appends <|endoftext|> if missing.
+  - Structured access logging (model, tokens_in, tokens_out, duration, client_ip).
 """
 
 import asyncio
 import json
+import logging
 import os
 import re
 import secrets
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 import httpx
@@ -51,11 +56,14 @@ KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "12"))
 ROUTER_API_KEY = os.environ.get("ROUTER_API_KEY", "")
 LLAMACPP_API_KEY = os.environ.get("LLAMACPP_API_KEY", "")
 
-# Admission control
-CHAT_CONCURRENCY = int(os.environ.get("CHAT_CONCURRENCY", "1"))
+# Admission control. CHAT_CONCURRENCY bumped 1→2 in 2026-05 for coding-agent
+# workflows: tools like Cline / OpenCode fire parallel chat calls (main agent +
+# sub-agent context). Two concurrent chats split the 4 llama.cpp slots evenly
+# (~33 t/s each) — small hit per request but agent UX is much smoother.
+CHAT_CONCURRENCY = int(os.environ.get("CHAT_CONCURRENCY", "2"))
 EMBED_CONCURRENCY = int(os.environ.get("EMBED_CONCURRENCY", "4"))
-MAX_CHAT_INPUT_TOKENS = int(os.environ.get("MAX_CHAT_INPUT_TOKENS", "100000"))
-MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "8192"))
+MAX_CHAT_INPUT_TOKENS = int(os.environ.get("MAX_CHAT_INPUT_TOKENS", "120000"))
+MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "16384"))
 
 # Rate limit (slowapi syntax: "60/minute")
 RATE_LIMIT_CHAT = os.environ.get("RATE_LIMIT_CHAT", "60/minute")
@@ -69,6 +77,44 @@ METRICS_ALLOWED_IPS = {
 # Finite timeouts. Streaming uses timeout=None because long generations are normal.
 CHAT_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=5.0)
 SMALL_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
+
+# ---------- Structured access logging ----------
+# One JSON line per request to /var/log/llm-router/access.log (rotated at 50MB,
+# keep 5 backups). Logs: timestamp, route, model, input_tokens, output_tokens,
+# duration_ms, http_status, client_ip. Useful for debugging slow completions
+# and tracking per-model usage over time.
+ACCESS_LOG_PATH = os.environ.get("ACCESS_LOG_PATH", "/var/log/llm-router/access.log")
+access_logger = logging.getLogger("llm-router.access")
+access_logger.setLevel(logging.INFO)
+access_logger.propagate = False
+try:
+    os.makedirs(os.path.dirname(ACCESS_LOG_PATH), exist_ok=True)
+    _h = RotatingFileHandler(ACCESS_LOG_PATH, maxBytes=50 * 1024 * 1024, backupCount=5)
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    access_logger.addHandler(_h)
+except (OSError, PermissionError):
+    # If we can't write the log file (e.g., perms during dev), fall back to stderr
+    access_logger.addHandler(logging.StreamHandler())
+
+
+def log_access(route: str, model: str, input_tokens: int, output_tokens: int,
+               duration_ms: int, status: int, client_ip: str, error: Optional[str] = None) -> None:
+    entry = {
+        "ts": time.time(),
+        "route": route,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_ms": duration_ms,
+        "status": status,
+        "client_ip": client_ip,
+    }
+    if error:
+        entry["error"] = error
+    try:
+        access_logger.info(json.dumps(entry))
+    except Exception:
+        pass  # never let logging break a request
 
 # ---------- App + middleware ----------
 
@@ -267,6 +313,9 @@ async def chat(
     strip = should_strip_thinking(body, x_strip_thinking)
     stream = body.get("stream", False)
     url = f"{V620_URL}/v1/chat/completions"
+    started = time.monotonic()
+    client_ip = request.client.host if request.client else "?"
+    model = body.get("model", "?")
 
     # Qwen3.6 chat-template thinking-mode toggle: when the requested model alias
     # matches rag-*, disable reasoning at the template level. Qwen3.6 emits its
@@ -274,7 +323,7 @@ async def chat(
     # the regex stripper can't catch it — RAG UIs end up showing the analysis
     # AND blowing through max_tokens before the actual answer finishes.
     # Honor the client if they explicitly set chat_template_kwargs themselves.
-    if RAG_MODEL_RE.search(body.get("model", "")):
+    if RAG_MODEL_RE.search(model):
         ctk = body.setdefault("chat_template_kwargs", {})
         ctk.setdefault("enable_thinking", False)
 
@@ -284,6 +333,9 @@ async def chat(
     async with httpx.AsyncClient() as client:
         token_count = await count_tokens(client, V620_URL, text)
     if token_count > MAX_CHAT_INPUT_TOKENS:
+        log_access("/v1/chat/completions", model, token_count, 0,
+                   int((time.monotonic() - started) * 1000), 413, client_ip,
+                   error="exceeds_max_chat_input_tokens")
         raise HTTPException(
             status_code=413,
             detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
@@ -291,6 +343,11 @@ async def chat(
 
     async with chat_sem:
         if stream:
+            # Streaming responses log only on connection close (we don't get tokens-out
+            # here easily). Log a "stream-started" entry now; rely on access patterns for the rest.
+            log_access("/v1/chat/completions", model, token_count, -1,
+                       int((time.monotonic() - started) * 1000), 200, client_ip,
+                       error="stream-started")
             return StreamingResponse(
                 sse_stream_with_keepalive(url, body, strip),
                 media_type="text/event-stream",
@@ -300,6 +357,9 @@ async def chat(
             try:
                 r = await c.post(url, json=body, headers=upstream_headers())
             except (httpx.ConnectError, httpx.ReadError) as e:
+                log_access("/v1/chat/completions", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error=type(e).__name__)
                 return JSONResponse(
                     {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
                     status_code=502,
@@ -307,6 +367,9 @@ async def chat(
             try:
                 data = r.json()
             except json.JSONDecodeError:
+                log_access("/v1/chat/completions", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error="upstream_invalid_json")
                 return JSONResponse(
                     {"error": "upstream_invalid_json", "detail": r.text[:500]},
                     status_code=502,
@@ -319,6 +382,88 @@ async def chat(
                             msg["content"] = THINK_RE.sub("", msg["content"])
                         if STRIP_CONTEXT_MARKERS:
                             msg["content"] = CONTEXT_MARKER_RE.sub("", msg["content"])
+            usage = data.get("usage", {}) or {}
+            log_access("/v1/chat/completions", model,
+                       usage.get("prompt_tokens", token_count),
+                       usage.get("completion_tokens", 0),
+                       int((time.monotonic() - started) * 1000),
+                       r.status_code, client_ip)
+            return JSONResponse(data, status_code=r.status_code)
+
+
+@app.post("/v1/completions")
+@limiter.limit(RATE_LIMIT_CHAT)
+async def completions(request: Request):
+    """Legacy completions / FIM passthrough.
+
+    Used by Continue.dev autocomplete, Cody, and other code completion plugins
+    that send `prompt` + optional `suffix` for fill-in-the-middle. We proxy to
+    the same chat upstream — llama-server handles both /v1/chat/completions and
+    /v1/completions on the same port. Lighter pipeline than chat: no message-
+    template assembly, no tool calls, no [CONTEXT N] stripping (FIM responses
+    are pure code so the regex would never match anyway).
+    """
+    body = await request.json()
+    stream = body.get("stream", False)
+    url = f"{V620_URL}/v1/completions"
+    started = time.monotonic()
+    client_ip = request.client.host if request.client else "?"
+    model = body.get("model", "?")
+
+    # Token-budget admission control on the prompt + suffix
+    prompt = body.get("prompt", "")
+    if isinstance(prompt, list):
+        prompt = "\n".join(str(p) for p in prompt)
+    suffix = body.get("suffix", "") or ""
+    text = f"{prompt}\n{suffix}"
+    async with httpx.AsyncClient() as client:
+        token_count = await count_tokens(client, V620_URL, text)
+    if token_count > MAX_CHAT_INPUT_TOKENS:
+        log_access("/v1/completions", model, token_count, 0,
+                   int((time.monotonic() - started) * 1000), 413, client_ip,
+                   error="exceeds_max_chat_input_tokens")
+        raise HTTPException(
+            status_code=413,
+            detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
+        )
+
+    async with chat_sem:
+        if stream:
+            log_access("/v1/completions", model, token_count, -1,
+                       int((time.monotonic() - started) * 1000), 200, client_ip,
+                       error="stream-started")
+            return StreamingResponse(
+                sse_stream_with_keepalive(url, body, strip_thinking=False),
+                media_type="text/event-stream",
+            )
+
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
+            try:
+                r = await c.post(url, json=body, headers=upstream_headers())
+            except (httpx.ConnectError, httpx.ReadError) as e:
+                log_access("/v1/completions", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error=type(e).__name__)
+                return JSONResponse(
+                    {"error": "service_degraded", "detail": f"upstream: {type(e).__name__}"},
+                    status_code=502,
+                )
+            try:
+                data = r.json()
+            except json.JSONDecodeError:
+                log_access("/v1/completions", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error="upstream_invalid_json")
+                return JSONResponse(
+                    {"error": "upstream_invalid_json", "detail": r.text[:500]},
+                    status_code=502,
+                )
+            usage = data.get("usage", {}) or {}
+            log_access("/v1/completions", model,
+                       usage.get("prompt_tokens", token_count),
+                       usage.get("completion_tokens", 0),
+                       int((time.monotonic() - started) * 1000),
+                       r.status_code, client_ip)
             return JSONResponse(data, status_code=r.status_code)
 
 
