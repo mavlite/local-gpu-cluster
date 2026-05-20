@@ -116,7 +116,11 @@ phase_7_2_python_env() {
     set -Eeuo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt update
-    apt install -y python3 python3-venv python3-pip openssh-server openssl
+    # curl is required by the keepalive script (/usr/local/bin/llm-router-keepalive.sh).
+    # Without it, the timer fails silently every 5-6 minutes — keepalive doesn't
+    # do harm, but the model gradually pages out of VRAM and first requests after
+    # idle pay a cold-start tax.
+    apt install -y python3 python3-venv python3-pip openssh-server openssl curl
 
     id -u router >/dev/null 2>&1 || useradd -r -m -d /opt/llm-router -s /usr/sbin/nologin router
     mkdir -p /opt/llm-router
