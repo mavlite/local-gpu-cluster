@@ -1,0 +1,153 @@
+# RAG corpus sources for AnythingLLM workspaces.
+#
+# Single source of truth for what gets ingested. Edit this file to add,
+# disable, or reconfigure a source, then run:
+#
+#   scripts/rag/refresh.py --source <id> --dry-run    # preview
+#   scripts/rag/refresh.py --source <id>              # apply
+#   scripts/rag/refresh.py                            # honor refresh_interval
+#   scripts/rag/refresh.py --force                    # all sources regardless of interval
+#
+# Sources are keyed by `id`. Each must declare a `handler` matching one of
+# scripts/rag/handlers/<name>.py. Disabled sources are skipped entirely.
+#
+# Refresh intervals use suffixes: 30d, 12h, 90m. The orchestrator skips a
+# source unless `(now - last_success) >= refresh_interval` or --force is set.
+#
+# ── handler reference ──────────────────────────────────────────────────────
+#   github_repo      Clone a git repo, walk files matching file_glob, compute
+#                    a citation URL per file, ingest as raw text. Best for
+#                    sources where the vendor publishes docs as text in git.
+#
+#   sphinx_sitemap   Fetch sitemap.xml (with fallback to scraping per-section
+#                    index pages), filter URLs, trafilatura-extract each one,
+#                    ingest as raw text. Best for hosted Sphinx sites.
+#
+#   hugo_sitemap     STUB (Phase 2). Like sphinx_sitemap but tuned for Hugo's
+#                    sitemap shape + Last-Modified header use.
+#
+#   rss              STUB (Phase 2). Periodically poll an RSS feed for new
+#                    entries, trafilatura-extract each post URL.
+#
+#   url_list_hashed  STUB (Phase 2). Hand-curated URL list; refresh checks
+#                    content hash of each URL and re-ingests on change.
+
+sources:
+
+  # ── Official: TrueNAS middleware API reference ──────────────────────────
+  # The Sphinx-rendered API methods/objects/events index served by iXsystems.
+  # Used to verify midclt call signatures and response shapes.
+  - id: truenas-api-v27
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] api.truenas.com v27.0"
+    refresh_interval: 30d
+    config:
+      sitemap_url: https://api.truenas.com/v27.0/sitemap.xml
+      base_url: https://api.truenas.com/v27.0
+      fallback_index_pages:
+        - api_methods.html
+        - api_objects.html
+        - api_events.html
+      include_patterns:
+        - "api_methods_"
+        - "api_objects_"
+        - "api_events_"
+        - "examples"
+        - "using_"
+        - "/index.html$"
+      exclude_patterns: []
+
+  # ── Official: OPNsense user documentation ───────────────────────────────
+  - id: opnsense-docs
+    handler: github_repo
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] opnsense/docs"
+    refresh_interval: 7d
+    config:
+      repo: https://github.com/opnsense/docs
+      file_glob: "*.rst"
+      path_strip: "source/"
+      rendered_base: https://docs.opnsense.org
+      url_ext_from: ".rst"
+      url_ext_to: ".html"
+
+  # ── Official: Keycloak documentation ────────────────────────────────────
+  # Many topic .adoc files compile to a single HTML guide page,
+  # so url_keep_depth=1 collapses them to the guide URL.
+  - id: keycloak-docs
+    handler: github_repo
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] keycloak/docs"
+    refresh_interval: 7d
+    config:
+      repo: https://github.com/keycloak/keycloak
+      file_glob: "*.adoc"
+      path_strip: "docs/documentation/"
+      rendered_base: https://www.keycloak.org/docs/latest
+      url_ext_from: ".adoc"
+      url_ext_to: "/"
+      url_keep_depth: 1
+      file_exclude_regex: '^docs/(guides|maven-plugin|documentation/(dist|header-maven-plugin|internal_resources|tests|aggregation|topics))/'
+
+  # ── Official: TrueNAS Scale user docs (Hugo) ────────────────────────────
+  # NOTE: verify repo path against your actual ingest history; some operators
+  # use a private mirror. The Hugo build lowercases paths.
+  - id: truenas-scale-docs
+    handler: github_repo
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] truenas/documentation"
+    refresh_interval: 7d
+    config:
+      repo: https://github.com/truenas/documentation
+      file_glob: "*.md"
+      path_strip: "content/"
+      rendered_base: https://www.truenas.com/docs
+      url_ext_from: ".md"
+      url_ext_to: "/"
+      url_lowercase: true
+
+  # ── Official: OpenZFS documentation ─────────────────────────────────────
+  # Some directories contain spaces (e.g., "Basic Concepts/") which must be
+  # URL-encoded in the citation URL.
+  - id: openzfs-docs
+    handler: github_repo
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] openzfs/openzfs-docs"
+    refresh_interval: 14d
+    config:
+      repo: https://github.com/openzfs/openzfs-docs
+      file_glob: "*.rst"
+      path_strip: "docs/"
+      rendered_base: https://openzfs.github.io/openzfs-docs
+      url_ext_from: ".rst"
+      url_ext_to: ".html"
+      url_encode_spaces: true
+
+# ── Global defaults ────────────────────────────────────────────────────────
+defaults:
+  # Halt a refresh that would delete more than this fraction of a source's
+  # existing documents. Write the plan to _proposals/ for operator review.
+  max_delete_pct: 0.10
+
+  # Where per-source state files live. Survives ingest LXC re-creation if on
+  # the ZFS pool.
+  state_dir: /tank/rag-state
+
+  # AnythingLLM API base URL. Token read from scripts/config.env (ALLM_API_KEY).
+  allm_base_url: http://192.168.6.154:3001/api/v1
+
+  # Polite delay between trafilatura HTTP fetches (per source).
+  crawl_delay_seconds: 3
+
+  # HTTP request timeout for sitemap / page fetches.
+  request_timeout_seconds: 30
+
+  # Embedding pass timeout. Big workspaces with thousands of new chunks need
+  # a generous ceiling.
+  embed_timeout_seconds: 1800
