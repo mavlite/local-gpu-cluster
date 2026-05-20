@@ -77,7 +77,9 @@ EOF
   cat > /etc/systemd/system/llamacpp-chat-restart.timer <<EOF
 [Unit]
 Description=Schedule for proactive llamacpp-chat restart
-Documentation=See llamacpp-chat-restart.service
+# See llamacpp-chat-restart.service for context; Documentation= requires a
+# URL-shaped value so we omit it on the timer rather than carry a comment
+# that systemd will misparse as URLs.
 
 [Timer]
 ${ON_CALENDAR_LINES}# Skew up to 15 minutes so multiple cluster nodes (if ever) don't restart
