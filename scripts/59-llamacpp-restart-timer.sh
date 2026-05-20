@@ -55,16 +55,22 @@ pct exec "$AMD_VMID" -- env \
   cat > /etc/systemd/system/llamacpp-chat-restart.service <<'EOF'
 [Unit]
 Description=Proactive restart of llamacpp-chat to flush GPU memory fragmentation
-Documentation=https://github.com/ggerganov/llama.cpp/issues (cache-reuse hipMemcpyAsync fault on gfx1030)
-After=llamacpp-chat.service
-Requires=llamacpp-chat.service
+# See https://github.com/ggerganov/llama.cpp/issues for the cache-reuse
+# hipMemcpyAsync fault on gfx1030 that motivates this proactive restart.
+Documentation=https://github.com/ggerganov/llama.cpp/issues
+# NOTE: do NOT use Requires=llamacpp-chat.service here. The ExecStart issues
+# `systemctl restart llamacpp-chat`, which transiently stops chat. With
+# Requires=, systemd kills this in-flight restart command with SIGTERM the
+# moment chat goes down — leaving both units in a broken state and triggering
+# a tight ~5s restart loop. Use no dependency at all; the restart command
+# will start chat back up itself even if it was already stopped.
 
 [Service]
 Type=oneshot
-ExecStart=/bin/systemctl restart llamacpp-chat.service
-# Don't loop-restart if the chat unit itself is unhealthy after restart.
-# This unit reports success even if chat fails to come up; that case will be
-# caught by chat's own Restart=on-failure + journalctl monitoring.
+# --no-block returns immediately so this oneshot doesn't sit holding the dbus
+# transaction while chat tears down + comes back up. The actual restart
+# proceeds asynchronously and is observable via `systemctl status llamacpp-chat`.
+ExecStart=/bin/systemctl --no-block restart llamacpp-chat.service
 SuccessExitStatus=0 1
 EOF
 
