@@ -37,11 +37,16 @@ sources:
   # ── Official: TrueNAS middleware API reference ──────────────────────────
   # The Sphinx-rendered API methods/objects/events index served by iXsystems.
   # Used to verify midclt call signatures and response shapes.
+  # NOTE: doc_prefix matches what the original recover-long-urls.sh ingest
+  # used. If you want to track multiple API versions side-by-side later,
+  # change this to include the version (e.g. " v27.0") AFTER the existing
+  # docs are migrated — otherwise the prefix-match fallback in
+  # migrate-backfill.py handles the drift.
   - id: truenas-api-v27
     handler: sphinx_sitemap
     enabled: true
     workspace: sdg-documentation
-    doc_prefix: "[OFFICIAL] api.truenas.com v27.0"
+    doc_prefix: "[OFFICIAL] api.truenas.com"
     refresh_interval: 30d
     config:
       sitemap_url: https://api.truenas.com/v27.0/sitemap.xml
