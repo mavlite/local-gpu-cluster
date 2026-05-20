@@ -18,9 +18,9 @@ One-time setup (PVE host):
 /opt/vcf-scraper-venv/bin/pip install -r scripts/rag/requirements.txt
 
 # Bootstrap state from the already-populated workspace
-/opt/vcf-scraper-venv/bin/python scripts/rag/migrate-backfill.py --dry-run
+/opt/vcf-scraper-venv/bin/python scripts/rag/migrate_backfill.py --dry-run
 # inspect output; then re-run without --dry-run to write state files
-/opt/vcf-scraper-venv/bin/python scripts/rag/migrate-backfill.py
+/opt/vcf-scraper-venv/bin/python scripts/rag/migrate_backfill.py
 ```
 
 Day-to-day:
@@ -50,7 +50,7 @@ Day-to-day:
 | `sources.yaml` | Manifest. Each source declares handler, workspace, doc_prefix, refresh interval, handler-specific config. |
 | `requirements.txt` | Python deps (PyYAML, requests, trafilatura). |
 | `refresh.py` | CLI orchestrator. Reads manifest, dispatches to handlers, computes plan, applies to AnythingLLM. |
-| `migrate-backfill.py` | One-time bootstrap of state files from an already-populated workspace. |
+| `migrate_backfill.py` | One-time bootstrap of state files from an already-populated workspace. |
 | `lib/state.py` | Per-source state I/O (`manifest.json`, `documents.json`). |
 | `lib/plan.py` | Plan dataclass + URL-keyed diff computation + safety threshold. |
 | `lib/allm.py` | Thin AnythingLLM REST wrapper. |
@@ -156,7 +156,7 @@ Phase 2 will add a proper `--approve <proposal>` workflow.
 - **Phase 4a** — vendor version probe (detect new vendor versions)
 - **Phase 4b** — coverage gap detection from router query logs (conditional)
 
-## Notes on `migrate-backfill.py`
+## Notes on `migrate_backfill.py`
 
 The migration script tries to match every existing workspace document
 to a source declared in `sources.yaml`. Match strategy is:
