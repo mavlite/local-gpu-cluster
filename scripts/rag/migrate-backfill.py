@@ -25,6 +25,7 @@ workspace state.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -68,11 +69,30 @@ def domain_of(url: str) -> str:
         return ""
 
 
+def metadata_dict(doc: dict) -> dict[str, Any]:
+    """Normalize a document's metadata to a dict.
+
+    AnythingLLM returns metadata as a parsed object for some docs and as
+    a JSON-serialized string for others (depends on ingest path and
+    AnythingLLM version). Treat both as dicts; treat null/garbage as {}.
+    """
+    md = doc.get("metadata")
+    if md is None:
+        return {}
+    if isinstance(md, dict):
+        return md
+    if isinstance(md, str):
+        try:
+            parsed = json.loads(md)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
+
+
 def extract_url(doc: dict) -> str | None:
     """Pull the citation URL from a workspace document record."""
-    # AnythingLLM stores metadata in a few shapes depending on ingest path.
-    # Look in the most likely places first.
-    md = doc.get("metadata") or {}
+    md = metadata_dict(doc)
 
     for key in ("sourceURL", "source_url", "url", "chunkSource", "docSource"):
         v = md.get(key)
@@ -92,6 +112,12 @@ def extract_url(doc: dict) -> str | None:
     if isinstance(chunk_source, str) and chunk_source.startswith("link://"):
         return chunk_source[len("link://") :].strip()
 
+    # Some ingest paths put the URL on the top-level doc object.
+    for key in ("sourceURL", "url"):
+        v = doc.get(key)
+        if isinstance(v, str) and v.startswith("http"):
+            return v.strip()
+
     return None
 
 
@@ -100,18 +126,29 @@ def pick_source_for_url(
 ) -> dict | None:
     """Match a workspace doc to one of the sources in sources.yaml.
 
-    Strategy:
-      1. If the document's docSource string exactly matches a source's
-         doc_prefix, use that source.
-      2. Otherwise, match by domain heuristic against the rendered_base /
-         base_url declared in the source config.
+    Strategy (in order):
+      1. Exact docSource match against doc_prefix.
+      2. docSource prefix-match (catches "[OFFICIAL] foo v27.0" against
+         "[OFFICIAL] foo" or vice versa).
+      3. URL domain heuristic against rendered_base / base_url / sitemap_url.
     """
     md_source = (doc_meta or {}).get("docSource") or ""
 
+    # 1. exact match
     for src in sources:
         if md_source and md_source == src.get("doc_prefix"):
             return src
 
+    # 2. prefix-of either direction (handles "v27.0" tail mismatches etc.)
+    if md_source:
+        for src in sources:
+            sp = src.get("doc_prefix", "")
+            if not sp:
+                continue
+            if md_source.startswith(sp) or sp.startswith(md_source):
+                return src
+
+    # 3. domain match
     url_domain = domain_of(url)
     for src in sources:
         cfg = src.get("config", {})
