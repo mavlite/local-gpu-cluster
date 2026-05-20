@@ -1,6 +1,6 @@
 """Thin AnythingLLM REST API wrapper.
 
-Only the endpoints needed by refresh.py and migrate-backfill.py. Reuses
+Only the endpoints needed by refresh.py and migrate_backfill.py. Reuses
 ALLM_API_KEY from scripts/config.env (the same convention as the existing
 ingest tools).
 """
@@ -86,7 +86,7 @@ class AnythingLLMClient:
     def list_workspace_documents(self, workspace: str) -> list[dict[str, Any]]:
         """GET /workspace/{slug} returns the workspace including its
         documents[] array. Each entry has at minimum docpath and metadata.
-        Used by migrate-backfill.py to map URL → docpath."""
+        Used by migrate_backfill.py to map URL → docpath."""
         r = self.session.get(
             f"{self.base_url}/workspace/{workspace}",
             timeout=self.timeout,

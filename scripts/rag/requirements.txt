@@ -1,4 +1,4 @@
-# Python dependencies for scripts/rag/refresh.py and migrate-backfill.py.
+# Python dependencies for scripts/rag/refresh.py and migrate_backfill.py.
 # Install into the existing scraper venv:
 #   /opt/vcf-scraper-venv/bin/pip install -r scripts/rag/requirements.txt
 PyYAML>=6.0

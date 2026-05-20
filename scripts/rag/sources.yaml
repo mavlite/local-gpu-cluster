@@ -41,7 +41,7 @@ sources:
   # used. If you want to track multiple API versions side-by-side later,
   # change this to include the version (e.g. " v27.0") AFTER the existing
   # docs are migrated — otherwise the prefix-match fallback in
-  # migrate-backfill.py handles the drift.
+  # migrate_backfill.py handles the drift.
   - id: truenas-api-v27
     handler: sphinx_sitemap
     enabled: true
