@@ -177,13 +177,50 @@ def refresh_one(
             print(f"    ... and {more} more")
         return {"source_id": source_id, "status": "dry_run", "plan": the_plan.summary()}
 
-    # Apply: upload new + updated docs, then update embeddings + remove old.
+    # Apply phase. Resilience strategy:
+    #   1. Special-case migrated hashes (hash=="migrated" placeholder from
+    #      migrate_backfill.py). Treat as "no content drift" — don't re-upload,
+    #      just stamp the real hash. Saves the wasted upload cost on first
+    #      real refresh after migration.
+    #   2. Print progress every doc so long runs don't look frozen.
+    #   3. Save state incrementally — after EACH upload completes and after
+    #      the embedding call (whether it succeeds or fails). A Ctrl-C or
+    #      network glitch loses at most one doc's tracking, not the whole run.
     new_state = dict(persisted)
     adds_docpaths: list[str] = []
     removes_docpaths: list[str] = []
 
-    for doc in the_plan.adds + the_plan.updates:
+    # 1) Promote migrated-hash entries: their content was vetted at migration
+    #    time, no re-upload needed. Just stamp the real hash and move on.
+    migrated_promoted = 0
+    real_updates = []
+    for doc in the_plan.updates:
+        prev = persisted.get(doc.url, {})
+        if prev.get("hash") == "migrated":
+            entry = dict(prev)
+            entry["hash"] = doc.hash
+            entry["last_fetched"] = state_mod.utcnow_iso()
+            entry["allm_doc_name"] = (doc.title or doc.url)[:120]
+            entry["metadata"] = doc.metadata
+            new_state[doc.url] = entry
+            migrated_promoted += 1
+        else:
+            real_updates.append(doc)
+
+    if migrated_promoted:
+        print(f"  promoted {migrated_promoted} migrated-hash entries (no re-upload)")
+        # Persist immediately so the cheap part is durable even if upload phase fails.
+        src_state.save_documents(new_state)
+
+    upload_queue = list(the_plan.adds) + real_updates
+    total = len(upload_queue)
+    if total:
+        print(f"  uploading {total} documents (adds={len(the_plan.adds)}, real updates={len(real_updates)})")
+
+    for i, doc in enumerate(upload_queue, 1):
         title = doc.title or doc.url
+        if i == 1 or i % 25 == 0 or i == total:
+            print(f"    [{i}/{total}] upload  {doc.url[:80]}")
         try:
             resp = client.upload_raw_text(
                 workspace=source["workspace"],
@@ -207,9 +244,8 @@ def refresh_one(
             docpath = d.get("location") or d.get("docpath") or d.get("name")
         if docpath:
             adds_docpaths.append(docpath)
-            # If this was an UPDATE, the old docpath needs removing from
-            # workspace embeddings AFTER the new one is added.
-            if doc.url in persisted:
+            # If this was a real UPDATE, queue the old docpath for removal.
+            if doc.url in persisted and persisted[doc.url].get("hash") != "migrated":
                 old_path = persisted[doc.url].get("allm_doc_path")
                 if old_path:
                     removes_docpaths.append(old_path)
@@ -221,6 +257,9 @@ def refresh_one(
             "allm_doc_name": title[:120],
             "metadata": doc.metadata,
         }
+        # Save after every upload. Cheap (~10ms for state files of this size)
+        # and means a Ctrl-C between uploads only loses one doc's tracking.
+        src_state.save_documents(new_state)
 
     # Process pure removals (URLs no longer in source).
     for url in the_plan.removes:
@@ -229,41 +268,55 @@ def refresh_one(
         if old_path:
             removes_docpaths.append(old_path)
         new_state.pop(url, None)
+    # Persist again to lock in the removal-from-state before we ask AnythingLLM
+    # to actually delete. If the embedding call fails, state already shows the
+    # URLs as removed — next run won't try to re-process them.
+    src_state.save_documents(new_state)
 
     # Single update-embeddings call applies adds + removes atomically
-    # from the workspace's perspective.
+    # from the workspace's perspective. This is the long-running step.
     if adds_docpaths or removes_docpaths:
+        embed_timeout = defaults.get("embed_timeout_seconds", 1800)
+        print(
+            f"  embedding pass: +{len(adds_docpaths)} adds / "
+            f"-{len(removes_docpaths)} removes (timeout {embed_timeout}s, "
+            f"may take several minutes — DO NOT Ctrl-C unless truly stuck)"
+        )
         try:
             client.update_embeddings(
                 workspace=source["workspace"],
                 adds=adds_docpaths,
                 removes=removes_docpaths,
-                timeout=defaults.get("embed_timeout_seconds", 1800),
+                timeout=embed_timeout,
             )
+            print("  embedding pass complete")
+        except KeyboardInterrupt:
+            msg = (
+                "embedding pass interrupted by user. State has been saved up to "
+                "the last successful upload. Re-running this source will "
+                "re-attempt the embedding pass with no additional uploads."
+            )
+            src_state.append_error(msg)
+            print(f"  WARNING: {msg}")
+            _update_manifest(
+                src_state, source, new_state, the_plan,
+                success=False, note="embed_interrupted",
+            )
+            return {"source_id": source_id, "status": "embed_interrupted"}
         except Exception as e:
             msg = f"update_embeddings failed: {e}"
             src_state.append_error(msg)
             print(f"  ERROR: {msg}")
-            # Don't persist new state if embeddings couldn't be updated;
-            # next run will retry from the same baseline.
+            _update_manifest(
+                src_state, source, new_state, the_plan,
+                success=False, note=f"embed_error: {e}",
+            )
             return {"source_id": source_id, "status": "error", "error": msg}
 
-    # Persist new state on success.
-    src_state.save_documents(new_state)
-    manifest = src_state.load_manifest()
-    now = state_mod.utcnow_iso()
-    manifest["last_refresh"] = now
-    manifest["last_success"] = now
-    manifest["handler"] = source["handler"]
-    manifest["workspace"] = source["workspace"]
-    manifest["doc_prefix"] = source["doc_prefix"]
-    manifest["stats"] = {
-        "document_count": len(new_state),
-        "last_change": the_plan.summary(),
-        "errors_this_run": len(the_plan.errors),
-    }
-    src_state.save_manifest(manifest)
-
+    _update_manifest(
+        src_state, source, new_state, the_plan,
+        success=True, note=None,
+    )
     print(f"  applied: {the_plan.summary()}")
     return {
         "source_id": source_id,
@@ -271,6 +324,33 @@ def refresh_one(
         "plan": the_plan.summary(),
         "errors": len(the_plan.errors),
     }
+
+
+def _update_manifest(
+    src_state: state_mod.SourceState,
+    source: dict,
+    new_state: dict,
+    the_plan,
+    success: bool,
+    note: str | None,
+) -> None:
+    """Update manifest.json after a refresh attempt. Always records the
+    attempt; only updates last_success when the embedding pass completed."""
+    manifest = src_state.load_manifest()
+    now = state_mod.utcnow_iso()
+    manifest["last_refresh"] = now
+    if success:
+        manifest["last_success"] = now
+    manifest["handler"] = source["handler"]
+    manifest["workspace"] = source["workspace"]
+    manifest["doc_prefix"] = source["doc_prefix"]
+    manifest["stats"] = {
+        "document_count": len(new_state),
+        "last_change": the_plan.summary(),
+        "errors_this_run": len(the_plan.errors),
+        "last_note": note,
+    }
+    src_state.save_manifest(manifest)
 
 
 def main() -> int:
