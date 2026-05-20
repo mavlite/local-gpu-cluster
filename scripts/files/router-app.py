@@ -245,18 +245,89 @@ CONTEXT_MARKER_RE = re.compile(
 STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() in ("true", "1", "yes")
 
 
+# ---------- Client-facing chat aliases ----------
+#
+# Qwen3.6 was post-trained with a thinking-first reasoning protocol baked in:
+# the model emits a <think>...</think> block, THEN the answer. Benchmarks
+# (HumanEval, SWE-bench, MMLU-Pro) are measured with thinking enabled.
+# Disabling thinking doesn't give "the same model, faster" — it gives a
+# meaningfully weaker variant. So we expose two virtual aliases for the same
+# underlying chat upstream:
+#
+#   rag-qwen3.6     thinking OFF — used by AnythingLLM. RAG synthesis is
+#                   chunk-formatting, not from-scratch reasoning; the thinking
+#                   block is pure latency overhead and can blow max_tokens
+#                   before the actual answer finishes. Thinking-off also
+#                   prevents Qwen3.6's plain-text reasoning bleed into
+#                   user-facing content for RAG UIs that don't render the
+#                   reasoning_content field separately.
+#   qwen3.6-think   thinking ON — used by OpenCode / Cline / coding agents.
+#                   The wall-clock cost (10-30s of pre-token reasoning) is
+#                   recouped many times over by correct-on-first-try output.
+#                   The router's SSE keepalive (KEEPALIVE_INTERVAL=12-15s)
+#                   prevents the client's read timer from firing during the
+#                   pre-token window.
+#   qwen3.6         convenience alias for qwen3.6-think.
+#
+# Both chat aliases resolve to the SAME backend (llama-server's --alias
+# rag-qwen3.6) — no extra VRAM, no second model. The only thing that changes
+# per-alias is the chat_template_kwargs.enable_thinking value the router
+# injects before forwarding.
+#
+# Schema per entry:
+#   backend          : str  — the alias llama-server actually knows.
+#                             Router rewrites body["model"] to this before
+#                             forwarding upstream.
+#   enable_thinking  : bool — value to inject into chat_template_kwargs.
+#                             Client-supplied chat_template_kwargs takes
+#                             precedence (we setdefault, not overwrite).
+#   strip_thinking   : bool — whether to regex-strip <think>...</think> from
+#                             the response. Belt-and-suspenders for
+#                             enable_thinking=False cases where the model
+#                             ignores the template kwarg.
+ALIAS_MAP: dict[str, dict] = {
+    "rag-qwen3.6":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True},
+    "qwen3.6-think": {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
+    "qwen3.6":       {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
+}
+
+
+def resolve_alias(model: str) -> dict:
+    """Resolve a client-facing chat alias to backend behavior.
+
+    Returns a dict with keys:
+        backend          : str  — alias name to send upstream
+        enable_thinking  : bool|None — value for chat_template_kwargs
+                                       (None = don't inject, let Qwen3.6 default)
+        strip_thinking   : bool — whether to regex-strip <think> tags from response
+
+    Unknown models fall back to the legacy RAG_MODEL_RE heuristic for
+    backward compatibility, then to passthrough (no rewrite, no injection).
+    """
+    if model in ALIAS_MAP:
+        return ALIAS_MAP[model]
+    # Legacy fallback: any rag-* / -rag model name gets thinking-off behavior.
+    if RAG_MODEL_RE.search(model):
+        return {"backend": model, "enable_thinking": False, "strip_thinking": True}
+    # Unknown model: pass through unchanged. llama-server will warn but serve
+    # the loaded model regardless of the requested name.
+    return {"backend": model, "enable_thinking": None, "strip_thinking": False}
+
+
 def should_strip_thinking(body: dict, header_value: Optional[str]) -> bool:
+    # Explicit client overrides win in all cases.
     if header_value is not None:
         return header_value.lower() in ("true", "1", "yes")
     if "strip_thinking" in body:
         return bool(body["strip_thinking"])
+    # System-prompt hint (legacy AnythingLLM pattern).
     msgs = body.get("messages", [])
     if msgs and msgs[0].get("role") == "system":
         if NOTHINK_HINT.search(msgs[0].get("content", "")):
             return True
-    if RAG_MODEL_RE.search(body.get("model", "")):
-        return True
-    return False
+    # Alias-based default. resolve_alias handles both ALIAS_MAP entries and
+    # the legacy RAG_MODEL_RE regex fallback for unknown rag-* names.
+    return resolve_alias(body.get("model", "")).get("strip_thinking", False)
 
 
 # ---------- Token-budget admission via upstream /tokenize ----------
@@ -369,17 +440,25 @@ async def chat(
     url = f"{V620_URL}/v1/chat/completions"
     started = time.monotonic()
     client_ip = request.client.host if request.client else "?"
+    # The model name the CLIENT requested — used for logging + alias lookup.
+    # body["model"] gets rewritten to the backend alias below before forwarding.
     model = body.get("model", "?")
 
-    # Qwen3.6 chat-template thinking-mode toggle: when the requested model alias
-    # matches rag-*, disable reasoning at the template level. Qwen3.6 emits its
-    # chain-of-thought as plain content (not wrapped in <think>...</think>) so
-    # the regex stripper can't catch it — RAG UIs end up showing the analysis
-    # AND blowing through max_tokens before the actual answer finishes.
-    # Honor the client if they explicitly set chat_template_kwargs themselves.
-    if RAG_MODEL_RE.search(model):
+    # Resolve the client-facing alias to backend behavior. Two things happen:
+    #   1. body["model"] gets rewritten to the backend alias llama-server knows.
+    #      (Without this, requesting model="qwen3.6-think" would forward that
+    #      literal string upstream; llama-server doesn't recognize it and
+    #      would either warn or 404 depending on its strict-model mode.)
+    #   2. chat_template_kwargs.enable_thinking gets set per the alias —
+    #      OFF for rag-qwen3.6 (RAG synthesis), ON for qwen3.6-think (agent
+    #      reasoning). Client-supplied chat_template_kwargs takes precedence
+    #      via setdefault so an explicit override always wins.
+    alias_info = resolve_alias(model)
+    if alias_info["backend"] != model:
+        body["model"] = alias_info["backend"]
+    if alias_info["enable_thinking"] is not None:
         ctk = body.setdefault("chat_template_kwargs", {})
-        ctk.setdefault("enable_thinking", False)
+        ctk.setdefault("enable_thinking", alias_info["enable_thinking"])
 
     # Token-budget admission control. Use /tokenize on the chat upstream.
     # count_tokens returns -1 when /tokenize is unreachable (fail-open).
@@ -600,15 +679,31 @@ async def rerank(request: Request):
 
 @app.get("/v1/models")
 async def models():
+    """Enumerate client-facing model aliases.
+
+    Chat aliases come from ALIAS_MAP (multiple virtual aliases → one llama-
+    server backend). We list them client-side rather than aggregating from
+    upstream because llama-server only knows one --alias per process, but we
+    expose several names that resolve to it (rag-qwen3.6 for thinking-off
+    RAG, qwen3.6-think for thinking-on agent work).
+
+    Embed + rerank still come from upstream — those have a 1:1 mapping
+    between client-facing name and backend alias, so the upstream's
+    /v1/models is the source of truth.
+    """
+    now = int(time.time())
+    data: list = [
+        {"id": alias, "object": "model", "owned_by": "v620-cluster", "created": now}
+        for alias in ALIAS_MAP.keys()
+    ]
     async with httpx.AsyncClient(timeout=10.0) as c:
-        aggregated: list = []
-        for url in (V620_URL, EMBED_URL, RERANK_URL):
+        for url in (EMBED_URL, RERANK_URL):
             try:
                 r = await c.get(f"{url}/v1/models", headers=upstream_headers())
-                aggregated.extend(r.json().get("data", []))
+                data.extend(r.json().get("data", []))
             except Exception:
                 pass
-    return {"object": "list", "data": aggregated}
+    return {"object": "list", "data": data}
 
 
 @app.get("/healthz")
