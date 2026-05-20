@@ -22,6 +22,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,6 +33,27 @@ import yaml  # noqa: E402
 
 from lib import allm, state as state_mod  # noqa: E402
 from migrate_backfill import metadata_dict  # noqa: E402
+
+
+def _call_with_heartbeat(fn, label: str, interval_seconds: int = 30):
+    """Same heartbeat helper as in refresh.py — prints elapsed time every
+    `interval_seconds` from a daemon thread so the operator knows the
+    request is in flight and doesn't Ctrl-C."""
+    done = threading.Event()
+    start = time.time()
+
+    def beat():
+        while not done.wait(interval_seconds):
+            elapsed = int(time.time() - start)
+            print(f"  ... {label}: still waiting on AnythingLLM ({elapsed}s elapsed)")
+
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        done.set()
+        t.join(timeout=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,12 +157,19 @@ def main() -> int:
     orphan_paths = [p for p in orphan_paths if p]
 
     print(f"\nRemoving {len(orphan_paths)} orphans from workspace embeddings...")
+    print(
+        "  NOTE: AnythingLLM keeps processing server-side even if you Ctrl-C. "
+        "Don't interrupt — heartbeats below confirm the request is in flight."
+    )
     try:
-        client.update_embeddings(
-            workspace=source["workspace"],
-            adds=[],
-            removes=orphan_paths,
-            timeout=defaults.get("embed_timeout_seconds", 1800),
+        _call_with_heartbeat(
+            lambda: client.update_embeddings(
+                workspace=source["workspace"],
+                adds=[],
+                removes=orphan_paths,
+                timeout=defaults.get("embed_timeout_seconds", 1800),
+            ),
+            label="orphan-removal embedding update",
         )
         print("  embeddings removed")
     except Exception as e:
@@ -148,7 +178,10 @@ def main() -> int:
 
     print(f"Deleting {len(orphan_paths)} orphan files from AnythingLLM storage...")
     try:
-        client.delete_documents(orphan_paths)
+        _call_with_heartbeat(
+            lambda: client.delete_documents(orphan_paths),
+            label="orphan file deletion",
+        )
         print("  files deleted")
     except Exception as e:
         print(f"  WARNING: delete_documents raised {e}")

@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -279,15 +281,23 @@ def refresh_one(
         embed_timeout = defaults.get("embed_timeout_seconds", 1800)
         print(
             f"  embedding pass: +{len(adds_docpaths)} adds / "
-            f"-{len(removes_docpaths)} removes (timeout {embed_timeout}s, "
-            f"may take several minutes — DO NOT Ctrl-C unless truly stuck)"
+            f"-{len(removes_docpaths)} removes (timeout {embed_timeout}s)"
+        )
+        print(
+            "  NOTE: AnythingLLM continues processing server-side even if you "
+            "Ctrl-C. Don't interrupt unless something is truly wrong — the "
+            "heartbeat below tells you the request is in-flight."
         )
         try:
-            client.update_embeddings(
-                workspace=source["workspace"],
-                adds=adds_docpaths,
-                removes=removes_docpaths,
-                timeout=embed_timeout,
+            _call_with_heartbeat(
+                lambda: client.update_embeddings(
+                    workspace=source["workspace"],
+                    adds=adds_docpaths,
+                    removes=removes_docpaths,
+                    timeout=embed_timeout,
+                ),
+                label="embedding pass",
+                interval_seconds=30,
             )
             print("  embedding pass complete")
         except KeyboardInterrupt:
@@ -324,6 +334,35 @@ def refresh_one(
         "plan": the_plan.summary(),
         "errors": len(the_plan.errors),
     }
+
+
+def _call_with_heartbeat(fn, label: str, interval_seconds: int = 30):
+    """Run `fn()` in the foreground but print a heartbeat from a daemon
+    thread every `interval_seconds` while it's running.
+
+    The HTTP call to AnythingLLM blocks the foreground thread waiting on
+    the server response. Without visible heartbeats it's indistinguishable
+    from a frozen process and operators reflexively Ctrl-C — but the
+    server continues processing after the client disconnects, leaving
+    the workspace in a partial state. The heartbeat is purely cosmetic
+    but operationally critical: it tells the user the request is in
+    flight and stops the Ctrl-C reflex.
+    """
+    done = threading.Event()
+    start = time.time()
+
+    def beat():
+        while not done.wait(interval_seconds):
+            elapsed = int(time.time() - start)
+            print(f"  ... {label}: still waiting on AnythingLLM ({elapsed}s elapsed)")
+
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    try:
+        return fn()
+    finally:
+        done.set()
+        t.join(timeout=1)
 
 
 def _update_manifest(
