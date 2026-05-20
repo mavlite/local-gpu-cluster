@@ -205,7 +205,7 @@ def main() -> int:
                 unmatched.append(doc.get("docpath") or doc.get("name") or "?")
                 continue
 
-            src = pick_source_for_url(url, doc.get("metadata") or {}, ws_sources)
+            src = pick_source_for_url(url, metadata_dict(doc), ws_sources)
             if src is None:
                 unmatched.append(url)
                 continue
@@ -218,7 +218,7 @@ def main() -> int:
                 "last_fetched": state_mod.utcnow_iso(),
                 "allm_doc_path": docpath,
                 "allm_doc_name": doc.get("title") or url,
-                "metadata": doc.get("metadata") or {},
+                "metadata": metadata_dict(doc),
             }
 
         # Report + persist per source.
