@@ -382,48 +382,106 @@ DONE_FRAME = b"data: [DONE]\n\n"
 
 
 async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thinking: bool):
-    """Stream upstream SSE, injecting keepalives every KEEPALIVE_INTERVAL seconds and
-    falling open with a `service_degraded` frame if the upstream errors. Caps the
-    total stream wall-clock at MAX_STREAM_SECONDS so a wedged upstream can't hold
-    its chat_sem slot forever."""
+    """Stream upstream SSE with proactive keepalive frames.
+
+    The previous structure was:
+        async with client.stream("POST", ...) as r:
+            async for chunk in r.aiter_text():
+                ... keepalive loop ...
+
+    That had a fatal bug: `async with client.stream(...) as r:` blocks until
+    the upstream returns response headers. For long prompts (15-30K+ tokens)
+    Qwen3.6 prompt-processing can take 60-120 seconds before llama-server
+    flushes the SSE response headers. During that window, the keepalive
+    loop hasn't started running yet — NO `: ping` frames reach the client.
+    OpenCode's hardcoded ~2-minute SSE read timer fires, the connection
+    drops, and the user sees "SSE read timed out" with zero data received.
+
+    The fix:
+      1. Yield a `: ping` frame IMMEDIATELY, before any upstream work, so
+         the client sees data on its socket the instant the streaming
+         response begins.
+      2. Run the upstream connection inside a background asyncio task so
+         the main generator can keep yielding keepalives while httpx is
+         blocked waiting for upstream response headers.
+
+    The queue carries (msg_type, payload) tuples: ("data", str chunk),
+    ("degraded", None), or ("eof", None). The main loop drains the queue
+    with KEEPALIVE_INTERVAL timeout and yields `: ping` on timeout.
+
+    Also caps the total stream wall-clock at MAX_STREAM_SECONDS so a
+    wedged upstream can't hold its chat_sem slot forever.
+    """
     stream_started = time.monotonic()
-    async with httpx.AsyncClient(timeout=None) as client:
+
+    # (1) Immediate keepalive — flushes a byte to the client right away
+    # so its SSE read timer starts in a known state. Without this, the
+    # client could time out during the upstream-connect-and-headers
+    # window even if our keepalive loop is otherwise correct.
+    yield b": ping\n\n"
+
+    # (2) Background task for the upstream call. Everything that could
+    # block — opening the connection, sending the POST, waiting for
+    # response headers, draining the body — happens here, off the main
+    # generator's path.
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def upstream_reader():
         try:
-            async with client.stream("POST", upstream_url, json=payload, headers=upstream_headers()) as r:
-                if r.status_code >= 500:
-                    yield DEGRADED_FRAME
-                    yield DONE_FRAME
-                    return
-                queue: asyncio.Queue = asyncio.Queue()
-
-                async def reader():
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST", upstream_url, json=payload, headers=upstream_headers()
+                ) as r:
+                    if r.status_code >= 500:
+                        await queue.put(("degraded", None))
+                        return
                     async for chunk in r.aiter_text():
-                        await queue.put(chunk)
-                    await queue.put(None)
+                        await queue.put(("data", chunk))
+                    await queue.put(("eof", None))
+        except (
+            httpx.ConnectError,
+            httpx.ReadError,
+            httpx.TimeoutException,
+            httpx.RemoteProtocolError,
+        ):
+            await queue.put(("degraded", None))
+        except Exception:
+            # Any other unexpected error from httpx — degrade rather than
+            # leak a 500 from the generator into the SSE stream.
+            await queue.put(("degraded", None))
 
-                task = asyncio.create_task(reader())
-                try:
-                    while True:
-                        if time.monotonic() - stream_started > MAX_STREAM_SECONDS:
-                            yield DEGRADED_FRAME
-                            yield DONE_FRAME
-                            return
-                        try:
-                            chunk = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_INTERVAL)
-                        except asyncio.TimeoutError:
-                            yield b": ping\n\n"
-                            continue
-                        if chunk is None:
-                            break
-                        out = THINK_RE.sub("", chunk) if strip_thinking else chunk
-                        if STRIP_CONTEXT_MARKERS:
-                            out = CONTEXT_MARKER_RE.sub("", out)
-                        yield out.encode()
-                finally:
-                    task.cancel()
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException, httpx.RemoteProtocolError):
-            yield DEGRADED_FRAME
-            yield DONE_FRAME
+    task = asyncio.create_task(upstream_reader())
+
+    try:
+        while True:
+            if time.monotonic() - stream_started > MAX_STREAM_SECONDS:
+                yield DEGRADED_FRAME
+                yield DONE_FRAME
+                return
+            try:
+                msg_type, payload_chunk = await asyncio.wait_for(
+                    queue.get(), timeout=KEEPALIVE_INTERVAL
+                )
+            except asyncio.TimeoutError:
+                # No upstream data within KEEPALIVE_INTERVAL — could mean
+                # we're still in prompt-processing on the upstream, or
+                # the upstream paused between thinking chunks. Either
+                # way, keep the client connection alive.
+                yield b": ping\n\n"
+                continue
+            if msg_type == "degraded":
+                yield DEGRADED_FRAME
+                yield DONE_FRAME
+                return
+            if msg_type == "eof":
+                break
+            # msg_type == "data"
+            out = THINK_RE.sub("", payload_chunk) if strip_thinking else payload_chunk
+            if STRIP_CONTEXT_MARKERS:
+                out = CONTEXT_MARKER_RE.sub("", out)
+            yield out.encode()
+    finally:
+        task.cancel()
 
 
 # ---------- Routes ----------
