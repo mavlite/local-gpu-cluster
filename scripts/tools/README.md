@@ -9,6 +9,7 @@ Helper scripts for bulk-ingesting docs into AnythingLLM workspaces. Used during 
 | `recover-long-urls.sh` | Trafilatura-based clean-text path. POSTs to `/document/raw-text` with a short hash-based filename, custom `metadata.docSource` tag, and publication-date extracted from page metadata. Required for URLs > 217 chars (where the URL-scrape path hits ENAMETOOLONG), and **preferred for community content** where boilerplate stripping and source tagging matter. |
 | `ingest-github-repo.sh` | Clone a GitHub doc repo (e.g., `opnsense/docs`) and ingest its `.rst`/`.md` files via `/document/raw-text`. Maps file paths to rendered docs URLs for citation usability and pulls per-file last-modified date from `git log`. Best path for any source where the maintainers publish the docs as text in a repo. |
 | `clear-workspace.sh` | Interactively wipe all embeddings from a workspace via `/workspace/<slug>/update-embeddings` deletes. Use before a clean re-ingest when the existing corpus is contaminated. |
+| `build-truenas-api-urls.sh` | Build a URL list for `api.truenas.com` (Sphinx-rendered middleware API reference). Prefers `sitemap.xml`, falls back to scraping per-section index pages. Output feeds into `recover-long-urls.sh`. Use any time a new TrueNAS API doc version needs to be ingested or refreshed. |
 
 ## When to use which
 
@@ -81,6 +82,19 @@ scripts/tools/ingest-github-repo.sh \
 
 # --- E. Wipe a workspace before clean re-ingest ---
 scripts/tools/clear-workspace.sh sdg-documentation
+
+# --- F. TrueNAS API reference (api.truenas.com) ---
+# Two-step: build URL list, then trafilatura-ingest.
+scripts/tools/build-truenas-api-urls.sh /tank/docs/truenas-api-urls.txt
+DOC_PREFIX="[OFFICIAL] api.truenas.com" \
+  scripts/tools/recover-long-urls.sh \
+  /tank/docs/truenas-api-urls.txt \
+  sdg-documentation \
+  --embed
+
+# To re-ingest for a different API version (e.g. when TrueNAS bumps from
+# v27.0 to v27.5), set API_VERSION and re-run both steps.
+API_VERSION=v27.5 scripts/tools/build-truenas-api-urls.sh /tank/docs/truenas-api-v27.5-urls.txt
 ```
 
 ## Environment variables
