@@ -76,6 +76,23 @@ MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "16384"))
 # Rate limit (slowapi syntax: "60/minute")
 RATE_LIMIT_CHAT = os.environ.get("RATE_LIMIT_CHAT", "60/minute")
 RATE_LIMIT_EMBED = os.environ.get("RATE_LIMIT_EMBED", "200/minute")
+RATE_LIMIT_TAVILY = os.environ.get("RATE_LIMIT_TAVILY", "30/minute")
+
+# Tavily proxy. Holds the Tavily key server-side so browser-side clients
+# (e.g. the external HTML reporting artifact) can do real web
+# search without ever seeing the key. Set TAVILY_API_KEY in /etc/router.env
+# to enable; if empty, /v1/tavily/search returns 503.
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
+# Whitelist of body fields we forward to Tavily. Anything else in the client
+# request is dropped. We omit raw_content / images / favicon by default to
+# keep response sizes small (the model only needs title + url + content).
+TAVILY_ALLOWED_FIELDS = {
+    "query", "search_depth", "chunks_per_source", "max_results",
+    "topic", "time_range", "start_date", "end_date",
+    "include_answer", "include_domains", "exclude_domains",
+    "country", "auto_parameters", "exact_match",
+}
 
 # /metrics IP allowlist (comma-separated)
 METRICS_ALLOWED_IPS = {
@@ -764,6 +781,81 @@ async def rerank(request: Request):
                     _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
+
+
+@app.post("/v1/tavily/search")
+@limiter.limit(RATE_LIMIT_TAVILY)
+async def tavily_search(request: Request):
+    """Proxy to Tavily Search API.
+
+    Browser-side clients (e.g. the external HTML reporting
+    artifact) call this instead of Tavily directly, so the Tavily key never
+    leaves the server. ROUTER_API_KEY still gates the request; rate-limited
+    separately so search bursts can't starve chat/embed budgets.
+
+    Body whitelist (see TAVILY_ALLOWED_FIELDS) keeps the client surface
+    narrow and drops large-response options (raw_content, images, favicon).
+    """
+    if not TAVILY_API_KEY:
+        return JSONResponse(
+            _error_body(
+                "tavily_unconfigured",
+                "TAVILY_API_KEY not set in /etc/router.env — add it and restart llm-router",
+            ),
+            status_code=503,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            _error_body("bad_request", "request body must be JSON"),
+            status_code=400,
+        )
+    if not isinstance(body, dict) or not body.get("query"):
+        return JSONResponse(
+            _error_body("bad_request", "missing required field: query"),
+            status_code=400,
+        )
+
+    forwarded = {k: v for k, v in body.items() if k in TAVILY_ALLOWED_FIELDS}
+
+    async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
+        try:
+            r = await c.post(
+                TAVILY_URL,
+                json=forwarded,
+                headers={
+                    "Authorization": f"Bearer {TAVILY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return JSONResponse(
+                _error_body("tavily_unreachable", f"upstream: {type(e).__name__}"),
+                status_code=502,
+            )
+
+    if r.status_code >= 400:
+        # Pass Tavily's error body through but normalize to our error envelope
+        # so clients get a consistent shape. Truncate to avoid log spam from
+        # accidentally massive HTML error pages.
+        upstream_text = (r.text or "")[:500]
+        return JSONResponse(
+            _error_body(
+                "tavily_error",
+                f"Tavily returned {r.status_code}: {upstream_text}",
+            ),
+            status_code=r.status_code if r.status_code in (401, 403, 429) else 502,
+        )
+
+    try:
+        return JSONResponse(r.json(), status_code=200)
+    except ValueError:
+        return JSONResponse(
+            _error_body("tavily_invalid_json", r.text[:500]),
+            status_code=502,
+        )
 
 
 @app.get("/v1/models")

@@ -51,6 +51,11 @@ MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-200000}"
 MAX_EMBED_INPUT_TOKENS="${MAX_EMBED_INPUT_TOKENS:-16384}"  # must match EMBED_CTX/EMBED_PARALLEL per-slot ctx on LXC 151
 RATE_LIMIT_CHAT="${RATE_LIMIT_CHAT:-60/minute}"
 RATE_LIMIT_EMBED="${RATE_LIMIT_EMBED:-200/minute}"
+RATE_LIMIT_TAVILY="${RATE_LIMIT_TAVILY:-30/minute}"
+# Tavily Search API key. Set in config.env (NOT committed). When empty the
+# /v1/tavily/search endpoint returns 503. Get a key at https://tavily.com.
+# Free tier = 1k searches/month, generous for the artifact's refresh use.
+TAVILY_API_KEY="${TAVILY_API_KEY:-}"
 PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.150}"
 METRICS_ALLOWED_IPS="${METRICS_ALLOWED_IPS:-127.0.0.1,${PROXMOX_HOST_IP}}"
 # CORS allow-origins. Needed when HTML pages loaded from file:// (Origin: null)
@@ -177,6 +182,8 @@ phase_7_4_systemd() {
     "MAX_EMBED_INPUT_TOKENS=$MAX_EMBED_INPUT_TOKENS" \
     "RATE_LIMIT_CHAT=$RATE_LIMIT_CHAT" \
     "RATE_LIMIT_EMBED=$RATE_LIMIT_EMBED" \
+    "RATE_LIMIT_TAVILY=$RATE_LIMIT_TAVILY" \
+    "TAVILY_API_KEY=$TAVILY_API_KEY" \
     "METRICS_ALLOWED_IPS=$METRICS_ALLOWED_IPS" \
     "CORS_ALLOW_ORIGINS=$CORS_ALLOW_ORIGINS" \
     bash -se <<'GUEST'
@@ -233,6 +240,8 @@ PY
     upsert_env MAX_EMBED_INPUT_TOKENS "$MAX_EMBED_INPUT_TOKENS"
     upsert_env RATE_LIMIT_CHAT "$RATE_LIMIT_CHAT"
     upsert_env RATE_LIMIT_EMBED "$RATE_LIMIT_EMBED"
+    upsert_env RATE_LIMIT_TAVILY "$RATE_LIMIT_TAVILY"
+    upsert_env TAVILY_API_KEY "$TAVILY_API_KEY"
     upsert_env METRICS_ALLOWED_IPS "$METRICS_ALLOWED_IPS"
     upsert_env CORS_ALLOW_ORIGINS "$CORS_ALLOW_ORIGINS"
     chmod 600 /etc/router.env
