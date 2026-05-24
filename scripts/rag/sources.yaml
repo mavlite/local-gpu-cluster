@@ -82,6 +82,12 @@ sources:
   # ── Official: Keycloak documentation ────────────────────────────────────
   # Many topic .adoc files compile to a single HTML guide page,
   # so url_keep_depth=1 collapses them to the guide URL.
+  #
+  # file_exclude_regex carries the section-level "topics/" partials too:
+  # Keycloak's structure is docs/documentation/<section>/topics/*.adoc
+  # (e.g. docs/documentation/server_admin/topics/login.adoc) which
+  # asciidoc includes into the main guide; ingesting them separately just
+  # duplicates content into the same collapsed URL.
   - id: keycloak-docs
     handler: github_repo
     enabled: true
@@ -96,7 +102,7 @@ sources:
       url_ext_from: ".adoc"
       url_ext_to: "/"
       url_keep_depth: 1
-      file_exclude_regex: '^docs/(guides|maven-plugin|documentation/(dist|header-maven-plugin|internal_resources|tests|aggregation|topics))/'
+      file_exclude_regex: '^docs/(guides|maven-plugin|documentation/(dist|header-maven-plugin|internal_resources|tests|aggregation|(?:[^/]+/)?topics))/'
 
   # ── Official: TrueNAS Scale user docs (Hugo) ────────────────────────────
   # NOTE: verify repo path against your actual ingest history; some operators
@@ -116,9 +122,37 @@ sources:
       url_ext_to: "/"
       url_lowercase: true
 
+  # ── Official: TrueNAS blog (parked — handler not yet implemented) ──────
+  # Created by splitting 595 blog URLs out of truenas-scale-docs state via
+  # scripts/rag/split_truenas_blog.py (migrate_backfill prefix-matched
+  # /blog/ URLs into the docs source by mistake). Stays disabled until the
+  # rss handler stub gains a real implementation; the split parks the
+  # blog-URL entries here so refresh.py won't try to "remove" them from
+  # the docs workspace as orphans.
+  - id: truenas-blog
+    handler: rss
+    enabled: false
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] truenas/blog"
+    refresh_interval: 7d
+    config:
+      rss_url: https://www.truenas.com/blog/feed/
+      url_domain_filter: '^https?://www\.truenas\.com/blog/'
+
   # ── Official: OpenZFS documentation ─────────────────────────────────────
   # Some directories contain spaces (e.g., "Basic Concepts/") which must be
   # URL-encoded in the citation URL.
+  #
+  # State-recovery procedure (one-time, run on PVE host) if documents.json
+  # holds stale '/en/' URLs from a pre-refresh.py ingest pattern:
+  #   rm /tank/rag-state/openzfs-docs/{documents,manifest}.json
+  #   /opt/vcf-scraper-venv/bin/python scripts/rag/refresh.py \
+  #     --source openzfs-docs --force
+  #   /opt/vcf-scraper-venv/bin/python scripts/rag/cleanup_interrupted_refresh.py \
+  #     --source openzfs-docs --apply
+  # The cleanup helper treats the workspace's leftover /en/ docs as orphans
+  # because the fresh state doesn't track them — same mechanism as the
+  # interrupted-refresh recovery, repurposed for URL-shape migration.
   - id: openzfs-docs
     handler: github_repo
     enabled: true

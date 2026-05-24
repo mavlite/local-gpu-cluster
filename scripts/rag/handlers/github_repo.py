@@ -59,8 +59,14 @@ class GitHubRepoHandler(Handler):
 
         clone_dir = self._clone_or_pull(repo_url, context.cache_dir)
 
-        # Yield one Document per matching file.
+        # Two-pass: gather per file, then emit one Document per unique citation URL.
+        # Why dedupe: when url_keep_depth collapses many source files to one
+        # rendered page (Keycloak: ~399 .adoc partials → ~7 guide URLs), the
+        # plan layer treats each collision as a separate ADD and AnythingLLM
+        # ends up with N copies per URL, but state can only remember the last
+        # one's docpath — so future refreshes can't delete the orphans.
         # Use git ls-files so .gitignore is respected and order is stable.
+        by_url: dict[str, dict] = {}
         for rel_path in self._list_files(clone_dir, file_glob):
             stripped = self._strip_prefix(rel_path, path_strip)
             if stripped is None:
@@ -71,7 +77,7 @@ class GitHubRepoHandler(Handler):
             abs_path = clone_dir / rel_path
             try:
                 content = abs_path.read_text(encoding="utf-8", errors="replace")
-            except (OSError, UnicodeDecodeError) as e:
+            except (OSError, UnicodeDecodeError):
                 # Skip unreadable files; let refresh.py log the URL as an error.
                 continue
             if not content.strip():
@@ -89,26 +95,52 @@ class GitHubRepoHandler(Handler):
 
             last_modified = self._git_file_last_modified(clone_dir, rel_path)
 
+            entry = by_url.setdefault(
+                citation_url,
+                {"rel_paths": [], "contents": [], "last_modifieds": [], "first_stripped": stripped},
+            )
+            entry["rel_paths"].append(rel_path)
+            entry["contents"].append(content)
+            entry["last_modifieds"].append(last_modified)
+
+        for citation_url, entry in by_url.items():
+            last_modified = max(
+                (lm for lm in entry["last_modifieds"] if lm), default=""
+            )
+            rel_paths = entry["rel_paths"]
+
+            if len(entry["contents"]) == 1:
+                body = entry["contents"][0]
+            else:
+                # Multiple source files collapsed to one URL. Concatenate in
+                # git ls-files order (lexicographic, deterministic) so the
+                # content hash is stable across refreshes.
+                body = "\n\n---\n\n".join(entry["contents"])
+
             # Prepend a small provenance header so the URL/date survive
             # AnythingLLM's metadata stripping at chunk write.
             text = (
                 f"Source: {citation_url}\n"
                 f"URL: {citation_url}\n"
                 f"Last-modified: {last_modified}\n\n"
-                f"{content}"
+                f"{body}"
             )
 
-            title = stripped.rstrip("/").replace("/", " / ")
+            title = entry["first_stripped"].rstrip("/").replace("/", " / ")
+
+            metadata: dict[str, Any] = {
+                "last_modified": last_modified,
+                "repo": repo_url,
+                "repo_path": rel_paths[0] if len(rel_paths) == 1 else rel_paths,
+            }
+            if len(rel_paths) > 1:
+                metadata["merged_count"] = len(rel_paths)
 
             yield Document(
                 url=citation_url,
                 content=text,
                 title=title,
-                metadata={
-                    "last_modified": last_modified,
-                    "repo": repo_url,
-                    "repo_path": rel_path,
-                },
+                metadata=metadata,
             )
 
     # ─── helpers ──────────────────────────────────────────────────────────
