@@ -193,9 +193,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 # Bearer auth middleware. /healthz and /metrics are exempt (the latter has its own
-# IP-allowlist check).
+# IP-allowlist check). CORS preflight OPTIONS requests are also exempt because
+# they cannot carry credentials per the CORS spec — auth must skip them so the
+# CORSMiddleware can answer with the access-control-allow-* headers. Without
+# this skip, browsers loaded from file:// (or any cross-origin page) get 403 on
+# the preflight and the actual request never fires.
 @app.middleware("http")
 async def require_bearer(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     if request.url.path in ("/healthz", "/metrics"):
         return await call_next(request)
     if not ROUTER_API_KEY:
