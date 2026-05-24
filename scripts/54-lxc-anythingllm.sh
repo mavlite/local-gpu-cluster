@@ -35,7 +35,7 @@ ALLM_STORAGE_MOUNT="${ALLM_STORAGE_MOUNT:-/tank/anythingllm}"
 # /v1/embeddings for the embedder; the router routes upstream by alias.
 ROUTER_IP="${ROUTER_IP:-192.168.6.153}"
 ALLM_LLM_BASE_URL="${ALLM_LLM_BASE_URL:-http://${ROUTER_IP}:8000/v1}"
-ALLM_LLM_MODEL="${ALLM_LLM_MODEL:-rag-qwen3.6}"        # matches LLAMA_ALIAS in 51-lxc-amd.sh
+ALLM_LLM_MODEL="${ALLM_LLM_MODEL:-rag-qwen3-coder}"    # matches LLAMA_ALIAS in 51-lxc-amd.sh
 # V620-only build: chat unit uses --ctx-size 131072 (128K). Higher values cause silent
 # mid-conversation failure when AnythingLLM sends a request that exceeds llama.cpp's
 # actual context. Pre-pivot configs used 262144 (256K) which was a bug.

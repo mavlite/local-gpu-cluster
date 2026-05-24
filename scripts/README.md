@@ -83,8 +83,8 @@ as three separate `llama-server` systemd units with per-card pinning:
 
 | Where | Service (unit) | Model | VRAM | Port |
 |------|----------------|-------|------|------|
-| V620 LXC 151 | `llamacpp-chat.service` (both V620s, `--tensor-split 1,1`) | Qwen3.6-35B-A3B UD-Q4_K_M (unsloth Dynamic), 128K ctx, q8_0 KV, `--parallel 4 --cache-reuse 1024 --mlock --log-prefix --reasoning-format deepseek` | ~32 GB (22 weights + 10 KV) across both | 8080 |
-| V620 LXC 151 | speculative draft (in-process on chat unit) | Qwen3-0.6B Q4_K_M (tokenizer-compatible with Qwen3.6) | ~400 MB | (same) |
+| V620 LXC 151 | `llamacpp-chat.service` (both V620s, `--tensor-split 1,1`) | Qwen3-Coder-Next UD-Q4_K_XL (80B MoE, 3B active; hybrid Gated DeltaNet + Gated Attention), 128K ctx, q8_0 KV, `--parallel 1 --cache-reuse 1024 --log-prefix` (no `--mlock` — host has 64 GB; no `--reasoning-format` — non-thinking model) | ~55-58 GB VRAM (49.6 weights + ~6-8 KV) across both | 8080 |
+| V620 LXC 151 | speculative draft (in-process on chat unit) | **DISABLED** — Qwen3-Coder-Next has no tokenizer-compatible small variant on HF; hybrid arch makes cross-family vocab matches unlikely | — | — |
 | V620 LXC 151 | `llamacpp-embed.service` (V620 #1, `--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`) | Qwen3-Embedding-0.6B Q8_0, **`--pooling last`** (NOT cls), 1024-dim, `--parallel 8` | ~1.2 GB | 8082 |
 | V620 LXC 151 | `llamacpp-rerank.service` (V620 #2, `--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`) | Qwen3-Reranker-0.6B Q8_0 (or BGE-Reranker-v2-m3), `--embeddings --pooling rank --reranking` | ~1.5 GB | 8083 |
 | Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control + slowapi rate-limit + prometheus-fastapi-instrumentator | — | 8000 |
@@ -92,17 +92,39 @@ as three separate `llama-server` systemd units with per-card pinning:
 Override anything via `config.env` — see `config.env.example` for the full knob list
 (`LLAMA_*`, `EMBED_*`, `RERANK_*`, admission + rate-limit env vars on the router).
 
+### Where models live
+
+- Host: `/tank/models/` on the ZFS mirror — actual storage.
+- LXC 151: `/opt/models/` — read-write bind mount of the same directory
+  (`pct set 151 -mp0 /tank/models,mp=/opt/models`).
+- Files use the HuggingFace cache layout:
+  `models--<org>--<repo>/snapshots/<rev>/<file>.gguf` symlinking to `blobs/<sha256>`.
+- On first `systemctl start llamacpp-chat`, llama-server downloads via `--hf-repo`
+  and writes here (`LLAMA_CACHE=/opt/models/.cache` in the unit).
+- To pre-fetch from the host:
+  `huggingface-cli download <repo> --local-dir /tank/models/<dirname>/`
+  **and** switch the unit from `--hf-repo` to `--model /opt/models/<dirname>/<file>.gguf`.
+
 ### Why these choices
 
-- **Qwen3.6-35B-A3B at UD-Q4_K_M** is the chat target. MoE with 3B active params keeps
-  inference fast; ~22 GB on disk. Unsloth Dynamic (UD-) quant is calibrated against an
-  imatrix dataset and tends to score slightly better than vanilla Q4_K_M at the same size.
-- **128K context with q8_0 KV cache and `--parallel 4`** ≈ 32-36 GB total. Fits in the
-  64 GB pool with embed + rerank pinned per-card; ~25 GB headroom.
-- **In-process speculative draft (Qwen3-0.6B)** runs on the same HIP process as the
-  target — llama.cpp's spec-decode cannot communicate across LXCs or processes. Qwen3.6
-  small variants don't exist on HF; Qwen3-0.6B shares the Qwen3 tokenizer family and works
-  as a vocab-compatible draft for the 35B target.
+- **Qwen3-Coder-Next at UD-Q4_K_XL** is the chat target. 80B total / 3B active MoE
+  keeps inference fast despite the size; ~49.6 GB on disk. Hybrid Gated DeltaNet +
+  Gated Attention architecture — recurrent layers carry no KV cache, only the 1-in-4
+  Gated Attention layers do, which dramatically reduces KV growth at long context.
+- **128K context with q8_0 KV cache and `--parallel 1`** ≈ 55-58 GB total. Single-user
+  policy gives the slot the full configured context; bumping to 256K (the model's
+  native ctx) is technically possible but VRAM-tight. Unsloth's own model card
+  recommends dropping to 32K if OOM.
+- **Speculative-decoding disabled** for this target. Coder-Next is the first hybrid
+  recurrent + attention model in the stack, and no Unsloth-published small variant
+  shares its tokenizer. Coder-Next's 3B active params already inference faster than a
+  spec-decoded dense 7B would; not a meaningful loss.
+- **`--mlock` disabled** on the chat unit. Pinning a 49.6 GB GGUF on a 64 GB host
+  would crowd out ZFS ARC and the other LXCs (153/154/155 = 24 GB combined). Weights
+  live in VRAM via `--n-gpu-layers all`; AMD_MEMORY is sized at 40 GB to cover the
+  load-time mmap, quant unpacking, and KV scratch with margin. Trade-off: slightly
+  slower cold-restart (NVMe re-read on next service start) instead of an OOM risk.
+  Embed + rerank units keep `--mlock` — their models are <2 GB combined.
 - **Embedder pooling: `--pooling last` is CRITICAL.** Qwen3-Embedding uses the final
   `<|endoftext|>` token. Using `cls` produces semantically wrong embeddings and silently
   invalidates AnythingLLM's vector DB.
@@ -112,8 +134,10 @@ Override anything via `config.env` — see `config.env.example` for the full kno
 - **Router admission control** replaces the hardware-level isolation the 3060 used to
   provide. Semaphores (chat=1, embed=4) prevent bulk re-embed from stalling chat;
   `slowapi` adds per-IP rate limits; Prometheus middleware exposes `/metrics`.
-- **`--reasoning-format deepseek`** moves `<think>` content into a separate
-  `reasoning_content` field so RAG UIs that don't read it ignore the thinking entirely.
+- **No `--reasoning-format` flag** with Qwen3-Coder-Next. The model is non-thinking
+  by design (does not emit `<think>...</think>` blocks), so the flag would be a no-op.
+  If you swap back to a thinking model, re-add `--reasoning-format deepseek` to keep
+  RAG UIs that don't read reasoning_content from seeing the thinking output.
 
 ## AnythingLLM auto-configuration
 
@@ -124,7 +148,7 @@ already pointing at the router for both LLM and embedder. Specifically:
 |--------|---------|--------|
 | `LLM_PROVIDER` | `generic-openai` | Use OpenAI-compatible upstream |
 | `GENERIC_OPEN_AI_BASE_PATH` | `http://<router>:8000/v1` | All chat requests via router |
-| `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3.6` | Picks the V620 main model (matches `LLAMA_ALIAS` in 51) |
+| `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3-coder` | Picks the V620 main model (matches `LLAMA_ALIAS` in 51) |
 | `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `131072` | Must equal `LLAMA_CTX` (128K); higher values cause silent overflow failure |
 | `EMBEDDING_ENGINE` | `generic-openai` | Same provider style for embedder |
 | `EMBEDDING_BASE_PATH` | `http://<router>:8000/v1` | Embeddings via router |
