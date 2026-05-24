@@ -38,6 +38,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -80,6 +81,18 @@ RATE_LIMIT_EMBED = os.environ.get("RATE_LIMIT_EMBED", "200/minute")
 METRICS_ALLOWED_IPS = {
     ip.strip() for ip in os.environ.get("METRICS_ALLOWED_IPS", "127.0.0.1").split(",") if ip.strip()
 }
+
+# CORS: needed when an HTML page loaded from file:// (Origin: null) or a
+# different LAN origin calls this router directly via fetch(). Without this,
+# browsers refuse to expose the response to JS even when the server accepts
+# the request. Default "*" is OK because this router lives on a LAN-only
+# IP behind a firewall AND requires Bearer auth on every protected endpoint
+# (header-based auth doesn't trigger the credentials/wildcard conflict).
+# Tighten to a specific origin list (e.g., "https://app.lan,http://192.168.6.150")
+# once you know the legitimate caller set.
+CORS_ALLOW_ORIGINS = [
+    o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
+]
 
 # Finite timeouts. Streaming uses timeout=None because long generations are normal.
 CHAT_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=5.0)
@@ -129,6 +142,18 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[])
 app = FastAPI(title="LLM Cluster Router (V620-only)")
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+# CORS middleware registered AFTER SlowAPI so it sits OUTERMOST. FastAPI executes
+# middleware in reverse-registration order on requests, so OPTIONS preflight is
+# answered by CORS before reaching the rate-limit counter (preflights should not
+# consume rate-limit budget).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
+)
 
 
 @app.exception_handler(RateLimitExceeded)

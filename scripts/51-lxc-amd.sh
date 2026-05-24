@@ -22,14 +22,7 @@ load_config
 AMD_VMID="${AMD_VMID:-151}"
 AMD_HOSTNAME="${AMD_HOSTNAME:-llamacpp-amd}"
 AMD_CORES="${AMD_CORES:-8}"
-# 40 GB working-set headroom for the 49.6 GB Qwen3-Coder-Next model. Note: --mlock
-# is DISABLED in llamacpp-chat.service because pinning a ~50 GB file on a 64 GB host
-# would crowd out ZFS ARC and the other LXCs (153/154/155 = 24 GB combined). Weights
-# still live in VRAM via --n-gpu-layers all; the host-side 40 GB covers load-time
-# mmap, quant unpacking, and KV scratch with margin. Trade-off vs --mlock: slightly
-# slower cold-restart (NVMe re-read on next service start) but no OOM risk.
-# Drop back to 32768 when running models with < ~20 GB GGUF.
-AMD_MEMORY="${AMD_MEMORY:-40960}"
+AMD_MEMORY="${AMD_MEMORY:-32768}"
 AMD_SWAP="${AMD_SWAP:-8192}"
 AMD_ROOTFS_SIZE="${AMD_ROOTFS_SIZE:-64}"
 LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)
@@ -41,31 +34,22 @@ AMD_GPU_TARGET="${AMD_GPU_TARGET:-gfx1030}"
 ROCM_RELEASE="${ROCM_RELEASE:-latest}"
 
 # ---------- llama-server tunables (overridable via config.env) ----------
-# V620-only build: 2x V620 = 64 GB VRAM total. Chat unit ~49.6 GB weights + KV cache.
-# Verified model availability on HF (2026-05-24):
-#   unsloth/Qwen3-Coder-Next-GGUF  Q file: Qwen3-Coder-Next-UD-Q4_K_XL.gguf (~49.6 GB)
-#   80B total / 3B active (MoE; 512 experts, 10 active); hybrid Gated DeltaNet +
-#   Gated Attention; 256K native context; non-thinking mode only (no <think> blocks).
-LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3-Coder-Next-GGUF}"
-LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q4_K_XL}"     # Unsloth Dynamic XL (recommended sweet spot for 80B at ~50 GB)
-LLAMA_ALIAS="${LLAMA_ALIAS:-rag-qwen3-coder}"      # matches AnythingLLM ALLM_LLM_MODEL
-# 128K default — Qwen3-Coder-Next supports 256K natively, but 49.6 GB weights leave
-# only ~14 GB on 64 GB VRAM for KV + activations. Hybrid Gated DeltaNet layers carry
-# no KV (only the 1-in-4 Gated Attention layers do), so 128K with q8_0 KV is ~5-8 GB
-# and fits comfortably. Bump to 262144 only after rocm-smi shows VRAM headroom.
-# Unsloth's own model card says "reduce from 256K to 32768 if OOM occurs" — treat
-# that as the floor for fallback if 128K is still tight.
-LLAMA_CTX="${LLAMA_CTX:-131072}"
-LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 best quality; drop to q4_0 if VRAM is tight
-# parallel=1 matches the router's CHAT_CONCURRENCY=1 single-user policy and gives
-# the full LLAMA_CTX to every request. With parallel>1 each slot would get ctx/N.
-LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
-# Note: --cache-reuse may be auto-disabled by llama.cpp at startup because the
-# hybrid Gated DeltaNet layers carry recurrent state that can't be partial-replayed.
-# Look for "context shift disabled" / "cache_reuse disabled" in the boot log. If
-# disabled, the setting is a no-op (harmless). Leaving at 1024 so it engages on
-# attention-only paths if the implementation supports it.
-LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-1024}"
+# V620-only build: 2x V620 = 64 GB VRAM total. Chat unit ~22 GB weights + KV cache.
+# Verified model availability on HF (2026-05-17):
+#   unsloth/Qwen3.6-35B-A3B-GGUF                Q file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (~22 GB)
+LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3.6-35B-A3B-GGUF}"
+LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q4_K_M}"      # Unsloth Dynamic Q4_K_M (slightly better than vanilla at same size)
+LLAMA_ALIAS="${LLAMA_ALIAS:-rag-qwen3.6}"          # matches AnythingLLM ALLM_LLM_MODEL
+LLAMA_CTX="${LLAMA_CTX:-262144}"                   # 256K total; with --parallel 1 → full 256K per request (matches Qwen3.6 n_ctx_train)
+LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~24GB @ 256K total; 64GB VRAM has plenty of headroom
+# parallel=1 matches the router's CHAT_CONCURRENCY=1 single-user policy.
+# With parallel=2 each slot was capped at 131K (half of n_ctx_train=262144), so
+# the second slot was dead VRAM under the single-user policy and the warning
+# "n_ctx_seq (131072) < n_ctx_train (262144)" appeared on every boot.
+# parallel=1 also re-enables --cache-reuse (multi-slot + quantized KV trips an
+# unsupported code path in llama.cpp).
+LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"              # 1 slot of full 256K
+LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-1024}"     # prompt-prefix reuse window for RAG system prompts
 # Prompt cache: stores processed KV for repeated prefixes. Default is 8 GB which
 # fits ~85K tokens; OpenCode reuses the same long system prompt every turn so
 # bumping to 16 GB doubles the hit window. LXC has 32 GB RAM, so 16 GB leaves
@@ -76,15 +60,15 @@ LLAMA_THREADS="${LLAMA_THREADS:-8}"
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
 # Speculative decoding (in-process draft on the V620 chat unit).
-# DISABLED by default for Qwen3-Coder-Next target — Unsloth has not published a
-# tokenizer-compatible small variant of this model, and the hybrid Gated DeltaNet
-# architecture is unusual enough that vocab-only matches from other Qwen3 family
-# models are unlikely to satisfy llama.cpp's spec-decode vocab check.
+# DISABLED by default for Qwen3.6 target — llama.cpp requires draft tokenizer
+# to match target ("draft model vocab type must match target model") and
+# Qwen3.6 has no published small variant with a compatible tokenizer.
 # When LLAMA_DRAFT_REPO is empty the chat unit boot log will show
 # "no implementations specified for speculative decoding" — that is the
 # expected/normal state, NOT a bug.
-# Workaround: Coder-Next is MoE with ~3B active params, so it's already fast
-# without spec decode.
+# Re-enable only when a Qwen3.6-family small variant becomes available.
+# Workaround: 35B-A3B is MoE with ~3B active params, so it's already fast
+# without spec decode. Loss is ~1.5-2× throughput; acceptable trade-off.
 LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
 LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
@@ -443,7 +427,9 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --cache-ram "${LLAMA_CACHE_RAM_MB}" \\
 ${DRAFT_LINES}    --no-mmproj \\
     --flash-attn "${LLAMA_FLASH_ATTN}" \\
+    --reasoning-format deepseek \\
     --jinja \\
+    --mlock \\
     --log-prefix \\
     --metrics
 ExecStartPost=-/usr/local/bin/warm-chat.sh

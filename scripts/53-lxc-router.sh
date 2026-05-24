@@ -36,23 +36,30 @@ KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-12}"
 
 # Admission control + rate limit (consumed by router-app.py rewrite).
 # CHAT_CONCURRENCY=1 matches the upstream chat unit's --parallel 1, which is
-# set that way to give every request the full configured context window
-# (LLAMA_CTX=131072 by default for Qwen3-Coder-Next). With parallel=1, allowing
-# CHAT_CONCURRENCY > 1 would just queue inside llama-server with worse SSE/keepalive
-# behavior. Sub-agent calls from OpenCode/Cline queue at the router instead, which
-# is the cleaner spot to hold them (router can emit keepalives while waiting).
+# set that way to give every request the full Qwen3.6 trained context window
+# (n_ctx_train=262144 = 256K). With parallel=1, allowing CHAT_CONCURRENCY > 1
+# would just queue inside llama-server with worse SSE/keepalive behavior.
+# Sub-agent calls from OpenCode/Cline queue at the router instead, which is
+# the cleaner spot to hold them (router can emit keepalives while waiting).
 CHAT_CONCURRENCY="${CHAT_CONCURRENCY:-1}"
 EMBED_CONCURRENCY="${EMBED_CONCURRENCY:-4}"
-# MAX_CHAT_INPUT_TOKENS sized at ~100K to use most of the 128K context window
-# while reserving ~28K for output. opencode.json's per-model limit.context should
-# be set to this value (or limit.context - limit.output should equal this) so
-# OpenCode's compaction triggers before the router 413s.
-MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-100000}"
+# MAX_CHAT_INPUT_TOKENS sized at ~200K to use most of the model's 256K window
+# while reserving ~56K for output + thinking. opencode.json's per-model
+# limit.context should be set to this value (or limit.context - limit.output
+# should equal this) so OpenCode's compaction triggers before the router 413s.
+MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-200000}"
 MAX_EMBED_INPUT_TOKENS="${MAX_EMBED_INPUT_TOKENS:-16384}"  # must match EMBED_CTX/EMBED_PARALLEL per-slot ctx on LXC 151
 RATE_LIMIT_CHAT="${RATE_LIMIT_CHAT:-60/minute}"
 RATE_LIMIT_EMBED="${RATE_LIMIT_EMBED:-200/minute}"
 PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.150}"
 METRICS_ALLOWED_IPS="${METRICS_ALLOWED_IPS:-127.0.0.1,${PROXMOX_HOST_IP}}"
+# CORS allow-origins. Needed when HTML pages loaded from file:// (Origin: null)
+# or arbitrary LAN origins call this router via fetch(). Default "*" is OK
+# because (a) this LXC sits on a LAN-only IP behind your firewall, and
+# (b) every protected endpoint already requires Bearer auth. Tighten to an
+# explicit comma-separated origin list (e.g., "http://192.168.6.150,https://app.lan")
+# once the legitimate caller set is known.
+CORS_ALLOW_ORIGINS="${CORS_ALLOW_ORIGINS:-*}"
 
 # AMD_VMID needed to fetch LLAMACPP_API_KEY from LXC 151 in phase_7_1_5
 AMD_VMID="${AMD_VMID:-151}"
@@ -171,6 +178,7 @@ phase_7_4_systemd() {
     "RATE_LIMIT_CHAT=$RATE_LIMIT_CHAT" \
     "RATE_LIMIT_EMBED=$RATE_LIMIT_EMBED" \
     "METRICS_ALLOWED_IPS=$METRICS_ALLOWED_IPS" \
+    "CORS_ALLOW_ORIGINS=$CORS_ALLOW_ORIGINS" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
 
@@ -226,6 +234,7 @@ PY
     upsert_env RATE_LIMIT_CHAT "$RATE_LIMIT_CHAT"
     upsert_env RATE_LIMIT_EMBED "$RATE_LIMIT_EMBED"
     upsert_env METRICS_ALLOWED_IPS "$METRICS_ALLOWED_IPS"
+    upsert_env CORS_ALLOW_ORIGINS "$CORS_ALLOW_ORIGINS"
     chmod 600 /etc/router.env
 
     cat > /etc/systemd/system/llm-router.service <<EOF
@@ -289,7 +298,7 @@ printf 'Authorization: Bearer %s\n' "$ROUTER_API_KEY" > "$tmpdir/auth"
 curl -s -m 30 -o /dev/null \
     -H "@$tmpdir/auth" \
     -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3-coder","messages":[{"role":"user","content":"."}],"max_tokens":1}' \
+    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"."}],"max_tokens":1}' \
     http://127.0.0.1:8000/v1/chat/completions || true
 SH
     chmod 0755 /usr/local/bin/llm-router-keepalive.sh
