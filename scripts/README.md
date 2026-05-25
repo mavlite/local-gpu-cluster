@@ -4,6 +4,10 @@ Idempotent automation of Phases 4–11 of [`setup-runbook.md`](../setup-runbook.
 Each script is independently runnable and may be invoked through the top-level
 orchestrator.
 
+Once the cluster is deployed, see [`day-2-ops.md`](../day-2-ops.md) for operational
+procedures (health checks, model swaps, key rotation, RAG refresh, embedder
+retuning, updates, hardware changes).
+
 | Phase | Script                  | Covers                                                     |
 | ----- | ----------------------- | ---------------------------------------------------------- |
 | 4     | `40-host-config.sh`     | IOMMU, AMD firmware, ZFS mirror, LXC template, THP disable (V620-only — no NVIDIA driver, no kernel pin) |
