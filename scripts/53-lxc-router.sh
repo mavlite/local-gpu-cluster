@@ -66,7 +66,7 @@ TAVILY_API_KEY="${TAVILY_API_KEY:-}"
 # expected by OpenCode / Cline / Continue. MAX_TOOL_ITERATIONS caps the
 # multi-turn loop to prevent runaways (each iteration is one upstream chat
 # completion + N tool executions).
-MAX_TOOL_ITERATIONS="${MAX_TOOL_ITERATIONS:-5}"
+MAX_TOOL_ITERATIONS="${MAX_TOOL_ITERATIONS:-10}"
 TOOL_EXECUTION_DEFAULT="${TOOL_EXECUTION_DEFAULT:-client}"
 
 # web_fetch tool safety. Caps response body size and request timeout to
