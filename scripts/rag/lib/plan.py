@@ -76,8 +76,26 @@ class Plan:
 def compute(
     collected: list[Document],
     persisted: dict[str, dict[str, Any]],
+    remove_missing: bool = True,
 ) -> Plan:
-    """Diff collected documents against persisted state."""
+    """Diff collected documents against persisted state.
+
+    When `remove_missing=True` (default), URLs in `persisted` but not in
+    `collected` are added to `plan.removes` — the appropriate behavior for
+    handlers that enumerate the complete current universe of URLs every
+    refresh (github_repo, sphinx_sitemap).
+
+    When `remove_missing=False`, those URLs are left alone. This is the
+    "additive only" diff used by handlers like rss whose collection is a
+    sliding recent-window of a much larger historical set (an RSS feed
+    typically exposes only the last 10-50 entries even though the source
+    site may have years of posts). Without this flag, every refresh would
+    plan to delete all the historical entries that have fallen out of the
+    feed's window, which is almost always wrong.
+
+    refresh.py sets this based on the source's `removal_policy` field
+    (`"additive_only"` → remove_missing=False; anything else → True).
+    """
     plan = Plan(existing_count=len(persisted))
     collected_urls: set[str] = set()
 
@@ -93,9 +111,9 @@ def compute(
             plan.updates.append(doc)
         # else: unchanged — no plan entry needed
 
-    # Anything in state but not in the new collection is a removal.
-    for url in persisted:
-        if url not in collected_urls:
-            plan.removes.append(url)
+    if remove_missing:
+        for url in persisted:
+            if url not in collected_urls:
+                plan.removes.append(url)
 
     return plan

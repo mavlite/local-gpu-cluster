@@ -123,9 +123,20 @@ def refresh_one(
     print(f"  collected: {len(collected)} documents from source")
 
     # Compute plan against persisted state.
+    # removal_policy controls whether URLs in state but not in the current
+    # collection get marked for deletion. "additive_only" is required for
+    # RSS-backed sources whose collection is a sliding recent-window; any
+    # other value (or absence) uses the default "full" behavior where
+    # missing URLs ARE removed (correct for github_repo, sphinx_sitemap).
     persisted = src_state.load_documents()
-    the_plan = plan_mod.compute(collected, persisted)
+    removal_policy = source.get("removal_policy", "full")
+    remove_missing = removal_policy != "additive_only"
+    the_plan = plan_mod.compute(
+        collected, persisted, remove_missing=remove_missing,
+    )
 
+    if not remove_missing:
+        print(f"  removal_policy=additive_only (state-only URLs preserved)")
     print(f"  plan: {the_plan.summary()}")
 
     # Safety check.
