@@ -33,6 +33,7 @@ import os
 import re
 import secrets
 import time
+import uuid
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -107,7 +108,7 @@ TAVILY_ALLOWED_FIELDS = {
 # is reached. Default is "client" (legacy behavior — tool_calls pass through
 # to the caller for client-side execution, as OpenCode / Cline / Continue
 # expect).
-MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
+MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "10"))
 TOOL_EXECUTION_DEFAULT = os.environ.get("TOOL_EXECUTION_DEFAULT", "client")
 
 # web_fetch tool safety. Direct HTTPS (or HTTP) GET with explicit denylist
@@ -846,10 +847,92 @@ def registered_tool_schemas() -> list:
     return [t["schema"] for t in TOOLS.values()]
 
 
+def _format_tavily_search(result: dict) -> str:
+    """Flatten a Tavily Search response into model-friendly markdown so the
+    model doesn't have to traverse nested JSON to extract results."""
+    lines = []
+    if result.get("answer"):
+        lines.append(f"**Tavily answer:** {result['answer']}\n")
+    results = result.get("results") or []
+    if not results:
+        return "No results found." if not lines else "\n".join(lines) + "\nNo results."
+    lines.append(f"{len(results)} results:\n")
+    for i, r in enumerate(results, 1):
+        title = r.get("title") or "(no title)"
+        url = r.get("url") or ""
+        content = (r.get("content") or "").strip()
+        score = r.get("score")
+        score_str = f" (score: {score:.2f})" if isinstance(score, (int, float)) else ""
+        lines.append(f"### {i}. {title}{score_str}")
+        lines.append(f"URL: {url}")
+        if content:
+            lines.append(f"\n{content}\n")
+    return "\n".join(lines)
+
+
+def _format_tavily_extract(result: dict) -> str:
+    """Flatten Tavily Extract response into markdown."""
+    lines = []
+    results = result.get("results") or []
+    if not results:
+        return "No content extracted."
+    for r in results:
+        url = r.get("url") or ""
+        content = (r.get("raw_content") or r.get("content") or "").strip()
+        lines.append(f"## {url}\n\n{content}\n")
+    failed = result.get("failed_results") or []
+    if failed:
+        lines.append("\n**Failed URLs:**")
+        for f in failed:
+            lines.append(f"- {f.get('url', '')}: {f.get('error', '')}")
+    return "\n".join(lines)
+
+
+def _format_tavily_crawl_map(result: dict) -> str:
+    """Flatten Tavily Crawl / Map response into markdown."""
+    base_url = result.get("base_url") or "(unknown)"
+    results = result.get("results") or []
+    if not results:
+        return f"No pages found under {base_url}."
+    lines = [f"Crawled/mapped {len(results)} pages under {base_url}:\n"]
+    for r in results:
+        url = r.get("url") or ""
+        content = (r.get("raw_content") or r.get("content") or "").strip()
+        if content:
+            lines.append(f"### {url}\n{content[:1500]}\n")
+        else:
+            lines.append(f"- {url}")
+    return "\n".join(lines)
+
+
+def _format_tool_result(name: str, result) -> str:
+    """Convert a tool handler's return value into a string suitable for the
+    role:"tool" message content field. Tavily endpoints get flattened to
+    markdown (much easier for the model to parse than nested JSON); others
+    fall back to JSON.
+
+    Errors always stay as JSON so they're structurally distinct and the
+    model can detect failure mode programmatically.
+    """
+    if not isinstance(result, dict):
+        return json.dumps(result, default=str)
+    if "error" in result:
+        return json.dumps(result, default=str)
+    if name == "tavily_search":
+        return _format_tavily_search(result)
+    if name == "tavily_extract":
+        return _format_tavily_extract(result)
+    if name in ("tavily_crawl", "tavily_map"):
+        return _format_tavily_crawl_map(result)
+    # web_fetch / unknown — JSON pass-through
+    return json.dumps(result, default=str)
+
+
 async def dispatch_tool(name: str, args_json: str) -> str:
     """Execute a tool by name. args_json is a JSON-encoded arguments string
-    (as produced by the model). Returns a JSON-encoded result string suitable
-    for embedding in a role:"tool" message."""
+    (as produced by the model). Returns a result string suitable for embedding
+    in a role:"tool" message — markdown for Tavily endpoints, JSON for others
+    and for errors."""
     if name not in TOOLS:
         return json.dumps({"error": "unknown_tool", "tool": name})
     try:
@@ -860,10 +943,23 @@ async def dispatch_tool(name: str, args_json: str) -> str:
         return json.dumps({"error": "arguments_must_be_object"})
     try:
         result = await TOOLS[name]["handler"](args)
-        return json.dumps(result, default=str)
+        return _format_tool_result(name, result)
     except Exception as e:
         return json.dumps({"error": "tool_execution_failed",
                            "type": type(e).__name__, "message": str(e)})
+
+
+def _ensure_tool_call_ids(tool_calls: list) -> list:
+    """Synthesize an ID for any tool_call missing one. Qwen3.6's jinja chat
+    template uses tool_call_id to pair role:"tool" responses back to the
+    assistant's tool_calls; if the model emitted calls without IDs, the
+    pairing fails and the model effectively never sees the responses,
+    causing it to call the tool again on the next turn (until max_iterations).
+    """
+    for tc in tool_calls:
+        if not tc.get("id"):
+            tc["id"] = f"call_{uuid.uuid4().hex[:24]}"
+    return tool_calls
 
 
 # ---------- Server-side tool execution: multi-turn loops ----------
@@ -1011,7 +1107,7 @@ async def tool_loop_stream(initial_body: dict, strip_thinking: bool, client_ip: 
             return
 
         if finish_reason == "tool_calls" and accumulator.has_any():
-            tool_calls = accumulator.finalize()
+            tool_calls = _ensure_tool_call_ids(accumulator.finalize())
             messages.append({
                 "role": "assistant",
                 "content": assistant_content or None,
@@ -1022,9 +1118,13 @@ async def tool_loop_stream(initial_body: dict, strip_thinking: bool, client_ip: 
                 result_str = await dispatch_tool(fn["name"], fn["arguments"])
                 log_access(
                     "/v1/chat/completions:tool", fn["name"],
-                    0, 0, int((time.monotonic() - started) * 1000),
+                    len(fn.get("arguments") or ""), len(result_str),
+                    int((time.monotonic() - started) * 1000),
                     200, client_ip,
-                    error=f"iteration={iteration+1}/{MAX_TOOL_ITERATIONS}",
+                    error=(f"iter={iteration+1}/{MAX_TOOL_ITERATIONS}"
+                           f" id={tc.get('id') or 'NULL'}"
+                           f" args={(fn.get('arguments') or '')[:120]}"
+                           f" result_head={result_str[:200]}"),
                 )
                 messages.append({
                     "role": "tool",
@@ -1103,6 +1203,7 @@ async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_i
         finish = choice.get("finish_reason")
 
         if finish == "tool_calls" and msg.get("tool_calls"):
+            _ensure_tool_call_ids(msg["tool_calls"])
             messages.append(msg)  # assistant message with tool_calls
             for tc in msg["tool_calls"]:
                 fn = tc.get("function") or {}
@@ -1111,9 +1212,13 @@ async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_i
                 )
                 log_access(
                     "/v1/chat/completions:tool", fn.get("name", "?"),
-                    0, 0, int((time.monotonic() - started) * 1000),
+                    len(fn.get("arguments") or ""), len(result_str),
+                    int((time.monotonic() - started) * 1000),
                     200, client_ip,
-                    error=f"iteration={iteration+1}/{MAX_TOOL_ITERATIONS}",
+                    error=(f"iter={iteration+1}/{MAX_TOOL_ITERATIONS}"
+                           f" id={tc.get('id') or 'NULL'}"
+                           f" args={(fn.get('arguments') or '')[:120]}"
+                           f" result_head={result_str[:200]}"),
                 )
                 messages.append({
                     "role": "tool",

@@ -636,7 +636,7 @@ When `tool_execution` is `"server"`, the router:
 1. Injects all registered tool schemas if the client didn't supply `tools` (lets the client restrict which tools are exposed by passing a subset).
 2. Sends the augmented request upstream.
 3. If the model emits `finish_reason: tool_calls`, the router executes each tool via the registry and appends `role: "tool"` messages with results.
-4. Loops back to step 2 until either the model returns a non-tool-call response or `MAX_TOOL_ITERATIONS=5` is hit.
+4. Loops back to step 2 until either the model returns a non-tool-call response or `MAX_TOOL_ITERATIONS=10` is hit.
 5. Returns only the final assistant message to the client (tool_call deltas are not streamed downstream).
 
 Default is `"client"` — preserves legacy pass-through behavior for OpenCode/Cline/Continue, which run their own tool dispatchers.
@@ -699,7 +699,7 @@ The script copies the updated `router-app.py` to LXC 153 and restarts the unit. 
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `MAX_TOOL_ITERATIONS` | 5 | Cap on multi-turn loop iterations |
+| `MAX_TOOL_ITERATIONS` | 10 | Cap on multi-turn loop iterations |
 | `TOOL_EXECUTION_DEFAULT` | `client` | Default when request doesn't set `tool_execution` |
 | `WEB_FETCH_MAX_SIZE_KB` | 1024 | Cap on `web_fetch` response body |
 | `WEB_FETCH_TIMEOUT_SECONDS` | 15 | Cap on `web_fetch` request time |
