@@ -10,7 +10,7 @@ big-session day of cluster work + artifact build-out.
 
 - **GPU cluster:** running, stable on Qwen3.6-35B-A3B. CORS works. Tavily proxy live.
 - **Artifact** (`weekly_customer_adoption_review.html`) — fully wired but **not yet tested end-to-end by you**. Three personal URL placeholders to fill in.
-- **RAG Phase 2** (openzfs / blog split / keycloak fixes) — paused mid-diagnosis, all changes still pending.
+- **RAG Phase 2** (openzfs / blog split / keycloak fixes) — resolved 2026-05-25 (commit 4f2b30e); full sdg-documentation wipe-loop baseline clean across all 5 sources.
 - **Three deferred decisions:** (1) Coder-Next take 2 with smaller quant, (2) runbook rewrite for current cluster state, (3) router-side MCP/tool execution layer.
 
 ---
@@ -162,15 +162,25 @@ Per refresh-button click, Tavily credits used:
 - `scripts/config.env.example`: corrected "read-only mount" to "read-write bind mount" (the artifact actually needs RW for HF cache).
 - `scripts/README.md`: added "Where models live" subsection documenting `/tank/models/` ↔ `/opt/models/` bind-mount and HF cache layout.
 
-### RAG Phase 2 — paused mid-diagnosis (NOT committed)
+### RAG Phase 2 — RESOLVED 2026-05-25 (commit 4f2b30e)
 
-Phase 1 (declarative refresh system in `scripts/rag/`) shipped earlier this session. Phase 2 issues diagnosed but not yet fixed:
+All three diagnosed issues fixed plus full sdg-documentation wipe-loop completed.
 
-1. **openzfs-docs state is 100% wrong URL shape** — verified: state URLs include a `/en/` segment that returns 404 on the live site; canonical URLs (without `/en/`) return 200. Fix: wipe state, re-run `refresh.py --source openzfs-docs` → 76 clean ADDs. Then clean 59 orphaned `/en/`-URL workspace docs.
-2. **truenas-scale-docs state polluted with 595 blog posts** — `migrate_backfill` prefix-matched too loosely. Decision made: split into a new `truenas-blog` source (Phase 2 requires implementing the RSS or url_list_hashed handler stub). State-surgery script needs writing.
-3. **keycloak handler bugs** — (a) `file_exclude_regex` doesn't match `documentation/<section>/topics/` partials, so 399 .adoc files get yielded for ~7 unique URLs; (b) `github_repo` handler doesn't dedupe by URL when `url_keep_depth` collapses files. Both bugs need fixing in `scripts/rag/handlers/github_repo.py` and `scripts/rag/sources.yaml`.
+1. **openzfs-docs `/en/` URL shape** — wiped state, `refresh.py --force` yielded 76 clean ADDs. The expected 59 orphans had already been cleaned in an earlier session (verified: 0 docs with `/en/` in sourceURL).
+2. **truenas-scale-docs blog pollution** — new `scripts/rag/split_truenas_blog.py` migrated 595 blog URLs into a parked `truenas-blog` source (handler: rss, enabled: false) preserving `allm_doc_path`. Source declared in `sources.yaml`; stays disabled until the rss handler stub is implemented.
+3. **keycloak handler bugs** — (a) `file_exclude_regex` updated to `(?:[^/]+/)?topics` to catch section-level topics partials; (b) `github_repo.py` `collect()` rewritten as gather-then-emit, merging content when multiple source files collapse to one citation URL (adds `merged_count` to metadata when merging).
 
-Safety threshold did its job — none of these mass-deletes ran. Proposals saved under `/tank/rag-state/_proposals/` on the Proxmox host.
+Post-wipe baseline (all sdg-documentation sources):
+
+| Source | state docs | workspace match | dup× | orphans |
+|---|---|---|---|---|
+| keycloak-docs | 6 | 12 | 2.00 | 0 |
+| openzfs-docs | 76 | 150 | 1.97 | 0 |
+| truenas-api-v27 | 1079 | 2159 | 2.00 | 0 |
+| opnsense-docs | 418 | 798 | 1.91 | 0 |
+| truenas-scale-docs | 452 | 904 | 2.00 | 0 |
+
+One stale `raw-recovered-` sidecar from 2026-05-20 was swept from truenas-api-v27 separately. Consistent ~2.0× workspace-list dup factor confirms an AnythingLLM `/workspace/{slug}` quirk (two rows per document) — non-blocking, known.
 
 ---
 
@@ -202,13 +212,9 @@ Safety threshold did its job — none of these mass-deletes ran. Proposals saved
 - [ ] Reload artifact, test 🔄 Refresh on Releases / Announcements / Events with `Local + Tavily` provider
 - [ ] Save artifact as "Week 1" baseline
 
-### Soon (RAG Phase 2)
+### Soon (RAG Phase 2) — DONE 2026-05-25
 
-- [ ] openzfs-docs: wipe state, run `refresh.py --source openzfs-docs`, clean 59 orphaned `/en/` workspace docs
-- [ ] Write state-surgery script: split 595 blog URLs out of `truenas-scale-docs` state into new `truenas-blog` parked state
-- [ ] Add `truenas-blog` source to `scripts/rag/sources.yaml` (`enabled: false` until handler exists)
-- [ ] Fix keycloak `file_exclude_regex` to match `documentation/<section>/topics/`
-- [ ] Add URL dedup to `scripts/rag/handlers/github_repo.py` when `url_keep_depth` is set
+All five items shipped in commit 4f2b30e and the full sdg-documentation workspace was wipe-rebuilt clean. See the "RAG Phase 2 — RESOLVED" section above for the post-wipe baseline.
 
 ### Later (separate planning sessions)
 
