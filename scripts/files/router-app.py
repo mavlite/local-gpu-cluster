@@ -368,6 +368,18 @@ ALIAS_MAP: dict[str, dict] = {
     "rag-qwen3.6":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True},
     "qwen3.6-think": {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
     "qwen3.6":       {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
+    # Qwen3-Coder-Next aliases. These resolve only when the chat unit is
+    # actually serving the Coder-Next backend (config.env LLAMA_ALIAS=qwen3-coder).
+    # If Qwen3.6 is still loaded, requests to these aliases get rewritten to
+    # backend="qwen3-coder" but llama-server serves whatever model is loaded
+    # regardless of the requested name — useful for one-line A/B testing but
+    # something to be aware of.
+    #
+    # Coder-Next doesn't use Qwen3.6's thinking-mode template, so leave
+    # enable_thinking=None (don't inject) and strip_thinking=False (don't
+    # regex-strip — Coder typically doesn't emit <think> blocks).
+    "qwen3-coder":      {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
+    "qwen3-coder-next": {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
 }
 
 
