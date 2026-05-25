@@ -227,7 +227,7 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 
 ### Standing items (no urgent action)
 
-- [ ] Implement Phase 2 RSS handler so the parked `truenas-blog` source can auto-refresh
+- [x] Implement Phase 2 RSS handler — **done 2026-05-25** in commit 57adec5. Handler at [`scripts/rag/handlers/rss.py`](./scripts/rag/handlers/rss.py); feedparser + trafilatura pipeline; new top-level `removal_policy: additive_only` source field (in [`scripts/rag/lib/plan.py`](./scripts/rag/lib/plan.py) + [`scripts/rag/refresh.py`](./scripts/rag/refresh.py)) prevents the diff layer from deleting historical entries that fall out of an RSS feed's sliding window. **truenas-blog itself stays parked**: TrueNAS / iXsystems publish no public feed (probed `/feed`, `/blog/feed`, `/blog/index.xml`, `/sitemap.xml`, all variants — either 404 or 301 → SPA-fallback HTML). 595 historical entries remain searchable through the sdg-documentation workspace. Handler is reusable for any future source that DOES have a feed (homenetworkguy, klarasystems, ServeTheHome, Phase Two community blogs) — just add a new sources.yaml entry with `handler: rss` and `removal_policy: additive_only`. For fresh TrueNAS blog content specifically, the server-side tool execution route ([day-2-ops § 6.8](./day-2-ops.md#-68-server-side-tool-execution)) covers live web search via `tavily_search`.
 - [ ] Implement Phase 2 split: `sphinx_sitemap` collect()/fetch() so `--dry-run` isn't expensive
 - [ ] migrate_backfill: extract_url shape fix for refresh.py-uploaded docs
 - [ ] cleanup script: batch-size handling (1800s timeout on 409 removes)

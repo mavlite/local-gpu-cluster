@@ -122,27 +122,43 @@ sources:
       url_ext_to: "/"
       url_lowercase: true
 
-  # ── Official: TrueNAS blog ──────────────────────────────────────────────
+  # ── Official: TrueNAS blog (parked — no public feed exists) ─────────────
   # Originally split out of truenas-scale-docs via
   # scripts/rag/split_truenas_blog.py (migrate_backfill prefix-matched
   # /blog/ URLs into the docs source by mistake). 595 historical entries
-  # currently in state with hash="migrated" — the rss handler runs on the
-  # feed's sliding window (latest ~50 posts) and adds/updates those; the
-  # historical entries are preserved via removal_policy=additive_only.
+  # remain in /tank/rag-state/truenas-blog/documents.json with hash=
+  # "migrated", still searchable through the sdg-documentation workspace.
   #
-  # removal_policy=additive_only is REQUIRED for RSS sources. RSS feeds
-  # don't expose the full history, only a sliding recent-window. Without
-  # this flag the diff layer would mark all 545+ historical entries for
-  # deletion on every refresh.
+  # 2026-05-25 verification: TrueNAS / iXsystems publish no public RSS,
+  # Atom, or accessible sitemap for blog content. Probed:
+  #     /blog/feed/                404
+  #     /blog/index.xml            404
+  #     /feed, /rss, /atom.xml etc 301 → SPA fallback (no real feed)
+  #     /sitemap.xml               301 → SPA fallback
+  #     /robots.txt                lists 3 sitemaps (main / community /
+  #                                docs), main one redirects same as above;
+  #                                community is the forum; docs is already
+  #                                ingested via truenas-scale-docs handler.
+  # The rss handler itself (scripts/rag/handlers/rss.py) and the
+  # removal_policy=additive_only support in plan.py/refresh.py are shipped
+  # and usable for any future source that DOES have a feed — likely
+  # candidates: homenetworkguy.com, klarasystems.com, ServeTheHome, Phase
+  # Two, etc. Just add a new entry below with handler: rss + the same
+  # removal_policy: additive_only field.
+  #
+  # For *new* TrueNAS blog content, the cluster's server-side tool
+  # execution route (see day-2-ops.md § 6.8) supports live web search via
+  # tavily_search — bypassing the need for RAG-indexed up-to-the-minute
+  # blog content. RAG retains the historical corpus; Tavily handles fresh.
   - id: truenas-blog
     handler: rss
-    enabled: true
+    enabled: false   # no working feed found — see comment above
     removal_policy: additive_only
     workspace: sdg-documentation
     doc_prefix: "[OFFICIAL] truenas/blog"
     refresh_interval: 7d
     config:
-      rss_url: https://www.truenas.com/blog/feed/
+      rss_url: https://www.truenas.com/blog/feed/   # 404 as of 2026-05-25
       url_domain_filter: '^https?://www\.truenas\.com/blog/'
       max_entries: 50
 
