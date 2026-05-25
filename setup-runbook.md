@@ -5,7 +5,9 @@
 > ### V620-only pivot — complete and deployed
 > The pivot from "2× V620 + 1× RTX 3060" to "V620-only" is finished. All scripts under `scripts/` and `scripts/files/router-app.py` are V620-clean (Bearer auth, admission control, slowapi rate limit, Prometheus instrumentation, fail-open SSE, `/v1/completions` passthrough, `[CONTEXT N]` marker stripping). `scripts/bootstrap.sh` runs end-to-end. The reference deployment at `gpu-cluster.local` has been validated through Phase 11 and ingested ~1000 docs across two AnythingLLM workspaces. Phase 6 (live cutover from a pre-pivot v2 cluster) is included for historical reference if anyone is migrating; fresh builds use Phases 4-11 directly.
 
-This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md). The v2 doc explains *why*; this runbook is the exact *how*. Every command is meant to be run in order. Each phase ends with a verification step — do not proceed if it fails.
+This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md). The v2 doc explains *why*; this runbook is the exact *how* of greenfield deployment. Every command is meant to be run in order. Each phase ends with a verification step — do not proceed if it fails.
+
+Once deployment is complete, see [`day-2-ops.md`](./day-2-ops.md) for steady-state operational procedures (health checks, troubleshooting, model swaps, key rotation, RAG operations, embedder retuning, updates, hardware changes).
 
 > **Architecture correction notes (vs. v2 doc rev 1):**
 >

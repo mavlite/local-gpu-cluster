@@ -69,7 +69,8 @@ The AnythingLLM `/workspace/{slug}` REST endpoint returns ~2 rows per underlying
 
 | File | Purpose |
 |---|---|
-| [`setup-runbook.md`](./setup-runbook.md) | Operational deployment runbook. Phases 1-11 from BIOS to final acceptance suite. The exact *how*. |
+| [`setup-runbook.md`](./setup-runbook.md) | Operational deployment runbook. Phases 1-11 from BIOS to final acceptance suite. The exact *how* of greenfield deployment. |
+| [`day-2-ops.md`](./day-2-ops.md) | Day-2 operations guide. What to do *after* the cluster is running: health checks, troubleshooting, model swaps, key rotation, RAG operations, embedder retuning, updates, hardware changes. |
 | [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md) | Architecture reference. Hardware rationale, GPU passthrough strategy, LXC vs VM trade-offs. The *why*. |
 | [`local-gpu-cluster-reference.md`](./local-gpu-cluster-reference.md) | Historical v1 reference (Dell T7910 + 3× RTX 3060 + Ollama). Kept for context. |
 | [`scripts/README.md`](./scripts/README.md) | Bootstrap automation under `scripts/`. Idempotent shell+python scripts for Phases 4-11. |
