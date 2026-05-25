@@ -84,7 +84,10 @@ RATE_LIMIT_TAVILY = os.environ.get("RATE_LIMIT_TAVILY", "30/minute")
 # to enable; if empty, /v1/tavily/search returns 503.
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
-# Whitelist of body fields we forward to Tavily. Anything else in the client
+TAVILY_EXTRACT_URL = os.environ.get("TAVILY_EXTRACT_URL", "https://api.tavily.com/extract")
+TAVILY_CRAWL_URL = os.environ.get("TAVILY_CRAWL_URL", "https://api.tavily.com/crawl")
+TAVILY_MAP_URL = os.environ.get("TAVILY_MAP_URL", "https://api.tavily.com/map")
+# Whitelist of body fields we forward to Tavily Search. Anything else in the client
 # request is dropped. We omit raw_content / images / favicon by default to
 # keep response sizes small (the model only needs title + url + content).
 TAVILY_ALLOWED_FIELDS = {
@@ -92,6 +95,33 @@ TAVILY_ALLOWED_FIELDS = {
     "topic", "time_range", "start_date", "end_date",
     "include_answer", "include_domains", "exclude_domains",
     "country", "auto_parameters", "exact_match",
+}
+
+# ---------- Server-side tool execution ----------
+# When a chat completion request includes `"tool_execution": "server"`, the
+# router runs the OpenAI tools/tool_calls multi-turn loop internally instead
+# of returning tool_calls to the client. Each iteration: send messages +
+# tools upstream → upstream emits tool_calls → router executes each tool via
+# the registry → results appended as role:"tool" messages → repeat. Loop
+# terminates when the model returns a non-tool-call response or MAX_TOOL_ITERATIONS
+# is reached. Default is "client" (legacy behavior — tool_calls pass through
+# to the caller for client-side execution, as OpenCode / Cline / Continue
+# expect).
+MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
+TOOL_EXECUTION_DEFAULT = os.environ.get("TOOL_EXECUTION_DEFAULT", "client")
+
+# web_fetch tool safety. Direct HTTPS (or HTTP) GET with explicit denylist
+# of metadata-service endpoints and private/loopback ranges to prevent SSRF.
+# Max response size cap and timeout cap prevent runaway downloads.
+WEB_FETCH_MAX_SIZE_BYTES = int(os.environ.get("WEB_FETCH_MAX_SIZE_KB", "1024")) * 1024
+WEB_FETCH_TIMEOUT_SECONDS = int(os.environ.get("WEB_FETCH_TIMEOUT_SECONDS", "15"))
+WEB_FETCH_DENY_HOSTS = {
+    # Cloud metadata endpoints — block to prevent SSRF to instance creds.
+    "169.254.169.254", "metadata.google.internal", "metadata", "169.254.170.2",
+    # Loopback / link-local. The cluster is on 192.168.6.0/24 but a tool
+    # call to one of our own LXCs (e.g., the router itself) would be a
+    # weird recursion vector. Block by default.
+    "localhost", "127.0.0.1", "::1", "0.0.0.0",
 }
 
 # /metrics IP allowlist (comma-separated)
@@ -532,6 +562,589 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
         task.cancel()
 
 
+# ---------- Tool registry + handlers ----------
+#
+# Server-side tool execution. When a chat completion request includes
+# `"tool_execution": "server"`, the router runs the OpenAI tools/tool_calls
+# multi-turn loop internally instead of returning tool_calls to the client.
+# This lets browser-side clients (e.g. external HTML reporting
+# artifact) get tool-augmented answers without implementing the dispatcher
+# loop themselves.
+#
+# Clients that want to keep doing their own tool execution (OpenCode, Cline,
+# Continue) get unchanged behavior — the default tool_execution is "client".
+
+
+TAVILY_SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tavily_search",
+        "description": (
+            "Search the web. Returns ranked results with titles, URLs, and "
+            "content snippets. Use for current events, product releases, or "
+            "facts beyond the model's training cutoff."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"},
+                "search_depth": {"type": "string", "enum": ["basic", "advanced"],
+                                 "description": "basic = fast / shallow; advanced = slower / deeper"},
+                "max_results": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20},
+                "topic": {"type": "string", "enum": ["general", "news", "finance"],
+                          "description": "Default 'general'; use 'news' for recent events"},
+                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"],
+                               "description": "Recency filter"},
+                "include_domains": {"type": "array", "items": {"type": "string"},
+                                    "description": "Only return results from these domains"},
+                "exclude_domains": {"type": "array", "items": {"type": "string"},
+                                    "description": "Exclude these domains from results"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+TAVILY_EXTRACT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tavily_extract",
+        "description": (
+            "Extract full content from one or more URLs. Use when tavily_search "
+            "results don't give enough detail and you need the actual page "
+            "contents."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "urls": {"type": "array", "items": {"type": "string"},
+                         "description": "List of URLs to extract content from"},
+                "extract_depth": {"type": "string", "enum": ["basic", "advanced"],
+                                  "description": "advanced extracts more thoroughly"},
+                "include_images": {"type": "boolean", "default": False},
+                "format": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
+            },
+            "required": ["urls"],
+        },
+    },
+}
+
+TAVILY_CRAWL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tavily_crawl",
+        "description": (
+            "Crawl a website following links to gather content. Use when you "
+            "need broad coverage of a site, not just one page. Expensive — "
+            "set max_depth and limit conservatively."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Starting URL"},
+                "max_depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5},
+                "max_breadth": {"type": "integer", "default": 10,
+                                "description": "Max links followed per page"},
+                "limit": {"type": "integer", "default": 20, "description": "Max total pages"},
+                "instructions": {"type": "string",
+                                 "description": "Natural-language guidance for what to focus on"},
+                "select_paths": {"type": "array", "items": {"type": "string"},
+                                 "description": "Regex paths to include"},
+                "exclude_paths": {"type": "array", "items": {"type": "string"},
+                                  "description": "Regex paths to exclude"},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+TAVILY_MAP_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tavily_map",
+        "description": (
+            "Map a website's URL structure (URLs only, no content). Use to "
+            "scope a site before doing deeper extraction with tavily_extract "
+            "or tavily_crawl."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Starting URL"},
+                "max_depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5},
+                "limit": {"type": "integer", "default": 50},
+                "instructions": {"type": "string", "description": "Natural-language guidance"},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+WEB_FETCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "web_fetch",
+        "description": (
+            "Fetch a single public HTTP(S) URL and return its body (capped at "
+            "1 MB). Use for known pages — prefer tavily_search for discovery. "
+            "Cannot access private networks, loopback, or cloud metadata endpoints."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Public HTTP or HTTPS URL"},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+
+async def _tavily_call(endpoint: str, payload: dict) -> dict:
+    """POST to a Tavily endpoint with auth, return parsed JSON or an error envelope."""
+    if not TAVILY_API_KEY:
+        return {"error": "tavily_unconfigured",
+                "message": "TAVILY_API_KEY not set in /etc/router.env"}
+    async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
+        try:
+            r = await c.post(endpoint, json=payload, headers={
+                "Authorization": f"Bearer {TAVILY_API_KEY}",
+                "Content-Type": "application/json",
+            })
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return {"error": "tavily_unreachable", "message": type(e).__name__}
+    if r.status_code >= 400:
+        return {"error": f"tavily_http_{r.status_code}", "body": (r.text or "")[:500]}
+    try:
+        return r.json()
+    except ValueError:
+        return {"error": "tavily_invalid_json", "body": (r.text or "")[:500]}
+
+
+async def _tool_tavily_search(args: dict) -> dict:
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return {"error": "missing 'query' field"}
+    forwarded = {k: v for k, v in args.items() if k in TAVILY_ALLOWED_FIELDS}
+    return await _tavily_call(TAVILY_URL, forwarded)
+
+
+async def _tool_tavily_extract(args: dict) -> dict:
+    urls = args.get("urls") or args.get("url")
+    if isinstance(urls, str):
+        urls = [urls]
+    if not isinstance(urls, list) or not urls:
+        return {"error": "missing 'urls' (list of strings)"}
+    allowed = {"urls", "extract_depth", "include_images", "include_favicon", "format"}
+    forwarded = {k: v for k, v in args.items() if k in allowed}
+    forwarded["urls"] = urls
+    return await _tavily_call(TAVILY_EXTRACT_URL, forwarded)
+
+
+async def _tool_tavily_crawl(args: dict) -> dict:
+    url = args.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return {"error": "missing 'url' field"}
+    allowed = {
+        "url", "max_depth", "max_breadth", "limit", "instructions",
+        "select_paths", "select_domains", "exclude_paths", "exclude_domains",
+        "allow_external", "categories", "extract_depth", "format",
+    }
+    forwarded = {k: v for k, v in args.items() if k in allowed}
+    return await _tavily_call(TAVILY_CRAWL_URL, forwarded)
+
+
+async def _tool_tavily_map(args: dict) -> dict:
+    url = args.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return {"error": "missing 'url' field"}
+    allowed = {
+        "url", "max_depth", "max_breadth", "limit", "instructions",
+        "select_paths", "select_domains", "exclude_paths", "exclude_domains",
+        "allow_external", "categories",
+    }
+    forwarded = {k: v for k, v in args.items() if k in allowed}
+    return await _tavily_call(TAVILY_MAP_URL, forwarded)
+
+
+async def _tool_web_fetch(args: dict) -> dict:
+    """HTTPS (or HTTP) GET with SSRF guards and size cap."""
+    import urllib.parse
+
+    url = args.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return {"error": "missing 'url' field"}
+
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as e:
+        return {"error": "invalid_url", "message": str(e)}
+
+    if parsed.scheme not in ("http", "https"):
+        return {"error": "scheme_not_allowed", "scheme": parsed.scheme}
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return {"error": "missing_host"}
+    if host in WEB_FETCH_DENY_HOSTS:
+        return {"error": "host_denied", "host": host}
+    # Block private IPv4 ranges as a coarse SSRF guard. Doesn't catch all
+    # forms (IPv6 link-local, DNS rebinding) but stops the obvious cases.
+    if host.startswith((
+        "10.",
+        "172.16.", "172.17.", "172.18.", "172.19.",
+        "172.20.", "172.21.", "172.22.", "172.23.",
+        "172.24.", "172.25.", "172.26.", "172.27.",
+        "172.28.", "172.29.", "172.30.", "172.31.",
+        "192.168.", "169.254.",
+    )):
+        return {"error": "host_denied_private_range", "host": host}
+
+    headers = {
+        "User-Agent": "local-gpu-cluster-router/1.0 (web_fetch)",
+        "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
+    }
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(WEB_FETCH_TIMEOUT_SECONDS),
+        follow_redirects=True,
+    ) as c:
+        try:
+            r = await c.get(url, headers=headers)
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return {"error": "unreachable", "message": type(e).__name__}
+
+    body_bytes = (r.content or b"")[:WEB_FETCH_MAX_SIZE_BYTES]
+    truncated = bool(r.content and len(r.content) > WEB_FETCH_MAX_SIZE_BYTES)
+    try:
+        body_text = body_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        body_text = repr(body_bytes)
+
+    return {
+        "status": r.status_code,
+        "url": str(r.url),
+        "content_type": r.headers.get("content-type", ""),
+        "content_length": len(r.content) if r.content else 0,
+        "truncated": truncated,
+        "body": body_text,
+    }
+
+
+TOOLS: dict[str, dict] = {
+    "tavily_search": {"handler": _tool_tavily_search, "schema": TAVILY_SEARCH_SCHEMA},
+    "tavily_extract": {"handler": _tool_tavily_extract, "schema": TAVILY_EXTRACT_SCHEMA},
+    "tavily_crawl": {"handler": _tool_tavily_crawl, "schema": TAVILY_CRAWL_SCHEMA},
+    "tavily_map": {"handler": _tool_tavily_map, "schema": TAVILY_MAP_SCHEMA},
+    "web_fetch": {"handler": _tool_web_fetch, "schema": WEB_FETCH_SCHEMA},
+}
+
+
+def registered_tool_schemas() -> list:
+    """Return all registered tool schemas as a list (for injection into upstream
+    chat completion requests when client didn't supply tools explicitly)."""
+    return [t["schema"] for t in TOOLS.values()]
+
+
+async def dispatch_tool(name: str, args_json: str) -> str:
+    """Execute a tool by name. args_json is a JSON-encoded arguments string
+    (as produced by the model). Returns a JSON-encoded result string suitable
+    for embedding in a role:"tool" message."""
+    if name not in TOOLS:
+        return json.dumps({"error": "unknown_tool", "tool": name})
+    try:
+        args = json.loads(args_json) if args_json else {}
+    except json.JSONDecodeError as e:
+        return json.dumps({"error": "invalid_json_arguments", "message": str(e)})
+    if not isinstance(args, dict):
+        return json.dumps({"error": "arguments_must_be_object"})
+    try:
+        result = await TOOLS[name]["handler"](args)
+        return json.dumps(result, default=str)
+    except Exception as e:
+        return json.dumps({"error": "tool_execution_failed",
+                           "type": type(e).__name__, "message": str(e)})
+
+
+# ---------- Server-side tool execution: multi-turn loops ----------
+
+class ToolCallAccumulator:
+    """Aggregates tool_call deltas from upstream SSE chunks into complete
+    tool_call objects. llama.cpp streams tool_calls as deltas keyed by index;
+    each chunk may contain partial id / name / arguments fragments that
+    must be concatenated in order."""
+
+    def __init__(self):
+        # Preserve insertion order so finalize() can return tool_calls in
+        # the order the model emitted them.
+        self.calls: dict = {}
+
+    def feed(self, delta_tool_calls: list) -> None:
+        for tc in delta_tool_calls or []:
+            idx = tc.get("index", 0)
+            cur = self.calls.setdefault(
+                idx, {"id": None, "name": None, "arguments": ""}
+            )
+            if tc.get("id"):
+                cur["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                cur["name"] = fn["name"]
+            if fn.get("arguments"):
+                cur["arguments"] += fn["arguments"]
+
+    def has_any(self) -> bool:
+        return bool(self.calls)
+
+    def finalize(self) -> list:
+        return [
+            {
+                "id": v["id"],
+                "type": "function",
+                "function": {"name": v["name"], "arguments": v["arguments"]},
+            }
+            for v in self.calls.values()
+        ]
+
+
+async def tool_loop_stream(initial_body: dict, strip_thinking: bool, client_ip: str):
+    """Multi-turn server-side tool-execution in streaming mode.
+
+    Each iteration: send messages + tools to llama.cpp → accumulate tool_calls
+    during the SSE stream → on finish_reason=tool_calls, run the tools via
+    dispatch_tool, append results as role:"tool" messages, loop. On any other
+    finish_reason, pass the final content delta + [DONE] through to the client.
+
+    Hides tool_call deltas from the client by default — only content deltas
+    flow downstream. Clients see what looks like a single streamed assistant
+    response, possibly with a pause between iterations while tools execute.
+    """
+    yield b": ping\n\n"
+
+    body = dict(initial_body)
+    if "tools" not in body:
+        body["tools"] = registered_tool_schemas()
+    body["stream"] = True
+    # tool_execution and the per-iteration messages list are router-internal;
+    # don't forward to llama.cpp where they'd be ignored or warned about.
+    body.pop("tool_execution", None)
+    messages = list(body["messages"])
+    started = time.monotonic()
+    model_label = body.get("model", "?")
+
+    for iteration in range(MAX_TOOL_ITERATIONS):
+        if time.monotonic() - started > MAX_STREAM_SECONDS:
+            yield DEGRADED_FRAME
+            yield DONE_FRAME
+            return
+
+        per_iter = dict(body)
+        per_iter["messages"] = messages
+        accumulator = ToolCallAccumulator()
+        assistant_content = ""
+        finish_reason = None
+
+        try:
+            async with httpx.AsyncClient(timeout=None) as c:
+                async with c.stream(
+                    "POST", f"{V620_URL}/v1/chat/completions",
+                    json=per_iter, headers=upstream_headers(),
+                ) as r:
+                    if r.status_code >= 500:
+                        yield DEGRADED_FRAME
+                        yield DONE_FRAME
+                        return
+
+                    buf = ""
+                    async for raw in r.aiter_text():
+                        buf += raw
+                        # SSE events are terminated by blank lines
+                        while "\n\n" in buf:
+                            event, buf = buf.split("\n\n", 1)
+                            for line in event.split("\n"):
+                                if not line.startswith("data: "):
+                                    continue
+                                data = line[6:].strip()
+                                if data == "[DONE]":
+                                    finish_reason = finish_reason or "stop"
+                                    continue
+                                try:
+                                    chunk = json.loads(data)
+                                except json.JSONDecodeError:
+                                    continue
+                                choices = chunk.get("choices") or []
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta") or {}
+                                fr = choices[0].get("finish_reason")
+                                if fr:
+                                    finish_reason = fr
+                                if delta.get("tool_calls"):
+                                    accumulator.feed(delta["tool_calls"])
+                                    # do NOT forward tool_call deltas to client
+                                if delta.get("content") is not None:
+                                    assistant_content += delta["content"]
+                                    out = delta["content"]
+                                    if strip_thinking:
+                                        out = THINK_RE.sub("", out)
+                                    if STRIP_CONTEXT_MARKERS:
+                                        out = CONTEXT_MARKER_RE.sub("", out)
+                                    # Rebuild client chunk (skip any tool_call deltas)
+                                    client_chunk = {
+                                        "id": chunk.get("id"),
+                                        "object": "chat.completion.chunk",
+                                        "created": chunk.get("created"),
+                                        "model": chunk.get("model"),
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {"content": out},
+                                            "finish_reason": None,
+                                        }],
+                                    }
+                                    yield f"data: {json.dumps(client_chunk)}\n\n".encode()
+        except (
+            httpx.ConnectError, httpx.ReadError,
+            httpx.TimeoutException, httpx.RemoteProtocolError,
+        ):
+            yield DEGRADED_FRAME
+            yield DONE_FRAME
+            return
+
+        if finish_reason == "tool_calls" and accumulator.has_any():
+            tool_calls = accumulator.finalize()
+            messages.append({
+                "role": "assistant",
+                "content": assistant_content or None,
+                "tool_calls": tool_calls,
+            })
+            for tc in tool_calls:
+                fn = tc["function"]
+                result_str = await dispatch_tool(fn["name"], fn["arguments"])
+                log_access(
+                    "/v1/chat/completions:tool", fn["name"],
+                    0, 0, int((time.monotonic() - started) * 1000),
+                    200, client_ip,
+                    error=f"iteration={iteration+1}/{MAX_TOOL_ITERATIONS}",
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result_str,
+                })
+            continue
+
+        # Final response — emit terminator and exit
+        if finish_reason:
+            final = {
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }],
+            }
+            yield f"data: {json.dumps(final)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+        return
+
+    # MAX_TOOL_ITERATIONS exceeded
+    final = {
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "\n\n[router: max_tool_iterations reached]"},
+            "finish_reason": "stop",
+        }],
+    }
+    yield f"data: {json.dumps(final)}\n\n".encode()
+    yield b"data: [DONE]\n\n"
+
+
+async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_ip: str) -> dict:
+    """Multi-turn server-side tool-execution in non-streaming mode.
+
+    Returns the final OpenAI chat-completion response dict, or an error
+    envelope. Subject to the same MAX_TOOL_ITERATIONS and MAX_STREAM_SECONDS
+    bounds as the streaming variant.
+    """
+    body = dict(initial_body)
+    if "tools" not in body:
+        body["tools"] = registered_tool_schemas()
+    body["stream"] = False
+    body.pop("tool_execution", None)
+    messages = list(body["messages"])
+    started = time.monotonic()
+    model_label = body.get("model", "?")
+    last_response: dict = {}
+
+    for iteration in range(MAX_TOOL_ITERATIONS):
+        if time.monotonic() - started > MAX_STREAM_SECONDS:
+            return _error_body("service_degraded", "max stream time exceeded during tool loop")
+
+        per_iter = dict(body)
+        per_iter["messages"] = messages
+
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
+            try:
+                r = await c.post(
+                    f"{V620_URL}/v1/chat/completions",
+                    json=per_iter, headers=upstream_headers(),
+                )
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+                return _error_body("service_degraded", f"upstream: {type(e).__name__}")
+            try:
+                data = r.json()
+            except json.JSONDecodeError:
+                return _error_body("upstream_invalid_json", r.text[:500])
+        last_response = data
+
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        finish = choice.get("finish_reason")
+
+        if finish == "tool_calls" and msg.get("tool_calls"):
+            messages.append(msg)  # assistant message with tool_calls
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function") or {}
+                result_str = await dispatch_tool(
+                    fn.get("name", ""), fn.get("arguments", ""),
+                )
+                log_access(
+                    "/v1/chat/completions:tool", fn.get("name", "?"),
+                    0, 0, int((time.monotonic() - started) * 1000),
+                    200, client_ip,
+                    error=f"iteration={iteration+1}/{MAX_TOOL_ITERATIONS}",
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": result_str,
+                })
+            continue
+
+        # Terminal — apply strip rules and return
+        if msg.get("content"):
+            if strip_thinking:
+                msg["content"] = THINK_RE.sub("", msg["content"])
+            if STRIP_CONTEXT_MARKERS:
+                msg["content"] = CONTEXT_MARKER_RE.sub("", msg["content"])
+        return data
+
+    # MAX_TOOL_ITERATIONS exceeded — return last response with an annotation
+    if last_response.get("choices"):
+        last_response["choices"][0].setdefault("message", {})
+        existing = last_response["choices"][0]["message"].get("content") or ""
+        last_response["choices"][0]["message"]["content"] = (
+            existing + "\n\n[router: max_tool_iterations reached]"
+        )
+        last_response["choices"][0]["finish_reason"] = "stop"
+        return last_response
+    return _error_body(
+        "max_tool_iterations_exceeded",
+        f"reached MAX_TOOL_ITERATIONS={MAX_TOOL_ITERATIONS} without final response",
+    )
+
+
 # ---------- Routes ----------
 
 @app.post("/v1/chat/completions")
@@ -581,7 +1194,30 @@ async def chat(
             detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
         )
 
+    # Server-side tool-execution dispatch — if the client opted in via
+    # body["tool_execution"] == "server", run the multi-turn tool loop
+    # internally rather than passing tool_calls through to the client. The
+    # loop hides tool_call deltas from the client (only content streams
+    # downstream); clients see what looks like a single streamed assistant
+    # response, possibly with a pause between iterations while tools execute.
+    tool_exec = body.get("tool_execution", TOOL_EXECUTION_DEFAULT)
+
     async with chat_sem:
+        if tool_exec == "server":
+            log_access(
+                "/v1/chat/completions", model, token_count,
+                -1 if stream else 0,
+                int((time.monotonic() - started) * 1000), 200, client_ip,
+                error=f"tool_execution=server,stream={stream}",
+            )
+            if stream:
+                return StreamingResponse(
+                    tool_loop_stream(body, strip, client_ip),
+                    media_type="text/event-stream",
+                )
+            data = await tool_loop_nonstream(body, strip, client_ip)
+            return JSONResponse(data, status_code=200)
+
         if stream:
             # Streaming responses log only on connection close (we don't get tokens-out
             # here easily). Log a "stream-started" entry now; rely on access patterns for the rest.

@@ -53,9 +53,27 @@ RATE_LIMIT_CHAT="${RATE_LIMIT_CHAT:-60/minute}"
 RATE_LIMIT_EMBED="${RATE_LIMIT_EMBED:-200/minute}"
 RATE_LIMIT_TAVILY="${RATE_LIMIT_TAVILY:-30/minute}"
 # Tavily Search API key. Set in config.env (NOT committed). When empty the
-# /v1/tavily/search endpoint returns 503. Get a key at https://tavily.com.
-# Free tier = 1k searches/month, generous for the artifact's refresh use.
+# /v1/tavily/search endpoint and any Tavily-based tools (tavily_search,
+# tavily_extract, tavily_crawl, tavily_map) return an error envelope.
+# Get a key at https://tavily.com. Free tier = 1k searches/month.
 TAVILY_API_KEY="${TAVILY_API_KEY:-}"
+
+# Server-side tool execution. When a chat-completion request includes
+# `"tool_execution": "server"`, the router runs the OpenAI tools/tool_calls
+# multi-turn loop internally (executes Tavily / web_fetch / etc. server-side,
+# feeds results back into the conversation) instead of returning tool_calls
+# to the client. Default "client" preserves the legacy pass-through behavior
+# expected by OpenCode / Cline / Continue. MAX_TOOL_ITERATIONS caps the
+# multi-turn loop to prevent runaways (each iteration is one upstream chat
+# completion + N tool executions).
+MAX_TOOL_ITERATIONS="${MAX_TOOL_ITERATIONS:-5}"
+TOOL_EXECUTION_DEFAULT="${TOOL_EXECUTION_DEFAULT:-client}"
+
+# web_fetch tool safety. Caps response body size and request timeout to
+# prevent runaway downloads / hung requests. SSRF guards (loopback + private
+# range deny list) are hardcoded in router-app.py.
+WEB_FETCH_MAX_SIZE_KB="${WEB_FETCH_MAX_SIZE_KB:-1024}"
+WEB_FETCH_TIMEOUT_SECONDS="${WEB_FETCH_TIMEOUT_SECONDS:-15}"
 PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.150}"
 METRICS_ALLOWED_IPS="${METRICS_ALLOWED_IPS:-127.0.0.1,${PROXMOX_HOST_IP}}"
 # CORS allow-origins. Needed when HTML pages loaded from file:// (Origin: null)
@@ -184,6 +202,10 @@ phase_7_4_systemd() {
     "RATE_LIMIT_EMBED=$RATE_LIMIT_EMBED" \
     "RATE_LIMIT_TAVILY=$RATE_LIMIT_TAVILY" \
     "TAVILY_API_KEY=$TAVILY_API_KEY" \
+    "MAX_TOOL_ITERATIONS=$MAX_TOOL_ITERATIONS" \
+    "TOOL_EXECUTION_DEFAULT=$TOOL_EXECUTION_DEFAULT" \
+    "WEB_FETCH_MAX_SIZE_KB=$WEB_FETCH_MAX_SIZE_KB" \
+    "WEB_FETCH_TIMEOUT_SECONDS=$WEB_FETCH_TIMEOUT_SECONDS" \
     "METRICS_ALLOWED_IPS=$METRICS_ALLOWED_IPS" \
     "CORS_ALLOW_ORIGINS=$CORS_ALLOW_ORIGINS" \
     bash -se <<'GUEST'
@@ -242,6 +264,10 @@ PY
     upsert_env RATE_LIMIT_EMBED "$RATE_LIMIT_EMBED"
     upsert_env RATE_LIMIT_TAVILY "$RATE_LIMIT_TAVILY"
     upsert_env TAVILY_API_KEY "$TAVILY_API_KEY"
+    upsert_env MAX_TOOL_ITERATIONS "$MAX_TOOL_ITERATIONS"
+    upsert_env TOOL_EXECUTION_DEFAULT "$TOOL_EXECUTION_DEFAULT"
+    upsert_env WEB_FETCH_MAX_SIZE_KB "$WEB_FETCH_MAX_SIZE_KB"
+    upsert_env WEB_FETCH_TIMEOUT_SECONDS "$WEB_FETCH_TIMEOUT_SECONDS"
     upsert_env METRICS_ALLOWED_IPS "$METRICS_ALLOWED_IPS"
     upsert_env CORS_ALLOW_ORIGINS "$CORS_ALLOW_ORIGINS"
     chmod 600 /etc/router.env
