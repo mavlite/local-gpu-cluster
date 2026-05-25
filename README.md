@@ -21,7 +21,7 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 | 151 `llamacpp-amd` | Inference (privileged for ROCm KFD) | `llamacpp-chat` (8080) + `llamacpp-embed` (8082) + `llamacpp-rerank` (8083) | 192.168.6.151 |
 | 153 `llm-router` | FastAPI router (auth, admission, FIM, metrics) | `llm-router` (8000) | 192.168.6.153 |
 | 154 `anythingllm` | Docker host running AnythingLLM | `anythingllm` (3001) | 192.168.6.154 |
-| 155 `mcp-stack` | Docker host for MCP servers | (empty, drop in compose files) | 192.168.6.155 |
+| 155 `mcp-stack` | Docker host for MCP servers + Python MCP bridge | `mcp-sdg.service` (port 3004) exposes `sdg-documentation` + `vcf-reference` workspaces via SSE; Docker compose stack optional | 192.168.6.155 |
 | host | Fan-control bridge driving V620 shroud fans by GPU temp | `v620-fan-bridge.service` | — |
 
 ### Models
@@ -34,27 +34,34 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 
 ### Router (LXC 153) features
 
-- Bearer auth on inbound + outbound
-- `asyncio.Semaphore` admission control (chat=2, embed=4)
-- Per-route token-budget pre-flight via upstream `/tokenize` (rejects oversized inputs with 413)
-- `slowapi` per-IP rate limit
-- Prometheus `/metrics` (IP-allowlist gated)
-- SSE keepalive frames every 12 s
-- Fail-open degraded mode on upstream 5xx
-- Auto-injects `chat_template_kwargs.enable_thinking=false` for `rag-*` model aliases (Qwen3.6 leaks chain-of-thought as plain content otherwise)
-- Strips `[CONTEXT N]` / `(Context 0, 1)` chunk-reference markers from chat output
-- `/v1/completions` passthrough for FIM-style code completion
-- Structured per-request access log at `/var/log/llm-router/access.log` (rotated)
-- Periodic 5-min keepalive timer to keep chat model weights hot
+- Bearer auth on inbound (`ROUTER_API_KEY`) + outbound (`LLAMACPP_API_KEY`)
+- `asyncio.Semaphore` admission control (chat=1, embed=4) — chat=1 matches the chat unit's `--parallel 1` single-user policy so multi-agent sub-calls queue at the router (which can emit SSE keepalives) instead of inside llama.cpp
+- Per-route token-budget pre-flight via upstream `/tokenize` (rejects oversized inputs with 413; chat cap 200K, embed cap 16K)
+- `slowapi` per-IP rate limit (chat 60/min, embed 200/min, Tavily 30/min)
+- Prometheus `/metrics` (IP-allowlist gated; default allows host + loopback)
+- CORS middleware (`CORS_ALLOW_ORIGINS=*` by default) — required for browser-side clients loaded from `file://` (e.g. the local HTML artifact) to call the router via `fetch()`; OPTIONS preflight bypasses Bearer auth so the preflight succeeds
+- SSE keepalive frames every 12 s, plus an immediate `: ping` flushed before upstream connect so clients' read timers don't fire during prompt-processing latency; `MAX_STREAM_SECONDS=900` wall-clock cap prevents a wedged upstream from holding a chat slot forever
+- Fail-open degraded mode on upstream 5xx (emits a `service_degraded` SSE frame so AnythingLLM can fall back without breaking the stream)
+- Three client-facing chat aliases all resolving to the same backend: `rag-qwen3.6` (thinking off, for AnythingLLM RAG synthesis), `qwen3.6-think` (thinking on, for OpenCode/Cline coding agents), `qwen3.6` (thinking-on convenience alias) — alias controls `chat_template_kwargs.enable_thinking` and whether `<think>...</think>` is regex-stripped from the response
+- Strips `[CONTEXT N]` / `(Context 0, 1)` chunk-reference markers from chat output (Qwen3.6 training-prior leak)
+- `/v1/completions` passthrough for FIM-style code completion (Continue.dev, Cody)
+- `POST /v1/tavily/search` proxy — holds the Tavily API key server-side so browser clients (e.g. the external HTML reporting artifact) can do live web search without ever seeing the key; whitelisted body fields, separate rate limit
+- Qwen3 Embedding compliance: appends `<|endoftext|>` to embedding inputs if missing
+- Structured per-request access log at `/var/log/llm-router/access.log` (50 MB rotation, 5 backups) — JSON per line with route/model/tokens/duration/status/client_ip
+- Periodic 5-min keepalive timer (separate systemd unit) to keep chat model weights hot in VRAM
 
 ### AnythingLLM workspaces
 
-| Workspace | Purpose | Docs |
-|---|---|---|
-| `vcf-reference` | VMware Cloud Foundation 9.0+ technical reference | 564 docs (release-notes, deployment, lifecycle, security, licensing) |
-| `sdg-documentation` | Self-hosted infrastructure tools | 413 docs (OPNsense; future: Keycloak) |
+| Workspace | Purpose |
+|---|---|
+| `vcf-reference` | VMware Cloud Foundation 9.0+ technical reference (Broadcom techdocs — release-notes, deployment, lifecycle, security, licensing) |
+| `sdg-documentation` | Self-hosted infrastructure tools (OPNsense, Keycloak, OpenZFS, TrueNAS Scale + TrueNAS API v27) |
 
-Both tuned for strict factual lookup: `chatMode=query`, `similarityThreshold=0.4`, `topN=12`, `vectorSearchMode=rerank`, refusal sentinel on no-match.
+Document counts vary per refresh cycle and are managed by the declarative RAG system at [`scripts/rag/`](./scripts/rag/) — see [`scripts/rag/sources.yaml`](./scripts/rag/sources.yaml) for the source list and [`SESSION_HANDOFF.md`](./SESSION_HANDOFF.md) for a recent post-wipe baseline.
+
+Both workspaces tuned for strict factual lookup: `chatMode=query`, `similarityThreshold=0` (rely on rerank for quality filtering), `topN=10` (vcf-reference) / `12` (sdg-documentation), `vectorSearchMode=rerank`, refusal sentinel on no-match. Workspace tuning is applied by [`scripts/57-configure-anythingllm.sh`](./scripts/57-configure-anythingllm.sh) via the AnythingLLM REST API.
+
+The AnythingLLM `/workspace/{slug}` REST endpoint returns ~2 rows per underlying document — a known list-endpoint quirk that's harmless for retrieval but means raw `documents[]` counts are roughly double the actual unique-document count.
 
 ---
 

@@ -9,7 +9,7 @@ orchestrator.
 | 4     | `40-host-config.sh`     | IOMMU, AMD firmware, ZFS mirror, LXC template, THP disable (V620-only — no NVIDIA driver, no kernel pin) |
 | 5     | `51-lxc-amd.sh`         | V620 LXC, ROCm, llama.cpp HIP, **three systemd units** (chat/embed/rerank), API key, warm-up, SSH harden |
 | 6     | (removed)               | Old `52-lxc-nv.sh` (3060 LXC) was deleted in the V620-only pivot. |
-| 7     | `53-lxc-router.sh`      | Router LXC, FastAPI app, API key gen, EnvironmentFile with admission control + rate limit + metrics IPs |
+| 7     | `53-lxc-router.sh`      | Router LXC, FastAPI app, API key gen, EnvironmentFile with admission control + rate limit + metrics IPs + Tavily proxy + CORS |
 | 8     | `54-lxc-anythingllm.sh` | AnythingLLM LXC, Docker, compose stack                     |
 | 9     | `55-lxc-mcp.sh`         | MCP stack LXC, Docker, optional rsync from previous host   |
 | 5.13  | `56-fan-control.sh`     | Host PWM bridge (needs `FAN_PWM_PATH` discovered manually) |
@@ -83,11 +83,10 @@ as three separate `llama-server` systemd units with per-card pinning:
 
 | Where | Service (unit) | Model | VRAM | Port |
 |------|----------------|-------|------|------|
-| V620 LXC 151 | `llamacpp-chat.service` (both V620s, `--tensor-split 1,1`) | Qwen3.6-35B-A3B UD-Q4_K_M (unsloth Dynamic), 128K ctx, q8_0 KV, `--parallel 4 --cache-reuse 1024 --mlock --log-prefix --reasoning-format deepseek` | ~32 GB (22 weights + 10 KV) across both | 8080 |
-| V620 LXC 151 | speculative draft (in-process on chat unit) | Qwen3-0.6B Q4_K_M (tokenizer-compatible with Qwen3.6) | ~400 MB | (same) |
-| V620 LXC 151 | `llamacpp-embed.service` (V620 #1, `--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`) | Qwen3-Embedding-0.6B Q8_0, **`--pooling last`** (NOT cls), 1024-dim, `--parallel 8` | ~1.2 GB | 8082 |
-| V620 LXC 151 | `llamacpp-rerank.service` (V620 #2, `--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`) | Qwen3-Reranker-0.6B Q8_0 (or BGE-Reranker-v2-m3), `--embeddings --pooling rank --reranking` | ~1.5 GB | 8083 |
-| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control + slowapi rate-limit + prometheus-fastapi-instrumentator | — | 8000 |
+| V620 LXC 151 | `llamacpp-chat.service` (both V620s, `--tensor-split 1,1`) | Qwen3.6-35B-A3B UD-Q4_K_M (unsloth Dynamic), **256K ctx** (`--ctx-size 262144`, full window per slot at `--parallel 1`), q8_0 KV, `--cache-reuse 1024 --cache-ram 16384 --mlock --log-prefix --reasoning-format deepseek --jinja --no-mmproj` | ~22 GB weights + KV across both | 8080 |
+| V620 LXC 151 | `llamacpp-embed.service` (V620 #1, `--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`) | Qwen3-Embedding-0.6B Q8_0, **`--pooling last`** (NOT cls), 1024-dim, `--ctx-size 65536 --parallel 4` (16 K per slot) | ~1.2 GB | 8082 |
+| V620 LXC 151 | `llamacpp-rerank.service` (V620 #2, `--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`) | BGE-Reranker-v2-m3 Q4_K_M (gpustack GGUF; Qwen3-Reranker-0.6B is gated alt), `--embeddings --pooling rank --reranking` | ~1.5 GB | 8083 |
+| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/completions` FIM passthrough, `/v1/embeddings`, `/v1/rerank`, `/v1/tavily/search` proxy, `/v1/models`, `/healthz`, `/metrics`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control (chat=1, embed=4) + slowapi rate-limit + Prometheus + CORS middleware; three chat aliases (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) resolve to the same backend with different `enable_thinking` defaults | — | 8000 |
 
 Override anything via `config.env` — see `config.env.example` for the full knob list
 (`LLAMA_*`, `EMBED_*`, `RERANK_*`, admission + rate-limit env vars on the router).
@@ -110,12 +109,19 @@ Override anything via `config.env` — see `config.env.example` for the full kno
 - **Qwen3.6-35B-A3B at UD-Q4_K_M** is the chat target. MoE with 3B active params keeps
   inference fast; ~22 GB on disk. Unsloth Dynamic (UD-) quant is calibrated against an
   imatrix dataset and tends to score slightly better than vanilla Q4_K_M at the same size.
-- **128K context with q8_0 KV cache and `--parallel 4`** ≈ 32-36 GB total. Fits in the
-  64 GB pool with embed + rerank pinned per-card; ~25 GB headroom.
-- **In-process speculative draft (Qwen3-0.6B)** runs on the same HIP process as the
-  target — llama.cpp's spec-decode cannot communicate across LXCs or processes. Qwen3.6
-  small variants don't exist on HF; Qwen3-0.6B shares the Qwen3 tokenizer family and works
-  as a vocab-compatible draft for the 35B target.
+- **256K context with q8_0 KV cache and `--parallel 1`** gives a single in-flight request
+  the full Qwen3.6 trained context window (`n_ctx_train=262144`). Sub-agent calls from
+  OpenCode/Cline queue at the router instead of in llama.cpp (router can emit SSE
+  keepalives while waiting). Total chat VRAM is ~22 GB weights + KV; embed + rerank
+  pinned per-card add ~3 GB; ~25 GB headroom in the 64 GB pool.
+- **Speculative decoding is disabled by default** for the Qwen3.6 target. Qwen3.6-35B-A3B
+  has vocab 248,320 while Qwen3-0.6B has vocab 151,936 — llama.cpp refuses to load a
+  mismatched-vocab draft. The chat unit boot log shows
+  `common_speculative_init: no implementations specified for speculative decoding`, which
+  is the expected/normal state. No vocab-compatible small variant exists in the Qwen3.6
+  family yet; the ~1.5-2× throughput hit is accepted because 35B-A3B is MoE with ~3 B
+  active params per token and already fast. Re-enable via `LLAMA_DRAFT_REPO` in `config.env`
+  when a compatible draft ships.
 - **Embedder pooling: `--pooling last` is CRITICAL.** Qwen3-Embedding uses the final
   `<|endoftext|>` token. Using `cls` produces semantically wrong embeddings and silently
   invalidates AnythingLLM's vector DB.
@@ -138,11 +144,11 @@ already pointing at the router for both LLM and embedder. Specifically:
 | `LLM_PROVIDER` | `generic-openai` | Use OpenAI-compatible upstream |
 | `GENERIC_OPEN_AI_BASE_PATH` | `http://<router>:8000/v1` | All chat requests via router |
 | `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3.6` | Picks the V620 main model (matches `LLAMA_ALIAS` in 51) |
-| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `131072` | Must equal `LLAMA_CTX` (128K); higher values cause silent overflow failure |
+| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `131072` | Conservative AnythingLLM-side cap. Chat unit's `LLAMA_CTX` is 256K (`--parallel 1` → full window per slot), but AnythingLLM stays at 128K as headroom against client misbehavior; bumping it is safe up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap |
 | `EMBEDDING_ENGINE` | `generic-openai` | Same provider style for embedder |
 | `EMBEDDING_BASE_PATH` | `http://<router>:8000/v1` | Embeddings via router |
-| `EMBEDDING_MODEL_PREF` | `qwen3-embedding` | 1024-dim Qwen3-Embedding |
-| `EMBEDDING_MODEL_MAX_CHUNK_LENGTH` | `8192` | Chunk char cap fed to embedder |
+| `EMBEDDING_MODEL_PREF` | `qwen3-embed` | 1024-dim Qwen3-Embedding (matches `EMBED_ALIAS` in 51-lxc-amd.sh) |
+| `EMBEDDING_MODEL_MAX_CHUNK_LENGTH` | `16384` | Chunk token cap fed to embedder (matches embed unit's 16 K per-slot ctx) |
 
 Phase 57 then uses the AnythingLLM REST API to create the two reference
 workspaces (`vcf-reference`, `sdg-documentation`) with the runbook's tuned

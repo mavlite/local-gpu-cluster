@@ -11,7 +11,7 @@ This runbook is the operational companion to [`local-gpu-cluster-v2.md`](./local
 >
 > 1. Speculative decoding requires both target and draft models in the same `llama-server` process (via `-md` / `--model-draft`). Both models live on the V620 LXC. With the V620-only pivot, embeddings and reranking moved into the same LXC as additional `llama-server` instances pinned per-card via `--main-gpu` (see `local-gpu-cluster-v2.md` §1.3 and Phase 5 below).
 >
-> 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. Speculative decoding still works but speedup may be modest since the target model is already fast. Qwen3.6 reuses the Qwen3 tokenizer family, so Qwen3-0.6B is a vocab-compatible draft.
+> 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. **Speculative decoding is disabled by default on Qwen3.6**: the 35B-A3B target uses tokenizer vocab 248,320 while Qwen3-0.6B uses vocab 151,936, and llama.cpp refuses to load a mismatched-vocab draft. No vocab-compatible small variant exists in the Qwen3.6 family yet. Because 35B-A3B is already MoE-fast (~3 B active params/token), the ~1.5-2× throughput hit from disabled spec-decode is accepted. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding` — this is the expected/normal state. Re-enable via `LLAMA_DRAFT_REPO` in `scripts/config.env` once a compatible draft ships.
 >
 > 3. Proxmox VE 9.1 (released Nov 2025) defaults to Linux kernel 6.17. With NVIDIA removed, no kernel pinning is required — AMDGPU is in-tree and stable on 6.17.
 >
@@ -485,7 +485,7 @@ Historical note: earlier revisions of this runbook pinned PVE 9.1's kernel to 6.
 ```bash
 # Verify kernel
 uname -r
-# Expect: 6.17.x-pve on a fresh PVE 9.1 install. 6.14.x is also fine if you came from an older PVE.
+# Expect: any PVE 9.x kernel (6.14.x / 6.17.x / 7.0.x-pve are all verified working).
 ```
 
 ### Step 4.2 — Enable IOMMU and load VFIO modules
@@ -947,7 +947,7 @@ The V620-only LXC hosts three llama-server processes (chat + embed + rerank). Al
 | File | Repo | Approx size | Used by |
 | --- | --- | --- | --- |
 | Target: Qwen3.6-35B-A3B UD-Q4_K_M | `unsloth/Qwen3.6-35B-A3B-GGUF` | ~22 GB | `llamacpp-chat.service` (port 8080) |
-| Draft: Qwen3-0.6B Q4_K_M (tokenizer-compatible with Qwen3.6) | `unsloth/Qwen3-0.6B-GGUF` | ~400 MB | `llamacpp-chat.service` (`--model-draft`) |
+| Draft: Qwen3-0.6B Q4_K_M (**unused** — see spec-decode note in Step 5.11.3) | `unsloth/Qwen3-0.6B-GGUF` | ~400 MB | (optional download; not loaded by default) |
 | Embedder: Qwen3-Embedding-0.6B Q8_0 | `Qwen/Qwen3-Embedding-0.6B-GGUF` | ~1.0 GB | `llamacpp-embed.service` (port 8082) |
 | Reranker: BGE Reranker v2-m3 (GGUF) | see note below | ~1.5 GB | `llamacpp-rerank.service` (port 8083) |
 
@@ -967,9 +967,12 @@ cd /tank/models
 wget -O qwen3.6-35b-a3b-ud-q4_k_m.gguf \
   "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 
-# Draft: Qwen 3.5 0.8B Q4_K_M
-wget -O qwen3-0.6b-q4_k_m.gguf \
-  "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+# Draft: Qwen3-0.6B Q4_K_M (download is OPTIONAL — currently UNUSED because Qwen3.6's
+# tokenizer vocab (248,320) doesn't match Qwen3-0.6B's (151,936) and llama.cpp rejects
+# mismatched-vocab drafts. Skip this download unless a vocab-compatible Qwen3.6 small
+# variant becomes available.)
+# wget -O qwen3-0.6b-q4_k_m.gguf \
+#   "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
 
 # Embedder: Qwen3-Embedding-0.6B Q8_0 (uses --pooling last; do NOT use cls — see Step 5.11.2)
 wget -O qwen3-embedding-0.6b-q8_0.gguf \
@@ -1006,9 +1009,10 @@ chmod 644 *.gguf
 
 **About Qwen3.6 35B-A3B specifically:**
 - It's an **MoE model**: 35 B total parameters, 3 B activated per token. Inference is closer to a 3 B model in throughput while VRAM cost is still ~22 GB at Q4_K_M.
-- Default behavior: **thinking mode enabled** (generates `<think>...</think>` blocks). The 0.8 B draft defaults to non-thinking.
-- The `mmproj` vision projector file is optional — only needed if you want vision input. Skip it for text-only RAG/coding.
-- Default context: 262 K tokens (256 K). At 128 K, KV cache @ Q8 ≈ 5–6 GB.
+- Default behavior: **thinking mode enabled** (generates `<think>...</think>` blocks). The router exposes a `rag-qwen3.6` alias that disables thinking via `chat_template_kwargs.enable_thinking=false` for RAG synthesis, and a `qwen3.6-think` alias that leaves it on for agent work.
+- Speculative decoding is **disabled by default** — see Step 5.11.3 note for why.
+- The `mmproj` vision projector file is optional — only needed if you want vision input. The chat unit passes `--no-mmproj` to skip it for text-only RAG/coding.
+- Trained context: 262 K tokens (256 K). The chat unit is configured at `--ctx-size 262144 --parallel 1` to give a single in-flight request the full window. KV cache @ Q8 ≈ 11 GB at full 256 K context.
 
 ### Step 5.8 — Smoke-test the V620 stack
 
@@ -1050,7 +1054,7 @@ curl -s http://localhost:8080/v1/models | head -20
 curl -s -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3.5",
+    "model": "rag-qwen3.6",
     "messages": [{"role":"user","content":"In one sentence: what is the speed of light?"}],
     "max_tokens": 50
   }' | jq '.choices[0].message.content'
@@ -1086,7 +1090,7 @@ sleep 60
 
 # Generate a long response
 curl -X POST http://localhost:8080/v1/chat/completions \
-  -d '{"model":"qwen3.5","messages":[{"role":"user","content":"Write 1000 words about the OSI model."}]}' \
+  -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"Write 1000 words about the OSI model."}]}' \
   > /dev/null
 ```
 
@@ -1171,7 +1175,7 @@ Decide based on your benchmark (§5.10) whether to set `--flash-attn` to `on`, `
 ```bash
 cat > /etc/systemd/system/llamacpp-chat.service <<'EOF'
 [Unit]
-Description=llama.cpp chat (V620 ROCm — Qwen3.6-35B-A3B UD-Q4_K_M + Qwen3-0.6B draft, tensor-split 1,1)
+Description=llama.cpp chat (V620 ROCm tensor-split — unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M)
 After=network-online.target
 Wants=network-online.target
 
@@ -1185,30 +1189,33 @@ Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
 Environment="HIP_FORCE_DEV_KERNARG=1"
 Environment="GPU_MAX_HW_QUEUES=2"
 Environment="GGML_HIP_UMA=0"
+Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m.gguf \
-    --model-draft /opt/models/qwen3-0.6b-q4_k_m.gguf \
+    --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M \
     --alias rag-qwen3.6 \
     --host 0.0.0.0 --port 8080 \
     --api-key ${LLAMACPP_API_KEY} \
-    --ctx-size 131072 \
+    --ctx-size 262144 \
     --n-gpu-layers all \
-    --n-gpu-layers-draft all \
     --tensor-split 1,1 \
     --threads 8 \
-    --batch-size 512 --ubatch-size 512 \
+    --batch-size 2048 --ubatch-size 512 \
     --cache-type-k q8_0 --cache-type-v q8_0 \
     --cont-batching \
-    --parallel 4 \
+    --parallel 1 \
     --cache-reuse 1024 \
-    --mlock \
-    --spec-draft-n-max 16 --spec-draft-n-min 0 \
+    --cache-ram 16384 \
+    --no-mmproj \
     --flash-attn auto \
+    --reasoning-format deepseek \
+    --jinja \
+    --mlock \
     --log-prefix \
     --metrics
-ExecStartPost=/usr/local/bin/warm-chat.sh
+ExecStartPost=-/usr/local/bin/warm-chat.sh
 Restart=on-failure
 RestartSec=10
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target
@@ -1217,15 +1224,21 @@ EOF
 
 Key flag rationale (V620-only adjustments):
 
+- `--hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` — llama.cpp downloads the GGUF on first start into `LLAMA_CACHE=/opt/models/.cache` (HuggingFace cache layout: `models--<org>--<repo>/snapshots/<rev>/<file>.gguf`). To pin a local copy instead, swap to `--model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m.gguf` after manually downloading.
 - `--api-key ${LLAMACPP_API_KEY}` enforces Bearer auth on llama-server. The key is loaded via `EnvironmentFile=/etc/llamacpp.env` — never inline in the unit file (would leak via `systemctl show` + vzdump).
-- `--parallel 4` enables 4 concurrent KV slots (vs. the old `--parallel 2`). Each slot at 128K ctx q8_0 ≈ 3-4 GB, so total ~16 GB of slot KV on top of the 22 GB weights. Fits comfortably in the 64 GB pool with ~25 GB headroom for embed + rerank co-tenants.
-- `--cache-reuse 1024` (was 256) — system-prompt prefix reuse window of 1024 tokens. RAG system prompts are typically 1-4K tokens; the old 256-token window was sub-optimal. Adds ~1 slot's worth of KV but we have headroom.
+- `--ctx-size 262144` (256K) + `--parallel 1` — a single in-flight request gets Qwen3.6's full trained context window (`n_ctx_train=262144`). llama.cpp divides ctx-size by parallel, so `parallel > 1` would shrink each slot to 256K/N. The router's `CHAT_CONCURRENCY=1` matches this, queuing multi-agent sub-calls at the router instead of inside llama.cpp (router can emit SSE keepalives while waiting).
+- `--cache-reuse 1024` — system-prompt prefix reuse window. RAG system prompts are typically 1-4K tokens; this catches the common case.
+- `--cache-ram 16384` (16 GB) — prompt-prefix KV is cached in host RAM so repeat prefixes (OpenCode reuses long system prompts) skip re-tokenization. LXC has 32 GB RAM, leaves plenty for model + OS.
 - `--mlock` pins the model in VRAM, prevents demand paging under bulk-embed contention.
-- `--log-prefix` writes prompt prefix to journald — required for spec-decode acceptance-rate scraping. Has privacy implications: see journald retention config below (Step 5.11.6).
+- `--no-mmproj` skips loading Qwen3.6's vision projector — text-only RAG/coding doesn't need it (the projector GGUF is downloaded by `--hf-repo` but never loaded).
+- `--reasoning-format deepseek` moves `<think>...</think>` to `message.reasoning_content`, simplifying the router's strip logic.
+- `--jinja` enables jinja chat-template support — required for the router to inject `chat_template_kwargs.enable_thinking` per the requested alias.
+- `--log-prefix` writes prompt prefix to journald (privacy implications — see journald retention config below in Step 5.11.6).
+- `--alias rag-qwen3.6` is the backend alias name. The router exposes three client-facing aliases (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) that all rewrite `body["model"]` to this backend name before forwarding — see [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP`.
 - `HIP_FORCE_DEV_KERNARG=1` shaves ~2-5% off small-kernel paths on gfx1030.
-- `GPU_MAX_HW_QUEUES=2` caps ROCm queue context-switching when 4 chat slots compete on each card.
-- `--alias rag-qwen3.6` triggers the router's strip-thinking heuristic (`^rag-|-rag$`).
-- **Optional:** `--reasoning-format deepseek` moves `<think>...</think>` to `message.reasoning_content`, simplifying the router. Default `auto` leaves them in `message.content`.
+- `GPU_MAX_HW_QUEUES=2` caps ROCm queue context-switching.
+
+**Speculative decoding is DISABLED by default.** Qwen3.6-35B-A3B has vocab 248,320 while Qwen3-0.6B has vocab 151,936 — llama.cpp refuses to load a mismatched-vocab draft. The chat unit boot log will show `common_speculative_init: no implementations specified for speculative decoding`, which is the expected/normal state. To re-enable when a vocab-matched Qwen3.6 small variant ships, set `LLAMA_DRAFT_REPO=unsloth/<variant>-GGUF` in `scripts/config.env`; the `51-lxc-amd.sh` script then appends `--hf-repo-draft`, `--n-gpu-layers-draft all`, and `--spec-draft-n-max/min` to the ExecStart automatically.
 
 #### Step 5.11.4 — `llamacpp-embed.service` (port 8082, V620 #1)
 
@@ -1245,7 +1258,7 @@ Environment="HIP_VISIBLE_DEVICES=0"
 Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
 Environment="HIP_FORCE_DEV_KERNARG=1"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3-embedding-0.6b-q8_0.gguf \
+    --hf-repo Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0 \
     --alias qwen3-embed \
     --host 0.0.0.0 --port 8082 \
     --api-key ${LLAMACPP_API_KEY} \
@@ -1253,9 +1266,9 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \
     --n-gpu-layers all \
     --embeddings \
     --pooling last \
-    --ctx-size 8192 \
+    --ctx-size 65536 \
     --cont-batching \
-    --parallel 8 \
+    --parallel 4 \
     --batch-size 2048 --ubatch-size 512 \
     --flash-attn off \
     --mlock \
@@ -1269,6 +1282,8 @@ EOF
 ```
 
 Critical correctness note: `--pooling last`, NOT `cls`. Qwen3-Embedding-0.6B uses the final `<|endoftext|>` token for pooling. Using `cls` produces semantically wrong embeddings and silently invalidates AnythingLLM's vector DB. Embedding dim = 1024.
+
+Per-slot context note: llama.cpp divides `--ctx-size` by `--parallel`. At `65536 / 4 = 16384` tokens per slot, this covers >97% of real-world technical-doc chunks (verified empirically; lower values produce silent embed failures on long pages with code blocks or dense tables — pre-pivot defaults of `8192 / 8 = 1024` per slot failed roughly half the VCF release-notes corpus). The router's `MAX_EMBED_INPUT_TOKENS=16384` and AnythingLLM's `EMBEDDING_MODEL_MAX_CHUNK_LENGTH=16384` must all agree with the per-slot value.
 
 #### Step 5.11.5 — `llamacpp-rerank.service` (port 8083, V620 #2)
 
@@ -1411,7 +1426,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://$LLAMACPP_AMD_IP:8080/v1/models
 - [ ] Embedding dim returned is 1024 (confirms `--pooling last` is correct)
 - [ ] Reranker scores "Paris is in France" higher than "Berlin is in Germany"
 - [ ] Both GPUs split work during chat generation (`rocm-smi --showuse` shows activity on both)
-- [ ] Speculative decoding acceptance rate >0.6 in `journalctl -u llamacpp-chat | grep acceptance`
+- [ ] Chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding` (spec-decode disabled by design for Qwen3.6 — see Step 5.11.3 rationale)
 
 ### Step 5.13 — V620 fan control software bridge (Approach A from Step 1.9.1)
 
@@ -2257,17 +2272,21 @@ curl -s http://localhost:8000/healthz | jq
 # Aggregated model list
 curl -s http://localhost:8000/v1/models | jq
 
-# Test strip-thinking preserved by default
+# Test thinking PRESERVED via the qwen3.6-think alias (router injects enable_thinking=true)
 curl -sN http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"think briefly then say hi"}]}' | head -20
+  -H "Authorization: Bearer $ROUTER_KEY" \
+  -d '{"model":"qwen3.6-think","stream":true,"messages":[{"role":"user","content":"think briefly then say hi"}]}' | head -20
 
-# Test strip-thinking via header
+# Test thinking STRIPPED via the rag-qwen3.6 alias (router injects enable_thinking=false
+# AND regex-strips any leaked <think> blocks as belt-and-suspenders)
 curl -sN http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "X-Strip-Thinking: true" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"think briefly then say hi"}]}' | head -20
-# Differences: <think>...</think> blocks should be absent in the second test
+  -H "Authorization: Bearer $ROUTER_KEY" \
+  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"think briefly then say hi"}]}' | head -20
+# Differences: <think>...</think> blocks should be present in the first test, absent in the second.
+# The X-Strip-Thinking header is still supported as an explicit override (see router-app.py
+# should_strip_thinking() priority chain), but alias-driven is the cleaner default.
 ```
 
 ```bash
@@ -2414,10 +2433,15 @@ In AnythingLLM UI: **Settings → AI Providers → LLM Preference**
 - Chat Model Name: query the actual model id. Two equivalent ways:
    - Via router (matches AnythingLLM's traffic path): `curl -H "Authorization: Bearer $ROUTER_API_KEY" http://192.168.6.153:8000/v1/models | jq -r .data[0].id`
    - Direct to llama-server (verification only — bypasses router): `curl -H "Authorization: Bearer $LLAMACPP_API_KEY" http://192.168.6.151:8080/v1/models | jq -r .data[0].id` using the LLAMACPP_API_KEY from `/etc/llamacpp.env` inside LXC 151
-- Token context window: `131072` — **must match llama.cpp's `--ctx-size 131072`** (the V620 chat unit's context window). Values higher cause silent chat failure mid-conversation when the request exceeds llama.cpp's actual context.
+- Token context window: `131072` (128K). This is AnythingLLM's input cap, **not** the llama.cpp backend's context window — the chat unit actually runs at `--ctx-size 262144` (256K) per Step 5.11.3. The 128K AnythingLLM cap is a conservative safety margin; safe to bump up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap (which leaves ~56K for output + thinking inside the 256K chat unit window). Values *higher than 200K* cause silent chat failure mid-conversation when the router rejects the request with 413.
 - Max Tokens: `8192`
 
-> ⚠️ **Important — script-vs-config mismatch warning:** The provisioning script `scripts/54-lxc-anythingllm.sh` currently sets `ALLM_LLM_TOKEN_LIMIT=262144` in `/opt/anythingllm/.env` (a leftover from when llama.cpp was configured with a 256K context). When you set "131072" in the UI above, AnythingLLM persists the UI value in its database and the UI wins at runtime. However, if the AnythingLLM container is recreated (e.g., `docker compose down && up`), it re-bootstraps from `.env` and reverts to 262144. **Either** (a) fix the script first by editing line 36 to `ALLM_LLM_TOKEN_LIMIT=131072` and re-running it, **or** (b) edit `/opt/anythingllm/.env` directly post-deploy. The runbook's Phase 6.2.G cutover step (Step G in Step 6.2) automates option (b) with a one-shot `sed` command for existing v2 clusters.
+> ℹ️ **Three-tier token-limit layering** — kept consistent across the stack:
+> - llama.cpp chat unit: `--ctx-size 262144` (256K, full Qwen3.6 trained window)
+> - Router: `MAX_CHAT_INPUT_TOKENS=200000` (200K input cap, ~56K reserved for output)
+> - AnythingLLM: `ALLM_LLM_TOKEN_LIMIT=131072` (128K, conservative client-side cap; `scripts/54-lxc-anythingllm.sh:42` default)
+>
+> Bumping AnythingLLM's limit up to 200K is safe (still under the router cap). When the AnythingLLM container is recreated (e.g., `docker compose down && up`), it re-bootstraps from `/opt/anythingllm/.env` — re-applying any UI changes requires either editing the `.env` directly or re-running `scripts/54-lxc-anythingllm.sh` with the desired override in `config.env`.
 
 Click **Save Changes**.
 
@@ -3865,16 +3889,19 @@ cd /opt/llama.cpp
 
 This troubleshooting entry covered NVML version mismatches between the host's NVIDIA kernel module and the LXC's userspace driver. The V620-only build has no NVIDIA hardware, no `nvidia-driver`, and no `nvidia-smi` — this failure mode no longer applies. If you see this error, check whether you accidentally installed nvidia-driver and remove it: `apt purge -y nvidia-driver firmware-nvidia-graphics`.
 
-### Speculative decoding acceptance rate is low (<40%)
+### Speculative decoding is disabled (no acceptance-rate to tune)
 
-Likely model mismatch — the draft and target models don't share enough vocabulary.
+The Qwen3.6 chat unit ships with spec-decode **disabled** because Qwen3.6-35B-A3B (vocab 248,320) has no vocab-compatible small variant — see Step 5.11.3 for the full rationale. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding`, which is expected/normal.
+
+If you re-enable spec-decode via `LLAMA_DRAFT_REPO` in `scripts/config.env` once a vocab-matched Qwen3.6 small variant ships, and acceptance rate is low (<40%):
 
 ```bash
-# Verify both are from the same family
-pct exec 151 -- ls -la /opt/models/qwen3.5-*
+# Verify the draft and target tokenizers match
+pct exec 151 -- journalctl -u llamacpp-chat --since "10 min ago" | grep -iE "draft|spec_decode|vocab"
+# If you see "draft model vocab type must match target model", the draft is incompatible.
 
-# Both must be qwen3.5 — not qwen2.5 + qwen3.5 mix
-# If they're mixed, redownload the correct draft model
+# Inspect the cached models
+pct exec 151 -- find /opt/models/.cache -maxdepth 4 -name "*.gguf"
 ```
 
 ### High GPU temperatures on V620 (>85°C)
