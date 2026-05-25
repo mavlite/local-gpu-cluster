@@ -122,22 +122,29 @@ sources:
       url_ext_to: "/"
       url_lowercase: true
 
-  # ── Official: TrueNAS blog (parked — handler not yet implemented) ──────
-  # Created by splitting 595 blog URLs out of truenas-scale-docs state via
+  # ── Official: TrueNAS blog ──────────────────────────────────────────────
+  # Originally split out of truenas-scale-docs via
   # scripts/rag/split_truenas_blog.py (migrate_backfill prefix-matched
-  # /blog/ URLs into the docs source by mistake). Stays disabled until the
-  # rss handler stub gains a real implementation; the split parks the
-  # blog-URL entries here so refresh.py won't try to "remove" them from
-  # the docs workspace as orphans.
+  # /blog/ URLs into the docs source by mistake). 595 historical entries
+  # currently in state with hash="migrated" — the rss handler runs on the
+  # feed's sliding window (latest ~50 posts) and adds/updates those; the
+  # historical entries are preserved via removal_policy=additive_only.
+  #
+  # removal_policy=additive_only is REQUIRED for RSS sources. RSS feeds
+  # don't expose the full history, only a sliding recent-window. Without
+  # this flag the diff layer would mark all 545+ historical entries for
+  # deletion on every refresh.
   - id: truenas-blog
     handler: rss
-    enabled: false
+    enabled: true
+    removal_policy: additive_only
     workspace: sdg-documentation
     doc_prefix: "[OFFICIAL] truenas/blog"
     refresh_interval: 7d
     config:
       rss_url: https://www.truenas.com/blog/feed/
       url_domain_filter: '^https?://www\.truenas\.com/blog/'
+      max_entries: 50
 
   # ── Official: OpenZFS documentation ─────────────────────────────────────
   # Some directories contain spaces (e.g., "Basic Concepts/") which must be
