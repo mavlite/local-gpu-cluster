@@ -403,6 +403,85 @@ Rules of thumb:
 
 For a 50 GB GGUF model at Q4_K_M: weights alone are ~32 GB, ~16 GB per card → tight, KV at 128K already pushes per-card to ~22 GB. At 256K, no headroom. **Don't download.** Try a smaller quant or a smaller base.
 
+**Worked example — Qwen3-Coder-Next sizing (May 2026):**
+
+[`unsloth/Qwen3-Coder-Next-GGUF`](https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF) is an **80B-total / 3B-activated MoE** coder model with the same 256K trained context as Qwen3.6, but with a hybrid **Gated Attention + Gated DeltaNet** architecture. The first attempt (May 2026, [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) downloaded `UD-Q4_K_XL` (49.6 GB) blind and OOM'd on V620 #0 at a 24.2 GB single allocation. This worked example captures the post-mortem analysis.
+
+Per-card target with embed + rerank co-resident:
+
+| Per-card budget | Value |
+|---|---|
+| V620 capacity | 32 GB |
+| Embed OR rerank pinned (~1.5 GB worst case) | −1.5 GB |
+| Chat KV at 256K Q8, half per card (3-5 GB; DeltaNet hybrid usually lower than full transformer attention but verify on first run) | −3 to −5 GB |
+| Safety margin (allocator fragmentation, transient activations) | −2 GB |
+| **Usable for weights per card** | **~22-25 GB** |
+
+So total chat weights across both cards ≤ **~44-50 GB**. From the 38 published quants, the candidates partition into four zones:
+
+| Zone | Total weights | Quants |
+|---|---|---|
+| **OOM (>46 GB)** — don't try | 47-87 GB | Q4_K_M 48.5, UD-Q4_K_M 49.3, **UD-Q4_K_XL 49.6 ❌** (already OOM'd), Q4_1 50.1, MXFP4_MOE 48.0, all Q5/Q6/Q8 |
+| **Borderline (42-46 GB)** — fits only if KV stays at the low estimate | 42-46 GB | IQ4_XS 42.7, IQ4_NL 45.1, Q4_0 45.3, Q4_K_S 45.5, UD-Q4_K_S 46.1 |
+| **Comfortable (28-42 GB)** — fits with headroom | 28-42 GB | **UD-IQ4_XS 38.4**, UD-IQ4_NL 39.2, Q3_K_M 38.3, UD-Q3_K_XL 36.3, UD-Q3_K_M 35.9, Q3_K_S 34.6, UD-Q3_K_S 33.3, UD-IQ3_S 29.7, UD-IQ3_XXS 28.5 |
+| **Aggressive (<28 GB)** — fits easily but coding-quality concerns at Q2 and below | 18-27 GB | UD-Q2_K_XL 26.8, smaller Q2/IQ2/IQ1 variants |
+
+**Recommendation: `UD-IQ4_XS` (38.4 GB)** — best balance for coding workloads:
+
+- **Quality:** Q4-class via Unsloth Dynamic 2.0 imatrix calibration. Q4 is the consensus sweet spot for code generation — Q3 starts showing edge-case syntax mistakes.
+- **Footprint:** ~38.4 GB weights across 2 cards = ~19 GB per card → leaves ~10 GB per card for KV + embed/rerank + safety. Comfortable headroom even if KV is at the high end of the estimate.
+- **Throughput:** 3 B active params per token means inference speed should be similar to or better than Qwen3.6-35B-A3B (which also has 3 B active). 80 B total parameters give broader knowledge / better recall at the same per-token compute cost.
+
+**Backup if UD-IQ4_XS shows quality issues:** `UD-IQ4_NL` (39.2 GB) — different IQ4 quantization scheme, ~same size.
+
+**More conservative (headroom over quality):** `UD-Q3_K_S` (33.3 GB) — drops to Q3 but ~12 GB per-card headroom, useful if running additional GPU services.
+
+**Deployment procedure:**
+
+```bash
+# 1. Reclaim the failed 49.6 GB UD-Q4_K_XL leftover (~50 GB freed)
+rm -rf /tank/models/.cache/models--unsloth--Qwen3-Coder-Next-GGUF
+
+# 2. Edit config.env
+$EDITOR /root/local-gpu-cluster/scripts/config.env
+# Set:
+#   LLAMA_HF_REPO=unsloth/Qwen3-Coder-Next-GGUF
+#   LLAMA_HF_QUANT=UD-IQ4_XS
+#   LLAMA_ALIAS=qwen3-coder       # whatever you want clients to address it as
+
+# 3. Apply (idempotent; downloads ~38 GB on first start)
+./scripts/51-lxc-amd.sh
+
+# 4. Watch the unit boot
+pct exec 151 -- journalctl -u llamacpp-chat -f
+# Expect "server is listening on http://0.0.0.0:8080" after download + load
+```
+
+**Verification:**
+
+```bash
+ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+curl -sf -H "Authorization: Bearer $ROUTER_KEY" http://192.168.6.153:8000/v1/models | jq '.data[].id'
+
+# VRAM check — both cards should be at ~20-25 GB used, ≥3 GB free
+pct exec 151 -- rocm-smi --showmemuse -d 0 1
+
+# Coding smoke test
+curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"Write a Python function that reverses a linked list in place. Include a docstring."}]}' \
+  http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content'
+```
+
+If `rocm-smi` shows ≥3 GB free on each card and the unit is stable for ~10 min, the budget is right. If it OOMs at first start (single-allocation failure), drop one rank — try `UD-Q3_K_XL` (36.3 GB).
+
+**Caveat — chat-model exclusivity:** Coder-Next at any of these quants replaces (doesn't coexist with) `rag-qwen3.6` in the chat slot. Three operational patterns:
+
+- **Coding workstation** — Coder-Next is the chat model; all clients (OpenCode, AnythingLLM RAG, browser artifact) use it. RAG quality may degrade vs Qwen3.6 (different model strengths).
+- **RAG workstation** — Keep Qwen3.6-35B-A3B; Coder-Next not deployed.
+- **Switch on demand** — Keep both downloaded, change `LLAMA_HF_QUANT` in `config.env` and re-run `51-lxc-amd.sh` to swap (~30s downtime).
+
+The router's [`ALIAS_MAP`](./scripts/files/router-app.py) doesn't currently expose a `coder-qwen3` alias; if you want client routing by alias name, add an entry per [§ 6.2](#-62-adding-or-editing-router-aliases).
+
 ### § 4.5 Enabling spec-decode (when a compatible draft ships)
 
 Currently disabled (see [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding)). When a vocab-compatible Qwen3.6 small variant ships:
