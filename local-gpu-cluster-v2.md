@@ -6,7 +6,7 @@
 ![Hypervisor](https://img.shields.io/badge/containers-LXC%20%2B%20Docker-blue)
 ![GPU-AMD](https://img.shields.io/badge/GPU-2%C3%97%20V620%2032GB-red)
 ![Runtime](https://img.shields.io/badge/runtime-llama.cpp-000000)
-![Models](https://img.shields.io/badge/models-Qwen%203.5%20family-blue)
+![Models](https://img.shields.io/badge/models-Qwen%203.6%20family-blue)
 ![RAG](https://img.shields.io/badge/RAG-AnythingLLM%20%2B%20LanceDB-0a6cf5)
 ![SpecDecode](https://img.shields.io/badge/feature-speculative%20decoding-orange)
 ![Revision](https://img.shields.io/badge/revision-2-lightgrey)
@@ -128,17 +128,17 @@ The V620 is AMD's professional inference card based on the same Navi 21 silicon 
 
 **Why no NVIDIA tier.** Earlier revisions of this document described a "2× V620 + 1× RTX 3060" hybrid where the 3060 ran the embedder + reranker + a small fast-chat model as a workload-isolation tier. **That tier has been removed.** All embedding, reranking, and chat now run as separate `llama-server` processes inside a single V620 LXC, with per-card pinning via `--main-gpu`:
 
-- **Chat** (Qwen 3.5 35B-A3B + 0.8B draft for spec decode): tensor-split across both V620s (`--tensor-split 1,1`).
+- **Chat** (Qwen3.6-35B-A3B UD-Q4_K_M, single in-flight request at full 256K ctx; spec-decode disabled — see note below): tensor-split across both V620s (`--tensor-split 1,1`).
 - **Embedder** (Qwen3-Embedding-0.6B Q8_0): pinned to V620 #1 via `--main-gpu 0` and `HIP_VISIBLE_DEVICES=0`. Uses `--pooling last` (Qwen3-Embedding uses the final `<|endoftext|>` token; `cls` produces wrong embeddings).
 - **Reranker** (BGE Reranker v2-m3 OR Qwen3-Reranker-0.6B): pinned to V620 #2 via `--main-gpu 1` and `HIP_VISIBLE_DEVICES=1`. Uses `--embeddings --pooling rank --reranking`.
 
-VRAM budget (steady state, 128K chat context, q8_0 KV, `--parallel 4`): chat 22 GB weights + 10–14 GB slot KV split across cards + draft 2.1 GB + embedder 1.2 GB on card #1 + reranker 1.5 GB on card #2 ≈ **37–41 GB used of the 64 GB pool**. Per-card ≈ 17–19 GB. ~25 GB headroom for parallel sequences and bulk-embed bursts.
+VRAM budget (steady state, 256K chat context, q8_0 KV, `--parallel 1` on chat, `--parallel 4` on embed): chat 22 GB weights + ~11 GB single-slot KV split across cards + embedder 1.2 GB on card #1 + reranker 1.5 GB on card #2 ≈ **~35 GB used of the 64 GB pool**. Per-card ≈ 17-18 GB. ~29 GB headroom. No draft model: spec-decoding is disabled — see the note below.
 
 **Trade-off accepted.** The 3060 used to isolate bulk RAG ingest from interactive chat at the hardware level. With the V620-only topology, that isolation moves up the stack to the router (LXC 153): `asyncio.Semaphore`-based admission control, per-IP rate limiting via `slowapi`, fail-open SSE on upstream 5xx, and a priority lane that throttles bulk embed when chat has in-flight requests. A 5K-document re-embed will briefly contend with chat for compute (~15–25 minutes total wall-clock on V620 with `--parallel 8`, vs the prior 30–60 minutes on the 3060). For typical workloads where bulk ingest is rare, this is the right trade.
 
 **Future expansion.** PCIE_3 (bottom slot, PCIe 4.0 x4 from chipset) is now empty. Prioritized future-use options: 10 GbE NIC for cluster federation (Intel X710), HBA if `/tank` outgrows two NVMes (LSI 9300-8i), PCIe audio capture for a future Whisper LXC, or an OCuLink adapter for an external GPU. Adding a third V620 is power-feasible (~340 W headroom at 80% derate of the 1200 W PSU; matches the user's memory note that 3060s drew ~120 W measured vs 170 W spec → V620s similarly under-draw vs 300 W TDP), but slot count and cooling are the constraints, not power.
 
-> **Note on speculative decoding architecture:** llama.cpp's speculative decoding requires both target and draft models in the **same** `llama-server` process (via `-md` / `--model-draft` flag) — they cannot communicate across LXCs or over the network. The architecture loads both Qwen 3.5 35B (target, ~22 GB) and Qwen 3.5 0.8B (draft, ~600 MB) into the V620 chat process together. The 0.8B draft is small enough to coexist with the 35B target in the V620 VRAM pool without measurable cost.
+> **Note on speculative decoding architecture:** llama.cpp's speculative decoding requires both target and draft models in the **same** `llama-server` process (via `-md` / `--model-draft` flag) — they cannot communicate across LXCs or over the network. **Spec-decode is currently disabled on Qwen3.6** because the 35B-A3B target has vocab 248,320 while available small variants (Qwen3-0.6B at vocab 151,936) have an incompatible tokenizer that llama.cpp refuses to load as a draft. Until a vocab-matched Qwen3.6 small variant ships, the chat unit boots with the 22 GB target alone and logs `common_speculative_init: no implementations specified for speculative decoding` (expected behavior, not a bug). Qwen3.6-35B-A3B is MoE with ~3 B active params/token, so it's already fast — the ~1.5-2× throughput hit from disabled spec-decode is an accepted trade-off. Re-enable via `LLAMA_DRAFT_REPO` in `scripts/config.env` once a compatible draft is available.
 
 ### 1.4 V620 active cooling: shroud kit + 80 mm fans + 12 V Molex
 
@@ -278,10 +278,12 @@ Resulting layout:
 ```
 /tank/
 ├── models/                      # gguf files, mounted ro into both llama.cpp LXCs
-│   ├── qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf
-│   ├── qwen3.5-0.8b-q4_k_m.gguf  (draft model)
-│   ├── qwen3-embedding-0.6b.gguf
-│   └── bge-reranker-v2-m3.gguf
+│   └── .cache/                       # HuggingFace cache layout (llama-server writes here via --hf-repo)
+│       └── models--<org>--<repo>/snapshots/<rev>/<file>.gguf
+│   # Currently-deployed (verified live):
+│   #   unsloth/Qwen3.6-35B-A3B-GGUF       -> Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  (chat target ~22 GB)
+│   #   Qwen/Qwen3-Embedding-0.6B-GGUF     -> Qwen3-Embedding-0.6B-Q8_0.gguf  (embedder ~1 GB)
+│   #   gpustack/bge-reranker-v2-m3-GGUF   -> bge-reranker-v2-m3-Q4_K_M.gguf  (reranker ~1.5 GB)
 ├── anythingllm/                 # AnythingLLM persistent storage
 │   └── storage/
 └── mcp/                         # MCP container working state
@@ -331,15 +333,18 @@ The ProArt X870E-Creator presents three PCIe slots:
 | --- | --- | --- | --- | --- |
 | PCIE_1 (top) | CPU | x16 (drops to x8 when slot 2 populated) | PCIe 5.0 | V620 #1 |
 | PCIE_2 | CPU | x8 (active when slot 1 also populated) | PCIe 5.0 | V620 #2 |
-| PCIE_3 (bottom) | X870E chipset | x4 | PCIe 4.0 | RTX 3060 |
+| PCIE_3 (bottom) | X870E chipset | x4 | PCIe 4.0 | (empty — V620-only build; pre-pivot held RTX 3060) |
 
 V620 is a PCIe 4.0 card, so PCIe 5.0 negotiation drops to 4.0 — expected and fine. The 3060 is also PCIe 4.0, also drops to 4.0 in the chipset slot.
 
 Verify enumeration:
 
 ```bash
-lspci -nn | grep -iE "vga|3d controller"
-# Expect three entries: two AMD V620 (1002:73a3 or similar Navi 21 ID) and one NVIDIA GA106 (10de:2504)
+# V620s are class 0380 "Display controller" (headless server cards) — not class 0300 VGA or
+# 0302 3D controller, so the naive `vga|3d` filter misses them. Filter by Navi 21 ID instead.
+lspci -nn | grep -iE "navi 21|\[1002:73a1\]"
+# Expect: two AMD Radeon Pro V620 entries [1002:73a1]. Pre-pivot builds also showed an
+# NVIDIA GA106 (10de:2504) in PCIE_3; the 3060 was removed in the V620-only pivot.
 ```
 
 Verify link width and speed:
@@ -355,7 +360,7 @@ Expected:
 
 - V620 #1 in PCIE_1: `LnkSta: Speed 16GT/s, Width x8` (PCIe 4.0 x8)
 - V620 #2 in PCIE_2: `LnkSta: Speed 16GT/s, Width x8`
-- 3060 in PCIE_3: `LnkSta: Speed 16GT/s, Width x4`
+- PCIE_3 (bottom): empty in V620-only builds. Pre-pivot 3060 in this slot showed `LnkSta: Speed 16GT/s, Width x4`.
 
 If any card shows `Width x1` or `Speed 2.5GT/s`, the slot is misconfigured. Check that **Above 4G Decoding** and **Re-Size BAR** are enabled (§2.2) and that no M.2 drive is stealing lanes from the slot in question. On this board, populating M.2_2 drops PCIE_2 from x8 to x4 — leave M.2_2 empty unless you accept that bandwidth hit on V620 #2.
 
@@ -364,18 +369,14 @@ If any card shows `Width x1` or `Speed 2.5GT/s`, the slot is misconfigured. Chec
 After ROCm and CUDA are installed in their respective LXCs (§5 and §6), repeat the link check from each container:
 
 ```bash
-# In llamacpp-amd LXC
+# In llamacpp-amd LXC (the only GPU LXC in the V620-only build)
 rocm-smi --showpcie
 # Expect both V620s at PCIe 4.0 x8
-
-# In llamacpp-nv LXC
-nvidia-smi --query-gpu=index,name,pci.bus_id,pcie.link.gen.current,pcie.link.width.current --format=csv
-# Expect: 0, NVIDIA GeForce RTX 3060, ..., 4, 4
 ```
 
 ### Known X870E PCIe quirk
 
-There is a documented X870E firmware bug where, after a VFIO Function Level Reset, the slot permanently downgrades from x16 to x8 until the next cold boot. This affects **VFIO passthrough to VMs**, not LXC cgroup-based passthrough, which doesn't issue FLRs. Since this build uses LXC for all GPU stacks, the bug doesn't bite. If a future workload needs VFIO-based GPU passthrough to a VM (e.g., a Windows daily-driver VM with the 3060), be aware: cold-boot recovery is required to restore x16 width after each VM stop.
+There is a documented X870E firmware bug where, after a VFIO Function Level Reset, the slot permanently downgrades from x16 to x8 until the next cold boot. This affects **VFIO passthrough to VMs**, not LXC cgroup-based passthrough, which doesn't issue FLRs. Since this build uses LXC for all GPU stacks, the bug doesn't bite. If a future workload needs VFIO-based GPU passthrough to a VM (e.g., a Bazzite gaming VM in PCIE_3), be aware: cold-boot recovery is required to restore x16 width after each VM stop.
 
 ---
 
@@ -392,8 +393,7 @@ The trade-off is that LXC containers can't isolate GPUs from the host — the ho
 Different services in this stack get different treatment:
 
 **Bare-metal in LXC (no Docker layer):**
-- `llamacpp-amd` — the V620 inference stack
-- `llamacpp-nv` — the 3060 stack
+- `llamacpp-amd` — the V620 inference stack (chat + embed + rerank on ports 8080/8082/8083)
 - `llm-router` — the request-aware router
 
 These workloads either need direct GPU device access (the llama.cpp stacks) or are tiny and benefit from minimal abstraction (the router). Adding a Docker layer between LXC and the application would introduce a second cgroup translation for GPU devices, complicate driver/library version matching, and add nothing in return.
@@ -572,102 +572,65 @@ Build time is ~10 minutes on the 7600.
 
 ### 5.5 Model selection and download
 
-Per the Qwen 3.5 model family, the V620 stack runs the **35B target model + 0.8B draft** in the same `llama-server` process for speculative decoding (`--model-draft`). Pre-pivot designs ran the draft on a separate 3060 LXC, but llama.cpp's spec-decode requires both models in the same process — the in-process design is the only correct architecture and is documented in `setup-runbook.md` Phase 5.
+The V620 stack runs **three `llama-server` processes** inside LXC 151, all sharing the same llama.cpp binary built in §5.4:
 
-Model | Size | Quant | Context | Use
---- | --- | --- | --- | ---
-qwen3.5:35b-a3b | 24 GB | Q4_K_M | 256 K theoretical, 128 K practical | Primary chat / coding
-qwen3.5:27b | 17 GB | Q4_K_M | 256 K theoretical, 128 K practical | Optional alternate (more headroom)
+| Service | Model | Size | Notes |
+| --- | --- | --- | --- |
+| `llamacpp-chat.service` (port 8080) | Qwen3.6-35B-A3B UD-Q4_K_M (`unsloth/Qwen3.6-35B-A3B-GGUF`) | ~22 GB | Primary chat / RAG / coding target. MoE with ~3 B active params/token. Tensor-split across both V620s, single in-flight request at full trained ctx (`--ctx-size 262144 --parallel 1`). |
+| `llamacpp-embed.service` (port 8082) | Qwen3-Embedding-0.6B Q8_0 (`Qwen/Qwen3-Embedding-0.6B-GGUF`) | ~1 GB | Embedding generation (1024-dim). Pinned to V620 #1 via `--main-gpu 0`. **`--pooling last`** is critical — `cls` produces semantically wrong embeddings and silently invalidates the vector DB. |
+| `llamacpp-rerank.service` (port 8083) | BGE Reranker v2-m3 Q4_K_M (`gpustack/bge-reranker-v2-m3-GGUF`) | ~1.5 GB | Cross-encoder reranking for vector-search results. Pinned to V620 #2 via `--main-gpu 1`. Alt: `Qwen/Qwen3-Reranker-0.6B-GGUF` (gated on HF — requires `HF_TOKEN`). |
 
-VRAM budget at 128 K context on 64 GB pool (2× V620 32 GB):
-- Weights (35B Q4_K_M): ~24 GB
-- KV cache @ 128 K context: ~10 GB
-- Activations + overhead: ~3 GB
-- **Total: ~37 GB**, leaves ~27 GB pooled headroom for concurrent requests or context expansion
+**VRAM budget at deployed config** (chat: 256K ctx, q8_0 KV, `--parallel 1`):
 
-At 256 K context the KV cache balloons to ~20 GB and total occupancy hits ~47 GB — still fits but with much less headroom. For routine use, 128 K is the sweet spot.
+| Component | VRAM |
+| --- | --- |
+| Chat weights + KV split across both V620s | ~32 GB total (~16 GB per card) |
+| Embedder pinned to V620 #1 | ~1.2 GB |
+| Reranker pinned to V620 #2 | ~1.5 GB |
+| **Total** | **~35 GB of 64 GB pool, ~29 GB headroom** |
 
-Download via Ollama-style registry pulls (which produce gguf files we can use with llama.cpp directly), or fetch from Hugging Face in gguf format. Place in `/tank/models/` on the host; the LXC sees them at `/opt/models/`:
+**Speculative decoding is disabled by default** — see §1.3 note. Re-enable via `LLAMA_DRAFT_REPO` in `scripts/config.env` if a vocab-matched Qwen3.6 small variant becomes available.
 
-```bash
-# From the Proxmox host (not inside the LXC)
-cd /tank/models
-wget https://huggingface.co/.../qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf
-wget https://huggingface.co/.../qwen3.5-0.8b-q4_k_m.gguf
-wget https://huggingface.co/.../qwen3-embedding-0.6b.gguf
-wget https://huggingface.co/.../bge-reranker-v2-m3.gguf
-```
-
-(Exact URLs depend on the model maintainer's gguf release; substitute the specific community quant of choice. Bartowski and TheBloke produce reliable Qwen quants on Hugging Face.)
-
-### 5.6 llama-server systemd unit
-
-`/etc/systemd/system/llama-server.service` inside the `llamacpp-amd` LXC:
-
-```ini
-[Unit]
-Description=llama.cpp server (V620 ROCm — Qwen 3.5 35B + 0.8B draft for spec decode)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/llama.cpp
-Environment="HIP_VISIBLE_DEVICES=0,1"
-Environment="HSA_OVERRIDE_GFX_VERSION=10.3.0"
-Environment="GGML_HIP_UMA=0"
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --model /opt/models/qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf \
-    --model-draft /opt/models/qwen3.5-0.8b-q4_k_m.gguf \
-    --host 0.0.0.0 \
-    --port 8080 \
-    --ctx-size 131072 \
-    --n-gpu-layers all \
-    --n-gpu-layers-draft all \
-    --tensor-split 1,1 \
-    --batch-size 512 \
-    --ubatch-size 512 \
-    --threads 8 \
-    --parallel 2 \
-    --cont-batching \
-    --cache-type-k q8_0 \
-    --cache-type-v q8_0 \
-    --spec-draft-n-max 16 \
-    --spec-draft-n-min 0 \
-    --metrics
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Key flag rationale:
-- `--model-draft /opt/models/qwen3.5-0.8b-q4_k_m.gguf` — local draft model for speculative decoding. Both target and draft must be loaded in the same `llama-server` process (this is how llama.cpp implements spec decode).
-- `--n-gpu-layers-draft all` — offload all draft model layers to GPU. The 0.8B draft is tiny (~600 MB) and shares VRAM with the target model.
-- `--spec-draft-n-max 16` — maximum draft tokens per iteration. Default is 16, fine for most workloads.
-- `--n-gpu-layers all` — offload all target model layers. 999 is a common idiom for "all".
-- `--tensor-split 1,1` — split layers evenly between V620 #1 and V620 #2. Tune in §5.7.
-- `--ctx-size 131072` — 128 K context, fits comfortably with Q8 KV cache.
-- `--cache-type-k q8_0 --cache-type-v q8_0` — quantize the KV cache to 8-bit. Halves KV memory cost vs. f16 with imperceptible quality impact.
-- `--cont-batching` — continuous batching for concurrent request efficiency.
-- `--parallel 2` — allow 2 concurrent sequences. Increase only after measuring VRAM headroom.
-
-Note: Flash Attention (`--flash-attn`) has known performance issues on V620 (`gfx1030`) — it can be slower than the default attention path on this generation. **Benchmark both before enabling it in production.** See §5.7 for the benchmark procedure.
+Models are downloaded on demand by llama-server's `--hf-repo` flag into `/tank/models/.cache/` (HuggingFace cache layout: `models--<org>--<repo>/snapshots/<rev>/<file>.gguf`). The `/tank/models/` directory is RW bind-mounted into LXC 151 at `/opt/models/` so the cache survives container recreation. To pre-fetch from the host:
 
 ```bash
-systemctl daemon-reload
-systemctl enable --now llama-server
-systemctl status llama-server
+# From the Proxmox host
+huggingface-cli download unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
+    --local-dir /tank/models/Qwen3.6-35B-A3B-GGUF/
+# Then swap the unit's --hf-repo flag for --model /opt/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 ```
 
-Confirm it's serving:
+The provisioning script [`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) and [`setup-runbook.md`](./setup-runbook.md) §5.11 are the canonical source of truth for which models are deployed and how their systemd units are configured.
 
-```bash
-curl http://localhost:8080/v1/models
-# Expect a JSON response listing the loaded model
-```
+### 5.6 llama-server systemd units
+
+LXC 151 hosts **three** systemd units, not one. Each is a separate `llama-server` process with per-card pinning:
+
+- `llamacpp-chat.service` (port 8080) — Qwen3.6-35B-A3B target tensor-split across both V620s
+- `llamacpp-embed.service` (port 8082) — Qwen3-Embedding-0.6B pinned to V620 #1 (`--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`)
+- `llamacpp-rerank.service` (port 8083) — BGE Reranker v2-m3 pinned to V620 #2 (`--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`)
+
+The canonical unit shapes are generated by [`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) and documented in detail in [`setup-runbook.md`](./setup-runbook.md) §5.11.3 (chat), §5.11.4 (embed), §5.11.5 (rerank). Key features common to all three:
+
+- Bearer auth via `--api-key ${LLAMACPP_API_KEY}` (key loaded from `EnvironmentFile=/etc/llamacpp.env`, never inline in the unit file).
+- `--hf-repo` for on-demand HuggingFace download into `LLAMA_CACHE=/opt/models/.cache`.
+- `--cache-type-k q8_0 --cache-type-v q8_0` to halve KV cost vs. f16 with imperceptible quality impact.
+- `--mlock` pins weights in VRAM, prevents demand paging under bulk-embed contention.
+- `--metrics` exposes Prometheus instrumentation on each port.
+- ROCm tuning env vars: `HIP_FORCE_DEV_KERNARG=1`, `GPU_MAX_HW_QUEUES=2`, `HSA_OVERRIDE_GFX_VERSION=10.3.0`, `GGML_HIP_UMA=0`.
+
+Chat-specific tuning:
+- `--ctx-size 262144 --parallel 1` gives a single in-flight request the full Qwen3.6 trained context window (256K). The router's `CHAT_CONCURRENCY=1` matches this — multi-agent sub-calls queue at the router (which can emit SSE keepalives while waiting) rather than inside llama.cpp.
+- `--cache-reuse 1024 --cache-ram 16384` enables 16 GB host-RAM prompt-prefix KV cache so repeat prefixes (OpenCode's long system prompt every turn) skip re-tokenization.
+- `--reasoning-format deepseek` moves `<think>...</think>` into `message.reasoning_content`; `--jinja` enables the chat template kwargs the router uses to toggle `enable_thinking` per alias.
+- `--no-mmproj` skips the vision projector — text-only RAG/coding doesn't need it.
+- **Speculative decoding is disabled by default** (see §1.3 note and runbook §5.11.3).
+
+Embed-specific: `--embeddings --pooling last` (NOT `cls` — wrong pooling silently invalidates the vector DB). Rerank-specific: `--reranking --embeddings --pooling rank` per llama.cpp upstream best practice.
+
+Flash Attention (`--flash-attn`) has known performance regressions on V620 (`gfx1030`) — sometimes slower than the default path. The chat unit ships with `--flash-attn auto`; **benchmark both** per §5.7 before pinning to `on` or `off` in production.
+
+Don't hand-author these unit files from this document — they drift fast as llama.cpp's flag surface evolves. Use `scripts/51-lxc-amd.sh` (Phase 5 of the runbook) as the source of truth.
 
 ### 5.7 Tensor split tuning across the two V620s
 
@@ -730,8 +693,8 @@ This replaces the v1 dual-port no-think proxy (one port stripped thinking, the o
 Request                                     Backend
 ──────────────────────────────────────────  ────────────────────────────────
 POST /v1/chat/completions                   llamacpp-amd:8080 (V620 stack)
-POST /v1/embeddings                         llamacpp-nv:8082 (3060 embedder)
-POST /v1/rerank                             llamacpp-nv:8083 (3060 reranker)
+POST /v1/embeddings                         llamacpp-amd:8082 (V620 embedder, --main-gpu 0)
+POST /v1/rerank                             llamacpp-amd:8083 (V620 reranker, --main-gpu 1)
 GET  /v1/models                             aggregated from both backends
 ```
 
@@ -749,8 +712,8 @@ The router decides whether to strip `<think>...</think>` from responses based on
 
 This means:
 
-- **AnythingLLM** sets `X-Strip-Thinking: true` (or uses a model named `rag-qwen3.5`) → reasoning stripped, lower latency to first answer token.
-- **OpenCode** sends no header and uses model `coder-qwen3.5` → reasoning preserved, multi-turn thinking continuity works.
+- **AnythingLLM** uses model `rag-qwen3.6` (router alias) → thinking disabled via `chat_template_kwargs.enable_thinking=false` and any leaked `<think>` blocks regex-stripped from the response, lower latency to first answer token.
+- **OpenCode** uses model `qwen3.6-think` → thinking enabled, multi-turn reasoning continuity works.
 - **`curl` testing** can pass either header explicitly.
 
 ### 7.4 SSE keepalive
@@ -808,8 +771,8 @@ from fastapi import FastAPI, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 
 V620_URL    = os.environ.get("V620_URL",    "http://192.168.6.151:8080")
-EMBED_URL   = os.environ.get("EMBED_URL",   "http://192.168.6.152:8082")
-RERANK_URL  = os.environ.get("RERANK_URL",  "http://192.168.6.152:8083")
+EMBED_URL   = os.environ.get("EMBED_URL",   "http://192.168.6.151:8082")
+RERANK_URL  = os.environ.get("RERANK_URL",  "http://192.168.6.151:8083")
 KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "12"))
 
 THINK_RE       = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -1047,8 +1010,8 @@ Type=simple
 User=router
 WorkingDirectory=/opt/llm-router
 Environment="V620_URL=http://192.168.6.151:8080"
-Environment="EMBED_URL=http://192.168.6.152:8082"
-Environment="RERANK_URL=http://192.168.6.152:8083"
+Environment="EMBED_URL=http://192.168.6.151:8082"
+Environment="RERANK_URL=http://192.168.6.151:8083"
 Environment="KEEPALIVE_INTERVAL=12"
 ExecStart=/opt/llm-router/venv/bin/uvicorn app:app \
     --host 0.0.0.0 --port 8000 \
@@ -1079,7 +1042,7 @@ curl http://192.168.6.153:8000/v1/models
 curl -N http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-Strip-Thinking: true" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"think briefly, then say hi"}]}'
+  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"think briefly, then say hi"}]}'
 # Expect <think> blocks absent from data: payloads
 ```
 
@@ -1170,7 +1133,7 @@ In AnythingLLM Settings:
 **Chat LLM**
 - Provider: **Generic OpenAI**
 - Base URL: `http://192.168.6.153:8000/v1`
-- Model: `qwen3.5-35b` (or whatever name llama.cpp reports — check `curl http://192.168.6.151:8080/v1/models`)
+- Model: `rag-qwen3.6` (the router alias for thinking-off RAG synthesis; use `qwen3.6-think` for thinking-on coding agents — both resolve to the same backend, see [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP`)
 - Token context window: `131072`
 - API key: `sk-anything` (llama.cpp doesn't validate, AnythingLLM requires a non-empty value)
 
@@ -1203,7 +1166,7 @@ curl -X POST "$ALLM_URL/api/v1/workspace/$WS/update" \
     "chatMode": "query",
     "vectorSearchMode": "rerank",
     "openAiTemp": 0.3,
-    "chatModel": "qwen3.5-35b",
+    "chatModel": "rag-qwen3.6",
     "queryRefusalResponse": "Not in the provided VCF documents.",
     "openAiPrompt": "You are a technical reference assistant for VMware Cloud Foundation (VCF). Answer questions using ONLY the content retrieved from the attached VCF documentation. If the answer is not in the retrieved context, say so — do not fall back on general VMware knowledge. Cite which document each claim comes from when possible."
   }'
@@ -1236,7 +1199,7 @@ for f in /tmp/opt/vcf-ingest/out/*.md; do
     -F "addToWorkspaces=$WS"
 done
 
-# Trigger embeddings via the router → 3060 embedder
+# Trigger embeddings via the router → V620 embedder (LXC 151, --main-gpu 0)
 curl -s -X POST "$ALLM_URL/api/v1/workspace/$WS/update-embeddings" \
   -H "Authorization: Bearer $ALLM_KEY"
 
@@ -1252,7 +1215,7 @@ curl -s -X POST "$ALLM_URL/api/v1/workspace/$WS/update-embeddings" \
   -H "Authorization: Bearer $ALLM_KEY"
 ```
 
-The embedding step is dramatically faster than v1 because it runs on the dedicated 3060 embedder service rather than competing with chat traffic on the GPU pool.
+The embedding step runs on V620 #1's pinned `llamacpp-embed` service (`--main-gpu 0`, `--parallel 4`); router admission control (`EMBED_CONCURRENCY=4`) prevents bulk re-embed from stalling chat traffic that shares the V620 pool.
 
 Apply the chunk-size fix from v1 §8 before re-embedding: Settings → Text Splitter & Chunking → chunk size **2500**, overlap **500**.
 
@@ -1390,7 +1353,7 @@ sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
 
 | LXC | IP | Port | Service | Notes |
 | --- | --- | --- | --- | --- |
-| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | `llamacpp-chat.service` (V620 tensor-split, 35B target + 0.8B draft) | Speculative decoding native via `-md`; Bearer auth via `LLAMACPP_API_KEY` |
+| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | `llamacpp-chat.service` (V620 tensor-split, Qwen3.6-35B-A3B UD-Q4_K_M, 256K ctx, `--parallel 1`) | Speculative decoding disabled by default — vocab mismatch with available drafts, see [`setup-runbook.md`](./setup-runbook.md) §5.11.3; Bearer auth via `LLAMACPP_API_KEY` |
 | `llamacpp-amd` (151) | 192.168.6.151 | 8082 | `llamacpp-embed.service` (V620 #1 via `--main-gpu 0`) | Qwen3-Embedding-0.6B Q8_0, `--pooling last`, dim 1024 |
 | `llamacpp-amd` (151) | 192.168.6.151 | 8083 | `llamacpp-rerank.service` (V620 #2 via `--main-gpu 1`) | BGE-Reranker-v2-m3 or Qwen3-Reranker-0.6B fallback |
 | `llm-router` (153) | 192.168.6.153 | 8000 | FastAPI router | per-request strip + keepalive |
@@ -1409,28 +1372,25 @@ Client-facing endpoint: **`http://192.168.6.153:8000/v1`** (the router). All cli
 
 ### Proxmox host
 ```
-/tank/                                       # ZFS pool on secondary NVMe
-├── models/                                  # gguf model files (mounted ro into both llama.cpp LXCs)
-│   ├── qwen3.5-35b-a3b-q4_k_m-00001-of-00002.gguf
-│   ├── qwen3.5-0.8b-q4_k_m.gguf
-│   ├── qwen3-embedding-0.6b.gguf
-│   └── bge-reranker-v2-m3-q4_k_m.gguf
+/tank/                                       # ZFS mirror across two NVMes
+├── models/                                  # gguf model files (RW bind-mounted into LXC 151 — HF cache target)
+│   └── .cache/                              # HuggingFace cache layout (llama-server downloads here via --hf-repo)
+│       └── models--<org>--<repo>/snapshots/<rev>/<file>.gguf
+│   # Currently-deployed files (verified live):
+│   #   unsloth/Qwen3.6-35B-A3B-GGUF       -> Qwen3.6-35B-A3B-UD-Q4_K_M.gguf  (~22 GB chat target)
+│   #   Qwen/Qwen3-Embedding-0.6B-GGUF     -> Qwen3-Embedding-0.6B-Q8_0.gguf  (~1 GB embedder)
+│   #   gpustack/bge-reranker-v2-m3-GGUF   -> bge-reranker-v2-m3-Q4_K_M.gguf  (~1.5 GB reranker)
 ├── anythingllm/                             # AnythingLLM persistent storage
 │   └── storage/
 │       └── documents/
-│           └── custom-documents/            # ~5,000 ingested .json files
+│           └── custom-documents/            # ~7000+ ingested .json files across both workspaces
+├── rag-state/                               # RAG corpus refresh state (scripts/rag/)
+│   ├── <source-id>/{manifest,documents}.json
+│   └── _proposals/                          # safety-threshold-halted plans for review
 └── mcp/                                     # MCP container working state
 ```
 
 ### llamacpp-amd LXC (151)
-```
-/opt/
-├── models/                                  # bind-mounted from /tank/models (ro)
-└── llama.cpp/
-    └── build/bin/llama-server
-```
-
-### llamacpp-nv LXC (152)
 ```
 /opt/
 ├── models/                                  # bind-mounted from /tank/models (ro)
@@ -1474,38 +1434,42 @@ Run these in sequence after any rebuild or migration step.
 
 ```bash
 # === 1. Host-level GPU enumeration ===
-lspci -nn | grep -iE "vga|3d controller"
-# Expect: 2× AMD V620 + 1× NVIDIA RTX 3060
+# V620 = class 0380 "Display controller" (headless server card; not VGA/3D).
+lspci -nn | grep -iE "navi 21|\[1002:73a1\]"
+# Expect: 2× AMD Radeon Pro V620 entries (Navi 21)
 
 # === 2. Host IOMMU groups are clean ===
 for d in /sys/kernel/iommu_groups/*/devices/*; do
   n=${d#*/iommu_groups/*}; n=${n%%/*}
   printf 'IOMMU Group %s ' "$n"
   lspci -nns "${d##*/}"
-done | sort -V | grep -iE "vga|3d|audio.*nvidia|audio.*amd"
-# Each GPU + audio function should be in its own group
+done | sort -V | grep -iE "navi|amd.*audio"
+# Each V620 should be in its own group. V620s have NO audio function (headless),
+# so the only AMD audio you'll see is the Raphael iGPU's HDMI audio at 7e:00.1/7e:00.6.
 
 # === 3. ROCm sees both V620s (from llamacpp-amd LXC) ===
 pct exec 151 -- rocm-smi --showtemp
 # Expect tabular output with GPU 0 and GPU 1
 
-# === 4. CUDA sees the 3060 (from llamacpp-nv LXC) ===
-pct exec 152 -- nvidia-smi --query-gpu=index,name,memory.total --format=csv
-# Expect: 0, NVIDIA GeForce RTX 3060, 12288 MiB
+# === 4. (removed) CUDA 3060 check — LXC 152 destroyed in V620-only pivot ===
 
-# === 5. V620 llama-server is responding ===
-curl -s http://192.168.6.151:8080/v1/models | jq '.data[].id'
-# Expect: model identifier(s) including qwen3.5-35b
+# === 5. V620 chat llama-server is responding ===
+LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
+curl -sf -H "Authorization: Bearer $LLAMACPP_KEY" http://192.168.6.151:8080/v1/models | jq '.data[].id'
+# Expect: "rag-qwen3.6"
 
-# === 6. 3060 services are responding ===
+# === 6. V620 embed + rerank services are responding ===
 for port in 8082 8083; do
   echo "=== port $port ==="
-  curl -s "http://192.168.6.152:$port/v1/models" | jq '.data[].id'
+  curl -sf -H "Authorization: Bearer $LLAMACPP_KEY" "http://192.168.6.151:$port/v1/models" | jq '.data[].id'
 done
+# Expect: "qwen3-embed" on 8082, "bge-rerank" on 8083
 
-# === 7. Speculative decoding is wired (both target + draft on V620 LXC) ===
-pct exec 151 -- journalctl -u llama-server --since "10 min ago" | grep -iE "draft|spec"
-# Expect lines indicating draft acceptance statistics during recent generations
+# === 7. Speculative decoding state (expected: DISABLED for Qwen3.6) ===
+pct exec 151 -- journalctl -u llamacpp-chat --since "30 min ago" | grep -i "no implementations specified for speculative decoding"
+# Expect: a line confirming spec-decode is off (vocab mismatch — see runbook §5.11.3).
+# Re-enable by setting LLAMA_DRAFT_REPO in config.env once a vocab-matched
+# Qwen3.6 small variant becomes available.
 
 # === 8. Router is healthy and aggregates models ===
 curl -s http://192.168.6.153:8000/healthz
@@ -1516,28 +1480,34 @@ curl -s http://192.168.6.153:8000/v1/models | jq '.data[].id'
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-Strip-Thinking: true" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
+  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
   | grep -c '<think>'
-# Expect: 0
+# Expect: 0 (rag-qwen3.6 alias disables thinking via chat_template_kwargs.enable_thinking=false
+# AND the router regex-strips any leaked <think> blocks as a belt-and-suspenders backup)
 
 # === 10. Router preserves thinking by default ===
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
+  -H "Authorization: Bearer $ROUTER_KEY" \
+  -d '{"model":"qwen3.6-think","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
   | grep -c '<think>'
-# Expect: > 0 (thinking blocks present)
+# Expect: > 0 (thinking blocks present — qwen3.6-think alias enables thinking)
 
 # === 11. Router keepalive works during long generation ===
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3.5","stream":true,"messages":[{"role":"user","content":"Write a 2000-word essay on ZFS internals."}]}' \
+  -H "Authorization: Bearer $ROUTER_KEY" \
+  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"Write a 2000-word essay on ZFS internals."}]}' \
   | grep -E "^: ping" | head -3
-# Expect: at least one ": ping" line during slow generation
+# Expect: at least one ": ping" line during slow generation. The first ": ping" is
+# emitted immediately, before upstream connect, so clients see a byte right away
+# instead of waiting through the prompt-processing window.
 
 # === 12. Embedding produces 1024-dim vectors ===
 curl -s http://192.168.6.153:8000/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-embedding","input":"dimension probe"}' \
+  -H "Authorization: Bearer $ROUTER_KEY" \
+  -d '{"model":"qwen3-embed","input":"dimension probe"}' \
   | jq '.data[0].embedding | length'
 # Expect: 1024
 
@@ -1665,81 +1635,9 @@ echo "==> Done. Verify GPUs with: pct exec $VMID -- rocminfo | grep gfx1030"
 echo "==> Then create /etc/systemd/system/llama-server.service per the doc."
 ```
 
-### llamacpp-nv-lxc.sh
+### ~~llamacpp-nv-lxc.sh~~ — removed in V620-only pivot
 
-```bash
-#!/usr/bin/env bash
-# llamacpp-nv-lxc.sh — Provision the 3060 CUDA llama.cpp LXC
-
-set -euo pipefail
-
-VMID="${VMID:-152}"
-HOSTNAME="${HOSTNAME:-llamacpp-nv}"
-TEMPLATE="${TEMPLATE:-local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst}"
-CORES="${CORES:-4}"
-MEMORY="${MEMORY:-16384}"
-ROOTFS="${ROOTFS:-local-zfs:48}"
-BRIDGE="${BRIDGE:-vmbr0}"
-MODELS_DIR="${MODELS_DIR:-/tank/models}"
-DRIVER_VERSION="${DRIVER_VERSION:?must specify DRIVER_VERSION matching host nvidia-smi}"
-
-echo "==> Creating LXC $VMID ($HOSTNAME)"
-pct create "$VMID" "$TEMPLATE" \
-  --hostname "$HOSTNAME" \
-  --cores "$CORES" \
-  --memory "$MEMORY" \
-  --rootfs "$ROOTFS" \
-  --net0 "name=eth0,bridge=$BRIDGE,firewall=0,ip=dhcp,type=veth" \
-  --features nesting=1 \
-  --unprivileged 1 \
-  --ostype ubuntu \
-  --start 0
-
-CONF="/etc/pve/lxc/${VMID}.conf"
-cat <<EOF >> "$CONF"
-
-mp0: ${MODELS_DIR},mp=/opt/models,ro=1
-
-lxc.cgroup2.devices.allow: c 195:* rwm
-lxc.cgroup2.devices.allow: c 240:* rwm
-lxc.cgroup2.devices.allow: c 506:* rwm
-lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
-lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-modeset dev/nvidia-modeset none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
-lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
-
-lxc.apparmor.profile: unconfined
-lxc.cap.drop:
-EOF
-
-pct start "$VMID"
-sleep 5
-
-pct exec "$VMID" -- bash -c "
-  set -e
-  apt update && apt install -y wget build-essential cmake git
-  cd /tmp
-  wget -q https://us.download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-  chmod +x NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run
-  ./NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run --no-kernel-module -s
-
-  wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-  dpkg -i cuda-keyring_1.1-1_all.deb
-  apt update
-  apt install -y cuda-toolkit-12-6
-
-  cd /opt
-  git clone https://github.com/ggerganov/llama.cpp.git
-  cd llama.cpp
-  cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 \
-    -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_SERVER=ON
-  cmake --build build --config Release -j 4
-"
-
-echo "==> Done. Verify with: pct exec $VMID -- nvidia-smi"
-```
+The pre-pivot design provisioned an NVIDIA 3060 LXC (`llamacpp-nv`, VMID 152) for the embedder + reranker + a fast-chat tier. **LXC 152 has been destroyed and the 3060 removed from the build.** The embedder and reranker workloads moved into LXC 151 as additional `llama-server` processes pinned per-card via `--main-gpu` — see [`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) for the current canonical provisioning. The old NVIDIA driver install, CUDA toolkit, and CUDA-backed llama.cpp build are gone.
 
 ### llm-router-lxc.sh
 
@@ -1794,5 +1692,5 @@ This document is published under [Creative Commons Attribution-ShareAlike 4.0 In
 - **Proxmox** — the hypervisor that makes this whole architecture practical
 - **llama.cpp / ggerganov** — the inference runtime that replaced Ollama for performance and speculative-decoding support
 - **AMD ROCm team** — for the RDNA 2 (`gfx1030`) target support that makes V620s viable for local inference
-- **Qwen team (Alibaba Cloud)** — open model weights including the 0.8B/35B family pairing that enables speculative decoding
+- **Qwen team (Alibaba Cloud)** — open Qwen3.6-35B-A3B (MoE, ~3 B active params/token) for the chat target plus Qwen3-Embedding-0.6B / Qwen3-Reranker-0.6B for the RAG retrieval pipeline
 - **AnythingLLM (Mintplex Labs)** — RAG frontend, unchanged from v1
