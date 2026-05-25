@@ -19,6 +19,7 @@ This guide is for the operator who inherits or maintains a running cluster — c
 | Swap or update the chat / embed / rerank model | [§ 4](#-4-model-management) | [`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh), [`config.env.example`](./scripts/config.env.example) |
 | Understand or adjust input-token caps | [§ 5](#-5-three-tier-token-limit-layering) | — |
 | Tune rate limits, CORS, ALIAS_MAP, or read access logs | [§ 6](#-6-router-operations) | [`scripts/files/router-app.py`](./scripts/files/router-app.py), [`scripts/53-lxc-router.sh`](./scripts/53-lxc-router.sh) |
+| Use or extend server-side tool execution (Tavily, web_fetch, etc.) | [§ 6.8](#-68-server-side-tool-execution) | [`scripts/files/router-app.py`](./scripts/files/router-app.py) `TOOLS` registry |
 | Rotate an API key | [§ 7](#-7-secrets--key-rotation) | — |
 | Add a new RAG source / refresh / wipe / orphans | [§ 8](#-8-rag-operations) | [`scripts/rag/README.md`](./scripts/rag/README.md) |
 | Change embedder or reranker model | [§ 9](#-9-embedderreranker-retuning--re-ingest-playbook) | — |
@@ -612,7 +613,126 @@ pct exec 153 -- jq 'select(.route == "/v1/tavily/search") | .ts' /var/log/llm-ro
 
 For real quota state, check the Tavily dashboard — the router has no awareness of remaining credits. If Tavily returns `429` or `402`, the proxy passes it through wrapped in the OpenAI-style error envelope.
 
-### § 6.8 Safe restart
+### § 6.8 Server-side tool execution
+
+The router can run the OpenAI tools/tool_calls multi-turn loop internally instead of returning `tool_calls` to the client. Browser-side clients (the Weekly Customer Adoption Review artifact, ad-hoc curl scripts) get tool-augmented chat without implementing a dispatcher.
+
+**Opt-in per request:**
+
+```bash
+ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+
+curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-think",
+    "messages": [{"role":"user","content":"What was announced about TrueNAS Scale in the last 7 days?"}],
+    "tool_execution": "server",
+    "stream": false
+  }' \
+  http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content'
+```
+
+When `tool_execution` is `"server"`, the router:
+1. Injects all registered tool schemas if the client didn't supply `tools` (lets the client restrict which tools are exposed by passing a subset).
+2. Sends the augmented request upstream.
+3. If the model emits `finish_reason: tool_calls`, the router executes each tool via the registry and appends `role: "tool"` messages with results.
+4. Loops back to step 2 until either the model returns a non-tool-call response or `MAX_TOOL_ITERATIONS=5` is hit.
+5. Returns only the final assistant message to the client (tool_call deltas are not streamed downstream).
+
+Default is `"client"` — preserves legacy pass-through behavior for OpenCode/Cline/Continue, which run their own tool dispatchers.
+
+**Registered tools (v1):**
+
+| Name | Purpose | Backend |
+|---|---|---|
+| `tavily_search` | Web search with ranked results | Tavily Search API (`TAVILY_API_KEY`) |
+| `tavily_extract` | Pull full content from URLs | Tavily Extract API |
+| `tavily_crawl` | Follow links to gather site content | Tavily Crawl API |
+| `tavily_map` | Map a site's URL structure (URLs only) | Tavily Map API |
+| `web_fetch` | Direct HTTP(S) GET with 1 MB cap + SSRF guards | local httpx |
+
+`web_fetch` blocks loopback, private IPv4 ranges, and known cloud-metadata endpoints (`169.254.169.254`, `metadata.google.internal`, etc.) to prevent SSRF. The list is in [`router-app.py`](./scripts/files/router-app.py) `WEB_FETCH_DENY_HOSTS`.
+
+**Streaming:** server-side tool execution works in both streaming and non-streaming modes. In streaming mode, the router buffers tool_call deltas internally (the client never sees them) and only forwards `content` deltas. The result is a single streamed assistant response that may pause briefly between iterations while tools execute.
+
+**Adding a new tool:**
+
+1. Write the handler in [`scripts/files/router-app.py`](./scripts/files/router-app.py):
+
+```python
+async def _tool_my_new_tool(args: dict) -> dict:
+    # validate args, call upstream, return a JSON-serializable dict
+    return {"result": "..."}
+
+MY_NEW_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "my_new_tool",
+        "description": "What it does. Be clear — the model picks tools based on this text.",
+        "parameters": {
+            "type": "object",
+            "properties": {"some_arg": {"type": "string", "description": "..."}},
+            "required": ["some_arg"],
+        },
+    },
+}
+```
+
+2. Add it to the `TOOLS` registry dict:
+
+```python
+TOOLS = {
+    ...,
+    "my_new_tool": {"handler": _tool_my_new_tool, "schema": MY_NEW_TOOL_SCHEMA},
+}
+```
+
+3. Redeploy:
+
+```bash
+./scripts/53-lxc-router.sh
+```
+
+The script copies the updated `router-app.py` to LXC 153 and restarts the unit. The new tool is immediately available — clients calling with `tool_execution: "server"` will see it in the model's tool choices on the next request.
+
+**Safety bounds:**
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `MAX_TOOL_ITERATIONS` | 5 | Cap on multi-turn loop iterations |
+| `TOOL_EXECUTION_DEFAULT` | `client` | Default when request doesn't set `tool_execution` |
+| `WEB_FETCH_MAX_SIZE_KB` | 1024 | Cap on `web_fetch` response body |
+| `WEB_FETCH_TIMEOUT_SECONDS` | 15 | Cap on `web_fetch` request time |
+| `MAX_STREAM_SECONDS` | 900 | Overall wall-clock cap across all iterations |
+
+Tool calls log to `/var/log/llm-router/access.log` with `route: "/v1/chat/completions:tool"` and the tool name in the `model` field. Filter with:
+
+```bash
+pct exec 153 -- jq 'select(.route == "/v1/chat/completions:tool")' /var/log/llm-router/access.log
+```
+
+**Verification (smoke test):**
+
+```bash
+ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+
+# Non-streaming, simple Tavily search question
+curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-think",
+    "messages": [{"role":"user","content":"What is the current TrueNAS Scale stable release?"}],
+    "tool_execution": "server",
+    "stream": false
+  }' \
+  http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content'
+
+# Check the access log for the tool call
+pct exec 153 -- tail -10 /var/log/llm-router/access.log | jq 'select(.route | contains("tool"))'
+```
+
+Expected: response references a recent TrueNAS release with citations, and the access log shows a `tavily_search` invocation.
+
+### § 6.9 Safe restart
 
 ```bash
 pct exec 153 -- systemctl restart llm-router
