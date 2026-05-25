@@ -11,7 +11,8 @@ big-session day of cluster work + artifact build-out.
 - **GPU cluster:** running, stable on Qwen3.6-35B-A3B. CORS works. Tavily proxy live.
 - **Artifact** (`weekly_customer_adoption_review.html`) — fully wired but **not yet tested end-to-end by you**. Three personal URL placeholders to fill in.
 - **RAG Phase 2** (openzfs / blog split / keycloak fixes) — resolved 2026-05-25 (commit 4f2b30e); full sdg-documentation wipe-loop baseline clean across all 5 sources.
-- **Three deferred decisions:** (1) Coder-Next take 2 with smaller quant, (2) runbook rewrite for current cluster state, (3) router-side MCP/tool execution layer.
+- **Docs refresh complete (2026-05-25, commits 5d3ab61 + cf4f277):** all docs aligned with live cluster state; new [`day-2-ops.md`](./day-2-ops.md) operations guide (14 sections, 1543 lines).
+- **Two deferred decisions:** (1) Coder-Next take 2 with smaller quant, (2) router-side MCP/tool execution layer.
 
 ---
 
@@ -219,8 +220,10 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 ### Later (separate planning sessions)
 
 - [ ] Coder-Next take 2: enumerate Unsloth Q3/Q4 quants for Qwen3-Coder-Next, do proper VRAM budget table (embed + rerank co-residency), pick a quant that fits with headroom not at the edge
-- [ ] `setup-runbook.md` Phase 5 rewrite + `local-gpu-cluster-v2.md` model-section rewrite — defer until model topology stabilizes (12+ stale references to Qwen3.6 across docs)
+- [x] `setup-runbook.md` Phase 5 rewrite + `local-gpu-cluster-v2.md` model-section rewrite — **done 2026-05-25** in commit 5d3ab61 (5-file refresh against ground-truth). Day-2-ops follow-on doc added in cf4f277.
 - [ ] Router-side MCP/tool execution: promote Tavily (and others) from per-client (OpenCode) config to cluster capability. Half-day to a day of work. Would let the artifact's chat completions use tools natively instead of the browser pre-fetching search and stuffing prompts.
+- [ ] **Monitoring & alerting setup** — surfaced by the day-2-ops review (cf4f277). The router exposes `/metrics` (Prometheus, IP-allowlisted) but there's no scrape config, no alert rules, no dashboards. Scope: Prometheus scrape configuration for the router endpoint, suggested alert thresholds (chat p95 latency, 5xx rate, embed queue depth, /tank disk %, fan-bridge down), and integration patterns with an external receiver (Grafana / AlertManager / ntfy / Discord webhook). Day-2-ops.md §2 + §12 cover reading existing metrics manually; this item is about closing the loop into proactive alerting.
+- [ ] **Security hardening checklist** — surfaced by the day-2-ops review (cf4f277). Current posture is Bearer auth on the router + IP-allowlists on `/metrics`, assuming LAN-only deployment behind a firewall. Scope for hardening: per-LXC SSH audit (key-only, non-default port, hardened sshd_config), fail2ban or equivalent against brute-force, audit logging strategy (who-did-what beyond access.log), secrets-at-rest review (file modes on /etc/router.env etc.), TLS termination if any service ever needs to be exposed beyond LAN. Becomes more important if the cluster's network exposure changes.
 
 ### Standing items (no urgent action)
 
