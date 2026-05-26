@@ -478,7 +478,7 @@ If `rocm-smi` shows ≥3 GB free on each card and the unit is stable for ~10 min
 
 - **Coding workstation** — Coder-Next is the chat model; all clients (OpenCode, AnythingLLM RAG, browser artifact) use it. RAG quality may degrade vs Qwen3.6 (different model strengths).
 - **RAG workstation** — Keep Qwen3.6-35B-A3B; Coder-Next not deployed.
-- **Switch on demand** — Keep both downloaded; use [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) to flip between profiles. ~5-15s on a warm cache; ~7-15 min on first use of a new model (HF download).
+- **Switch on demand** — Keep both downloaded; use [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) to flip between profiles. **~45-120s on a warm cache** (measured 2026-05-26: qwen3.6→coder 61s, coder→qwen3.6 45s); ~7-15 min on first use of a new model (HF download).
 
 The router's [`ALIAS_MAP`](./scripts/files/router-app.py) already maps `qwen3-coder` and `qwen3-coder-next` to the chat unit so clients can address the active model by either alias after a swap.
 
@@ -502,7 +502,22 @@ The swap script automates the four-step manual procedure above as a single atomi
 
 Profiles are defined in the `get_profile()` case statement at the top of the script. To add a third profile (e.g., a fine-tune, a different quant), extend that case and add the name to `PROFILE_NAMES`.
 
-**Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 5-15s.
+**Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 45-120s.
+
+**Tensor-split is profile-specific.** Each profile in [`get_profile()`](./scripts/swap-chat-model.sh) carries a `LLAMA_TENSOR_SPLIT` value alongside repo/quant/alias. The swap rewrites it in `config.env` so `51-lxc-amd.sh` picks it up on regen. Why per-profile:
+
+- llama.cpp places non-split tensors (output layer, embed table, some buffers) entirely on `--main-gpu` (default GPU 0). For Coder-Next (80B MoE) those non-split layers are larger than for Qwen3.6.
+- The embedder pins to GPU 0 (~1 GB) and the reranker to GPU 1 (~1.5 GB), compounding the asymmetry.
+
+Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
+
+| Profile | Split | GPU 0 | GPU 1 | Free GPU 0 | Free GPU 1 |
+|---|---|---|---|---|---|
+| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | ~50% | ~50% | comfortable | comfortable |
+| `coder` (UD-IQ4_XS, 38 GB) — initial `1,1` | `1,1` | 98% ⚠️ | 66% | 0.6 GB | 10.9 GB |
+| `coder` — tuned | `1,1.5` | **90%** | **82%** | **3.2 GB** | **5.8 GB** |
+
+The `1,1.5` value satisfies the "≥3 GB free on each card" budget. If you add a third profile, measure with `pct exec 151 -- rocm-smi --showmemuse -d 0 1` after the first swap and tune the split in `get_profile()`.
 
 **Triggering from a workstation:** add a thin SSH wrapper to your shell profile. Example PowerShell function for the Windows side:
 
