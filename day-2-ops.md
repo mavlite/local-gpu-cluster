@@ -517,14 +517,17 @@ Profiles are defined in the `get_profile()` case statement at the top of the scr
 
 Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 
-| Profile | Split | Ctx | GPU 0 (idle) | GPU 1 (idle) | Free GPU 0 | Notes |
-|---|---|---|---|---|---|---|
-| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | ~50% | ~50% | comfortable | stable |
-| `coder` initial | `1,1` | 256K | 98% ⚠️ | 66% | 0.6 GB | OOM-adjacent at idle |
-| `coder` split-only fix | `1,1.5` | 256K | 90% | 82% | 3.2 GB | drifts to 98%/90% under 82K prefill, **stays there** |
-| `coder` final | `1,1.5` | **128K** | TBD | TBD | TBD | post-fix; re-run stability test to verify |
+| Profile | Split | Ctx | Cache-reuse | GPU 0 idle / peak | GPU 1 idle / peak | Free GPU 0 at peak | Notes |
+|---|---|---|---|---|---|---|---|
+| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024 | ~50% / — | ~50% / — | comfortable | stable, RAG prefix-reuse active |
+| `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
+| `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
+| `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
+| `coder` **final** | `1,1.5` | **128K** | **0** | **84% / 92%** | **77% / 85%** | **~2.6 GB** | **stable across repeated 82K prefills; no aborts** |
 
-The two-step tuning (split first, then ctx) reflects how the symptoms appeared. The split balances *idle* VRAM (post-load, pre-traffic); the ctx caps the *post-prefill* allocation peak. Both are needed for sustained operation.
+The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms appeared. The split balances *idle* VRAM; the ctx caps the *post-prefill* allocation peak; the cache-reuse disable eliminates a llama.cpp abort on duplicate-prompt replays. All three together are needed for sustained operation.
+
+Verified 2026-05-26 with two consecutive 82K-token requests: VRAM held at 92%/85% on both, no drift between requests, no journal errors.
 
 Re-validate after any profile change with [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) — it sends three escalating requests (~2K → ~30K → ~100K input tokens) and reports drift, peaks, and unit errors.
 
