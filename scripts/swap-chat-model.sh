@@ -108,6 +108,29 @@ get_profile() {
 
 PROFILE_NAMES=(qwen3.6 qwen3.6-hi coder)
 
+# Profile metadata for human display (--status, --help, swap header).
+# Kept separate from get_profile so the operational config stays terse.
+get_profile_description() {
+  case "$1" in
+    qwen3.6)    echo "Qwen3.6-35B-A3B UD-Q4_K_M — RAG / general (default)" ;;
+    qwen3.6-hi) echo "Qwen3.6-35B-A3B UD-Q5_K_M — higher-precision Q5; deep research" ;;
+    coder)      echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific" ;;
+    *)          echo "" ;;
+  esac
+}
+
+# Measured idle VRAM (and under-load peak where stability-tested). Printed
+# before each swap so operators know what they're committing to. Update
+# when day-2-ops.md § 4.4 table is updated.
+get_profile_vram_estimate() {
+  case "$1" in
+    qwen3.6)    echo "idle ~50% / ~50% on each card; not under-load-tested" ;;
+    qwen3.6-hi) echo "idle 73% / 60%; ~8.6 GB free GPU 0 at idle; not under-load-tested" ;;
+    coder)      echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
+    *)          echo "(no VRAM data — run stability-test after swap to characterize)" ;;
+  esac
+}
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 usage() {
@@ -259,8 +282,12 @@ current_profile=$(identify_profile "$current_hfrepo")
 if [[ "$TARGET" == "--status" ]]; then
   systemd_state=$(pct exec "$AMD_VMID" -- systemctl is-active llamacpp-chat 2>/dev/null || echo unknown)
   printf "currently loaded profile: %s\n" "$current_profile"
+  desc=$(get_profile_description "$current_profile")
+  [[ -n "$desc" ]] && printf "description:              %s\n" "$desc"
   printf "current --hf-repo:        %s\n" "${current_hfrepo:-<not detected>}"
   printf "llamacpp-chat state:      %s\n" "$systemd_state"
+  vram=$(get_profile_vram_estimate "$current_profile")
+  [[ -n "$vram" ]] && printf "VRAM characterization:    %s\n" "$vram"
   exit 0
 fi
 
@@ -286,6 +313,10 @@ fi
 
 started=$(date +%s)
 echo "[swap-chat-model] $(date -u +%FT%TZ) — ${current_profile} → ${TARGET}"
+target_desc=$(get_profile_description "$TARGET")
+[[ -n "$target_desc" ]] && echo "  target:        $target_desc"
+target_vram=$(get_profile_vram_estimate "$TARGET")
+[[ -n "$target_vram" ]] && echo "  expected VRAM: $target_vram"
 echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE})"
 
 write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE"
@@ -296,15 +327,13 @@ echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads sys
 
 echo "  restarting llamacpp-chat in LXC $AMD_VMID"
 
-# Capture a "since" anchor BEFORE the restart so --follow shows everything
-# from systemd's "Stopping..." line onward. Uses Unix epoch ('@SECONDS')
-# which journalctl --since parses unambiguously regardless of LXC timezone.
-# Prior cursor-based approach proved fragile through pct exec arg passing.
-journal_since=""
+# Always capture a "since" anchor BEFORE the restart. Used by --follow to
+# stream live output AND by the post-swap warning scan (--cache_reuse not
+# supported, control-looking token, etc.) so operators don't have to enable
+# --follow just to see them. Unix epoch ('@SECONDS') is unambiguous regardless
+# of LXC timezone.
+journal_since="@$(date +%s)"
 journal_lines_seen=0
-if $FOLLOW; then
-  journal_since="@$(date +%s)"
-fi
 
 pct exec "$AMD_VMID" -- systemctl daemon-reload
 pct exec "$AMD_VMID" -- systemctl restart llamacpp-chat
@@ -365,6 +394,15 @@ done
 elapsed=$(( $(date +%s) - started ))
 new_hfrepo=$(detect_current_hfrepo)
 
+# Surface notable llama.cpp warnings from the load journal so operators see
+# things like "cache_reuse is not supported by this context, it will be
+# disabled" without needing --follow. Filtered to known-meaningful patterns;
+# silent if nothing matches.
+notable_warnings=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
+  --since "$journal_since" --no-pager -o cat 2>/dev/null \
+  | grep -iE 'cache_reuse.*not supported|control-looking token|n_ctx_seq.*<.*n_ctx_train|will be disabled' \
+  | sort -u || true)
+
 echo
 echo "============================================================"
 echo " swapped to ${TARGET} in ${elapsed}s"
@@ -374,6 +412,12 @@ echo " --tensor-split:  ${TARGET_SPLIT}"
 echo " --ctx-size:      ${TARGET_CTX}"
 echo " --cache-reuse:   ${TARGET_CACHE_REUSE}"
 echo "============================================================"
+
+if [[ -n "$notable_warnings" ]]; then
+  echo
+  echo "Notable llama.cpp warnings during this load (informational, not errors):"
+  echo "$notable_warnings" | sed 's/^/  | /'
+fi
 echo
 echo "Smoke test through the router:"
 echo "  ROUTER_KEY=\$(pct exec ${ROUTER_VMID} -- awk -F= '/^ROUTER_API_KEY=/{print \$2}' /etc/router.env)"
