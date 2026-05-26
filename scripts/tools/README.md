@@ -1,6 +1,10 @@
-# Document ingestion tools
+# Tools
 
-Helper scripts for bulk-ingesting docs into AnythingLLM workspaces. Used during VCF and OPNsense corpus loads.
+Runtime helpers for the live cluster: document ingestion and stability load-testing.
+
+## Document ingestion
+
+For bulk-ingesting docs into AnythingLLM workspaces. Used during VCF and OPNsense corpus loads.
 
 | Script | Purpose |
 |---|---|
@@ -10,6 +14,13 @@ Helper scripts for bulk-ingesting docs into AnythingLLM workspaces. Used during 
 | `ingest-github-repo.sh` | Clone a GitHub doc repo (e.g., `opnsense/docs`) and ingest its `.rst`/`.md` files via `/document/raw-text`. Maps file paths to rendered docs URLs for citation usability and pulls per-file last-modified date from `git log`. Best path for any source where the maintainers publish the docs as text in a repo. |
 | `clear-workspace.sh` | Interactively wipe all embeddings from a workspace via `/workspace/<slug>/update-embeddings` deletes. Use before a clean re-ingest when the existing corpus is contaminated. |
 | `build-truenas-api-urls.sh` | Build a URL list for `api.truenas.com` (Sphinx-rendered middleware API reference). Prefers `sitemap.xml`, falls back to scraping per-section index pages. Output feeds into `recover-long-urls.sh`. Use any time a new TrueNAS API doc version needs to be ingested or refreshed. |
+
+## Stability + benchmark
+
+| Script | Purpose |
+|---|---|
+| `stability-test-coder.sh` | Load-test the `coder` chat profile under growing KV pressure. Sends three escalating chat-completions through the router (~2K → ~30K → ~100K prompt tokens), captures `rocm-smi` snapshots between each, scans `journalctl` for errors, reports peak VRAM, drift, latency, throughput, and a pass/fail verdict. Re-run after any change to coder's `LLAMA_TENSOR_SPLIT` / `LLAMA_CTX` / `LLAMA_CACHE_REUSE` in [`scripts/swap-chat-model.sh`](../swap-chat-model.sh). ~3-8 min total. |
+| `benchmark-coder-vs-rag.py` | A/B benchmark comparing Coder-Next vs Qwen3.6 against HuggingFace Inference Providers. Requires a valid HF token with Inference access. Not currently runnable in this environment due to HF auth limitations. |
 
 ## When to use which
 
