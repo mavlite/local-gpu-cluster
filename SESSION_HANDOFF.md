@@ -1,60 +1,181 @@
-# Session handoff — latest: 2026-05-25 (swap + stability)
+# Session handoff — latest: 2026-05-26 (chat profiles + RAG automation)
 
-Latest session at the top. Prior sessions preserved below; read top-to-bottom
-or skip to the section you care about. Nothing here assumes you have the
-prior conversation cached.
+Latest session at the top. Prior sessions preserved below for historical
+context. Nothing here assumes you have the prior conversation cached.
 
 ---
 
-## 2026-05-25 — Chat-model swap workflow + coder profile stability
+## 🎯 Next session focus
 
-**What shipped (8 commits, all pushed to `origin/main`):**
+**Weekly status report** (`weekly_customer_adoption_review.html`) — last touched 2026-05-24. The cluster work that made it possible (server-side tool execution, Tavily proxy, CORS) is all done and stable; the report itself has three loose ends:
 
-| Commit | Topic |
-|---|---|
-| `a809563` | `scripts/swap-chat-model.sh` — atomic profile flip (`qwen3.6` ↔ `coder`). Rewrites `LLAMA_HF_*` keys in `config.env`, re-runs `51-lxc-amd.sh`, restarts `llamacpp-chat`, waits for `active`. Idempotency check + `--force` + `--status`. |
-| `ec86f3a` | Per-profile `LLAMA_TENSOR_SPLIT`. `qwen3.6=1,1`, `coder=1,1.5` (compensates for Coder-Next's larger non-split layer mass on `--main-gpu`). |
-| `c3c10ad` | Doc: measured tuning numbers in `day-2-ops.md § 4.4`. |
-| `f5bd9f3` | `scripts/tools/stability-test-coder.sh` — three escalating prefills (~2K → ~30K → ~100K tokens), `rocm-smi` snapshots, journal scan, pass/fail verdict. |
-| `77549ae` | Stability test uses chat-unit `--hf-repo` (authoritative) instead of `/v1/models` (stale router cache). |
-| `8199b81` | Per-profile `LLAMA_CTX`. `qwen3.6=262144`, `coder=131072`. 256K left GPU 0 at 98% post-prefill with non-releasable activation buffers; 128K freed ~5-7 GB headroom. |
-| `2fe9589` | Per-profile `LLAMA_CACHE_REUSE`. `qwen3.6=1024`, `coder=0`. Disabled for coder to work around llama.cpp `common.cpp:1489: failed to remove sequence … p1=-1` abort on exact-match cached prompts. |
-| `71256d8` | Doc: final measured values for coder profile in `day-2-ops § 4.4`. |
+1. **Three personal URL placeholders** to fill — search the file for `#PASTE_YOUR_` (scheduler link, Box share, TAM MP Box).
+2. **End-to-end Refresh-from-web flow not yet verified.** Load the file in a browser, ⚙ AI Settings → "Local + Tavily web search (via router proxy)", click 🔄 on Releases / Announcements / Events. Verify real URLs (no `#` placeholders), real CVE numbers, region-appropriate events.
+3. **Gitignore decision pending** — file contains personal/customer data. Options: gitignore live copy, sanitize as `.template.html` + gitignore live, or commit as-is (NOT recommended). See [GITIGNORE NOTE in 2026-05-24 section](#%EF%B8%8F-gitignore-note).
 
-Plus a router redeploy (`./scripts/53-lxc-router.sh`) so `/v1/models` advertises `qwen3-coder` + `qwen3-coder-next` from `ALIAS_MAP` (the deployed app was older than the source).
+Pick this up first when starting the new session. The cluster infrastructure underneath is rock-solid (see below); the artifact is the only loose end.
 
-**Final coder profile (verified 2026-05-25 across two consecutive 82K-prefill requests, no drift):**
-```
-TENSOR_SPLIT=1,1.5   CTX=131072   CACHE_REUSE=0
-Idle:   GPU0=84%   GPU1=77%
-Peak:   GPU0=92%   GPU1=85%   (bounded — no growth on repeated heavy prefills)
-```
+---
 
-**Day-to-day usage:**
+## 2026-05-26 — Chat-model swap workflow + RAG automation (~22 commits)
+
+A multi-theme session that started with a chat-model swap script and ended with the cluster fully characterized: three production-tuned chat profiles, generalized stability testing, dynamic router model discovery, full RAG automation. All commits pushed to `origin/main`.
+
+### Cluster end-state
+
+**Three chat profiles**, all load-tested under the T3a/T3b runaway-detection methodology (validates buffer behavior across consecutive 80K+ prefills):
+
+| Profile | Quant | Split | Ctx | Cache-reuse | Idle | Peak | Verdict |
+|---|---|---|---|---|---|---|---|
+| `qwen3.6` (default) | UD-Q4_K_M (~22 GB) | 1,1 | 256K | 1024† | 75 / 44 | 84 / 52 | ✅ |
+| `qwen3.6-hi` | UD-Q5_K_M (~26.5 GB) | 1,1.5 | 256K | 1024† | 73 / 60 | 81 / 68 | ✅ |
+| `coder` | UD-IQ4_XS (~38 GB) | 1,1.5 | 128K | 0 | 84 / 77 | 92 / 85 | ✅ |
+
+†llama.cpp auto-disables `cache_reuse` for all Q*_K_M + q8_0 KV configs in this build — runtime warning emitted, effective behavior is 0 across the board.
+
+**Universal pattern across all three profiles:** one-time +8pp activation-buffer allocation on first heavy prefill, then bounded (T3b matches T3a). Intrinsic to this llama.cpp build on V620+ROCm, documented in [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template).
+
+**Eight router aliases**, dynamically filtered by `/v1/models` based on currently-loaded profile (only aliases whose `backend` field matches what the chat unit is serving). `/healthz` now exposes `active_chat_profile` for monitoring.
+
+### Daily-use commands
+
 ```bash
-./scripts/swap-chat-model.sh --status     # what's loaded?
-./scripts/swap-chat-model.sh coder        # 30-60 s warm-cache swap
-./scripts/swap-chat-model.sh qwen3.6      # swap back
-./scripts/tools/stability-test-coder.sh   # re-verify after any tuning change
+# Profile swap (auto-detects current, prints VRAM characterization + description before swap)
+./scripts/swap-chat-model.sh --status
+./scripts/swap-chat-model.sh qwen3.6        # 22 GB Q4, RAG/general default
+./scripts/swap-chat-model.sh qwen3.6-hi     # 26.5 GB Q5, deep research / precision
+./scripts/swap-chat-model.sh coder          # 38 GB IQ4, coding agent
+./scripts/swap-chat-model.sh --follow coder # also stream chat-unit journal during the swap
+
+# Stability test the loaded profile (auto-detects MODEL_ALIAS from chat unit)
+./scripts/tools/stability-test-coder.sh --follow
+
+# Capture coder summary to a file (cleaner than scrolling 50K-char terminal):
+./scripts/tools/stability-test-coder.sh --follow 2>&1 | tee /tmp/stab.log
+sed -n '/── summary ──/,$p' /tmp/stab.log
 ```
 
-Workstation wrapper (PowerShell example in [`day-2-ops § 4.4`](./day-2-ops.md#-44-vram-budget-template)):
+Workstation wrapper (PowerShell, in [`day-2-ops § 4.4`](./day-2-ops.md#-44-vram-budget-template)):
 ```powershell
-function Swap-ClusterChatModel { param([string]$Target) ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target" }
+function Swap-ClusterChatModel { param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","qwen3.6-hi","--status")][string]$Target) ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target" }
 Set-Alias swap Swap-ClusterChatModel
 ```
 
-**Discovered upstream bugs (worth tracking):**
+### Commits, grouped by theme
 
-1. **llama.cpp cache-reuse abort** on exact-match cached prompt replay. Triggered by Coder-Next architecture under `--cache-reuse 1024`; not observed on Qwen3.6. Worked around per-profile. Stack trace + repro signature in commit `2fe9589`. Would be worth reporting upstream once a minimal repro is built.
-2. **`/v1/models` was stale** because the deployed router-app.py on LXC 153 hadn't been redeployed after `qwen3-coder` was added to `ALIAS_MAP`. Fixed by re-running `./scripts/53-lxc-router.sh`. Possible future-proofing: make `/v1/models` query the chat-unit's actual current alias instead of returning all hardcoded `ALIAS_MAP` keys.
+**Initial swap workflow + per-profile tuning (8 commits):**
+| Commit | Topic |
+|---|---|
+| `a809563` | `scripts/swap-chat-model.sh` — atomic profile flip, idempotency, `--force`, `--status` |
+| `ec86f3a` | Per-profile `LLAMA_TENSOR_SPLIT` (`qwen3.6=1,1`, `coder=1,1.5`) |
+| `c3c10ad` | Doc: measured tuning numbers in `day-2-ops.md § 4.4` |
+| `f5bd9f3` | `scripts/tools/stability-test-coder.sh` (three escalating prefills, pass/fail) |
+| `77549ae` | Stability test reads chat-unit `--hf-repo` (authoritative) instead of `/v1/models` |
+| `8199b81` | Per-profile `LLAMA_CTX` (`qwen3.6=262144`, `coder=131072` to fix 98%→0.6GB headroom) |
+| `2fe9589` | Per-profile `LLAMA_CACHE_REUSE` (`coder=0` to work around llama.cpp cache-reuse abort) |
+| `71256d8` | Doc: final measured values for coder profile |
 
-**Remaining items (not blocking):**
+**Doc audit + currency fixes (2 commits):**
+| `07517a5` | Top-level README + scripts/README + SESSION_HANDOFF + scripts/tools/README updated for the swap workflow |
+| `eba2c0d` | Audit-driven currency fixes (PowerShell ValidateSet, --follow doc, dynamic /v1/models doc, setup-runbook cross-ref) |
 
-- `stability-test-coder.sh` could grow a `--follow` flag (stream journal during the wait loop, kill on exit) so the "felt stuck" silent-polling UX gap closes.
-- Slowdown WARN threshold (3× T2→T3) is too aggressive for context-length tests — quadratic attention naturally produces ~3-6× per-token slowdown at the input growth ratios in T2 vs T3. Bump to 5× or make context-aware.
-- Stability test currently single-profile (coder). If we add a third profile later, mirror it (or generalize).
-- The benchmark script `scripts/tools/benchmark-coder-vs-rag.py` requires HF Inference Providers; the available HF token doesn't have that permission. Either provision a proper token or remove the script.
+**Third profile + rebalance (4 commits):**
+| `ccedb6e` | New `qwen3.6-hi` profile (UD-Q5_K_M, ~26.5 GB) wired up across swap script + router ALIAS_MAP + docs |
+| `2b22f86` | qwen3.6-hi initial VRAM measurement (1,1 split → 82/51) |
+| `81908ec` | Rebalanced qwen3.6-hi to 1,1.5 split (predicted 73/60) |
+| `5f7df91` | Locked in 1,1.5 split + measured exactly matches prediction (73/60) |
+
+**UX improvements (2 commits):**
+| `9194185` | `--follow` flag on both swap-chat-model.sh and stability-test-coder.sh; dynamic `/v1/models` filters by loaded profile |
+| `6c4ad9c` | `--follow` rewrite (cursor approach was fragile; switched to `--since` timestamp + line count); `identify_profile` matches on repo+quant not just repo (fixes `qwen3.6-hi → qwen3.6` misreporting) |
+
+**Stability test refinements (3 commits):**
+| `9f5aa0f` | T1+T2 bundle: generalized stability test (auto-detect MODEL_ALIAS), threshold sanity (3×→5× slowdown, post-settle remeasure), swap UX (descriptions + VRAM characterization in `--status`), `/healthz` adds `active_chat_profile` |
+| `949cce9` | Distinguish bounded one-time buffers (info) from runaway drift (fail) |
+| `c3bac2f` | T3a+T3b pair for proper runaway detection (was comparing T2→T3 which conflated first-allocation with compounding) |
+
+**Full profile validation (1 commit):**
+| `326b401` | All three profiles load-tested with T3a/T3b methodology, measurements locked in |
+
+**Tier 3 backlog (2 commits):**
+| `9f56d09` | Spec-decode HF re-check (MTP variant found — see deferred item below) + `--approve <proposal>` workflow with drift detection + archive |
+| `9acf8d8` | RAG Phase 3 — `58-rag-refresh-timer.sh` provisions daily systemd timer + Prometheus textfile metrics |
+
+### Tooling shipped this session
+
+| Path | Purpose |
+|---|---|
+| [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) | Atomic profile flip between `qwen3.6` / `qwen3.6-hi` / `coder`. `--status`, `--force`, `--follow`. Auto-warns about notable llama.cpp warnings after each swap. |
+| [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) | Generalized load test (auto-detects active profile). T1/T2/T3a/T3b methodology. `--follow`, `--model`, `--keep-tmp`. |
+| [`scripts/58-rag-refresh-timer.sh`](./scripts/58-rag-refresh-timer.sh) | Provisions systemd timer for daily RAG refresh + Prometheus textfile metrics at `/var/lib/rag-refresh/metrics.prom`. |
+| [`scripts/rag/refresh.py --approve PROPOSAL`](./scripts/rag/refresh.py) | Apply a halted safety proposal. Drift-aware (halts again with `-drift.json` if source changed); archives to `_proposals/applied/` on success. |
+
+### Discovered upstream bugs / behavior
+
+1. **llama.cpp `cache_reuse` auto-disable is universal** (not Coder-Next-specific). Every Q*_K_M + q8_0 KV config trips `cache_reuse is not supported by this context, it will be disabled` at load. Our setting `CACHE_REUSE=1024` on `qwen3.6` and `qwen3.6-hi` has been a no-op the whole time.
+2. **Activation-buffer allocation is bounded but persistent.** First heavy prefill (~80K+ tokens) allocates ~+8pp VRAM that doesn't release post-request. Second consecutive heavy prefill stays at the same level — bounded, not runaway. Verified by T3a vs T3b delta = 0pp on all three profiles.
+3. **llama.cpp cache-reuse abort** on Coder-Next exact-match cached prompt replay. `common.cpp:1489: failed to remove sequence … p1=-1` → `status=6/ABRT`. Worked around per-profile (`coder` has `LLAMA_CACHE_REUSE=0`). Worth reporting upstream once minimal repro is built.
+
+### Tier 3 deferred items (full implementation outlines preserved)
+
+- **MTP (Multi-Token Prediction) integration** — HF probe surfaced `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (updated 2026-05-20), an MTP-trained variant of our chat model. ~1.5–2× faster inference claimed, drop-in tokenizer-compatible. Implementation outline in [day-2-ops § 4.5](./day-2-ops.md#-45-enabling-spec-decode-when-a-compatible-draft-ships). Wiring needs: `51-lxc-amd.sh` to learn `--spec-type draft-mtp`, new profile field for spec type, ~22.7 GB download, re-stability-test. ~half-day work.
+- **`hugo_sitemap` / `url_list_hashed` handler stubs** — intentionally not built (no current source needs them; YAGNI). Implement when a real source requires Last-Modified caching or hand-curated URL lists.
+- **Monitoring + alerting** — `/var/lib/rag-refresh/metrics.prom` is now ready for a Prometheus scraper, but node_exporter isn't deployed. Carry-over from 2026-05-24's list of standing items.
+- **Security hardening checklist** — carry-over from 2026-05-24.
+- **`scripts/tools/benchmark-coder-vs-rag.py`** — still broken (HF Inference Providers auth blocks it). Either provision a paid HF token or delete the script.
+- **Weekly status report** — see "🎯 Next session focus" at top.
+
+### Repo state snapshot (2026-05-26)
+
+**Branch:** `main`. **Tracking:** `origin/main`. **HEAD:** `9acf8d8`.
+
+Latest 10 commits:
+```
+9acf8d8  T3: RAG Phase 3 — scheduled refresh + Prometheus textfile metrics
+9f56d09  T3: spec-decode HF re-check + --approve workflow
+326b401  all three profiles load-tested + measurements locked in
+c3bac2f  stability test: T3a + T3b pair for proper runaway-buffer detection
+949cce9  stability test: distinguish bounded one-time buffers from runaway drift
+9f5aa0f  T1 + T2: stability test generalization, threshold sanity, swap UX, /healthz
+eba2c0d  docs: audit-driven currency fixes for the swap workflow
+5f7df91  qwen3.6-hi: lock in 1,1.5 split with measured numbers
+81908ec  qwen3.6-hi: rebalance tensor-split 1,1 → 1,1.5
+2b22f86  day-2-ops § 4.4: record qwen3.6-hi initial VRAM measurement
+```
+
+Working tree clean at session end. No uncommitted changes.
+
+### How to verify the cluster on a new PC
+
+```bash
+# 0. SSH to the Proxmox host
+ssh gpu-cluster
+
+# 1. Pull the latest
+cd /root/local-gpu-cluster && git pull
+
+# 2. Cluster health
+./scripts/swap-chat-model.sh --status
+pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank
+pct exec 153 -- systemctl is-active llm-router
+pct exec 154 -- docker ps | grep anythingllm
+
+# 3. Router /healthz now includes active_chat_profile
+curl -s http://192.168.6.153:8000/healthz | jq
+
+# 4. /v1/models is profile-aware
+ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
+curl -sf -H "Authorization: Bearer $ROUTER_KEY" http://192.168.6.153:8000/v1/models | jq -r '.data[].id'
+
+# 5. If phase 58 was deployed, check the RAG refresh timer
+systemctl list-timers rag-refresh.timer --no-pager 2>/dev/null
+cat /var/lib/rag-refresh/metrics.prom 2>/dev/null
+```
+
+If phase 58 hasn't been deployed yet:
+```bash
+./scripts/58-rag-refresh-timer.sh
+```
 
 ---
 
