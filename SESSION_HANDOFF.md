@@ -1,4 +1,64 @@
-# Session handoff — 2026-05-24
+# Session handoff — latest: 2026-05-25 (swap + stability)
+
+Latest session at the top. Prior sessions preserved below; read top-to-bottom
+or skip to the section you care about. Nothing here assumes you have the
+prior conversation cached.
+
+---
+
+## 2026-05-25 — Chat-model swap workflow + coder profile stability
+
+**What shipped (8 commits, all pushed to `origin/main`):**
+
+| Commit | Topic |
+|---|---|
+| `a809563` | `scripts/swap-chat-model.sh` — atomic profile flip (`qwen3.6` ↔ `coder`). Rewrites `LLAMA_HF_*` keys in `config.env`, re-runs `51-lxc-amd.sh`, restarts `llamacpp-chat`, waits for `active`. Idempotency check + `--force` + `--status`. |
+| `ec86f3a` | Per-profile `LLAMA_TENSOR_SPLIT`. `qwen3.6=1,1`, `coder=1,1.5` (compensates for Coder-Next's larger non-split layer mass on `--main-gpu`). |
+| `c3c10ad` | Doc: measured tuning numbers in `day-2-ops.md § 4.4`. |
+| `f5bd9f3` | `scripts/tools/stability-test-coder.sh` — three escalating prefills (~2K → ~30K → ~100K tokens), `rocm-smi` snapshots, journal scan, pass/fail verdict. |
+| `77549ae` | Stability test uses chat-unit `--hf-repo` (authoritative) instead of `/v1/models` (stale router cache). |
+| `8199b81` | Per-profile `LLAMA_CTX`. `qwen3.6=262144`, `coder=131072`. 256K left GPU 0 at 98% post-prefill with non-releasable activation buffers; 128K freed ~5-7 GB headroom. |
+| `2fe9589` | Per-profile `LLAMA_CACHE_REUSE`. `qwen3.6=1024`, `coder=0`. Disabled for coder to work around llama.cpp `common.cpp:1489: failed to remove sequence … p1=-1` abort on exact-match cached prompts. |
+| `71256d8` | Doc: final measured values for coder profile in `day-2-ops § 4.4`. |
+
+Plus a router redeploy (`./scripts/53-lxc-router.sh`) so `/v1/models` advertises `qwen3-coder` + `qwen3-coder-next` from `ALIAS_MAP` (the deployed app was older than the source).
+
+**Final coder profile (verified 2026-05-25 across two consecutive 82K-prefill requests, no drift):**
+```
+TENSOR_SPLIT=1,1.5   CTX=131072   CACHE_REUSE=0
+Idle:   GPU0=84%   GPU1=77%
+Peak:   GPU0=92%   GPU1=85%   (bounded — no growth on repeated heavy prefills)
+```
+
+**Day-to-day usage:**
+```bash
+./scripts/swap-chat-model.sh --status     # what's loaded?
+./scripts/swap-chat-model.sh coder        # 30-60 s warm-cache swap
+./scripts/swap-chat-model.sh qwen3.6      # swap back
+./scripts/tools/stability-test-coder.sh   # re-verify after any tuning change
+```
+
+Workstation wrapper (PowerShell example in [`day-2-ops § 4.4`](./day-2-ops.md#-44-vram-budget-template)):
+```powershell
+function Swap-ClusterChatModel { param([string]$Target) ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target" }
+Set-Alias swap Swap-ClusterChatModel
+```
+
+**Discovered upstream bugs (worth tracking):**
+
+1. **llama.cpp cache-reuse abort** on exact-match cached prompt replay. Triggered by Coder-Next architecture under `--cache-reuse 1024`; not observed on Qwen3.6. Worked around per-profile. Stack trace + repro signature in commit `2fe9589`. Would be worth reporting upstream once a minimal repro is built.
+2. **`/v1/models` was stale** because the deployed router-app.py on LXC 153 hadn't been redeployed after `qwen3-coder` was added to `ALIAS_MAP`. Fixed by re-running `./scripts/53-lxc-router.sh`. Possible future-proofing: make `/v1/models` query the chat-unit's actual current alias instead of returning all hardcoded `ALIAS_MAP` keys.
+
+**Remaining items (not blocking):**
+
+- `stability-test-coder.sh` could grow a `--follow` flag (stream journal during the wait loop, kill on exit) so the "felt stuck" silent-polling UX gap closes.
+- Slowdown WARN threshold (3× T2→T3) is too aggressive for context-length tests — quadratic attention naturally produces ~3-6× per-token slowdown at the input growth ratios in T2 vs T3. Bump to 5× or make context-aware.
+- Stability test currently single-profile (coder). If we add a third profile later, mirror it (or generalize).
+- The benchmark script `scripts/tools/benchmark-coder-vs-rag.py` requires HF Inference Providers; the available HF token doesn't have that permission. Either provision a proper token or remove the script.
+
+---
+
+# Session handoff — 2026-05-24 (prior session, kept for context)
 
 Continuation notes for picking this work up on another PC. Read top-to-bottom;
 nothing in here assumes you have the prior conversation cached. Last activity:
@@ -6,7 +66,7 @@ big-session day of cluster work + artifact build-out.
 
 ---
 
-## TL;DR
+## TL;DR (2026-05-24)
 
 - **GPU cluster:** running, stable on Qwen3.6-35B-A3B. CORS works. Tavily proxy live.
 - **Artifact** (`weekly_customer_adoption_review.html`) — fully wired but **not yet tested end-to-end by you**. Three personal URL placeholders to fill in.

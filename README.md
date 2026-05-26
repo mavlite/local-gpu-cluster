@@ -28,9 +28,12 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 
 | Service | Model | Port | Notes |
 |---|---|---|---|
-| chat | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | both V620s tensor-split; `--reasoning-format deepseek`, `--jinja`, `--api-key`, thinking-mode-off auto-injected by router for `rag-*` aliases |
+| chat (default profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | both V620s tensor-split 1,1; 256K ctx; `--reasoning-format deepseek`, `--jinja`, `--api-key`, thinking-mode-off auto-injected by router for `rag-*` aliases |
+| chat (alt profile `coder`) | Qwen3-Coder-Next 80B/3B-A (UD-IQ4_XS, ~38 GB) | 8080 | swaps in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh); tensor-split 1,1.5; 128K ctx; cache-reuse disabled (llama.cpp bug workaround). Only ONE chat profile occupies the chat slot at a time |
 | embed | Qwen3-Embedding-0.6B (Q8_0, 1024-dim) | 8082 | V620 #1 pinned; `--pooling last` (CRITICAL — `cls` produces wrong embeddings) |
 | rerank | BGE Reranker v2-m3 (Q4_K_M) | 8083 | V620 #2 pinned; `--reranking --pooling rank` |
+
+Swap between chat profiles in 30–60 s with [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) — see [`day-2-ops.md § 4.4`](./day-2-ops.md#-44-vram-budget-template) for the workflow, tuning rationale, and measured VRAM distribution per profile. [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) provides reproducible load testing.
 
 ### Router (LXC 153) features
 
@@ -42,7 +45,7 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 - CORS middleware (`CORS_ALLOW_ORIGINS=*` by default) — required for browser-side clients loaded from `file://` (e.g. the local HTML artifact) to call the router via `fetch()`; OPTIONS preflight bypasses Bearer auth so the preflight succeeds
 - SSE keepalive frames every 12 s, plus an immediate `: ping` flushed before upstream connect so clients' read timers don't fire during prompt-processing latency; `MAX_STREAM_SECONDS=900` wall-clock cap prevents a wedged upstream from holding a chat slot forever
 - Fail-open degraded mode on upstream 5xx (emits a `service_degraded` SSE frame so AnythingLLM can fall back without breaking the stream)
-- Three client-facing chat aliases all resolving to the same backend: `rag-qwen3.6` (thinking off, for AnythingLLM RAG synthesis), `qwen3.6-think` (thinking on, for OpenCode/Cline coding agents), `qwen3.6` (thinking-on convenience alias) — alias controls `chat_template_kwargs.enable_thinking` and whether `<think>...</think>` is regex-stripped from the response
+- Five client-facing chat aliases — three for the `qwen3.6` profile (`rag-qwen3.6` thinking-off for RAG synthesis, `qwen3.6-think` thinking-on for OpenCode/Cline, `qwen3.6` thinking-on convenience alias) and two for the `coder` profile (`qwen3-coder`, `qwen3-coder-next`). Alias controls `chat_template_kwargs.enable_thinking` and `<think>...</think>` regex-stripping. Only the alias matching the currently-loaded profile actually serves traffic; mismatched-profile requests pass through to llama-server unchanged (useful for one-line A/B testing)
 - Strips `[CONTEXT N]` / `(Context 0, 1)` chunk-reference markers from chat output (Qwen3.6 training-prior leak)
 - `/v1/completions` passthrough for FIM-style code completion (Continue.dev, Cody)
 - `POST /v1/tavily/search` proxy — holds the Tavily API key server-side so browser clients (e.g. the Weekly Customer Adoption Review artifact) can do live web search without ever seeing the key; whitelisted body fields, separate rate limit
@@ -115,11 +118,18 @@ For any OpenAI-compatible client (AnythingLLM, OpenCode, Cline, Continue.dev, ra
 ```
 Base URL:     http://192.168.6.153:8000/v1
 API Key:      pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env
-Model:        rag-qwen3.6
 Provider:     OpenAI-compatible
 ```
 
-For embeddings or reranking, use the same endpoint with model `qwen3-embed` or `bge-rerank`.
+Pick the model alias that matches your use case (alias must match the currently-loaded chat profile — swap with `scripts/swap-chat-model.sh`):
+
+| Use case | Model alias | Active profile required |
+|---|---|---|
+| AnythingLLM RAG | `rag-qwen3.6` | `qwen3.6` |
+| OpenCode / Cline (reasoning on) | `qwen3.6-think` or `qwen3.6` | `qwen3.6` |
+| Coding agent (Coder-Next) | `qwen3-coder` or `qwen3-coder-next` | `coder` |
+| Embeddings | `qwen3-embed` | any (separate unit) |
+| Reranking | `bge-rerank` | any (separate unit) |
 
 ---
 

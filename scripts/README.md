@@ -23,6 +23,15 @@ retuning, updates, hardware changes).
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.
 
+### Runtime tools (not phases — invoked on demand after deployment)
+
+| Script | Purpose |
+|---|---|
+| [`swap-chat-model.sh`](./swap-chat-model.sh) | Atomically flip the chat unit between profiles (e.g., `qwen3.6` ↔ `coder`). Rewrites `LLAMA_HF_*` + `LLAMA_TENSOR_SPLIT` + `LLAMA_CTX` + `LLAMA_CACHE_REUSE` in `config.env`, re-runs `51-lxc-amd.sh`, restarts `llamacpp-chat`, waits for active. See [day-2-ops § 4.4](../day-2-ops.md#-44-vram-budget-template). |
+| [`tools/stability-test-coder.sh`](./tools/stability-test-coder.sh) | Three escalating chat-completions requests (~2K → ~30K → ~100K input tokens) through the router; snapshots `rocm-smi` between each; scans `journalctl` for errors; reports peak VRAM, drift, latency, throughput. Re-run after any coder-profile tuning change. |
+| [`tools/`](./tools/) | Document ingestion tools (`ingest-urls.sh`, `recover-long-urls.sh`, `ingest-github-repo.sh`, `clear-workspace.sh`, etc.). See [`tools/README.md`](./tools/README.md). |
+| [`rag/refresh.py`](./rag/) | Declarative RAG corpus refresh (replaces ad-hoc ingest commands). See [`rag/README.md`](./rag/README.md). |
+
 ## Quick start
 
 ```bash
@@ -87,10 +96,10 @@ as three separate `llama-server` systemd units with per-card pinning:
 
 | Where | Service (unit) | Model | VRAM | Port |
 |------|----------------|-------|------|------|
-| V620 LXC 151 | `llamacpp-chat.service` (both V620s, `--tensor-split 1,1`) | Qwen3.6-35B-A3B UD-Q4_K_M (unsloth Dynamic), **256K ctx** (`--ctx-size 262144`, full window per slot at `--parallel 1`), q8_0 KV, `--cache-reuse 1024 --cache-ram 16384 --mlock --log-prefix --reasoning-format deepseek --jinja --no-mmproj` | ~22 GB weights + KV across both | 8080 |
+| V620 LXC 151 | `llamacpp-chat.service` (both V620s, tensor-split per profile) | **Profile-switched** via [`swap-chat-model.sh`](./swap-chat-model.sh): default `qwen3.6` (Qwen3.6-35B-A3B UD-Q4_K_M, 256K ctx, `tensor-split 1,1`, `cache-reuse 1024`, ~22 GB) or `coder` (Qwen3-Coder-Next UD-IQ4_XS, 128K ctx, `tensor-split 1,1.5`, `cache-reuse 0`, ~38 GB). Common flags: q8_0 KV, `--cache-ram 16384 --mlock --log-prefix --reasoning-format deepseek --jinja --no-mmproj` | ~22 GB (qwen3.6) / ~38 GB (coder) | 8080 |
 | V620 LXC 151 | `llamacpp-embed.service` (V620 #1, `--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`) | Qwen3-Embedding-0.6B Q8_0, **`--pooling last`** (NOT cls), 1024-dim, `--ctx-size 65536 --parallel 4` (16 K per slot) | ~1.2 GB | 8082 |
 | V620 LXC 151 | `llamacpp-rerank.service` (V620 #2, `--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`) | BGE-Reranker-v2-m3 Q4_K_M (gpustack GGUF; Qwen3-Reranker-0.6B is gated alt), `--embeddings --pooling rank --reranking` | ~1.5 GB | 8083 |
-| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/completions` FIM passthrough, `/v1/embeddings`, `/v1/rerank`, `/v1/tavily/search` proxy, `/v1/models`, `/healthz`, `/metrics`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control (chat=1, embed=4) + slowapi rate-limit + Prometheus + CORS middleware; three chat aliases (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) resolve to the same backend with different `enable_thinking` defaults | — | 8000 |
+| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/completions` FIM passthrough, `/v1/embeddings`, `/v1/rerank`, `/v1/tavily/search` proxy, `/v1/models`, `/healthz`, `/metrics`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control (chat=1, embed=4) + slowapi rate-limit + Prometheus + CORS middleware; five chat aliases (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6` for the `qwen3.6` profile; `qwen3-coder`, `qwen3-coder-next` for the `coder` profile) all resolve to the same chat backend with different `enable_thinking` / `strip_thinking` defaults | — | 8000 |
 
 Override anything via `config.env` — see `config.env.example` for the full knob list
 (`LLAMA_*`, `EMBED_*`, `RERANK_*`, admission + rate-limit env vars on the router).
