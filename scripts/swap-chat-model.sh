@@ -45,14 +45,22 @@ AMD_VMID="${AMD_VMID:-151}"
 ROUTER_VMID="${ROUTER_VMID:-153}"
 
 # ─── profile definitions ─────────────────────────────────────────────────────
-# Returns "REPO QUANT ALIAS" on stdout, rc=0; rc=1 on unknown name.
+# Returns "REPO QUANT ALIAS TENSOR_SPLIT" on stdout, rc=0; rc=1 on unknown name.
+#
+# TENSOR_SPLIT (comma-separated, no spaces) is profile-specific because the
+# embedder pins to GPU 0 and the reranker pins to GPU 1, AND llama.cpp places
+# non-split tensors (output layer, embedding table, some buffers) entirely on
+# --main-gpu (default 0). For Coder-Next those non-split layers are bigger
+# than for Qwen3.6, so a 1,1 split leaves GPU 0 ~10 GB heavier than GPU 1.
+# Coder uses 1,1.5 to push more *split* weight onto GPU 1 to compensate.
+# Tune empirically: target ~3 GB free on each card per day-2-ops.md § 4.4.
 get_profile() {
   case "$1" in
     qwen3.6)
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1"
       ;;
     coder)
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder"
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5"
       ;;
     *)
       return 1
@@ -112,18 +120,19 @@ identify_profile() {
   echo "unknown"
 }
 
-# Rewrite the three LLAMA_HF_* keys in config.env atomically. Uses Python so
+# Rewrite the four LLAMA_* keys in config.env atomically. Uses Python so
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
-  local repo="$1" quant="$2" alias="$3"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" <<'PY'
+  local repo="$1" quant="$2" alias="$3" tensor_split="$4"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias = sys.argv[1:5]
+path, repo, quant, alias, tensor_split = sys.argv[1:6]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
     "LLAMA_ALIAS": alias,
+    "LLAMA_TENSOR_SPLIT": tensor_split,
 }
 
 try:
@@ -211,7 +220,7 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT <<<"$profile_line"
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -230,9 +239,9 @@ fi
 
 started=$(date +%s)
 echo "[swap-chat-model] $(date -u +%FT%TZ) — ${current_profile} → ${TARGET}"
-echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS})"
+echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
@@ -275,8 +284,9 @@ new_hfrepo=$(detect_current_hfrepo)
 echo
 echo "============================================================"
 echo " swapped to ${TARGET} in ${elapsed}s"
-echo " --hf-repo:  ${new_hfrepo}"
-echo " --alias:    ${TARGET_ALIAS}"
+echo " --hf-repo:       ${new_hfrepo}"
+echo " --alias:         ${TARGET_ALIAS}"
+echo " --tensor-split:  ${TARGET_SPLIT}"
 echo "============================================================"
 echo
 echo "Smoke test through the router:"
