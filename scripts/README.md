@@ -18,6 +18,7 @@ retuning, updates, hardware changes).
 | 9     | `55-lxc-mcp.sh`         | MCP stack LXC, Docker, optional rsync from previous host   |
 | 5.13  | `56-fan-control.sh`     | Host PWM bridge (needs `FAN_PWM_PATH` discovered manually) |
 | 10    | `57-configure-anythingllm.sh` | Create + tune RAG workspaces via REST API (needs `ALLM_API_KEY`) |
+| 10.5  | `58-rag-refresh-timer.sh` | Systemd timer (daily 03:15 UTC by default) running `scripts/rag/refresh.py` on the PVE host via `/opt/vcf-scraper-venv`. Emits Prometheus textfile metrics to `/var/lib/rag-refresh/metrics.prom` after each run. |
 | 11    | `60-verify.sh`          | Appendix C smoke tests                                     |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
