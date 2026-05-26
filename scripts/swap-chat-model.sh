@@ -45,7 +45,7 @@ AMD_VMID="${AMD_VMID:-151}"
 ROUTER_VMID="${ROUTER_VMID:-153}"
 
 # ─── profile definitions ─────────────────────────────────────────────────────
-# Returns "REPO QUANT ALIAS TENSOR_SPLIT" on stdout, rc=0; rc=1 on unknown name.
+# Returns "REPO QUANT ALIAS TENSOR_SPLIT CTX" on stdout, rc=0; rc=1 on unknown name.
 #
 # TENSOR_SPLIT (comma-separated, no spaces) is profile-specific because the
 # embedder pins to GPU 0 and the reranker pins to GPU 1, AND llama.cpp places
@@ -54,13 +54,21 @@ ROUTER_VMID="${ROUTER_VMID:-153}"
 # than for Qwen3.6, so a 1,1 split leaves GPU 0 ~10 GB heavier than GPU 1.
 # Coder uses 1,1.5 to push more *split* weight onto GPU 1 to compensate.
 # Tune empirically: target ~3 GB free on each card per day-2-ops.md § 4.4.
+#
+# CTX (--ctx-size, total context window pre-allocated as KV cache) is also
+# profile-specific. Qwen3.6 with q8_0 KV at 256K uses ~6 GB total, fits with
+# headroom on the 1,1 split. Coder-Next is heavier (more non-split layers,
+# bigger activation buffers during prefill) and 256K leaves GPU 0 at 98%
+# post-prefill — activation scratch isn't freed and the next request OOMs.
+# Coder drops to 128K to halve the KV reservation, freeing ~5-7 GB of
+# activation headroom. 128K is well above typical coding-session usage.
 get_profile() {
   case "$1" in
     qwen3.6)
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1 262144"
       ;;
     coder)
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5"
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072"
       ;;
     *)
       return 1
@@ -120,19 +128,20 @@ identify_profile() {
   echo "unknown"
 }
 
-# Rewrite the four LLAMA_* keys in config.env atomically. Uses Python so
+# Rewrite the five LLAMA_* keys in config.env atomically. Uses Python so
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
-  local repo="$1" quant="$2" alias="$3" tensor_split="$4"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" <<'PY'
+  local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split = sys.argv[1:6]
+path, repo, quant, alias, tensor_split, ctx = sys.argv[1:7]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
     "LLAMA_ALIAS": alias,
     "LLAMA_TENSOR_SPLIT": tensor_split,
+    "LLAMA_CTX": ctx,
 }
 
 try:
@@ -220,7 +229,7 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX <<<"$profile_line"
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -239,9 +248,9 @@ fi
 
 started=$(date +%s)
 echo "[swap-chat-model] $(date -u +%FT%TZ) — ${current_profile} → ${TARGET}"
-echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT})"
+echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
@@ -287,6 +296,7 @@ echo " swapped to ${TARGET} in ${elapsed}s"
 echo " --hf-repo:       ${new_hfrepo}"
 echo " --alias:         ${TARGET_ALIAS}"
 echo " --tensor-split:  ${TARGET_SPLIT}"
+echo " --ctx-size:      ${TARGET_CTX}"
 echo "============================================================"
 echo
 echo "Smoke test through the router:"
