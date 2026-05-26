@@ -582,6 +582,30 @@ $EDITOR scripts/config.env
 
 If the new draft has a mismatched vocab, llama.cpp will refuse to load it with `draft model vocab type must match target model`. Revert `LLAMA_DRAFT_REPO=` (empty) and re-run.
 
+#### Better alternative: MTP variant (Multi-Token Prediction) — available 2026-05
+
+A spec-decode HF re-check on 2026-05-26 surfaced a better path than waiting for a compatible small draft: **`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`** is the MTP-trained variant of our current chat model. MTP integrates spec-decode into the *same* model via additional prediction heads — no separate draft model needed, and unsloth claims **~1.5-2× faster inference with no accuracy loss**.
+
+Key facts:
+
+- Same tokenizer as the standard variant (vocab 248320) → no vocab-mismatch risk
+- UD-Q4_K_M is 22.7 GB (vs. 22.1 GB for the standard) — drop-in VRAM budget
+- Requires llama.cpp built from latest source (we already do this via `51-lxc-amd.sh`'s `git pull --ff-only`)
+- New flags needed: `--spec-type draft-mtp --spec-draft-n-max 2`
+- Compatible with our `--parallel 1` setup (MTP doesn't yet support `-np > 1`, which is fine)
+- Compatible with our `--no-mmproj` (MTP doesn't support `--mmproj`, which we already disable)
+
+**Status: not yet integrated.** Wiring this in requires:
+
+1. Teach `51-lxc-amd.sh` to emit `--spec-type draft-mtp` + `--spec-draft-n-max` when a new `LLAMA_SPEC_TYPE` env is set
+2. Add a new field to `swap-chat-model.sh` profile schema for the MTP type
+3. Add a `qwen3.6-mtp` profile entry (or replace `qwen3.6` with MTP after validation)
+4. Add corresponding `ALIAS_MAP` entries in `router-app.py`
+5. First-time ~22.7 GB download
+6. Re-run stability test (T3a/T3b) against the MTP profile
+
+Defer until the operator wants the throughput boost. Implementation outline saved here so the next pass doesn't have to re-research.
+
 ### § 4.6 Cleaning up unused cached models ✅
 
 The HF cache accumulates downloaded files that may not be in use. As of last verification, ~50 GB is reclaimable:
