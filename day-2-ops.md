@@ -524,13 +524,15 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 
 | Profile | Split | Ctx | Cache-reuse | GPU 0 idle / peak | GPU 1 idle / peak | Free GPU 0 at peak | Notes |
 |---|---|---|---|---|---|---|---|
-| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024 | ~50% / — | ~50% / — | comfortable | stable, RAG prefix-reuse active |
-| `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 (same pattern as Coder) |
-| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / 81%** | **60% / 68%** | **~6.1 GB at peak** | validated under 90K-token prefill (2026-05-26); +8pp drift is bounded one-time activation buffer (consistent across all profiles on this llama.cpp build — second heavy request stays at peak). †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV) — runtime warning: `cache_reuse is not supported by this context, it will be disabled`. Effective behavior is `CACHE_REUSE=0` |
+| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024† | **75% / 84%** | **44% / 52%** | **~5.1 GB at peak** | validated 2026-05-26 (T3a/T3b methodology): T3a→T3b delta +0pp/+0pp, no errors, ✅ PASS. 31pp idle asymmetry: ~10 GB non-split tensor mass lands on GPU 0 (same `--main-gpu` pattern as the other profiles, just within comfortable headroom). †`cache_reuse` auto-disables here too (same llama.cpp Q*_K_M behavior) |
+| `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 |
+| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / 81%** | **60% / 68%** | **~6.1 GB at peak** | validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS. †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV). Effective behavior is `CACHE_REUSE=0` |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
-| `coder` **final** | `1,1.5` | **128K** | **0** | **84% / 92%** | **77% / 85%** | **~2.6 GB** | **stable across repeated 82K prefills; no aborts** |
+| `coder` **final** | `1,1.5` | **128K** | **0** | **84% / 92%** | **77% / 85%** | **~2.6 GB at peak** | re-validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS. Cache-reuse abort is now structurally impossible (set to 0) |
+
+**Universal pattern across all three profiles:** a one-time +8pp activation-buffer allocation on the first heavy prefill (~80K+ tokens), then bounded — repeat heavy requests stay at the same VRAM level. This is intrinsic to the current llama.cpp build on V620 + ROCm, not a per-profile issue. The post-settle drift is real (buffer is held, not released), but it's a one-shot allocation, not compounding fragmentation. Safe to ignore on any profile that meets the ≥3 GB free at peak target.
 
 The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms appeared. The split balances *idle* VRAM; the ctx caps the *post-prefill* allocation peak; the cache-reuse disable eliminates a llama.cpp abort on duplicate-prompt replays. All three together are needed for sustained operation.
 
