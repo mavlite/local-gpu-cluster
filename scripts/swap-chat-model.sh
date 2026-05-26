@@ -45,7 +45,8 @@ AMD_VMID="${AMD_VMID:-151}"
 ROUTER_VMID="${ROUTER_VMID:-153}"
 
 # ─── profile definitions ─────────────────────────────────────────────────────
-# Returns "REPO QUANT ALIAS TENSOR_SPLIT CTX" on stdout, rc=0; rc=1 on unknown name.
+# Returns "REPO QUANT ALIAS TENSOR_SPLIT CTX CACHE_REUSE" on stdout, rc=0;
+# rc=1 on unknown name.
 #
 # TENSOR_SPLIT (comma-separated, no spaces) is profile-specific because the
 # embedder pins to GPU 0 and the reranker pins to GPU 1, AND llama.cpp places
@@ -62,13 +63,21 @@ ROUTER_VMID="${ROUTER_VMID:-153}"
 # post-prefill — activation scratch isn't freed and the next request OOMs.
 # Coder drops to 128K to halve the KV reservation, freeing ~5-7 GB of
 # activation headroom. 128K is well above typical coding-session usage.
+#
+# CACHE_REUSE (--cache-reuse, prompt-prefix reuse window) is per-profile
+# because a llama.cpp bug aborts the unit when an exact-match cached prompt
+# replays (n_past gets set to len-1 and llama_memory_seq_rm fails with
+# "failed to remove sequence ... p1=-1"). Qwen3.6 has not triggered this
+# in practice and benefits from prefix reuse on long RAG system prompts.
+# Coder-Next does trigger it, so we disable cache-reuse for that profile.
+# Set to 0 to disable, >0 to enable with that token window.
 get_profile() {
   case "$1" in
     qwen3.6)
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1 262144"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1 262144 1024"
       ;;
     coder)
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072"
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0"
       ;;
     *)
       return 1
@@ -128,20 +137,21 @@ identify_profile() {
   echo "unknown"
 }
 
-# Rewrite the five LLAMA_* keys in config.env atomically. Uses Python so
+# Rewrite the six LLAMA_* keys in config.env atomically. Uses Python so
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
-  local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" <<'PY'
+  local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split, ctx = sys.argv[1:7]
+path, repo, quant, alias, tensor_split, ctx, cache_reuse = sys.argv[1:8]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
     "LLAMA_ALIAS": alias,
     "LLAMA_TENSOR_SPLIT": tensor_split,
     "LLAMA_CTX": ctx,
+    "LLAMA_CACHE_REUSE": cache_reuse,
 }
 
 try:
@@ -229,7 +239,7 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE <<<"$profile_line"
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -248,9 +258,9 @@ fi
 
 started=$(date +%s)
 echo "[swap-chat-model] $(date -u +%FT%TZ) — ${current_profile} → ${TARGET}"
-echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX})"
+echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
@@ -297,6 +307,7 @@ echo " --hf-repo:       ${new_hfrepo}"
 echo " --alias:         ${TARGET_ALIAS}"
 echo " --tensor-split:  ${TARGET_SPLIT}"
 echo " --ctx-size:      ${TARGET_CTX}"
+echo " --cache-reuse:   ${TARGET_CACHE_REUSE}"
 echo "============================================================"
 echo
 echo "Smoke test through the router:"
