@@ -135,15 +135,16 @@ detect_current_hfrepo() {
   ' 2>/dev/null || echo ""
 }
 
-# Match a detected --hf-repo string against the known profiles.
-# Echoes the matching profile name (e.g., "qwen3.6") or "unknown".
+# Match a detected --hf-repo string against the known profiles. Matches on
+# the full "repo:quant" pair because multiple profiles can share a repo
+# (e.g., qwen3.6 and qwen3.6-hi both use unsloth/Qwen3.6-35B-A3B-GGUF, just
+# different quants). Echoes the matching profile name or "unknown".
 identify_profile() {
-  local hfrepo="$1"
-  local repo="${hfrepo%%:*}"  # strip :QUANT
+  local hfrepo="$1"  # e.g., "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"
   for name in "${PROFILE_NAMES[@]}"; do
-    local profile_repo
-    profile_repo=$(get_profile "$name" | awk '{print $1}')
-    if [[ "$repo" == "$profile_repo" ]]; then
+    local profile_repo profile_quant
+    read -r profile_repo profile_quant _ <<<"$(get_profile "$name")"
+    if [[ "$hfrepo" == "${profile_repo}:${profile_quant}" ]]; then
       echo "$name"
       return 0
     fi
@@ -284,16 +285,31 @@ echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads sys
 
 echo "  restarting llamacpp-chat in LXC $AMD_VMID"
 
-# Capture journal cursor BEFORE the restart so --follow shows everything
-# from systemd's "Stopping..." line onward, not just from the wait loop.
-journal_cursor=""
+# Capture a "since" anchor BEFORE the restart so --follow shows everything
+# from systemd's "Stopping..." line onward. Uses Unix epoch ('@SECONDS')
+# which journalctl --since parses unambiguously regardless of LXC timezone.
+# Prior cursor-based approach proved fragile through pct exec arg passing.
+journal_since=""
+journal_lines_seen=0
 if $FOLLOW; then
-  journal_cursor=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat -n0 --show-cursor --no-pager 2>/dev/null \
-    | awk '/^-- cursor:/ {print $3; exit}' || true)
+  journal_since="@$(date +%s)"
 fi
 
 pct exec "$AMD_VMID" -- systemctl daemon-reload
 pct exec "$AMD_VMID" -- systemctl restart llamacpp-chat
+
+# Helper: print any chat-unit journal lines added since $journal_since that
+# haven't been printed yet (tracked via $journal_lines_seen line count).
+print_new_journal() {
+  local all new_count
+  all=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat --since "$journal_since" --no-pager -o cat 2>/dev/null || true)
+  [[ -z "$all" ]] && return 0
+  new_count=$(printf '%s\n' "$all" | wc -l)
+  if (( new_count > journal_lines_seen )); then
+    printf '%s\n' "$all" | tail -n +$((journal_lines_seen + 1)) | sed 's/^/  | /'
+    journal_lines_seen=$new_count
+  fi
+}
 
 # Poll for active. First-time use of a new model triggers a ~38 GB HF
 # download inside the unit (chat unit's TimeoutStartSec=1800s = 30 min).
@@ -308,6 +324,7 @@ while :; do
   state=$(pct exec "$AMD_VMID" -- systemctl is-active llamacpp-chat 2>/dev/null || echo unknown)
   if [[ "$state" == "active" ]]; then
     if $FOLLOW; then
+      print_new_journal   # flush any final lines (incl. "server is listening")
       echo "  → active"
     else
       echo " OK"
@@ -327,14 +344,7 @@ while :; do
     exit 1
   fi
   if $FOLLOW; then
-    out=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
-      ${journal_cursor:+--after-cursor "$journal_cursor"} \
-      --show-cursor --no-pager -o cat 2>/dev/null || true)
-    if [[ -n "$out" ]]; then
-      echo "$out" | grep -v '^-- cursor:' | sed 's/^/  | /'
-      new_cur=$(echo "$out" | awk '/^-- cursor:/ {print $3; exit}')
-      [[ -n "$new_cur" ]] && journal_cursor="$new_cur"
-    fi
+    print_new_journal
   else
     echo -n "."
   fi
