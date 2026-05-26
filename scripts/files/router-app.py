@@ -88,13 +88,17 @@ TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
 TAVILY_EXTRACT_URL = os.environ.get("TAVILY_EXTRACT_URL", "https://api.tavily.com/extract")
 TAVILY_CRAWL_URL = os.environ.get("TAVILY_CRAWL_URL", "https://api.tavily.com/crawl")
 TAVILY_MAP_URL = os.environ.get("TAVILY_MAP_URL", "https://api.tavily.com/map")
-# Whitelist of body fields we forward to Tavily Search. Anything else in the client
-# request is dropped. We omit raw_content / images / favicon by default to
-# keep response sizes small (the model only needs title + url + content).
+# Whitelist of body fields we forward to Tavily Search. Anything else in the
+# client request is dropped. We forward include_raw_content because clients
+# (e.g. the external HTML reporting artifact) need full advisory text
+# to mine identifiers like CVE-YYYY-NNNNN that don't fit in the 400-char
+# `content` snippet. images / favicon stay omitted to keep response sizes
+# bounded — we don't currently expose any client that needs them.
 TAVILY_ALLOWED_FIELDS = {
     "query", "search_depth", "chunks_per_source", "max_results",
-    "topic", "time_range", "start_date", "end_date",
-    "include_answer", "include_domains", "exclude_domains",
+    "topic", "time_range", "start_date", "end_date", "days",
+    "include_answer", "include_raw_content",
+    "include_domains", "exclude_domains",
     "country", "auto_parameters", "exact_match",
 }
 
@@ -788,8 +792,20 @@ async def _tool_tavily_map(args: dict) -> dict:
 
 
 async def _tool_web_fetch(args: dict) -> dict:
-    """HTTPS (or HTTP) GET with SSRF guards and size cap."""
+    """HTTPS (or HTTP) GET with SSRF guards and size cap.
+
+    SSRF strategy: resolve the hostname via getaddrinfo and reject if ANY
+    returned address is private/loopback/link-local/reserved, then connect
+    normally. This covers IPv4, IPv6 (including IPv4-mapped IPv6 like
+    ::ffff:192.168.x.x and ULA fc00::/7), and avoids the brittle prefix-string
+    matching the earlier guard used. A narrow DNS-rebinding window still
+    exists between resolution and connect, but for a single-shot GET with no
+    keepalive the gap is small enough not to be a usable primitive without
+    sub-millisecond TTLs the kernel resolver caches over anyway.
+    """
     import urllib.parse
+    import ipaddress
+    import socket
 
     url = args.get("url")
     if not isinstance(url, str) or not url.strip():
@@ -808,17 +824,33 @@ async def _tool_web_fetch(args: dict) -> dict:
         return {"error": "missing_host"}
     if host in WEB_FETCH_DENY_HOSTS:
         return {"error": "host_denied", "host": host}
-    # Block private IPv4 ranges as a coarse SSRF guard. Doesn't catch all
-    # forms (IPv6 link-local, DNS rebinding) but stops the obvious cases.
-    if host.startswith((
-        "10.",
-        "172.16.", "172.17.", "172.18.", "172.19.",
-        "172.20.", "172.21.", "172.22.", "172.23.",
-        "172.24.", "172.25.", "172.26.", "172.27.",
-        "172.28.", "172.29.", "172.30.", "172.31.",
-        "192.168.", "169.254.",
-    )):
-        return {"error": "host_denied_private_range", "host": host}
+
+    # Resolve and inspect every returned address. Reject if any is non-global.
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror as e:
+        return {"error": "dns_resolution_failed", "message": str(e)}
+
+    for info in infos:
+        sockaddr = info[4]
+        addr_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr_str)
+        except ValueError:
+            return {"error": "host_denied_unparseable_ip", "host": host, "addr": addr_str}
+        # `is_global` is True only for routable public addresses. Excludes
+        # private, loopback, link-local, multicast, reserved, unspecified,
+        # and (for IPv6) site-local + ULA. Also blocks IPv4-mapped IPv6
+        # forms like ::ffff:192.168.x.x because ipaddress unwraps them.
+        if not ip.is_global:
+            return {
+                "error": "host_denied_private_range",
+                "host": host,
+                "resolved": addr_str,
+            }
 
     headers = {
         "User-Agent": "local-gpu-cluster-router/1.0 (web_fetch)",
@@ -945,6 +977,30 @@ def _format_tool_result(name: str, result) -> str:
         return _format_tavily_crawl_map(result)
     # web_fetch / unknown — JSON pass-through
     return json.dumps(result, default=str)
+
+
+def _summarize_tool_result(result_str: str) -> str:
+    """Return a metadata-only summary of a tool result for access logs.
+
+    The full text is intentionally NOT included — tool results frequently
+    contain fetched page bodies (web_fetch), Tavily raw_content, or other
+    user-data that we don't want persisted in /var/log/llm-router/access.log
+    where it can outlive the request lifecycle. The summary returns size +
+    any error class found in the JSON envelope, which is enough for ops
+    debugging without retaining PII.
+    """
+    size = len(result_str)
+    # Most tool errors come back as `{"error": "<class>", ...}` JSON. Sniff
+    # the leading bytes cheaply rather than parsing the whole thing.
+    head = result_str.lstrip()[:80]
+    if head.startswith('{"error"'):
+        try:
+            obj = json.loads(result_str)
+            if isinstance(obj, dict) and "error" in obj:
+                return f"size={size} error={obj.get('error', 'unknown')!r}"
+        except (ValueError, json.JSONDecodeError):
+            pass
+    return f"size={size} ok"
 
 
 async def dispatch_tool(name: str, args_json: str) -> str:
@@ -1142,8 +1198,8 @@ async def tool_loop_stream(initial_body: dict, strip_thinking: bool, client_ip: 
                     200, client_ip,
                     error=(f"iter={iteration+1}/{MAX_TOOL_ITERATIONS}"
                            f" id={tc.get('id') or 'NULL'}"
-                           f" args={(fn.get('arguments') or '')[:120]}"
-                           f" result_head={result_str[:200]}"),
+                           f" args_size={len(fn.get('arguments') or '')}"
+                           f" result_summary={_summarize_tool_result(result_str)}"),
                 )
                 messages.append({
                     "role": "tool",
@@ -1236,8 +1292,8 @@ async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_i
                     200, client_ip,
                     error=(f"iter={iteration+1}/{MAX_TOOL_ITERATIONS}"
                            f" id={tc.get('id') or 'NULL'}"
-                           f" args={(fn.get('arguments') or '')[:120]}"
-                           f" result_head={result_str[:200]}"),
+                           f" args_size={len(fn.get('arguments') or '')}"
+                           f" result_summary={_summarize_tool_result(result_str)}"),
                 )
                 messages.append({
                     "role": "tool",
