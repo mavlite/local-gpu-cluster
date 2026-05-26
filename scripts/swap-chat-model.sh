@@ -125,7 +125,7 @@ get_profile_description() {
 get_profile_vram_estimate() {
   case "$1" in
     qwen3.6)    echo "idle ~50% / ~50% on each card; not under-load-tested" ;;
-    qwen3.6-hi) echo "idle 73% / 60%; ~8.6 GB free GPU 0 at idle; not under-load-tested" ;;
+    qwen3.6-hi) echo "idle 73% / 60%; peak 81% / 68% under 90K prefill; ~6.1 GB free GPU 0 at peak; bounded across repeated heavy prefills" ;;
     coder)      echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
     *)          echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
