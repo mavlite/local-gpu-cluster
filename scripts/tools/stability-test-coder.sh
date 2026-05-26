@@ -244,19 +244,20 @@ echo "  (approx tokens: divide bytes by 3.5)"
 echo
 
 # ─── --follow: spawn background journal poller for the test duration ─────────
-# Polls every 3s via --after-cursor (no `pct exec ... -f` so signal propagation
-# is clean — kill the subshell PID and it exits at the next sleep boundary).
+# Polls every 3s via --since "@EPOCH" + line-count tracking (cursor-based
+# polling proved fragile through pct exec arg-passing). Killing the subshell
+# PID terminates cleanly because no `pct exec ... -f` blocks across iterations.
 if $FOLLOW; then
   (
-    cur="$journal_cursor"  # reuse the pre-test cursor captured above
+    since="@$(date +%s)"
+    seen=0
     while sleep 3; do
-      out=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
-        ${cur:+--after-cursor "$cur"} \
-        --show-cursor --no-pager -o cat 2>/dev/null || true)
-      if [[ -n "$out" ]]; then
-        echo "$out" | grep -v '^-- cursor:' | sed 's/^/  | /'
-        new=$(echo "$out" | awk '/^-- cursor:/ {print $3; exit}')
-        [[ -n "$new" ]] && cur="$new"
+      all=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat --since "$since" --no-pager -o cat 2>/dev/null || true)
+      [[ -z "$all" ]] && continue
+      new_count=$(printf '%s\n' "$all" | wc -l)
+      if (( new_count > seen )); then
+        printf '%s\n' "$all" | tail -n +$((seen + 1)) | sed 's/^/  | /'
+        seen=$new_count
       fi
     done
   ) &
