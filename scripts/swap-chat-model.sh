@@ -91,7 +91,7 @@ PROFILE_NAMES=(qwen3.6 coder)
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--force] {${PROFILE_NAMES[*]/ /|}|--status}
+Usage: $(basename "$0") [--force] [--follow] {${PROFILE_NAMES[*]/ /|}|--status}
 
 Profiles:
   qwen3.6  — Qwen3.6-35B-A3B UD-Q4_K_M (RAG / general — default)
@@ -100,6 +100,9 @@ Profiles:
 Flags:
   --status  Show currently-loaded profile (no changes)
   --force   Re-run even if already on target profile
+  --follow  Stream chat-unit journal during the wait loop (suppresses dots).
+            Useful when waiting feels stuck — surfaces HF download / mmap /
+            ROCm init progress in real-ish time (5s poll).
 EOF
   exit "${1:-0}"
 }
@@ -206,12 +209,14 @@ PY
 # ─── parse args ──────────────────────────────────────────────────────────────
 
 FORCE=false
+FOLLOW=false
 TARGET=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --force)  FORCE=true; shift ;;
-    --status) TARGET="--status"; shift ;;
+    --force)   FORCE=true; shift ;;
+    --follow)  FOLLOW=true; shift ;;
+    --status)  TARGET="--status"; shift ;;
     -h|--help) usage 0 ;;
     --*)
       echo "unknown flag: $1" >&2; usage 2 ;;
@@ -267,18 +272,35 @@ echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads sys
   || { echo "  ERROR: 51-lxc-amd.sh failed; see /tmp/swap-chat-model.51-lxc-amd.log" >&2; exit 1; }
 
 echo "  restarting llamacpp-chat in LXC $AMD_VMID"
+
+# Capture journal cursor BEFORE the restart so --follow shows everything
+# from systemd's "Stopping..." line onward, not just from the wait loop.
+journal_cursor=""
+if $FOLLOW; then
+  journal_cursor=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat -n0 --show-cursor --no-pager 2>/dev/null \
+    | awk '/^-- cursor:/ {print $3; exit}' || true)
+fi
+
 pct exec "$AMD_VMID" -- systemctl daemon-reload
 pct exec "$AMD_VMID" -- systemctl restart llamacpp-chat
 
 # Poll for active. First-time use of a new model triggers a ~38 GB HF
 # download inside the unit (chat unit's TimeoutStartSec=1800s = 30 min).
 # A warm-cache load is typically 5-15s; allow generous timeout.
-echo -n "  waiting for active "
+if $FOLLOW; then
+  echo "  waiting for active — streaming chat-unit journal (5s poll):"
+else
+  echo -n "  waiting for active "
+fi
 deadline=$(( $(date +%s) + 1800 ))
 while :; do
   state=$(pct exec "$AMD_VMID" -- systemctl is-active llamacpp-chat 2>/dev/null || echo unknown)
   if [[ "$state" == "active" ]]; then
-    echo " OK"
+    if $FOLLOW; then
+      echo "  → active"
+    else
+      echo " OK"
+    fi
     break
   fi
   if [[ "$state" == "failed" ]]; then
@@ -293,7 +315,18 @@ while :; do
     echo "  Inspect: pct exec $AMD_VMID -- journalctl -u llamacpp-chat -n 80 --no-pager" >&2
     exit 1
   fi
-  echo -n "."
+  if $FOLLOW; then
+    out=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
+      ${journal_cursor:+--after-cursor "$journal_cursor"} \
+      --show-cursor --no-pager -o cat 2>/dev/null || true)
+    if [[ -n "$out" ]]; then
+      echo "$out" | grep -v '^-- cursor:' | sed 's/^/  | /'
+      new_cur=$(echo "$out" | awk '/^-- cursor:/ {print $3; exit}')
+      [[ -n "$new_cur" ]] && journal_cursor="$new_cur"
+    fi
+  else
+    echo -n "."
+  fi
   sleep 5
 done
 
