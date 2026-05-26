@@ -504,7 +504,7 @@ Profiles are defined in the `get_profile()` case statement at the top of the scr
 
 **Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 45-120s.
 
-**Two profile-specific knobs:** `LLAMA_TENSOR_SPLIT` and `LLAMA_CTX`. The swap rewrites both in `config.env` so `51-lxc-amd.sh` picks them up on regen.
+**Three profile-specific knobs:** `LLAMA_TENSOR_SPLIT`, `LLAMA_CTX`, `LLAMA_CACHE_REUSE`. The swap rewrites all three in `config.env` so `51-lxc-amd.sh` picks them up on regen.
 
 **Why per-profile tensor-split:**
 
@@ -512,6 +512,8 @@ Profiles are defined in the `get_profile()` case statement at the top of the scr
 - The embedder pins to GPU 0 (~1 GB) and the reranker to GPU 1 (~1.5 GB), compounding the asymmetry.
 
 **Why per-profile ctx:** Coder-Next's larger prefill activation buffers concentrate on GPU 0 and aren't released after the request completes. Stability testing at 256K showed GPU 0 climbing from 90% → 98% during an 82K-token prefill **and staying there** (real fragmentation, not transient). Dropping `LLAMA_CTX` from 262144 → 131072 halves the KV reservation, freeing ~5-7 GB of activation headroom. 128K is well above typical coding-session usage.
+
+**Why per-profile cache-reuse:** llama.cpp's `--cache-reuse` (prompt-prefix reuse) has a logic bug that aborts the unit when a 100%-similar cached prompt replays. The crash signature is `common.cpp:1489: failed to remove sequence ... p1=-1` followed by `status=6/ABRT`. We hit this on Coder-Next during stability testing; Qwen3.6 hasn't tripped it. Coder profile sets `LLAMA_CACHE_REUSE=0` to disable it entirely; Qwen3.6 keeps `1024` for the RAG prompt-prefix speedup. Trade-off for coder: identical-prefix replays pay full prefill cost instead of skipping cached tokens.
 
 Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 
