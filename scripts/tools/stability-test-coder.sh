@@ -36,10 +36,39 @@ ROUTER_PORT="${ROUTER_PORT:-8000}"
 MODEL_ALIAS="${MODEL_ALIAS:-qwen3-coder}"
 
 KEEP_TMP=false
-[[ "${1:-}" == "--keep-tmp" ]] && KEEP_TMP=true
+FOLLOW=false
+for arg in "$@"; do
+  case "$arg" in
+    --keep-tmp) KEEP_TMP=true ;;
+    --follow|-f) FOLLOW=true ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--follow] [--keep-tmp]
+
+Flags:
+  --follow, -f  Stream chat-unit journal in the background during the test.
+                Each line prefixed with "  | " so it's distinguishable from
+                the test's own output. Useful for diagnosing what the model
+                is actually doing during long prefills (KV growth, prompt
+                cache, slot launches, errors).
+  --keep-tmp    Leave the generated prompt files in TMP_DIR for inspection.
+EOF
+      exit 0 ;;
+    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
 
 TMP_DIR=$(mktemp -d -t coder-stability.XXXXXX)
-trap '$KEEP_TMP || rm -rf "$TMP_DIR"' EXIT
+JOURNAL_PID=""
+
+cleanup() {
+  $KEEP_TMP || rm -rf "$TMP_DIR"
+  if [[ -n "$JOURNAL_PID" ]]; then
+    kill "$JOURNAL_PID" 2>/dev/null || true
+    wait "$JOURNAL_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -213,6 +242,28 @@ t3_bytes=$(wc -c < "$TMP_DIR/t3.txt")
 echo "  test prompts built (bytes): T1=$t1_bytes  T2=$t2_bytes  T3=$t3_bytes"
 echo "  (approx tokens: divide bytes by 3.5)"
 echo
+
+# ─── --follow: spawn background journal poller for the test duration ─────────
+# Polls every 3s via --after-cursor (no `pct exec ... -f` so signal propagation
+# is clean — kill the subshell PID and it exits at the next sleep boundary).
+if $FOLLOW; then
+  (
+    cur="$journal_cursor"  # reuse the pre-test cursor captured above
+    while sleep 3; do
+      out=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
+        ${cur:+--after-cursor "$cur"} \
+        --show-cursor --no-pager -o cat 2>/dev/null || true)
+      if [[ -n "$out" ]]; then
+        echo "$out" | grep -v '^-- cursor:' | sed 's/^/  | /'
+        new=$(echo "$out" | awk '/^-- cursor:/ {print $3; exit}')
+        [[ -n "$new" ]] && cur="$new"
+      fi
+    done
+  ) &
+  JOURNAL_PID=$!
+  echo "  --follow: streaming chat-unit journal (poll 3s, PID=$JOURNAL_PID)"
+  echo
+fi
 
 # ─── run the tests ───────────────────────────────────────────────────────────
 

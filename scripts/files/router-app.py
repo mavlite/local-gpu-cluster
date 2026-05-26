@@ -1615,21 +1615,50 @@ async def tavily_search(request: Request):
 async def models():
     """Enumerate client-facing model aliases.
 
-    Chat aliases come from ALIAS_MAP (multiple virtual aliases → one llama-
-    server backend). We list them client-side rather than aggregating from
-    upstream because llama-server only knows one --alias per process, but we
-    expose several names that resolve to it (rag-qwen3.6 for thinking-off
-    RAG, qwen3.6-think for thinking-on agent work).
+    Chat aliases come from ALIAS_MAP filtered by which backend is ACTUALLY
+    loaded right now. The chat unit serves only one model at a time (one
+    --alias per llama-server process), so advertising aliases for the
+    *other* profile would let a client request something the chat unit
+    can't service correctly. We query the chat unit's /v1/models, take its
+    reported model id as the active backend, and only advertise ALIAS_MAP
+    entries whose 'backend' field matches.
+
+    If the chat unit is unreachable we fall back to advertising ALL
+    ALIAS_MAP keys (degraded mode — better than an empty list).
 
     Embed + rerank still come from upstream — those have a 1:1 mapping
     between client-facing name and backend alias, so the upstream's
     /v1/models is the source of truth.
     """
     now = int(time.time())
+    active_backend: str | None = None
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        try:
+            r = await c.get(f"{V620_URL}/v1/models", headers=upstream_headers())
+            r.raise_for_status()
+            ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+            # llama-server returns one id per loaded model — the chat unit serves
+            # exactly one, so just take the first.
+            if ids:
+                active_backend = ids[0]
+        except Exception:
+            pass
+
+    if active_backend is not None:
+        chat_aliases = [
+            alias for alias, entry in ALIAS_MAP.items()
+            if entry.get("backend") == active_backend
+        ]
+    else:
+        # Fallback: chat unit unreachable. Advertise everything so clients
+        # can still discover aliases; mismatched ones will fail at request time.
+        chat_aliases = list(ALIAS_MAP.keys())
+
     data: list = [
         {"id": alias, "object": "model", "owned_by": "v620-cluster", "created": now}
-        for alias in ALIAS_MAP.keys()
+        for alias in chat_aliases
     ]
+
     async with httpx.AsyncClient(timeout=10.0) as c:
         for url in (EMBED_URL, RERANK_URL):
             try:
