@@ -520,7 +520,8 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 | Profile | Split | Ctx | Cache-reuse | GPU 0 idle / peak | GPU 1 idle / peak | Free GPU 0 at peak | Notes |
 |---|---|---|---|---|---|---|---|
 | `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024 | ~50% / — | ~50% / — | comfortable | stable, RAG prefix-reuse active |
-| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) | `1,1` | 256K | 1024 | 82% / TBD | 51% / TBD | ~5.7 GB | works, but 31pp asymmetry: ~10 GB non-split tensor mass lands on GPU 0 (same pattern as Coder-Next, less severe). Could tune split to `1,1.5` or `1,2` for balance — not unsafe at `1,1` |
+| `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 (same pattern as Coder) |
+| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **current** | `1,1.5` | 256K | 1024 | TBD / TBD | TBD / TBD | TBD | shifted split for balance; re-measure after first swap and tighten to `1,2` if more symmetry wanted |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
