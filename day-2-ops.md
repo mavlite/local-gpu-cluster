@@ -504,20 +504,27 @@ Profiles are defined in the `get_profile()` case statement at the top of the scr
 
 **Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 45-120s.
 
-**Tensor-split is profile-specific.** Each profile in [`get_profile()`](./scripts/swap-chat-model.sh) carries a `LLAMA_TENSOR_SPLIT` value alongside repo/quant/alias. The swap rewrites it in `config.env` so `51-lxc-amd.sh` picks it up on regen. Why per-profile:
+**Two profile-specific knobs:** `LLAMA_TENSOR_SPLIT` and `LLAMA_CTX`. The swap rewrites both in `config.env` so `51-lxc-amd.sh` picks them up on regen.
+
+**Why per-profile tensor-split:**
 
 - llama.cpp places non-split tensors (output layer, embed table, some buffers) entirely on `--main-gpu` (default GPU 0). For Coder-Next (80B MoE) those non-split layers are larger than for Qwen3.6.
 - The embedder pins to GPU 0 (~1 GB) and the reranker to GPU 1 (~1.5 GB), compounding the asymmetry.
 
+**Why per-profile ctx:** Coder-Next's larger prefill activation buffers concentrate on GPU 0 and aren't released after the request completes. Stability testing at 256K showed GPU 0 climbing from 90% → 98% during an 82K-token prefill **and staying there** (real fragmentation, not transient). Dropping `LLAMA_CTX` from 262144 → 131072 halves the KV reservation, freeing ~5-7 GB of activation headroom. 128K is well above typical coding-session usage.
+
 Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 
-| Profile | Split | GPU 0 | GPU 1 | Free GPU 0 | Free GPU 1 |
-|---|---|---|---|---|---|
-| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | ~50% | ~50% | comfortable | comfortable |
-| `coder` (UD-IQ4_XS, 38 GB) — initial `1,1` | `1,1` | 98% ⚠️ | 66% | 0.6 GB | 10.9 GB |
-| `coder` — tuned | `1,1.5` | **90%** | **82%** | **3.2 GB** | **5.8 GB** |
+| Profile | Split | Ctx | GPU 0 (idle) | GPU 1 (idle) | Free GPU 0 | Notes |
+|---|---|---|---|---|---|---|
+| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | ~50% | ~50% | comfortable | stable |
+| `coder` initial | `1,1` | 256K | 98% ⚠️ | 66% | 0.6 GB | OOM-adjacent at idle |
+| `coder` split-only fix | `1,1.5` | 256K | 90% | 82% | 3.2 GB | drifts to 98%/90% under 82K prefill, **stays there** |
+| `coder` final | `1,1.5` | **128K** | TBD | TBD | TBD | post-fix; re-run stability test to verify |
 
-The `1,1.5` value satisfies the "≥3 GB free on each card" budget. If you add a third profile, measure with `pct exec 151 -- rocm-smi --showmemuse -d 0 1` after the first swap and tune the split in `get_profile()`.
+The two-step tuning (split first, then ctx) reflects how the symptoms appeared. The split balances *idle* VRAM (post-load, pre-traffic); the ctx caps the *post-prefill* allocation peak. Both are needed for sustained operation.
+
+Re-validate after any profile change with [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) — it sends three escalating requests (~2K → ~30K → ~100K input tokens) and reports drift, peaks, and unit errors.
 
 **Triggering from a workstation:** add a thin SSH wrapper to your shell profile. Example PowerShell function for the Windows side:
 
