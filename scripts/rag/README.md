@@ -117,10 +117,28 @@ removed is ≥ 5, the run halts and writes the plan to:
 /tank/rag-state/_proposals/<source-id>-<timestamp>.json
 ```
 
-Inspect the proposal. If the deletion is legitimate (e.g., vendor
-deprecated old version, you intend the cleanup) you can manually edit
-`documents.json` to remove the affected URLs, then re-run refresh.
-Phase 2 will add a proper `--approve <proposal>` workflow.
+Inspect the proposal. Three options:
+
+1. **Approve and apply** (recommended) — review the file's `removes` list, then:
+   ```bash
+   /opt/vcf-scraper-venv/bin/python scripts/rag/refresh.py \
+     --approve /tank/rag-state/_proposals/<source-id>-<timestamp>.json
+   ```
+   This re-runs the source's collect step, bypasses the safety threshold,
+   and verifies the new plan's removes are a subset of the approved set.
+   If the source drifted since the proposal was written (new URLs would
+   be removed that weren't in the proposal), the run halts again with a
+   fresh `<source>-<ts>-drift.json` proposal naming the unexpected removes.
+   On successful apply, the original proposal is archived to
+   `/tank/rag-state/_proposals/applied/`.
+
+2. **Reject** — delete the proposal file. The next regular refresh will
+   re-halt with a fresh proposal if the condition still applies. Useful
+   if the removes look wrong and you need time to investigate.
+
+3. **Manual override** (advanced) — edit `documents.json` directly to
+   remove the affected URLs, then re-run refresh. Use only for
+   one-offs where `--approve` isn't appropriate (e.g., partial approval).
 
 ## Handler reference
 
@@ -178,7 +196,7 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 ## Roadmap
 
 - **Phase 1** (this) — manifest + state + diff + 2 handlers + migration
-- **Phase 2** — rss handler shipped (with source-level `removal_policy: additive_only`). Still pending: hugo_sitemap, url_list_hashed, `--approve` workflow for halted plans, sphinx_sitemap collect/fetch split for cheaper `--dry-run`.
+- **Phase 2** — rss handler shipped (with source-level `removal_policy: additive_only`); `--approve` workflow shipped (drift-aware, archives proposals). Still pending: hugo_sitemap, url_list_hashed, sphinx_sitemap collect/fetch split for cheaper `--dry-run`. The pending handlers are stubs in `handlers/` — implement when a source actually needs them rather than building speculatively.
 - **Phase 3** — systemd timer + Prometheus metrics
 - **Phase 4a** — vendor version probe (detect new vendor versions)
 - **Phase 4b** — coverage gap detection from router query logs (conditional)

@@ -76,6 +76,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compute plan, emit JSON to stdout, do not apply",
     )
+    p.add_argument(
+        "--approve",
+        metavar="PROPOSAL_PATH",
+        help="Apply a previously-halted safety proposal (the JSON file written "
+        "to <state_dir>/_proposals/<source>-<ts>.json). Bypasses the safety "
+        "threshold for the source named in the proposal. Re-runs collect; "
+        "if the new plan's removes are a subset of the approved removes, "
+        "applies. If new URLs would be removed (drift), halts with a new "
+        "proposal. On success, archives the proposal to _proposals/applied/.",
+    )
     return p.parse_args()
 
 
@@ -96,8 +106,17 @@ def refresh_one(
     client: allm.AnythingLLMClient,
     dry_run: bool,
     plan_only: bool,
+    approved_removes: set[str] | None = None,
+    proposal_path: Path | None = None,
 ) -> dict:
-    """Refresh a single source. Returns a result dict for reporting."""
+    """Refresh a single source. Returns a result dict for reporting.
+
+    If approved_removes is set, bypasses the safety threshold check. The
+    new plan's removes MUST be a subset of approved_removes; if any extra
+    URL would be removed, halts with a fresh proposal (drift detected).
+    On successful apply, the original proposal_path is archived to
+    _proposals/applied/.
+    """
     source_id = source["id"]
     state_dir = Path(defaults.get("state_dir", "/tank/rag-state"))
     src_state = state_mod.SourceState(state_dir, source_id)
@@ -139,35 +158,83 @@ def refresh_one(
         print(f"  removal_policy=additive_only (state-only URLs preserved)")
     print(f"  plan: {the_plan.summary()}")
 
-    # Safety check.
+    # Safety check OR approval-mode drift check.
     max_delete_pct = float(defaults.get("max_delete_pct", 0.10))
-    safe, reason = the_plan.safety_check(max_delete_pct)
-    if not safe:
-        proposal_dir = state_dir / "_proposals"
-        proposal_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        proposal_path = proposal_dir / f"{source_id}-{ts}.json"
-        proposal_path.write_text(
-            json.dumps(
-                {
-                    "source_id": source_id,
-                    "reason": reason,
-                    "adds": [d.url for d in the_plan.adds],
-                    "updates": [d.url for d in the_plan.updates],
-                    "removes": the_plan.removes,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+    if approved_removes is not None:
+        # --approve mode: skip the percent threshold, but verify the new
+        # plan's removes are a subset of what the operator already approved.
+        new_removes = set(the_plan.removes)
+        extra = new_removes - approved_removes
+        if extra:
+            # Source drifted since the proposal was written. Write a NEW
+            # proposal so the operator can review the new state.
+            proposal_dir = state_dir / "_proposals"
+            proposal_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            new_proposal_path = proposal_dir / f"{source_id}-{ts}-drift.json"
+            new_proposal_path.write_text(
+                json.dumps(
+                    {
+                        "source_id": source_id,
+                        "reason": (
+                            f"approved-proposal drift: {len(extra)} URL(s) "
+                            "would be removed that were not in the approved set"
+                        ),
+                        "extra_removes": sorted(extra),
+                        "adds": [d.url for d in the_plan.adds],
+                        "updates": [d.url for d in the_plan.updates],
+                        "removes": the_plan.removes,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            print(
+                f"  HALTED: approval drift — {len(extra)} new URL(s) would be "
+                f"removed that weren't in the approved proposal"
+            )
+            print(f"  drift proposal written to {new_proposal_path}")
+            return {
+                "source_id": source_id,
+                "status": "halted_drift",
+                "extra_removes": sorted(extra),
+                "proposal_path": str(new_proposal_path),
+            }
+        print(
+            f"  approved: bypassing safety threshold "
+            f"({len(new_removes)} removes, all in approved set)"
         )
-        print(f"  HALTED: {reason}")
-        print(f"  plan written to {proposal_path}")
-        return {
-            "source_id": source_id,
-            "status": "halted_safety",
-            "reason": reason,
-            "proposal_path": str(proposal_path),
-        }
+    else:
+        safe, reason = the_plan.safety_check(max_delete_pct)
+        if not safe:
+            proposal_dir = state_dir / "_proposals"
+            proposal_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            halt_proposal_path = proposal_dir / f"{source_id}-{ts}.json"
+            halt_proposal_path.write_text(
+                json.dumps(
+                    {
+                        "source_id": source_id,
+                        "reason": reason,
+                        "adds": [d.url for d in the_plan.adds],
+                        "updates": [d.url for d in the_plan.updates],
+                        "removes": the_plan.removes,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            print(f"  HALTED: {reason}")
+            print(f"  plan written to {halt_proposal_path}")
+            print(
+                f"  to apply: scripts/rag/refresh.py --approve {halt_proposal_path}"
+            )
+            return {
+                "source_id": source_id,
+                "status": "halted_safety",
+                "reason": reason,
+                "proposal_path": str(halt_proposal_path),
+            }
 
     # Plan-only / dry-run modes stop here.
     if plan_only:
@@ -339,11 +406,23 @@ def refresh_one(
         success=True, note=None,
     )
     print(f"  applied: {the_plan.summary()}")
+
+    # If this was an --approve run, archive the proposal so it doesn't
+    # get re-applied or confused with a fresh halt.
+    archived_to: str | None = None
+    if proposal_path is not None and proposal_path.exists():
+        applied_dir = state_dir / "_proposals" / "applied"
+        applied_dir.mkdir(parents=True, exist_ok=True)
+        archived_to = str(applied_dir / proposal_path.name)
+        proposal_path.rename(archived_to)
+        print(f"  archived approved proposal → {archived_to}")
+
     return {
         "source_id": source_id,
         "status": "applied",
         "plan": the_plan.summary(),
         "errors": len(the_plan.errors),
+        **({"approved_from": archived_to} if archived_to else {}),
     }
 
 
@@ -413,6 +492,42 @@ def main() -> int:
 
     sources, defaults = load_sources(sources_file)
 
+    # --approve resolves to a proposal file that names a specific source.
+    # Read it, extract the source_id + approved-removes set, and constrain
+    # this run to that single source.
+    approved_removes: set[str] | None = None
+    proposal_path: Path | None = None
+    if args.approve:
+        proposal_path = Path(args.approve)
+        if not proposal_path.exists():
+            print(f"proposal not found: {proposal_path}", file=sys.stderr)
+            return 2
+        try:
+            proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"could not read proposal {proposal_path}: {e}", file=sys.stderr)
+            return 2
+        proposal_source_id = proposal.get("source_id")
+        if not proposal_source_id:
+            print(f"proposal missing source_id: {proposal_path}", file=sys.stderr)
+            return 2
+        if args.source and args.source != proposal_source_id:
+            print(
+                f"--source={args.source!r} conflicts with proposal's "
+                f"source_id={proposal_source_id!r}",
+                file=sys.stderr,
+            )
+            return 2
+        args.source = proposal_source_id
+        approved_removes = set(proposal.get("removes", []))
+        print(
+            f"[approve] applying {proposal_path.name} for source "
+            f"{proposal_source_id!r} ({len(approved_removes)} approved removes)"
+        )
+        # --approve implies --force (we're bypassing both safety and the
+        # refresh_interval gate to apply this specific operator decision).
+        args.force = True
+
     if args.source:
         sources = [s for s in sources if s.get("id") == args.source]
         if not sources:
@@ -456,6 +571,8 @@ def main() -> int:
                     client=client,
                     dry_run=args.dry_run,
                     plan_only=args.plan,
+                    approved_removes=approved_removes,
+                    proposal_path=proposal_path,
                 )
             )
         except Exception as e:
@@ -468,9 +585,11 @@ def main() -> int:
         json.dump({"results": results}, sys.stdout, indent=2)
         sys.stdout.write("\n")
 
-    # Exit non-zero if any source errored or was halted by safety check.
+    # Exit non-zero if any source errored or was halted by safety check or
+    # drift detection.
     bad = sum(
-        1 for r in results if r["status"] in ("error", "halted_safety")
+        1 for r in results
+        if r["status"] in ("error", "halted_safety", "halted_drift")
     )
     return 1 if bad else 0
 
