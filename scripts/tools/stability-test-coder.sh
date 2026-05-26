@@ -89,13 +89,30 @@ ROUTER_KEY=$(pct exec "$ROUTER_VMID" -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /
   || { echo "ERROR: couldn't read ROUTER_API_KEY from LXC $ROUTER_VMID:/etc/router.env" >&2; exit 1; }
 [[ -n "$ROUTER_KEY" ]] || { echo "ERROR: ROUTER_API_KEY is empty" >&2; exit 1; }
 
-# Confirm coder is loaded
-loaded=$(curl -sf -H "Authorization: Bearer $ROUTER_KEY" \
-  "http://${ROUTER_HOST}:${ROUTER_PORT}/v1/models" | jq -r '.data[].id' | tr '\n' ' ')
-echo "  router /v1/models reports: $loaded"
-if ! echo "$loaded" | grep -qw "$MODEL_ALIAS"; then
-  echo "ERROR: $MODEL_ALIAS not listed by router. Run: ./scripts/swap-chat-model.sh coder" >&2
+# Confirm coder is loaded by inspecting the chat unit directly (authoritative).
+# The router's /v1/models can be stale if the router app hasn't been redeployed
+# since coder aliases were added to ALIAS_MAP — but the chat unit's systemd
+# ExecStart never lies about what model is actually mmap'd into VRAM.
+chat_hf=$(pct exec "$AMD_VMID" -- bash -c "grep -oE 'unsloth/[A-Za-z0-9._-]+:[A-Za-z0-9_-]+' /etc/systemd/system/llamacpp-chat.service | head -1" 2>/dev/null || echo "")
+echo "  chat unit --hf-repo: ${chat_hf:-<not detected>}"
+if [[ "$chat_hf" != *"Qwen3-Coder"* ]]; then
+  echo "ERROR: chat unit is not running a Coder profile (hf-repo=$chat_hf)" >&2
+  echo "       Run: ./scripts/swap-chat-model.sh coder" >&2
   exit 1
+fi
+
+# Informational only: the router /v1/models list.
+loaded=$(curl -sf -H "Authorization: Bearer $ROUTER_KEY" \
+  "http://${ROUTER_HOST}:${ROUTER_PORT}/v1/models" 2>/dev/null \
+  | jq -r '.data[].id' 2>/dev/null | tr '\n' ' ' || echo "")
+echo "  router /v1/models reports: ${loaded:-<unreachable>}"
+if ! echo "$loaded" | grep -qw "$MODEL_ALIAS"; then
+  cat >&2 <<WARN
+  WARN: router does not advertise '$MODEL_ALIAS' in /v1/models.
+        Either the router-app.py is stale (redeploy with scripts/52-lxc-router.sh)
+        or you need a different MODEL_ALIAS. Test will proceed and rely on
+        ALIAS_MAP passthrough — request will likely still route correctly.
+WARN
 fi
 
 # Mark the journal cursor BEFORE the test so we can scan only test-window log entries
