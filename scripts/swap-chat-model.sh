@@ -78,17 +78,23 @@ get_profile() {
       ;;
     qwen3.6-hi)
       # Higher-precision Q5_K_M variant of qwen3.6. ~26.5 GB weights vs
-      # ~22 GB for Q4_K_M. Same model architecture; cache-reuse=1024 is
-      # safe (cache-reuse abort is Coder-Next architecture-specific).
-      # Useful for deep-research / RAG-synthesis sessions where precision
-      # matters more than throughput.
+      # ~22 GB for Q4_K_M. Useful for deep-research / RAG-synthesis
+      # sessions where precision matters more than throughput.
       #
       # Tensor-split tuning history (2026-05-26):
       #   1,1   → GPU 0 82% / GPU 1 51% (~31pp asymmetry from non-split
       #           tensor mass landing on --main-gpu, same pattern as Coder).
-      #   1,1.5 → expected GPU 0 ~73% / GPU 1 ~60% (~13pp residual). Better
-      #           balance, more activation headroom on GPU 0. Re-measure
-      #           after first swap and tighten further to 1,2 if desired.
+      #   1,1.5 → measured GPU 0 73% / GPU 1 60% (~13pp residual). Both
+      #           cards well above the 3-GB-free headroom target. Locked
+      #           as the final config. Going to 1,2 would balance fully
+      #           but risks over-correcting; 1,1.5 keeps consistency with
+      #           the coder profile's split.
+      #
+      # CACHE_REUSE=1024 is set but llama.cpp emits "cache_reuse is not
+      # supported by this context, it will be disabled" at load — likely
+      # because Q5_K_M + q8_0 KV trips a code path llama.cpp hasn't
+      # implemented. Effective behavior is CACHE_REUSE=0. Harmless;
+      # documented for future readers who'll see the warning.
       echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q5_K_M rag-qwen3.6-hi 1,1.5 262144 1024"
       ;;
     coder)
