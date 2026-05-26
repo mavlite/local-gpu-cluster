@@ -521,7 +521,7 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 |---|---|---|---|---|---|---|---|
 | `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024 | ~50% / — | ~50% / — | comfortable | stable, RAG prefix-reuse active |
 | `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 (same pattern as Coder) |
-| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **current** | `1,1.5` | 256K | 1024 | TBD / TBD | TBD / TBD | TBD | shifted split for balance; re-measure after first swap and tighten to `1,2` if more symmetry wanted |
+| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / TBD** | **60% / TBD** | **~8.6 GB** | rebalanced; 13pp residual asymmetry, both cards well above headroom target. †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV) — runtime warning: `cache_reuse is not supported by this context, it will be disabled`. Effective behavior is `CACHE_REUSE=0` |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
