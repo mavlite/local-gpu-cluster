@@ -478,9 +478,48 @@ If `rocm-smi` shows ≥3 GB free on each card and the unit is stable for ~10 min
 
 - **Coding workstation** — Coder-Next is the chat model; all clients (OpenCode, AnythingLLM RAG, browser artifact) use it. RAG quality may degrade vs Qwen3.6 (different model strengths).
 - **RAG workstation** — Keep Qwen3.6-35B-A3B; Coder-Next not deployed.
-- **Switch on demand** — Keep both downloaded, change `LLAMA_HF_QUANT` in `config.env` and re-run `51-lxc-amd.sh` to swap (~30s downtime).
+- **Switch on demand** — Keep both downloaded; use [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) to flip between profiles. ~5-15s on a warm cache; ~7-15 min on first use of a new model (HF download).
 
-The router's [`ALIAS_MAP`](./scripts/files/router-app.py) doesn't currently expose a `coder-qwen3` alias; if you want client routing by alias name, add an entry per [§ 6.2](#-62-adding-or-editing-router-aliases).
+The router's [`ALIAS_MAP`](./scripts/files/router-app.py) already maps `qwen3-coder` and `qwen3-coder-next` to the chat unit so clients can address the active model by either alias after a swap.
+
+#### Swap workflow
+
+The swap script automates the four-step manual procedure above as a single atomic operation: rewrites the three `LLAMA_HF_*` keys in `config.env`, re-runs `51-lxc-amd.sh` (idempotent — regenerates the systemd unit only), restarts `llamacpp-chat`, and waits for `active`.
+
+```bash
+# Inspect what's loaded right now
+./scripts/swap-chat-model.sh --status
+
+# Swap to coder (first time: ~7-15 min, downloads UD-IQ4_XS ~38 GB)
+./scripts/swap-chat-model.sh coder
+
+# Swap back to the RAG model
+./scripts/swap-chat-model.sh qwen3.6
+
+# Force a re-run even if already on the target (e.g., to pick up a config tweak)
+./scripts/swap-chat-model.sh --force qwen3.6
+```
+
+Profiles are defined in the `get_profile()` case statement at the top of the script. To add a third profile (e.g., a fine-tune, a different quant), extend that case and add the name to `PROFILE_NAMES`.
+
+**Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 5-15s.
+
+**Triggering from a workstation:** add a thin SSH wrapper to your shell profile. Example PowerShell function for the Windows side:
+
+```powershell
+function Swap-ClusterChatModel {
+  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","--status")][string]$Target)
+  ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target"
+}
+Set-Alias swap Swap-ClusterChatModel
+# Usage:  swap --status    swap coder    swap qwen3.6
+```
+
+Bash equivalent:
+
+```bash
+alias swap='ssh root@<pve-host> /root/local-gpu-cluster/scripts/swap-chat-model.sh'
+```
 
 ### § 4.5 Enabling spec-decode (when a compatible draft ships)
 
