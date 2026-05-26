@@ -358,7 +358,9 @@ To pin to a static path instead of `--hf-repo` (e.g., for air-gapped deployments
 
 ### § 4.3 Swapping the chat model ✅
 
-The procedure is **edit config.env + re-run script.** Do not hand-edit the unit file or wget into `/tank/models`.
+**The fast path: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh)** automates the swap as a single atomic operation for the three pre-defined profiles (`qwen3.6` / `qwen3.6-hi` / `coder`). See [§ 4.4](#-44-vram-budget-template) for the full workflow, per-profile tuning rationale, and measured VRAM distribution. Use the swap script unless you're introducing a brand-new model not covered by an existing profile.
+
+**The manual path** (for adding a new model that doesn't have a profile yet): edit `config.env` + re-run `51-lxc-amd.sh`. Do not hand-edit the unit file or wget into `/tank/models`.
 
 ```bash
 cd /root/local-gpu-cluster
@@ -371,6 +373,9 @@ $EDITOR scripts/config.env
 #   LLAMA_HF_REPO=unsloth/<new-model>-GGUF
 #   LLAMA_HF_QUANT=<new-quant>
 #   LLAMA_ALIAS=<new-alias>  (optional — affects what /v1/models returns)
+#   LLAMA_TENSOR_SPLIT=<split>  (e.g., 1,1 or 1,1.5)
+#   LLAMA_CTX=<ctx-size>
+#   LLAMA_CACHE_REUSE=<window-or-0>
 
 # 3. Re-run the AMD-LXC provisioning script (idempotent)
 ./scripts/51-lxc-amd.sh
@@ -381,7 +386,7 @@ pct exec 151 -- journalctl -u llamacpp-chat -f
 
 The script regenerates `/etc/systemd/system/llamacpp-chat.service` from the new config.env values, runs `systemctl daemon-reload`, and restarts the unit.
 
-If the new model uses a different chat-template / reasoning format, also update [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP` — see [§ 6.2](#-62-adding-or-editing-router-aliases).
+If you intend to keep the new model around, **add it to [`get_profile()`](./scripts/swap-chat-model.sh)** so future swaps are automatic. Add corresponding [`ALIAS_MAP`](./scripts/files/router-app.py) entries — see [§ 6.2](#-62-adding-or-editing-router-aliases).
 
 ### § 4.4 VRAM budget template
 
@@ -521,7 +526,7 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 |---|---|---|---|---|---|---|---|
 | `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024 | ~50% / — | ~50% / — | comfortable | stable, RAG prefix-reuse active |
 | `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 (same pattern as Coder) |
-| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / TBD** | **60% / TBD** | **~8.6 GB** | rebalanced; 13pp residual asymmetry, both cards well above headroom target. †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV) — runtime warning: `cache_reuse is not supported by this context, it will be disabled`. Effective behavior is `CACHE_REUSE=0` |
+| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / not load-tested** | **60% / not load-tested** | **~8.6 GB idle** | rebalanced; 13pp residual asymmetry, both cards well above headroom target. Idle measured; under-load peak not yet validated (stability test is coder-specific). †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV) — runtime warning: `cache_reuse is not supported by this context, it will be disabled`. Effective behavior is `CACHE_REUSE=0` |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
@@ -531,17 +536,19 @@ The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms 
 
 Verified 2026-05-26 with two consecutive 82K-token requests: VRAM held at 92%/85% on both, no drift between requests, no journal errors.
 
-Re-validate after any profile change with [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) — it sends three escalating requests (~2K → ~30K → ~100K input tokens) and reports drift, peaks, and unit errors.
+Re-validate after any profile change with [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) — it sends three escalating requests (~2K → ~30K → ~100K input tokens) and reports drift, peaks, and unit errors. Use `--follow` (or `-f`) to also stream the chat-unit journal in the background during the test for live diagnostics. The script is currently coder-specific (refuses to run unless `Qwen3-Coder` is loaded); apply the same methodology manually to other profiles until generalized.
+
+**Discovering what's loaded:** `/v1/models` is **profile-aware** — the router queries the chat unit's reported model id and only advertises ALIAS_MAP entries whose `backend` field matches. So after `swap-chat-model.sh coder`, the response includes `qwen3-coder` and `qwen3-coder-next` but hides `rag-qwen3.6` / `qwen3.6-think` / `qwen3.6` / `rag-qwen3.6-hi` / `qwen3.6-hi-think` / `qwen3.6-hi`. Mismatched-profile requests will still pass through to llama-server (the chat unit serves whatever is loaded regardless of request alias), but the router's `/v1/models` advertises only what's truly live.
 
 **Triggering from a workstation:** add a thin SSH wrapper to your shell profile. Example PowerShell function for the Windows side:
 
 ```powershell
 function Swap-ClusterChatModel {
-  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","--status")][string]$Target)
+  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","qwen3.6-hi","--status")][string]$Target)
   ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target"
 }
 Set-Alias swap Swap-ClusterChatModel
-# Usage:  swap --status    swap coder    swap qwen3.6
+# Usage:  swap --status    swap coder    swap qwen3.6    swap qwen3.6-hi
 ```
 
 Bash equivalent:
@@ -549,6 +556,8 @@ Bash equivalent:
 ```bash
 alias swap='ssh root@<pve-host> /root/local-gpu-cluster/scripts/swap-chat-model.sh'
 ```
+
+To add an additional profile beyond the current three, extend the `get_profile()` case statement and `PROFILE_NAMES` array in [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh), then add corresponding entries to the router's [`ALIAS_MAP`](./scripts/files/router-app.py) (matching `backend` field). Dynamic `/v1/models` will pick them up automatically after the next `53-lxc-router.sh` redeploy.
 
 ### § 4.5 Enabling spec-decode (when a compatible draft ships)
 
