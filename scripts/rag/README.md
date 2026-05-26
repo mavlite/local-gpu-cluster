@@ -197,9 +197,32 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 
 - **Phase 1** (this) — manifest + state + diff + 2 handlers + migration
 - **Phase 2** — rss handler shipped (with source-level `removal_policy: additive_only`); `--approve` workflow shipped (drift-aware, archives proposals). Still pending: hugo_sitemap, url_list_hashed, sphinx_sitemap collect/fetch split for cheaper `--dry-run`. The pending handlers are stubs in `handlers/` — implement when a source actually needs them rather than building speculatively.
-- **Phase 3** — systemd timer + Prometheus metrics
+- **Phase 3** — shipped via [`scripts/58-rag-refresh-timer.sh`](../58-rag-refresh-timer.sh). Installs a systemd timer (default `*-*-* 03:15:00` with 10min jitter) that runs `refresh.py` on the PVE host via `/opt/vcf-scraper-venv`. Per-source `refresh_interval` in `sources.yaml` still gates whether each source actually executes — the timer just provides a regular opportunity. After each run, emits a Prometheus textfile-format metrics file (`/var/lib/rag-refresh/metrics.prom`) ready for a future node_exporter scrape, and overwrites a console log at `/var/lib/rag-refresh/last-run.log`.
 - **Phase 4a** — vendor version probe (detect new vendor versions)
 - **Phase 4b** — coverage gap detection from router query logs (conditional)
+
+## Phase 3 metrics
+
+After each scheduled run, `/var/lib/rag-refresh/metrics.prom` contains
+Prometheus textfile-format gauges:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `rag_refresh_run_seconds` | — | Wall-clock duration of the last run |
+| `rag_refresh_last_run_timestamp` | — | Unix epoch of last run completion |
+| `rag_refresh_run_total` | `status` | Source-status counts from last run (applied / skipped / disabled / error / halted_safety / halted_drift) |
+| `rag_refresh_document_count` | `source_id` | Current doc count per source from `manifest.json` stats |
+| `rag_refresh_last_success_timestamp` | `source_id` | Unix epoch of last successful refresh per source (0 if never) |
+| `rag_refresh_errors_this_run` | `source_id` | Per-source error count for the latest run |
+
+The file is written atomically (tempfile + `os.replace`) so a concurrent scrape never sees a half-written gauge. The schema is also useful standalone — `cat /var/lib/rag-refresh/metrics.prom` gives a complete picture of corpus health without needing a Prometheus server.
+
+Useful alerts to set up once node_exporter is deployed:
+
+- `time() - rag_refresh_last_success_timestamp{source_id=...} > 7*86400` — source hasn't refreshed in over a week
+- `rag_refresh_run_total{status="halted_safety"} > 0` — operator review needed
+- `rag_refresh_run_total{status="halted_drift"} > 0` — approved proposal went stale
+- `rag_refresh_run_total{status="error"} > 0` — handler crashed
 
 ## Notes on `migrate_backfill.py`
 

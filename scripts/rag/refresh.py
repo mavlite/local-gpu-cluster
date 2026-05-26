@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -545,6 +547,7 @@ def main() -> int:
     state_dir = Path(defaults.get("state_dir", "/tank/rag-state"))
     state_dir.mkdir(parents=True, exist_ok=True)
 
+    run_started_ts = time.time()
     results: list[dict] = []
     for source in sources:
         if not source.get("enabled", True):
@@ -585,6 +588,24 @@ def main() -> int:
         json.dump({"results": results}, sys.stdout, indent=2)
         sys.stdout.write("\n")
 
+    # Emit Prometheus-textfile metrics if RAG_METRICS_FILE is set. Used by
+    # the rag-refresh systemd timer (scripts/58-rag-refresh-timer.sh) to
+    # expose run health to a future Prometheus scrape. Writing the file is
+    # cheap and harmless when no scraper exists.
+    metrics_path = os.environ.get("RAG_METRICS_FILE")
+    if metrics_path and not args.plan and not args.dry_run:
+        try:
+            _write_metrics(
+                Path(metrics_path),
+                results=results,
+                state_dir=state_dir,
+                started_ts=run_started_ts,
+                finished_ts=time.time(),
+            )
+        except Exception as e:
+            print(f"warning: failed to write metrics to {metrics_path}: {e}",
+                  file=sys.stderr)
+
     # Exit non-zero if any source errored or was halted by safety check or
     # drift detection.
     bad = sum(
@@ -592,6 +613,103 @@ def main() -> int:
         if r["status"] in ("error", "halted_safety", "halted_drift")
     )
     return 1 if bad else 0
+
+
+def _write_metrics(
+    path: Path,
+    *,
+    results: list[dict],
+    state_dir: Path,
+    started_ts: float,
+    finished_ts: float,
+) -> None:
+    """Emit Prometheus textfile-format metrics for the just-completed run.
+
+    Atomic via tempfile + rename so a concurrent scrape never sees a
+    half-written file. Reads each source's manifest.json for last_success
+    timestamps and document counts (cheap — manifests are tiny JSON files).
+
+    Schema:
+      rag_refresh_run_seconds                       — wall-clock duration
+      rag_refresh_run_total{status="..."}           — count by source status
+      rag_refresh_last_run_timestamp                — Unix epoch of run end
+      rag_refresh_document_count{source_id="..."}   — current doc count per source
+      rag_refresh_last_success_timestamp{source_id="..."} — last successful refresh
+      rag_refresh_errors_this_run{source_id="..."}  — errors during this run
+    """
+    lines: list[str] = []
+
+    def m(name: str, help_text: str, mtype: str) -> None:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {mtype}")
+
+    m("rag_refresh_run_seconds",
+      "Wall-clock duration of the most recent rag-refresh run.", "gauge")
+    lines.append(f"rag_refresh_run_seconds {finished_ts - started_ts:.3f}")
+
+    m("rag_refresh_last_run_timestamp",
+      "Unix timestamp of the most recent rag-refresh run completion.", "gauge")
+    lines.append(f"rag_refresh_last_run_timestamp {finished_ts:.0f}")
+
+    # Counts by status across this run
+    status_counts: dict[str, int] = {}
+    for r in results:
+        status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
+    m("rag_refresh_run_total",
+      "Source-level outcomes from the most recent rag-refresh run.", "gauge")
+    for status, n in sorted(status_counts.items()):
+        lines.append(f'rag_refresh_run_total{{status="{status}"}} {n}')
+
+    # Per-source: read manifests for the durable facts
+    m("rag_refresh_document_count",
+      "Current document count per source (from manifest.json stats).", "gauge")
+    m("rag_refresh_last_success_timestamp",
+      "Unix timestamp of last successful refresh per source (0 if never).", "gauge")
+    m("rag_refresh_errors_this_run",
+      "Per-source errors_this_run from the most recent manifest.", "gauge")
+    for r in results:
+        sid = r.get("source_id", "")
+        if not sid:
+            continue
+        src_state = state_mod.SourceState(state_dir, sid)
+        manifest = src_state.load_manifest() or {}
+        stats = manifest.get("stats", {}) or {}
+        doc_count = int(stats.get("document_count", 0))
+        errors_this_run = int(stats.get("errors_this_run", 0))
+        last_success_iso = manifest.get("last_success")
+        last_success_ts = 0
+        if last_success_iso:
+            try:
+                last_success_ts = int(
+                    datetime.fromisoformat(
+                        last_success_iso.replace("Z", "+00:00")
+                    ).timestamp()
+                )
+            except ValueError:
+                pass
+        lines.append(f'rag_refresh_document_count{{source_id="{sid}"}} {doc_count}')
+        lines.append(
+            f'rag_refresh_last_success_timestamp{{source_id="{sid}"}} {last_success_ts}'
+        )
+        lines.append(
+            f'rag_refresh_errors_this_run{{source_id="{sid}"}} {errors_this_run}'
+        )
+
+    # Atomic write
+    body = "\n".join(lines) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".metrics.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 if __name__ == "__main__":

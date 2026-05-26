@@ -37,6 +37,7 @@ PHASES=(
   "55:MCP stack LXC (Docker + remote MCP servers, with hardcoded-IP audit):55-lxc-mcp.sh"
   "56:V620 fan-control bridge (host hwmon PWM driven by GPU temp):56-fan-control.sh"
   "57:AnythingLLM workspace tuning via REST API (needs ALLM_API_KEY):57-configure-anythingllm.sh"
+  "58:RAG refresh systemd timer + Prometheus textfile metrics:58-rag-refresh-timer.sh"
   "60:Smoke tests / final verification (auth gates, embed dim, rerank, concurrent VRAM, RAG E2E):60-verify.sh"
 )
 
