@@ -576,7 +576,7 @@ The V620 stack runs **three `llama-server` processes** inside LXC 151, all shari
 
 | Service | Model | Size | Notes |
 | --- | --- | --- | --- |
-| `llamacpp-chat.service` (port 8080) | Qwen3.6-35B-A3B UD-Q4_K_M (`unsloth/Qwen3.6-35B-A3B-GGUF`) | ~22 GB | Primary chat / RAG / coding target. MoE with ~3 B active params/token. Tensor-split across both V620s, single in-flight request at full trained ctx (`--ctx-size 262144 --parallel 1`). |
+| `llamacpp-chat.service` (port 8080) | **Profile-switchable** (default Qwen3.6-35B-A3B UD-Q4_K_M from `unsloth/Qwen3.6-35B-A3B-GGUF`) | ~22 GB default | Primary chat / RAG / coding target. The chat slot holds ONE model at a time; alternative profiles (`qwen3.6-hi` Q5_K_M, `coder` Qwen3-Coder-Next) are swapped in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) — see [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template). MoE with ~3 B active params/token. Tensor-split across both V620s, single in-flight request at full trained ctx (`--ctx-size 262144 --parallel 1`) for the default profile. |
 | `llamacpp-embed.service` (port 8082) | Qwen3-Embedding-0.6B Q8_0 (`Qwen/Qwen3-Embedding-0.6B-GGUF`) | ~1 GB | Embedding generation (1024-dim). Pinned to V620 #1 via `--main-gpu 0`. **`--pooling last`** is critical — `cls` produces semantically wrong embeddings and silently invalidates the vector DB. |
 | `llamacpp-rerank.service` (port 8083) | BGE Reranker v2-m3 Q4_K_M (`gpustack/bge-reranker-v2-m3-GGUF`) | ~1.5 GB | Cross-encoder reranking for vector-search results. Pinned to V620 #2 via `--main-gpu 1`. Alt: `Qwen/Qwen3-Reranker-0.6B-GGUF` (gated on HF — requires `HF_TOKEN`). |
 

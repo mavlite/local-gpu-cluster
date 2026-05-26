@@ -1631,6 +1631,12 @@ pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/mo
 - **BIOS may try to reclaim PWM control:** Some ASUS BIOSes resume default fan curves after S3/S4 sleep. Since this is a server, sleep should be disabled (Step 2.2 BIOS config disables S3). If you observe fans returning to BIOS-controlled behavior unexpectedly, restart `v620-fan-bridge.service`.
 - **`rocm-smi` field name varies by ROCm version:** ROCm 7.x reports temperature as "Temperature (Sensor edge)" or similar. The `awk` filter looks for `/Temperature.*edge/`; if your ROCm output differs, adjust the regex.
 
+### Post-Phase-5: chat-model swap workflow
+
+Phase 5 deploys Qwen3.6-35B-A3B (UD-Q4_K_M) as the default chat model. After deployment, the cluster supports **switching between three chat-model profiles** (`qwen3.6` / `qwen3.6-hi` / `coder`) without re-running Phase 5 — see [`day-2-ops.md § 4.4`](./day-2-ops.md#-44-vram-budget-template) for the full workflow. Driver script: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh).
+
+The Phase-5 install leaves `qwen3.6` loaded; profile swaps are a day-2 operation.
+
 ---
 
 ## Phase 6 — Cutover (live migration from running v2 cluster)
