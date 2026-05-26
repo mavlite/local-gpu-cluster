@@ -4,13 +4,21 @@
 #
 # What it does:
 #   1. Snapshots rocm-smi + journalctl cursor as baseline.
-#   2. Sends three progressively heavier chat-completions requests through
-#      the router (~2K → ~30K → ~100K prompt tokens), each generating
-#      ~500-3000 tokens of output.
+#   2. Sends four chat-completions requests through the router:
+#        T1  — ~2K prompt tokens (warmup)
+#        T2  — ~16K prompt tokens (medium)
+#        T3a — ~90K prompt tokens (heavy, first occurrence)
+#        T3b — ~90K prompt tokens (heavy, repeat — runaway-drift detector)
+#      The T3a/T3b pair distinguishes "first-time activation buffer
+#      allocation" (normal, bounded) from "buffer grows per heavy
+#      request" (real fragmentation).
 #   3. After each, snapshots rocm-smi + measures latency.
-#   4. Tails journalctl from the baseline cursor to surface any errors
-#      (ERROR / OOM / hsa / failed) emitted during the test.
-#   5. Reports VRAM drift (peak - baseline) and a pass/fail summary.
+#   4. Post-settle remeasure (30s wait) to catch buffers that release
+#      after the request completes.
+#   5. Tails journalctl from the baseline cursor to surface any errors
+#      (ERROR / OOM / hsa / failed) and notable warnings (cache_reuse
+#      auto-disable, etc.).
+#   6. Reports VRAM peak, drift breakdown, and a pass/fail summary.
 #
 # Pre-reqs:
 #   - Run from the Proxmox host as root.
@@ -299,11 +307,19 @@ fi
 declare -a results=()
 declare -a vram_after=()
 
-for round in 1 2 3; do
+# T3a + T3b are both the same heavy prompt. Runaway-buffer detection compares
+# T3b to T3a: if the second heavy request grows VRAM further on top of the
+# first, the activation buffer is unbounded (real fragmentation). If it stays
+# at T3a's peak, the buffer is bounded (one-time allocation — normal on this
+# llama.cpp build). Without two consecutive heavies, we can't distinguish
+# "first allocation" from "runaway", because T2's medium prompt is below the
+# threshold that triggers the heavy-prefill buffer in the first place.
+for round in 1 2 3 4; do
   case $round in
-    1) prompt="$TMP_DIR/t1.txt"; max=600  ; label="T1 (warmup)" ;;
-    2) prompt="$TMP_DIR/t2.txt"; max=2000 ; label="T2 (medium)" ;;
-    3) prompt="$TMP_DIR/t3.txt"; max=3000 ; label="T3 (heavy)"  ;;
+    1) prompt="$TMP_DIR/t1.txt"; max=600  ; label="T1 (warmup)"          ;;
+    2) prompt="$TMP_DIR/t2.txt"; max=2000 ; label="T2 (medium)"          ;;
+    3) prompt="$TMP_DIR/t3.txt"; max=3000 ; label="T3a (heavy — first)"  ;;
+    4) prompt="$TMP_DIR/t3.txt"; max=3000 ; label="T3b (heavy — repeat)" ;;
   esac
   echo "── round $round: $label ──"
   result=$(send_chat "$prompt" "$max") || {
@@ -365,16 +381,17 @@ echo
 
 echo "── summary ──"
 printf "  %-15s %12s %12s %10s\n" "round" "in tokens" "out tokens" "latency(s)"
-for i in 0 1 2; do
+labels=("T1" "T2" "T3a" "T3b")
+for i in 0 1 2 3; do
   read -r in_t out_t lat <<<"${results[$i]}"
-  printf "  %-15s %12s %12s %10s\n" "$((i+1))" "$in_t" "$out_t" "$lat"
+  printf "  %-15s %12s %12s %10s\n" "${labels[$i]}" "$in_t" "$out_t" "$lat"
 done
 echo
 printf "  %-15s  GPU0  GPU1\n" "snapshot"
 printf "  %-15s  %4s  %4s\n" "baseline" "${baseline% *}" "${baseline##* }"
-for i in 0 1 2; do
+for i in 0 1 2 3; do
   v="${vram_after[$i]}"
-  printf "  %-15s  %4s  %4s\n" "after-T$((i+1))" "${v% *}" "${v##* }"
+  printf "  %-15s  %4s  %4s\n" "after-${labels[$i]}" "${v% *}" "${v##* }"
 done
 printf "  %-15s  %4s  %4s\n" "post-settle" "${post_settle% *}" "${post_settle##* }"
 echo
@@ -403,45 +420,52 @@ echo
 
 # ─── pass/fail verdict ───────────────────────────────────────────────────────
 
-# Runaway-growth detector: compares the LAST per-round VRAM to the per-round
-# *before* it. If a heavy round adds >5pp on top of where the previous round
-# left off, that's compounding — real fragmentation. A one-time bump from
-# baseline (e.g., +8pp at T3 with the buffer then bounded) is normal llama.cpp
-# behavior on this build across all profiles tested, so we report it but
-# don't fail on it.
-v_after_t2=${vram_after[1]}
-v_after_t3=${vram_after[2]}
-between_g0=$(( ${v_after_t3% *} - ${v_after_t2% *} ))
-between_g1=$(( ${v_after_t3##* } - ${v_after_t2##* } ))
+# Runaway-growth detector: compares T3b to T3a (both 90K prefills). If the
+# second heavy request bumps VRAM further on top of the first, the activation
+# buffer is unbounded — real fragmentation that will compound across a long
+# session. If T3b stays at T3a's level, the buffer is bounded (one-time
+# allocation that survives across requests — normal on this llama.cpp build).
+# T2 vs T3 doesn't work for this because T2 is below the threshold that
+# triggers the heavy-prefill buffer in the first place.
+v_after_t3a=${vram_after[2]}
+v_after_t3b=${vram_after[3]}
+runaway_g0=$(( ${v_after_t3b% *} - ${v_after_t3a% *} ))
+runaway_g1=$(( ${v_after_t3b##* } - ${v_after_t3a##* } ))
 
 pass=true
 [[ -n "$errors" ]] && { echo "  ❌ FAIL: errors in journal"; pass=false; }
 (( peak_g0 >= 98 )) && { echo "  ⚠️  FAIL: GPU0 peak >= 98% (near-OOM territory)"; pass=false; }
 (( peak_g1 >= 98 )) && { echo "  ⚠️  FAIL: GPU1 peak >= 98% (near-OOM territory)"; pass=false; }
-# Runaway: T3 added >5pp on top of T2 → buffer is still growing per request.
-(( between_g0 > 5 )) && { echo "  ⚠️  FAIL: GPU0 runaway drift — T3 added +${between_g0}pp on top of T2 (buffer not bounded)"; pass=false; }
-(( between_g1 > 5 )) && { echo "  ⚠️  FAIL: GPU1 runaway drift — T3 added +${between_g1}pp on top of T2 (buffer not bounded)"; pass=false; }
-# Informational: one-time activation buffer is normal; just note it.
+(( runaway_g0 > 5 )) && { echo "  ⚠️  FAIL: GPU0 runaway drift — T3b added +${runaway_g0}pp on top of T3a (buffer not bounded across consecutive heavy prefills)"; pass=false; }
+(( runaway_g1 > 5 )) && { echo "  ⚠️  FAIL: GPU1 runaway drift — T3b added +${runaway_g1}pp on top of T3a (buffer not bounded across consecutive heavy prefills)"; pass=false; }
+# Informational: one-time activation buffer is normal — verified bounded if
+# runaway delta is small.
 if (( settle_drift_g0 > 5 || settle_drift_g1 > 5 )); then
-  echo "  ℹ️   note: post-settle drift +${settle_drift_g0}pp/+${settle_drift_g1}pp — bounded one-time activation buffer (expected on this llama.cpp build; verified by between-round delta = +${between_g0}pp/+${between_g1}pp)"
+  if (( runaway_g0 <= 5 && runaway_g1 <= 5 )); then
+    echo "  ℹ️   note: post-settle drift +${settle_drift_g0}pp/+${settle_drift_g1}pp — one-time activation buffer, verified bounded (T3b vs T3a delta = +${runaway_g0}pp/+${runaway_g1}pp)"
+  fi
 fi
 
-# Latency-degradation check: T3 should not be more than ~5x slower than T2 PER TOKEN.
-# Attention is O(n²) so 5-6× input growth naturally produces ~3-6× per-token slowdown.
-# Threshold was previously 3× which false-positived on every healthy run.
+# Latency-degradation check: T3a should not be more than ~5x slower than T2
+# PER TOKEN. Attention is O(n²) so 5-6× input growth naturally produces ~3-6×
+# per-token slowdown. Compare T2→T3a (not T3b) because T3b benefits from the
+# prompt-cache hit on the identical T3a prompt and isn't representative of
+# cold-context throughput.
 read -r _ t2_out t2_lat <<<"${results[1]}"
-read -r _ t3_out t3_lat <<<"${results[2]}"
-if (( t2_out > 0 && t3_out > 0 )); then
+read -r _ t3a_out t3a_lat <<<"${results[2]}"
+read -r _ t3b_out t3b_lat <<<"${results[3]}"
+if (( t2_out > 0 && t3a_out > 0 )); then
   t2_tps=$(awk -v t="$t2_lat" -v n="$t2_out" 'BEGIN {printf "%.2f", n/t}')
-  t3_tps=$(awk -v t="$t3_lat" -v n="$t3_out" 'BEGIN {printf "%.2f", n/t}')
-  echo "  throughput:  T2=${t2_tps} tok/s   T3=${t3_tps} tok/s"
-  ratio=$(awk -v a="$t2_tps" -v b="$t3_tps" 'BEGIN {if (b>0) printf "%.2f", a/b; else print "inf"}')
-  echo "  slowdown:    T2/T3 = ${ratio}x  (>5x suggests context-length sensitivity beyond expected quadratic scaling)"
+  t3a_tps=$(awk -v t="$t3a_lat" -v n="$t3a_out" 'BEGIN {printf "%.2f", n/t}')
+  t3b_tps=$(awk -v t="$t3b_lat" -v n="$t3b_out" 'BEGIN {printf "%.2f", n/t}')
+  echo "  throughput:  T2=${t2_tps} tok/s   T3a=${t3a_tps} tok/s   T3b=${t3b_tps} tok/s (cache hit)"
+  ratio=$(awk -v a="$t2_tps" -v b="$t3a_tps" 'BEGIN {if (b>0) printf "%.2f", a/b; else print "inf"}')
+  echo "  slowdown:    T2/T3a = ${ratio}x  (>5x suggests context-length sensitivity beyond expected quadratic scaling)"
 fi
 
 echo
 if $pass; then
-  echo "  ✅ PASS: no errors, no near-OOM, no post-settle drift — $MODEL_ALIAS profile stable under tested load"
+  echo "  ✅ PASS: no errors, no near-OOM, no runaway drift across consecutive heavy prefills — $MODEL_ALIAS profile stable under tested load"
 else
   echo "  ❌ FAIL: see warnings above"
   exit 1
