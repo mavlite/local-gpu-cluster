@@ -1680,6 +1680,7 @@ async def models():
 async def healthz():
     async with httpx.AsyncClient(timeout=3.0) as c:
         upstream_status = {}
+        chat_models_payload = None
         for name, url in [
             ("chat", V620_URL),
             ("embed", EMBED_URL),
@@ -1688,6 +1689,20 @@ async def healthz():
             try:
                 r = await c.get(f"{url}/v1/models", headers=upstream_headers())
                 upstream_status[name] = "ok" if r.status_code == 200 else f"http_{r.status_code}"
+                if name == "chat" and r.status_code == 200:
+                    chat_models_payload = r.json()
             except Exception as e:
                 upstream_status[name] = f"unreachable: {type(e).__name__}"
-    return {"ok": True, "ts": time.time(), "upstream": upstream_status}
+    # Surface the active chat profile (matches what /v1/models filters against)
+    # so monitoring tools can alert on unexpected swaps.
+    active_chat_profile: str | None = None
+    if chat_models_payload:
+        ids = [m.get("id") for m in chat_models_payload.get("data", []) if m.get("id")]
+        if ids:
+            active_chat_profile = ids[0]
+    return {
+        "ok": True,
+        "ts": time.time(),
+        "upstream": upstream_status,
+        "active_chat_profile": active_chat_profile,
+    }

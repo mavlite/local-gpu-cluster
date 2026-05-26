@@ -33,28 +33,47 @@ AMD_VMID="${AMD_VMID:-151}"
 ROUTER_VMID="${ROUTER_VMID:-153}"
 ROUTER_HOST="${ROUTER_HOST:-192.168.6.${ROUTER_VMID}}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
-MODEL_ALIAS="${MODEL_ALIAS:-qwen3-coder}"
+
+# MODEL_ALIAS is auto-detected from the chat unit's --alias arg below if not
+# specified. Override via --model or the MODEL_ALIAS env var if you want to
+# exercise a specific router-side alias (e.g., to test thinking-mode behavior
+# separately from non-thinking) rather than whatever the chat unit reports.
+MODEL_ALIAS="${MODEL_ALIAS:-}"
 
 KEEP_TMP=false
 FOLLOW=false
-for arg in "$@"; do
-  case "$arg" in
-    --keep-tmp) KEEP_TMP=true ;;
-    --follow|-f) FOLLOW=true ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keep-tmp)   KEEP_TMP=true; shift ;;
+    --follow|-f)  FOLLOW=true; shift ;;
+    --model)      MODEL_ALIAS="$2"; shift 2 ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--follow] [--keep-tmp]
+Usage: $(basename "$0") [--follow] [--keep-tmp] [--model ALIAS]
+
+Stability-tests whichever chat profile is currently loaded (auto-detected
+from the chat unit's --alias arg). Sends three escalating chat-completions
+through the router (~2K → ~30K → ~100K prompt tokens), snapshots rocm-smi
+between each, scans journalctl for errors, and reports:
+
+  - peak VRAM per GPU + drift baseline → peak
+  - post-settle VRAM (30s after last request) → distinguishes transient
+    activation buffers from permanent fragmentation
+  - latency + throughput per round
+  - notable llama.cpp warnings (cache_reuse auto-disable, etc.)
+  - pass/fail verdict
 
 Flags:
-  --follow, -f  Stream chat-unit journal in the background during the test.
-                Each line prefixed with "  | " so it's distinguishable from
-                the test's own output. Useful for diagnosing what the model
-                is actually doing during long prefills (KV growth, prompt
-                cache, slot launches, errors).
-  --keep-tmp    Leave the generated prompt files in TMP_DIR for inspection.
+  --follow, -f      Stream chat-unit journal in the background during the
+                    test. Each line prefixed with "  | ".
+  --keep-tmp        Leave the generated prompt files in TMP_DIR for inspection.
+  --model ALIAS     Override the router-side model alias. Default: auto-
+                    detected from the chat unit's --alias arg. Useful for
+                    testing a thinking-mode alias separately (e.g., to
+                    test qwen3.6-think while qwen3.6 is loaded).
 EOF
       exit 0 ;;
-    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
@@ -118,17 +137,25 @@ ROUTER_KEY=$(pct exec "$ROUTER_VMID" -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /
   || { echo "ERROR: couldn't read ROUTER_API_KEY from LXC $ROUTER_VMID:/etc/router.env" >&2; exit 1; }
 [[ -n "$ROUTER_KEY" ]] || { echo "ERROR: ROUTER_API_KEY is empty" >&2; exit 1; }
 
-# Confirm coder is loaded by inspecting the chat unit directly (authoritative).
-# The router's /v1/models can be stale if the router app hasn't been redeployed
-# since coder aliases were added to ALIAS_MAP — but the chat unit's systemd
-# ExecStart never lies about what model is actually mmap'd into VRAM.
-chat_hf=$(pct exec "$AMD_VMID" -- bash -c "grep -oE 'unsloth/[A-Za-z0-9._-]+:[A-Za-z0-9_-]+' /etc/systemd/system/llamacpp-chat.service | head -1" 2>/dev/null || echo "")
+# Confirm SOME chat profile is loaded (was coder-only; now profile-agnostic).
+# Chat unit's systemd ExecStart never lies about what model is mmap'd into VRAM.
+chat_hf=$(pct exec "$AMD_VMID" -- bash -c "grep -oE '[A-Za-z0-9_-]+/[A-Za-z0-9._-]+:[A-Za-z0-9_-]+' /etc/systemd/system/llamacpp-chat.service | head -1" 2>/dev/null || echo "")
 echo "  chat unit --hf-repo: ${chat_hf:-<not detected>}"
-if [[ "$chat_hf" != *"Qwen3-Coder"* ]]; then
-  echo "ERROR: chat unit is not running a Coder profile (hf-repo=$chat_hf)" >&2
-  echo "       Run: ./scripts/swap-chat-model.sh coder" >&2
+if [[ -z "$chat_hf" ]]; then
+  echo "ERROR: no --hf-repo detected in chat unit. Is llamacpp-chat installed?" >&2
+  echo "       Check: pct exec $AMD_VMID -- systemctl status llamacpp-chat" >&2
   exit 1
 fi
+
+# Auto-detect MODEL_ALIAS from the chat unit's --alias arg unless overridden.
+if [[ -z "$MODEL_ALIAS" ]]; then
+  MODEL_ALIAS=$(pct exec "$AMD_VMID" -- bash -c "grep -oE -- '--alias \"[^\"]+\"' /etc/systemd/system/llamacpp-chat.service | head -1 | sed 's/.*\"\([^\"]*\)\".*/\1/'" 2>/dev/null || echo "")
+fi
+if [[ -z "$MODEL_ALIAS" ]]; then
+  echo "ERROR: couldn't determine MODEL_ALIAS. Pass --model <alias> explicitly." >&2
+  exit 1
+fi
+echo "  target model alias:  $MODEL_ALIAS"
 
 # Informational only: the router /v1/models list.
 loaded=$(curl -sf -H "Authorization: Bearer $ROUTER_KEY" \
@@ -138,9 +165,10 @@ echo "  router /v1/models reports: ${loaded:-<unreachable>}"
 if ! echo "$loaded" | grep -qw "$MODEL_ALIAS"; then
   cat >&2 <<WARN
   WARN: router does not advertise '$MODEL_ALIAS' in /v1/models.
-        Either the router-app.py is stale (redeploy with scripts/52-lxc-router.sh)
-        or you need a different MODEL_ALIAS. Test will proceed and rely on
-        ALIAS_MAP passthrough — request will likely still route correctly.
+        Either the router-app.py is stale (redeploy with scripts/53-lxc-router.sh)
+        or this alias maps to a backend that doesn't match the loaded profile.
+        Test will proceed and rely on ALIAS_MAP passthrough — request will
+        likely still route correctly.
 WARN
 fi
 
@@ -291,6 +319,17 @@ for round in 1 2 3; do
   echo
 done
 
+# ─── post-settle remeasure ───────────────────────────────────────────────────
+# Activation buffers from large prefills may release after the request completes
+# (transient — no fragmentation concern) OR they may stick around (real drift,
+# compounds over a long session). Wait + remeasure to distinguish.
+
+echo "── post-settle (waiting 30s for activation buffers to release) ──"
+sleep 30
+post_settle=$(vram_snapshot)
+echo "  post-settle VRAM: GPU0=${post_settle% *}%  GPU1=${post_settle##* }%"
+echo
+
 # ─── post-test analysis ──────────────────────────────────────────────────────
 
 echo "── post-test journal scan (errors since baseline) ──"
@@ -300,16 +339,27 @@ if [[ -n "$journal_cursor" ]]; then
     | grep -Ei 'error|oom|hsa.*fail|cuda.*fail|failed to|abort' \
     | grep -v 'warning' \
     || true)
+  # Surface notable llama.cpp warnings (cache_reuse auto-disable, etc.) for awareness
+  warnings=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat \
+    --after-cursor "$journal_cursor" --no-pager 2>/dev/null \
+    | grep -iE 'cache_reuse.*not supported|control-looking token|n_ctx_seq.*<.*n_ctx_train' \
+    | sort -u || true)
 else
-  errors=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat -n 200 --no-pager 2>/dev/null \
+  errors=$(pct exec "$AMD_VMID" -- journalctl -u llamacpp-chat -n 500 --no-pager 2>/dev/null \
     | grep -Ei 'error|oom|hsa.*fail|cuda.*fail|failed to|abort' \
     | grep -v 'warning' \
     || true)
+  warnings=""
 fi
 if [[ -z "$errors" ]]; then
   echo "  (no error-level lines in journal during test window)"
 else
   echo "$errors"
+fi
+if [[ -n "$warnings" ]]; then
+  echo
+  echo "  notable llama.cpp warnings (informational):"
+  echo "$warnings" | sed 's/^/    /'
 fi
 echo
 
@@ -326,9 +376,10 @@ for i in 0 1 2; do
   v="${vram_after[$i]}"
   printf "  %-15s  %4s  %4s\n" "after-T$((i+1))" "${v% *}" "${v##* }"
 done
+printf "  %-15s  %4s  %4s\n" "post-settle" "${post_settle% *}" "${post_settle##* }"
 echo
 
-# Drift = peak - baseline
+# Peak = max across all per-round snapshots.
 peak_g0=${baseline% *}
 peak_g1=${baseline##* }
 for v in "${vram_after[@]}"; do
@@ -336,11 +387,18 @@ for v in "${vram_after[@]}"; do
   (( vg0 > peak_g0 )) && peak_g0=$vg0
   (( vg1 > peak_g1 )) && peak_g1=$vg1
 done
-drift_g0=$(( peak_g0 - ${baseline% *} ))
-drift_g1=$(( peak_g1 - ${baseline##* } ))
 
-echo "  peak VRAM:   GPU0=${peak_g0}%   GPU1=${peak_g1}%"
-echo "  drift:       GPU0=+${drift_g0}pp  GPU1=+${drift_g1}pp"
+# Two drift numbers — peak drift is "worst transient" (could include
+# activation buffers that release); settle drift is "what's still held"
+# (real fragmentation that compounds across sessions).
+peak_drift_g0=$(( peak_g0 - ${baseline% *} ))
+peak_drift_g1=$(( peak_g1 - ${baseline##* } ))
+settle_drift_g0=$(( ${post_settle% *} - ${baseline% *} ))
+settle_drift_g1=$(( ${post_settle##* } - ${baseline##* } ))
+
+echo "  peak VRAM:        GPU0=${peak_g0}%   GPU1=${peak_g1}%"
+echo "  peak drift:       GPU0=+${peak_drift_g0}pp  GPU1=+${peak_drift_g1}pp  (worst transient)"
+echo "  post-settle drift: GPU0=+${settle_drift_g0}pp  GPU1=+${settle_drift_g1}pp  (held buffers — real fragmentation)"
 echo
 
 # ─── pass/fail verdict ───────────────────────────────────────────────────────
@@ -349,10 +407,15 @@ pass=true
 [[ -n "$errors" ]] && { echo "  ❌ FAIL: errors in journal"; pass=false; }
 (( peak_g0 >= 98 )) && { echo "  ⚠️  WARN: GPU0 peak >= 98% (near-OOM territory)"; pass=false; }
 (( peak_g1 >= 98 )) && { echo "  ⚠️  WARN: GPU1 peak >= 98% (near-OOM territory)"; pass=false; }
-(( drift_g0 > 5 )) && { echo "  ⚠️  WARN: GPU0 drift >5pp (possible fragmentation)"; }
-(( drift_g1 > 5 )) && { echo "  ⚠️  WARN: GPU1 drift >5pp (possible fragmentation)"; }
+# Drift warning fires only on POST-SETTLE growth (was peak drift; that
+# false-positived on transient activation buffers). >5pp post-settle = real
+# fragmentation that will compound across requests.
+(( settle_drift_g0 > 5 )) && { echo "  ⚠️  WARN: GPU0 post-settle drift >5pp (activation buffers not releasing)"; pass=false; }
+(( settle_drift_g1 > 5 )) && { echo "  ⚠️  WARN: GPU1 post-settle drift >5pp (activation buffers not releasing)"; pass=false; }
 
-# Latency-degradation check: T3 should not be more than ~3x slower than T2 PER TOKEN
+# Latency-degradation check: T3 should not be more than ~5x slower than T2 PER TOKEN.
+# Attention is O(n²) so 5-6× input growth naturally produces ~3-6× per-token slowdown.
+# Threshold was previously 3× which false-positived on every healthy run.
 read -r _ t2_out t2_lat <<<"${results[1]}"
 read -r _ t3_out t3_lat <<<"${results[2]}"
 if (( t2_out > 0 && t3_out > 0 )); then
@@ -360,12 +423,12 @@ if (( t2_out > 0 && t3_out > 0 )); then
   t3_tps=$(awk -v t="$t3_lat" -v n="$t3_out" 'BEGIN {printf "%.2f", n/t}')
   echo "  throughput:  T2=${t2_tps} tok/s   T3=${t3_tps} tok/s"
   ratio=$(awk -v a="$t2_tps" -v b="$t3_tps" 'BEGIN {if (b>0) printf "%.2f", a/b; else print "inf"}')
-  echo "  slowdown:    T2/T3 = ${ratio}x  (>3x suggests context-length sensitivity)"
+  echo "  slowdown:    T2/T3 = ${ratio}x  (>5x suggests context-length sensitivity beyond expected quadratic scaling)"
 fi
 
 echo
 if $pass; then
-  echo "  ✅ PASS: no errors, no near-OOM, coder profile stable under tested load"
+  echo "  ✅ PASS: no errors, no near-OOM, no post-settle drift — $MODEL_ALIAS profile stable under tested load"
 else
   echo "  ❌ FAIL: see warnings above"
   exit 1
