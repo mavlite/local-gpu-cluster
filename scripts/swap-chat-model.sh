@@ -78,13 +78,18 @@ get_profile() {
       ;;
     qwen3.6-hi)
       # Higher-precision Q5_K_M variant of qwen3.6. ~26.5 GB weights vs
-      # ~22 GB for Q4_K_M — ~4 GB more per swap, still leaves both cards
-      # ≥30% free at 256K context. Same model architecture so the 1,1
-      # tensor-split and 256K ctx that work for qwen3.6 should work here
-      # too; cache-reuse=1024 is safe (cache-reuse abort is Coder-Next
-      # architecture-specific). Useful for deep-research / RAG-synthesis
-      # sessions where precision matters more than throughput.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q5_K_M rag-qwen3.6-hi 1,1 262144 1024"
+      # ~22 GB for Q4_K_M. Same model architecture; cache-reuse=1024 is
+      # safe (cache-reuse abort is Coder-Next architecture-specific).
+      # Useful for deep-research / RAG-synthesis sessions where precision
+      # matters more than throughput.
+      #
+      # Tensor-split tuning history (2026-05-26):
+      #   1,1   → GPU 0 82% / GPU 1 51% (~31pp asymmetry from non-split
+      #           tensor mass landing on --main-gpu, same pattern as Coder).
+      #   1,1.5 → expected GPU 0 ~73% / GPU 1 ~60% (~13pp residual). Better
+      #           balance, more activation headroom on GPU 0. Re-measure
+      #           after first swap and tighten further to 1,2 if desired.
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q5_K_M rag-qwen3.6-hi 1,1.5 262144 1024"
       ;;
     coder)
       echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0"
