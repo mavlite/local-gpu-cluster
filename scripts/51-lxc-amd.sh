@@ -34,14 +34,16 @@ AMD_GPU_TARGET="${AMD_GPU_TARGET:-gfx1030}"
 ROCM_RELEASE="${ROCM_RELEASE:-latest}"
 
 # ---------- llama-server tunables (overridable via config.env) ----------
-# V620-only build: 2x V620 = 64 GB VRAM total. Chat unit ~22 GB weights + KV cache.
-# Verified model availability on HF (2026-05-17):
-#   unsloth/Qwen3.6-35B-A3B-GGUF                Q file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (~22 GB)
+# V620-only build: 2x V620 = 64 GB VRAM total. Chat unit ~29 GB weights + KV cache at the
+# Q6_K default (or ~22 GB on the qwen3.6-fast Q4_K_M throughput profile).
+# Verified model availability on HF (2026-05-27):
+#   unsloth/Qwen3.6-35B-A3B-GGUF        Qwen3.6-35B-A3B-UD-Q6_K.gguf   (~29 GB; default — pivoted from UD-Q4_K_M on 2026-05-27)
+#   unsloth/Qwen3.6-35B-A3B-GGUF        Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (~22 GB; qwen3.6-fast profile)
 LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3.6-35B-A3B-GGUF}"
-LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q4_K_M}"      # Unsloth Dynamic Q4_K_M (slightly better than vanilla at same size)
+LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q6_K}"        # Unsloth Dynamic Q6_K — near-lossless precision (~99% of Q8 quality)
 LLAMA_ALIAS="${LLAMA_ALIAS:-rag-qwen3.6}"          # matches AnythingLLM ALLM_LLM_MODEL
 LLAMA_CTX="${LLAMA_CTX:-262144}"                   # 256K total; with --parallel 1 → full 256K per request (matches Qwen3.6 n_ctx_train)
-LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~24GB @ 256K total; 64GB VRAM has plenty of headroom
+LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~11GB @ 256K total; 64GB VRAM has plenty of headroom
 # parallel=1 matches the router's CHAT_CONCURRENCY=1 single-user policy.
 # With parallel=2 each slot was capped at 131K (half of n_ctx_train=262144), so
 # the second slot was dead VRAM under the single-user policy and the warning
@@ -55,20 +57,29 @@ LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-1024}"     # prompt-prefix reuse window 
 # bumping to 16 GB doubles the hit window. LXC has 32 GB RAM, so 16 GB leaves
 # plenty for the model + OS. Set to 0 to disable.
 LLAMA_CACHE_RAM_MB="${LLAMA_CACHE_RAM_MB:-16384}"
-LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1}"
+# Default 1,1.5 matches the Q6_K weight distribution: ~+3.5 GB extra split share
+# on GPU 0 at 1,1 would push GPU 0 peak from 84% (Q4 baseline) to ~95% — too tight.
+# 1,1.5 shifts more split weight to GPU 1, which has only the reranker (1.5 GB)
+# rather than the embedder + ~10 GB non-split tensor mass on GPU 0. Pre-pivot
+# default was 1,1 (Q4_K_M baseline); qwen3.6-fast profile keeps that.
+LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1.5}"
 LLAMA_THREADS="${LLAMA_THREADS:-8}"
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
 # Speculative decoding (in-process draft on the V620 chat unit).
-# DISABLED by default for Qwen3.6 target — llama.cpp requires draft tokenizer
-# to match target ("draft model vocab type must match target model") and
-# Qwen3.6 has no published small variant with a compatible tokenizer.
+# DISABLED by default — NOT because of a vocab mismatch. As of 2026-03-02 Qwen3.5-0.8B
+# (vocab 248,320) is a vocab-match for Qwen3.6, and llama.cpp PR #19493 (merged 2026-04-19)
+# accepts it as a draft via --hf-repo-draft. Spec-decode stays disabled because the A3B
+# MoE architecture incurs per-token expert-loading overhead during draft verification
+# that EXCEEDS any acceptance-rate speedup. Independent benchmarks (thc1006 RTX 3090
+# sweep, llama.cpp discussion #22473) measure 3-12% throughput regression on non-
+# datacenter GPUs despite 100% draft acceptance — i.e., enabling it would slow us down.
 # When LLAMA_DRAFT_REPO is empty the chat unit boot log will show
-# "no implementations specified for speculative decoding" — that is the
-# expected/normal state, NOT a bug.
-# Re-enable only when a Qwen3.6-family small variant becomes available.
-# Workaround: 35B-A3B is MoE with ~3B active params, so it's already fast
-# without spec decode. Loss is ~1.5-2× throughput; acceptable trade-off.
+# "no implementations specified for speculative decoding" — that is the expected state.
+# Qwen3.6-35B-A3B is already MoE-fast at 3B active params/token. Re-evaluate only if Qwen
+# ships a dense small Qwen3.6 variant OR if llama.cpp lands MoE expert-caching for the
+# draft verification path. To test the regression yourself: set LLAMA_DRAFT_REPO to
+# Qwen/Qwen3.5-0.8B-GGUF and benchmark — expect to roll back.
 LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
 LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
@@ -329,7 +340,7 @@ phase_5_11_2_warmup() {
 # Warm-up the chat unit after startup so the first user request doesn't pay cold-start.
 # Best-effort: the unit's ExecStartPost is prefixed with "-" so failure here won't
 # kill llama-server. This script polls for up to 30 minutes (covers first-time HF
-# model download of ~22 GB on slow networks), then exits 0 regardless.
+# model download of ~29 GB on slow networks), then exits 0 regardless.
 . /etc/llamacpp.env 2>/dev/null
 for attempt in $(seq 1 360); do
     if curl -sf -m 5 -H "Authorization: Bearer ${LLAMACPP_API_KEY}" \
@@ -584,7 +595,7 @@ phase_5_11_systemd() {
   phase_5_11_5_rerank_unit
   phase_5_11_6_journald_ssh
   warn "Three llama-server units installed (enabled, not started). First-start downloads:"
-  warn "  - Chat target ~22 GB"
+  warn "  - Chat target ~29 GB (UD-Q6_K default; ~22 GB on the qwen3.6-fast UD-Q4_K_M profile)"
   warn "  - Embedder ~1 GB"
   warn "  - Reranker ~1.5 GB"
   warn "Start with: pct exec $AMD_VMID -- systemctl start llamacpp-chat llamacpp-embed llamacpp-rerank"

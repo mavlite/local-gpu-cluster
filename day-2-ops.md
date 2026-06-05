@@ -195,7 +195,7 @@ pct exec 151 -- journalctl -u llamacpp-chat -n 100 --no-pager
 
 Common causes:
 
-- **First-start model download stalled.** The chat unit's `--hf-repo` downloads ~22 GB on first start. `TimeoutStartSec=1800` (30 min) allows for this. If slower, the `warm-chat.sh` ExecStartPost will eventually time out but the model download continues in the background; restart the unit once download visible in `/opt/models/.cache/`.
+- **First-start model download stalled.** The chat unit's `--hf-repo` downloads ~29 GB on first start (Q6_K default; ~22 GB on the qwen3.6-fast Q4 profile). `TimeoutStartSec=1800` (30 min) allows for this. If slower, the `warm-chat.sh` ExecStartPost will eventually time out but the model download continues in the background; restart the unit once download visible in `/opt/models/.cache/`.
 - **VRAM OOM at weight load.** Most often when someone tries to swap to a larger model. `journalctl` shows `hipMalloc failed` or `out of memory`. Recovery: edit [`scripts/config.env`](./scripts/config.env.example) to revert `LLAMA_HF_REPO` / `LLAMA_HF_QUANT`, re-run `scripts/51-lxc-amd.sh`. Then do a VRAM budget exercise per [§ 4.4](#-44-vram-budget-template) before retrying.
 - **KFD ioctl rejected** (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`). Usually means the LXC's AppArmor profile got reset. Confirm `/etc/pve/lxc/151.conf` still contains `lxc.apparmor.profile: unconfined`. Restart the LXC: `pct restart 151`.
 
@@ -304,9 +304,9 @@ Recovery: see [§ 7.2](#-72-rotating-router_api_key).
 
 ### § 3.9 "no implementations specified for speculative decoding"
 
-This log line in `llamacpp-chat` is **expected and correct.** Spec-decode is disabled by design on Qwen3.6 (vocab 248,320) because no vocab-compatible small variant exists yet (Qwen3-0.6B is vocab 151,936). See [`setup-runbook.md` § 5.11.3](./setup-runbook.md) for the full rationale.
+This log line in `llamacpp-chat` is **expected and correct.** Spec-decode is disabled because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that exceeds any acceptance-rate speedup — independent benchmarks measure 3-12% throughput regression even with a vocab-matched draft (Qwen3.5-0.8B is now vocab-matched at 248,320 and loadable via llama.cpp PR #19493; it just doesn't help on V620-class hardware). See [`setup-runbook.md` § 5.11.3](./setup-runbook.md) for the full rationale and benchmark citations.
 
-Do not try to "fix" this. To re-enable when a compatible draft ships, see [§ 4.5](#-45-enabling-spec-decode-when-a-compatible-draft-ships).
+Do not try to "fix" this. See [§ 4.5](#-45-enabling-spec-decode-when-a-compatible-draft-ships) if you want to test the regression yourself or re-evaluate when MoE expert-caching lands in llama.cpp.
 
 ---
 
@@ -318,7 +318,7 @@ Do not try to "fix" this. To re-enable when a compatible draft ships, see [§ 4.
 
 Models are downloaded by `llama-server`'s `--hf-repo` flag into `LLAMA_CACHE=/opt/models/.cache` inside LXC 151. The bind mount maps that to `/tank/models/.cache` on the host — RW so the cache survives container recreation.
 
-**HuggingFace cache layout** (this is what `--hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` produces):
+**HuggingFace cache layout** (this is what `--hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K` produces):
 
 ```
 /tank/models/.cache/
@@ -327,38 +327,54 @@ Models are downloaded by `llama-server`'s `--hf-repo` flag into `LLAMA_CACHE=/op
     └── blobs/<sha256>               ← actual file
 ```
 
-Currently deployed (verified live):
+Currently cached on the host (verified live 2026-05-27):
 
 | Repo | File | Size | Used by |
 |---|---|---|---|
-| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | ~22 GB | chat |
-| `unsloth/Qwen3.6-35B-A3B-GGUF` | `mmproj-BF16.gguf` | several GB | **unused** (chat has `--no-mmproj`) |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q6_K.gguf` | ~29 GB | **chat (default — `qwen3.6` profile)** |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | ~22 GB | **chat (`qwen3.6-fast` throughput profile)** |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `mmproj-BF16.gguf` | several GB | unused (chat has `--no-mmproj`) |
 | `Qwen/Qwen3-Embedding-0.6B-GGUF` | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ~1 GB | embed |
 | `gpustack/bge-reranker-v2-m3-GGUF` | `bge-reranker-v2-m3-Q4_K_M.gguf` | ~1.5 GB | rerank |
-| `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | ~400 MB | **unused** (spec-decode disabled — see [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding)) |
-| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | **unused** (leftover from failed swap, see [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) |
+| `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | ~400 MB | unused (historical draft attempt — vocab 151,936 mismatch; safe to delete) |
+| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | unused (leftover from failed swap; see [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) |
 
 ### § 4.2 Pre-fetching a model
 
 If you want a model on disk *before* the unit starts (e.g., to avoid a slow first-start download):
 
-```bash
-# Pre-download into the HF cache layout
-huggingface-cli download unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
-    --local-dir /tank/models/Qwen3.6-35B-A3B-GGUF/
+The Proxmox host doesn't ship `huggingface-cli` — install in a venv first, OR use `curl`, OR just let `llama-server`'s `--hf-repo` flag auto-fetch on next restart (every currently-cached GGUF arrived that way).
 
-# Or place it in the standard HF cache structure:
-HF_HOME=/tank/models/.cache huggingface-cli download \
-    unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+```bash
+# Method A — let llama-server fetch it (simplest, no extra tooling).
+# Update the unit's --hf-file (or swap-chat-model.sh profile), then:
+pct exec 151 -- systemctl restart llamacpp-chat
+# First request blocks until download finishes; subsequent restarts hit the cache.
+
+# Method B — pre-fetch with huggingface-cli (populates the cache properly):
+apt install -y python3-venv
+python3 -m venv ~/.venvs/hf
+~/.venvs/hf/bin/pip install -U 'huggingface_hub[cli]'
+
+HUGGINGFACE_HUB_CACHE=/tank/models/.cache \
+  ~/.venvs/hf/bin/huggingface-cli download \
+  unsloth/Qwen3.6-35B-A3B-GGUF Qwen3.6-35B-A3B-UD-Q6_K.gguf
+# Result: /tank/models/.cache/models--unsloth--Qwen3.6-35B-A3B-GGUF/snapshots/<rev>/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+
+# Method C — curl (zero install; bypasses cache layout, only use with --model swap):
+mkdir -p /tank/models/Qwen3.6-35B-A3B-GGUF
+curl -L -C - -o /tank/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q6_K.gguf \
+  https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q6_K.gguf
+# Then in the service unit, replace --hf-repo / --hf-file with --model /opt/models/...
 ```
 
-Either works. The `--hf-repo` flag in the unit file will detect the cached file and skip download.
+Methods A and B keep the `--hf-repo` pattern. Method C creates a parallel flat-layout directory and requires editing the unit to use `--model` — only use it when CLI install is blocked.
 
 To pin to a static path instead of `--hf-repo` (e.g., for air-gapped deployments), edit the systemd unit to use `--model /opt/models/<path>/<file>.gguf` instead of `--hf-repo`. The provisioning script does not currently support this flag automatically — edit `/etc/systemd/system/llamacpp-chat.service` directly, `systemctl daemon-reload`, restart.
 
 ### § 4.3 Swapping the chat model ✅
 
-**The fast path: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh)** automates the swap as a single atomic operation for the three pre-defined profiles (`qwen3.6` / `qwen3.6-hi` / `coder`). See [§ 4.4](#-44-vram-budget-template) for the full workflow, per-profile tuning rationale, and measured VRAM distribution. Use the swap script unless you're introducing a brand-new model not covered by an existing profile.
+**The fast path: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh)** automates the swap as a single atomic operation for the three pre-defined profiles (`qwen3.6` / `qwen3.6-fast` / `coder`). See [§ 4.4](#-44-vram-budget-template) for the full workflow, per-profile tuning rationale, and measured VRAM distribution. Use the swap script unless you're introducing a brand-new model not covered by an existing profile.
 
 **The manual path** (for adding a new model that doesn't have a profile yet): edit `config.env` + re-run `51-lxc-amd.sh`. Do not hand-edit the unit file or wget into `/tank/models`.
 
@@ -392,13 +408,14 @@ If you intend to keep the new model around, **add it to [`get_profile()`](./scri
 
 Captured from the [Qwen3-Coder-Next OOM lesson](./SESSION_HANDOFF.md) (May 2026): a 49.6 GB GGUF was downloaded and tried before checking VRAM math; it failed at weight allocation. Always run this before downloading anything > 30 GB.
 
-| Component | Formula | Current values |
+| Component | Formula | Current values (Q6_K default) |
 |---|---|---|
-| Chat weights (Q4_K_M or UD-Q4_K_M) | ~0.65 × file size | ~22 GB |
+| Chat weights (Q6_K default) | ~0.65 × file size | ~29 GB (Q6_K) / ~22 GB (qwen3.6-fast Q4) |
 | Chat KV cache (Q8) | `--ctx-size × 2 × hidden_size × n_layers × bytes_per_token / 8` ≈ **~11 GB at 256K × Q8** | ~11 GB |
 | Embed weights + KV (Q8) | ~1.2 GB | 1.2 GB |
 | Rerank weights + KV | ~1.5 GB | 1.5 GB |
-| **Pool total** | | **~36 GB of 64 GB pool, ~28 GB headroom** |
+| **Pool total (Q6_K default)** | | **~43 GB of 64 GB pool, ~21 GB headroom** |
+| **Pool total (Q4 fast profile)** | | ~36 GB of 64 GB pool, ~28 GB headroom |
 
 Rules of thumb:
 
@@ -524,9 +541,9 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 
 | Profile | Split | Ctx | Cache-reuse | GPU 0 idle / peak | GPU 1 idle / peak | Free GPU 0 at peak | Notes |
 |---|---|---|---|---|---|---|---|
-| `qwen3.6` (UD-Q4_K_M, 22 GB) | `1,1` | 256K | 1024† | **75% / 84%** | **44% / 52%** | **~5.1 GB at peak** | validated 2026-05-26 (T3a/T3b methodology): T3a→T3b delta +0pp/+0pp, no errors, ✅ PASS. 31pp idle asymmetry: ~10 GB non-split tensor mass lands on GPU 0 (same `--main-gpu` pattern as the other profiles, just within comfortable headroom). †`cache_reuse` auto-disables here too (same llama.cpp Q*_K_M behavior) |
-| `qwen3.6-hi` initial | `1,1` | 256K | 1024 | 82% / — | 51% / — | ~5.7 GB | works but 31pp asymmetry; ~10 GB non-split tensor mass on GPU 0 |
-| `qwen3.6-hi` (UD-Q5_K_M, 26.5 GB) **final** | `1,1.5` | 256K | 1024† | **73% / 81%** | **60% / 68%** | **~6.1 GB at peak** | validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS. †llama.cpp auto-disables cache_reuse for this context (Q5_K_M + q8_0 KV). Effective behavior is `CACHE_REUSE=0` |
+| `qwen3.6` (UD-Q6_K, 29 GB) **default — 2026-05-27 pivot** | `1,1.5` | 256K | 1024† | **PENDING (predicted ~76% / ~85%)** | **PENDING (predicted ~63% / ~73%)** | **PENDING (predicted ~3-4 GB at peak)** | RE-MEASURE after first redeploy via `swap-chat-model.sh qwen3.6` and update this row. Predicted via interpolation between Q4@1,1 and Q5@1,1.5 measurements below. †Expect `cache_reuse` auto-disable (same Q*_K_M behavior). |
+| `qwen3.6-fast` (UD-Q4_K_M, 22 GB) — renamed from prior default 2026-05-27 | `1,1` | 256K | 1024† | **75% / 84%** | **44% / 52%** | **~5.1 GB at peak** | validated 2026-05-26 as previous `qwen3.6` default: T3a→T3b delta +0pp/+0pp, no errors, ✅ PASS. Same GGUF, so measurements carry over verbatim. 31pp idle asymmetry: ~10 GB non-split tensor mass lands on GPU 0. †`cache_reuse` auto-disables (Q*_K_M + q8_0 KV) |
+| ~~`qwen3.6-hi` (UD-Q5_K_M, 26.5 GB)~~ retired 2026-05-27 | ~~`1,1.5`~~ | ~~256K~~ | ~~1024~~ | ~~73% / 81%~~ | ~~60% / 68%~~ | ~~~6.1 GB~~ | **Retired:** Q5 is strictly dominated by the new Q6 default going up and by Q4 (qwen3.6-fast) going down for throughput. Historical measurement preserved here for reference. |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
@@ -540,17 +557,17 @@ Verified 2026-05-26 with two consecutive 82K-token requests: VRAM held at 92%/85
 
 Re-validate after any profile change with [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) — it sends three escalating requests (~2K → ~30K → ~100K input tokens) and reports drift, peaks, and unit errors. Use `--follow` (or `-f`) to also stream the chat-unit journal in the background during the test for live diagnostics. The script is currently coder-specific (refuses to run unless `Qwen3-Coder` is loaded); apply the same methodology manually to other profiles until generalized.
 
-**Discovering what's loaded:** `/v1/models` is **profile-aware** — the router queries the chat unit's reported model id and only advertises ALIAS_MAP entries whose `backend` field matches. So after `swap-chat-model.sh coder`, the response includes `qwen3-coder` and `qwen3-coder-next` but hides `rag-qwen3.6` / `qwen3.6-think` / `qwen3.6` / `rag-qwen3.6-hi` / `qwen3.6-hi-think` / `qwen3.6-hi`. Mismatched-profile requests will still pass through to llama-server (the chat unit serves whatever is loaded regardless of request alias), but the router's `/v1/models` advertises only what's truly live.
+**Discovering what's loaded:** `/v1/models` is **profile-aware** — the router queries the chat unit's reported model id and only advertises ALIAS_MAP entries whose `backend` field matches. So after `swap-chat-model.sh coder`, the response includes `qwen3-coder` and `qwen3-coder-next` but hides `rag-qwen3.6` / `qwen3.6-think` / `qwen3.6` / `rag-qwen3.6-fast` / `qwen3.6-fast-think` / `qwen3.6-fast`. Mismatched-profile requests will still pass through to llama-server (the chat unit serves whatever is loaded regardless of request alias), but the router's `/v1/models` advertises only what's truly live.
 
 **Triggering from a workstation:** add a thin SSH wrapper to your shell profile. Example PowerShell function for the Windows side:
 
 ```powershell
 function Swap-ClusterChatModel {
-  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","qwen3.6-hi","--status")][string]$Target)
+  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","qwen3.6-fast","--status")][string]$Target)
   ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target"
 }
 Set-Alias swap Swap-ClusterChatModel
-# Usage:  swap --status    swap coder    swap qwen3.6    swap qwen3.6-hi
+# Usage:  swap --status    swap coder    swap qwen3.6    swap qwen3.6-fast
 ```
 
 Bash equivalent:
@@ -561,15 +578,20 @@ alias swap='ssh root@<pve-host> /root/local-gpu-cluster/scripts/swap-chat-model.
 
 To add an additional profile beyond the current three, extend the `get_profile()` case statement and `PROFILE_NAMES` array in [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh), then add corresponding entries to the router's [`ALIAS_MAP`](./scripts/files/router-app.py) (matching `backend` field). Dynamic `/v1/models` will pick them up automatically after the next `53-lxc-router.sh` redeploy.
 
-### § 4.5 Enabling spec-decode (when a compatible draft ships)
+### § 4.5 Spec-decode status and re-evaluation triggers
 
-Currently disabled (see [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding)). When a vocab-compatible Qwen3.6 small variant ships:
+**Currently disabled** (see [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding)). The blocker is **not** vocab mismatch — Qwen3.5-0.8B (vocab 248,320) is a vocab match for Qwen3.6 and llama.cpp [PR #19493](https://github.com/ggml-org/llama.cpp/pull/19493) accepts it as a draft via `--hf-repo-draft`. Spec-decode stays off because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that **exceeds** any acceptance-rate speedup. Two independent benchmarks measured the regression:
+
+- [thc1006 RTX 3090 sweep](https://github.com/thc1006/qwen3.6-speculative-decoding-rtx3090): 19 configs, 3-12% throughput regression, 100% draft acceptance
+- [llama.cpp discussion #22473](https://github.com/ggml-org/llama.cpp/discussions/22473): 38 → 33 tps regression on Qwen3.6-27B with Qwen3.5-0.8B draft
+
+**To test the regression yourself** (expect to roll back):
 
 ```bash
 # Edit scripts/config.env
 $EDITOR scripts/config.env
 # Set:
-#   LLAMA_DRAFT_REPO=unsloth/<new-small-variant>-GGUF
+#   LLAMA_DRAFT_REPO=Qwen/Qwen3.5-0.8B-GGUF    # vocab-matched at 248,320
 #   LLAMA_DRAFT_QUANT=Q4_K_M
 #   LLAMA_SPEC_NMAX=16
 #   LLAMA_SPEC_NMIN=0
@@ -578,18 +600,23 @@ $EDITOR scripts/config.env
 ./scripts/51-lxc-amd.sh
 ```
 
-[`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) detects the non-empty `LLAMA_DRAFT_REPO` and appends `--hf-repo-draft`, `--n-gpu-layers-draft all`, and `--spec-draft-n-max/min` to the ExecStart. After restart, the log should show acceptance rates instead of the "no implementations specified" line.
+[`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) detects the non-empty `LLAMA_DRAFT_REPO` and appends `--hf-repo-draft`, `--n-gpu-layers-draft all`, and `--spec-draft-n-max/min` to the ExecStart. After restart, the log will show acceptance rates — but compare end-to-end t/s against the baseline before keeping it.
 
-If the new draft has a mismatched vocab, llama.cpp will refuse to load it with `draft model vocab type must match target model`. Revert `LLAMA_DRAFT_REPO=` (empty) and re-run.
+**Re-evaluation triggers:**
+
+1. Qwen ships a *dense* small variant of Qwen3.6 (the MoE expert-load overhead may still apply — needs fresh benchmark since the target still pays verification cost regardless of draft type).
+2. llama.cpp lands MoE expert-caching for the draft verification path.
+3. Hardware upgrade to HBM-class GPU (MI300, H100) where expert loads are effectively free.
 
 #### Better alternative: MTP variant (Multi-Token Prediction) — available 2026-05
 
-A spec-decode HF re-check on 2026-05-26 surfaced a better path than waiting for a compatible small draft: **`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`** is the MTP-trained variant of our current chat model. MTP integrates spec-decode into the *same* model via additional prediction heads — no separate draft model needed, and unsloth claims **~1.5-2× faster inference with no accuracy loss**.
+A spec-decode HF re-check on 2026-05-26 surfaced a better path than the external-draft route: **`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`** is the MTP-trained variant of our current chat model. MTP integrates spec-decode into the *same* model via additional prediction heads — no separate draft model needed, no cross-model expert-load overhead, and unsloth claims **~1.5-2× faster inference with no accuracy loss**. This is the most promising path forward for Qwen3.6 spec-decode on V620-class hardware because it sidesteps the MoE expert-loading regression entirely (no draft model → no separate verification pass).
 
 Key facts:
 
-- Same tokenizer as the standard variant (vocab 248320) → no vocab-mismatch risk
-- UD-Q4_K_M is 22.7 GB (vs. 22.1 GB for the standard) — drop-in VRAM budget
+- Same tokenizer as the standard variant (vocab 248,320) → no vocab-mismatch risk
+- UD-Q6_K likely available (verify on HF — if only UD-Q4_K_M ships, that's an acceptable temporary regression vs current Q6_K default for the spec-decode benefit)
+- UD-Q4_K_M is 22.7 GB (vs. 22.1 GB for the standard non-MTP) — drop-in VRAM budget for the qwen3.6-fast profile
 - Requires llama.cpp built from latest source (we already do this via `51-lxc-amd.sh`'s `git pull --ff-only`)
 - New flags needed: `--spec-type draft-mtp --spec-draft-n-max 2`
 - Compatible with our `--parallel 1` setup (MTP doesn't yet support `-np > 1`, which is fine)
@@ -599,9 +626,9 @@ Key facts:
 
 1. Teach `51-lxc-amd.sh` to emit `--spec-type draft-mtp` + `--spec-draft-n-max` when a new `LLAMA_SPEC_TYPE` env is set
 2. Add a new field to `swap-chat-model.sh` profile schema for the MTP type
-3. Add a `qwen3.6-mtp` profile entry (or replace `qwen3.6` with MTP after validation)
+3. Add a `qwen3.6-mtp` profile entry (or replace `qwen3.6` with MTP after validation — but first confirm UD-Q6_K is available; otherwise this is a precision regression from the new default)
 4. Add corresponding `ALIAS_MAP` entries in `router-app.py`
-5. First-time ~22.7 GB download
+5. First-time ~22.7 GB download (Q4) or ~29 GB (Q6, if available)
 6. Re-run stability test (T3a/T3b) against the MTP profile
 
 Defer until the operator wants the throughput boost. Implementation outline saved here so the next pass doesn't have to re-research.
@@ -616,7 +643,7 @@ du -sh /tank/models/.cache/models--*/
 
 # Safely remove an unused repo's blobs:
 rm -rf /tank/models/.cache/models--unsloth--Qwen3-Coder-Next-GGUF
-rm -rf /tank/models/.cache/models--unsloth--Qwen3-0.6B-GGUF    # only if spec-decode stays disabled
+rm -rf /tank/models/.cache/models--unsloth--Qwen3-0.6B-GGUF    # safe to delete — vocab mismatch with Qwen3.6 (151,936 vs 248,320); never usable as draft
 
 # The mmproj file inside the chat repo cache is unused but the repo dir itself is needed.
 # Delete only the specific blob:

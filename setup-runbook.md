@@ -13,7 +13,7 @@ Once deployment is complete, see [`day-2-ops.md`](./day-2-ops.md) for steady-sta
 >
 > 1. Speculative decoding requires both target and draft models in the same `llama-server` process (via `-md` / `--model-draft`). Both models live on the V620 LXC. With the V620-only pivot, embeddings and reranking moved into the same LXC as additional `llama-server` instances pinned per-card via `--main-gpu` (see `local-gpu-cluster-v2.md` §1.3 and Phase 5 below).
 >
-> 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. **Speculative decoding is disabled by default on Qwen3.6**: the 35B-A3B target uses tokenizer vocab 248,320 while Qwen3-0.6B uses vocab 151,936, and llama.cpp refuses to load a mismatched-vocab draft. No vocab-compatible small variant exists in the Qwen3.6 family yet. Because 35B-A3B is already MoE-fast (~3 B active params/token), the ~1.5-2× throughput hit from disabled spec-decode is accepted. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding` — this is the expected/normal state. Re-enable via `LLAMA_DRAFT_REPO` in `scripts/config.env` once a compatible draft ships.
+> 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. Default quant is **UD-Q6_K** (~29 GB; pivoted from UD-Q4_K_M on 2026-05-27); the prior Q4 default lives on as the `qwen3.6-fast` profile for throughput-prioritized workloads. **Speculative decoding is disabled by default on Qwen3.6** — NOT because of a vocab mismatch (Qwen3.5-0.8B shipped 2026-03-02 with vocab 248,320 matching Qwen3.6, and llama.cpp PR #19493 accepts it as a draft) but because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that exceeds any acceptance-rate speedup. Benchmarks measure 3-12% throughput regression with the vocab-matched draft. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding` — this is the expected/normal state. See Step 5.11.3 for details and citations.
 >
 > 3. Proxmox VE 9.1 (released Nov 2025) defaults to Linux kernel 6.17. With NVIDIA removed, no kernel pinning is required — AMDGPU is in-tree and stable on 6.17.
 >
@@ -948,8 +948,9 @@ The V620-only LXC hosts three llama-server processes (chat + embed + rerank). Al
 
 | File | Repo | Approx size | Used by |
 | --- | --- | --- | --- |
-| Target: Qwen3.6-35B-A3B UD-Q4_K_M | `unsloth/Qwen3.6-35B-A3B-GGUF` | ~22 GB | `llamacpp-chat.service` (port 8080) |
-| Draft: Qwen3-0.6B Q4_K_M (**unused** — see spec-decode note in Step 5.11.3) | `unsloth/Qwen3-0.6B-GGUF` | ~400 MB | (optional download; not loaded by default) |
+| Target (default): Qwen3.6-35B-A3B UD-Q6_K | `unsloth/Qwen3.6-35B-A3B-GGUF` | ~29 GB | `llamacpp-chat.service` (port 8080) — pivoted from UD-Q4_K_M on 2026-05-27 |
+| Target (qwen3.6-fast profile): Qwen3.6-35B-A3B UD-Q4_K_M | `unsloth/Qwen3.6-35B-A3B-GGUF` | ~22 GB | `llamacpp-chat.service` (port 8080) when throughput > precision |
+| Draft (unused — see spec-decode note in Step 5.11.3): Qwen3.5-0.8B Q4_K_M | `Qwen/Qwen3.5-0.8B-GGUF` | ~500 MB | vocab-matched (248,320) but causes 3-12% regression on MoE; not loaded by default |
 | Embedder: Qwen3-Embedding-0.6B Q8_0 | `Qwen/Qwen3-Embedding-0.6B-GGUF` | ~1.0 GB | `llamacpp-embed.service` (port 8082) |
 | Reranker: BGE Reranker v2-m3 (GGUF) | see note below | ~1.5 GB | `llamacpp-rerank.service` (port 8083) |
 
@@ -964,17 +965,25 @@ cd /tank/models
 # Use llama-server's built-in HF downloader (recommended — handles multi-shard automatically)
 # Or wget directly:
 
-# Target: Qwen3.6 35B-A3B (MoE) UD-Q4_K_M (Unsloth Dynamic — single file, ~22 GB).
+# Target: Qwen3.6 35B-A3B (MoE) UD-Q6_K (Unsloth Dynamic — single file, ~29 GB, default).
 # Verify current file list at https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main
-wget -O qwen3.6-35b-a3b-ud-q4_k_m.gguf \
-  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+wget -O qwen3.6-35b-a3b-ud-q6_k.gguf \
+  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q6_K.gguf"
 
-# Draft: Qwen3-0.6B Q4_K_M (download is OPTIONAL — currently UNUSED because Qwen3.6's
-# tokenizer vocab (248,320) doesn't match Qwen3-0.6B's (151,936) and llama.cpp rejects
-# mismatched-vocab drafts. Skip this download unless a vocab-compatible Qwen3.6 small
-# variant becomes available.)
-# wget -O qwen3-0.6b-q4_k_m.gguf \
-#   "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf"
+# Optional: also fetch UD-Q4_K_M (~22 GB) for the qwen3.6-fast throughput profile —
+# swap-chat-model.sh will pull it on first --hf-repo use anyway, so this is just
+# a pre-fetch convenience:
+# wget -O qwen3.6-35b-a3b-ud-q4_k_m.gguf \
+#   "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+
+# Draft: Qwen3.5-0.8B Q4_K_M (download is OPTIONAL — currently UNUSED). Qwen3.5-0.8B has
+# vocab 248,320 matching Qwen3.6 exactly, and llama.cpp PR #19493 accepts it as a draft.
+# But the A3B MoE incurs per-token expert-load overhead during verification that exceeds
+# any speedup — independent benchmarks (thc1006, llama.cpp #22473) measure 3-12% regression
+# despite 100% acceptance. Skip this download unless you want to reproduce the regression
+# experiment. See Step 5.11.3.
+# wget -O qwen3.5-0.8b-q4_k_m.gguf \
+#   "https://huggingface.co/Qwen/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"
 
 # Embedder: Qwen3-Embedding-0.6B Q8_0 (uses --pooling last; do NOT use cls — see Step 5.11.2)
 wget -O qwen3-embedding-0.6b-q8_0.gguf \
@@ -1003,14 +1012,15 @@ chmod 644 *.gguf
 
 ```bash
 # Inside the LXC, the systemd unit can reference a HF repo:
-# --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M --hf-repo-draft unsloth/Qwen3-0.6B-GGUF:Q4_K_M
-# This auto-downloads to LLAMA_CACHE on first start.
+# --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K
+# This auto-downloads to LLAMA_CACHE on first start. Spec-decode draft (--hf-repo-draft)
+# is intentionally NOT set — see Step 5.11.3.
 ```
 
-**URL stability caveat:** Hugging Face URLs and exact quant filenames change as new quantization algorithms (e.g. Unsloth Dynamic 2.0) are released. Verify the current file list at `https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main` before running `wget`. The `UD-Q4_K_M` (Unsloth Dynamic) quant is recommended as a quality/size sweet spot — slightly better than vanilla Q4_K_M at the same ~22 GB size.
+**URL stability caveat:** Hugging Face URLs and exact quant filenames change as new quantization algorithms (e.g. Unsloth Dynamic 2.0) are released. Verify the current file list at `https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/tree/main` before running `wget`. **`UD-Q6_K`** (~29 GB) is the current default — Unsloth Dynamic Q6_K captures ~99% of Q8 quality at ~80% of Q8 size. The previous default `UD-Q4_K_M` (~22 GB) lives on as the `qwen3.6-fast` profile for throughput-prioritized workloads.
 
 **About Qwen3.6 35B-A3B specifically:**
-- It's an **MoE model**: 35 B total parameters, 3 B activated per token. Inference is closer to a 3 B model in throughput while VRAM cost is still ~22 GB at Q4_K_M.
+- It's an **MoE model**: 35 B total parameters, 3 B activated per token. Inference is closer to a 3 B model in throughput while VRAM cost is ~29 GB at Q6_K (default) or ~22 GB at Q4_K_M (qwen3.6-fast profile).
 - Default behavior: **thinking mode enabled** (generates `<think>...</think>` blocks). The router exposes a `rag-qwen3.6` alias that disables thinking via `chat_template_kwargs.enable_thinking=false` for RAG synthesis, and a `qwen3.6-think` alias that leaves it on for agent work.
 - Speculative decoding is **disabled by default** — see Step 5.11.3 note for why.
 - The `mmproj` vision projector file is optional — only needed if you want vision input. The chat unit passes `--no-mmproj` to skip it for text-only RAG/coding.
@@ -1177,7 +1187,7 @@ Decide based on your benchmark (§5.10) whether to set `--flash-attn` to `on`, `
 ```bash
 cat > /etc/systemd/system/llamacpp-chat.service <<'EOF'
 [Unit]
-Description=llama.cpp chat (V620 ROCm tensor-split — unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M)
+Description=llama.cpp chat (V620 ROCm tensor-split — unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K)
 After=network-online.target
 Wants=network-online.target
 
@@ -1193,13 +1203,13 @@ Environment="GPU_MAX_HW_QUEUES=2"
 Environment="GGML_HIP_UMA=0"
 Environment="LLAMA_CACHE=/opt/models/.cache"
 ExecStart=/opt/llama.cpp/build/bin/llama-server \
-    --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M \
+    --hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K \
     --alias rag-qwen3.6 \
     --host 0.0.0.0 --port 8080 \
     --api-key ${LLAMACPP_API_KEY} \
     --ctx-size 262144 \
     --n-gpu-layers all \
-    --tensor-split 1,1 \
+    --tensor-split 1,1.5 \
     --threads 8 \
     --batch-size 2048 --ubatch-size 512 \
     --cache-type-k q8_0 --cache-type-v q8_0 \
@@ -1226,7 +1236,7 @@ EOF
 
 Key flag rationale (V620-only adjustments):
 
-- `--hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M` — llama.cpp downloads the GGUF on first start into `LLAMA_CACHE=/opt/models/.cache` (HuggingFace cache layout: `models--<org>--<repo>/snapshots/<rev>/<file>.gguf`). To pin a local copy instead, swap to `--model /opt/models/qwen3.6-35b-a3b-ud-q4_k_m.gguf` after manually downloading.
+- `--hf-repo unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K` — llama.cpp downloads the GGUF on first start into `LLAMA_CACHE=/opt/models/.cache` (HuggingFace cache layout: `models--<org>--<repo>/snapshots/<rev>/<file>.gguf`). To pin a local copy instead, swap to `--model /opt/models/qwen3.6-35b-a3b-ud-q6_k.gguf` after manually downloading. The `qwen3.6-fast` throughput profile uses the same repo with `:UD-Q4_K_M` instead — `scripts/swap-chat-model.sh` flips this atomically.
 - `--api-key ${LLAMACPP_API_KEY}` enforces Bearer auth on llama-server. The key is loaded via `EnvironmentFile=/etc/llamacpp.env` — never inline in the unit file (would leak via `systemctl show` + vzdump).
 - `--ctx-size 262144` (256K) + `--parallel 1` — a single in-flight request gets Qwen3.6's full trained context window (`n_ctx_train=262144`). llama.cpp divides ctx-size by parallel, so `parallel > 1` would shrink each slot to 256K/N. The router's `CHAT_CONCURRENCY=1` matches this, queuing multi-agent sub-calls at the router instead of inside llama.cpp (router can emit SSE keepalives while waiting).
 - `--cache-reuse 1024` — system-prompt prefix reuse window. RAG system prompts are typically 1-4K tokens; this catches the common case.
@@ -1240,7 +1250,7 @@ Key flag rationale (V620-only adjustments):
 - `HIP_FORCE_DEV_KERNARG=1` shaves ~2-5% off small-kernel paths on gfx1030.
 - `GPU_MAX_HW_QUEUES=2` caps ROCm queue context-switching.
 
-**Speculative decoding is DISABLED by default.** Qwen3.6-35B-A3B has vocab 248,320 while Qwen3-0.6B has vocab 151,936 — llama.cpp refuses to load a mismatched-vocab draft. The chat unit boot log will show `common_speculative_init: no implementations specified for speculative decoding`, which is the expected/normal state. To re-enable when a vocab-matched Qwen3.6 small variant ships, set `LLAMA_DRAFT_REPO=unsloth/<variant>-GGUF` in `scripts/config.env`; the `51-lxc-amd.sh` script then appends `--hf-repo-draft`, `--n-gpu-layers-draft all`, and `--spec-draft-n-max/min` to the ExecStart automatically.
+**Speculative decoding is DISABLED by default.** Not because of a vocab mismatch — Qwen3.5-0.8B shipped 2026-03-02 with vocab 248,320 matching Qwen3.6 exactly, and llama.cpp PR #19493 (merged 2026-04-19) accepts it as a draft via `--hf-repo-draft`. Spec-decode is disabled because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that EXCEEDS any acceptance-rate speedup. Independent benchmarks ([thc1006 RTX 3090 sweep](https://github.com/thc1006/qwen3.6-speculative-decoding-rtx3090), [llama.cpp discussion #22473](https://github.com/ggml-org/llama.cpp/discussions/22473)) measure **3-12% throughput regression** despite 100% draft acceptance. The chat unit boot log will show `common_speculative_init: no implementations specified for speculative decoding` — the expected state. To test the regression yourself: set `LLAMA_DRAFT_REPO=Qwen/Qwen3.5-0.8B-GGUF` in `scripts/config.env`; expect to roll back. Re-evaluate only if Qwen ships a dense small Qwen3.6 variant OR if llama.cpp lands MoE expert-caching for the draft verification path.
 
 #### Step 5.11.4 — `llamacpp-embed.service` (port 8082, V620 #1)
 
@@ -1358,7 +1368,7 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd
 systemctl daemon-reload
 systemctl enable --now llamacpp-chat llamacpp-embed llamacpp-rerank
 
-# Cold-start load is dominated by reading the 22 GB chat model from /tank over PCIe.
+# Cold-start load is dominated by reading the 29 GB chat model from /tank over PCIe (22 GB on qwen3.6-fast profile).
 # Wait up to 120s for all three to report `active`. Bail out with a journalctl pointer
 # if any unit hasn't become active within that window.
 for attempt in $(seq 1 24); do
@@ -1633,7 +1643,7 @@ pct exec 151 -- bash -c 'cd /opt/llama.cpp && ./build/bin/llama-bench -m /opt/mo
 
 ### Post-Phase-5: chat-model swap workflow
 
-Phase 5 deploys Qwen3.6-35B-A3B (UD-Q4_K_M) as the default chat model. After deployment, the cluster supports **switching between three chat-model profiles** (`qwen3.6` / `qwen3.6-hi` / `coder`) without re-running Phase 5 — see [`day-2-ops.md § 4.4`](./day-2-ops.md#-44-vram-budget-template) for the full workflow. Driver script: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh).
+Phase 5 deploys Qwen3.6-35B-A3B (**UD-Q6_K**) as the default chat model. After deployment, the cluster supports **switching between three chat-model profiles** (`qwen3.6` / `qwen3.6-fast` / `coder`) without re-running Phase 5 — see [`day-2-ops.md § 4.4`](./day-2-ops.md#-44-vram-budget-template) for the full workflow. Driver script: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh).
 
 The Phase-5 install leaves `qwen3.6` loaded; profile swaps are a day-2 operation.
 
@@ -3051,7 +3061,7 @@ pct exec 151 -- bash -c "
   # Snapshot VRAM after overlap
   rocm-smi --showmeminfo vram --showuse
 "
-# Expect: both V620s 18-22 GB used; > 60% util during overlap window; no OOM in journal
+# Expect: both V620s 20-26 GB used at Q6_K default (~18-22 GB on qwen3.6-fast Q4 profile); > 60% util during overlap window; no OOM in journal
 
 # 4.2 No OOM / HIP errors in journal over the last 30 min
 pct exec 151 -- journalctl -u llamacpp-chat -u llamacpp-embed -u llamacpp-rerank --since '30 min ago' \
@@ -3670,7 +3680,9 @@ pct exec 151 -- rocm-smi --showid
 # To:
 #   Environment="HIP_VISIBLE_DEVICES=0"
 #   --tensor-split 1,0     (or remove the flag — single GPU defaults to all-on-one)
-#   --ctx-size 32768       (single V620 has only 32 GB VRAM — weights 22 GB + KV ~5 GB)
+#   --ctx-size 32768       (single V620 has only 32 GB VRAM — Q6_K weights 29 GB barely fits;
+#                           swap to qwen3.6-fast Q4 (~22 GB) for degraded-mode operation +
+#                           KV ~5 GB)
 #   --parallel 2           (cut concurrent slots to fit 32 GB)
 
 pct exec 151 -- systemctl daemon-reload
@@ -3699,7 +3711,7 @@ pct exec 151 -- systemctl stop llamacpp-embed
 
 **Step 4 (optional): Move the small service to the surviving card if you can spare ~1.5 GB.**
 
-The reranker is ~1.5 GB or the embedder is ~1.2 GB; either fits on top of a degraded-mode chat (22 GB weights + 5 GB KV = ~27 GB used on a 32 GB card; ~5 GB headroom). To re-home the orphaned small service to the surviving card:
+The reranker is ~1.5 GB or the embedder is ~1.2 GB; either fits on top of a degraded-mode chat. **Degraded mode requires swapping to the qwen3.6-fast profile**: at Q6_K default (29 GB weights) a single 32 GB card has only ~3 GB headroom — embed/rerank won't fit. Swap first with `swap-chat-model.sh qwen3.6-fast`, then the qwen3.6-fast profile (22 GB weights + 5 GB KV = ~27 GB used) leaves ~5 GB headroom. To re-home the orphaned small service to the surviving card:
 
 ```bash
 # Edit the orphaned service's unit:
@@ -3897,19 +3909,23 @@ cd /opt/llama.cpp
 
 This troubleshooting entry covered NVML version mismatches between the host's NVIDIA kernel module and the LXC's userspace driver. The V620-only build has no NVIDIA hardware, no `nvidia-driver`, and no `nvidia-smi` — this failure mode no longer applies. If you see this error, check whether you accidentally installed nvidia-driver and remove it: `apt purge -y nvidia-driver firmware-nvidia-graphics`.
 
-### Speculative decoding is disabled (no acceptance-rate to tune)
+### Speculative decoding is disabled (and should stay disabled on this hardware)
 
-The Qwen3.6 chat unit ships with spec-decode **disabled** because Qwen3.6-35B-A3B (vocab 248,320) has no vocab-compatible small variant — see Step 5.11.3 for the full rationale. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding`, which is expected/normal.
+The Qwen3.6 chat unit ships with spec-decode **disabled** because the A3B MoE architecture regresses 3-12% on non-datacenter GPUs even with a vocab-matched draft — see Step 5.11.3 for the full rationale and benchmark citations. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding`, which is expected/normal.
 
-If you re-enable spec-decode via `LLAMA_DRAFT_REPO` in `scripts/config.env` once a vocab-matched Qwen3.6 small variant ships, and acceptance rate is low (<40%):
+If you test spec-decode by setting `LLAMA_DRAFT_REPO=Qwen/Qwen3.5-0.8B-GGUF` in `scripts/config.env` (vocab-matched at 248,320; loaded via llama.cpp PR #19493) and observe throughput regression:
 
 ```bash
-# Verify the draft and target tokenizers match
-pct exec 151 -- journalctl -u llamacpp-chat --since "10 min ago" | grep -iE "draft|spec_decode|vocab"
-# If you see "draft model vocab type must match target model", the draft is incompatible.
+# Look for the per-token expert-load pattern that drives the regression
+pct exec 151 -- journalctl -u llamacpp-chat --since "10 min ago" | grep -iE "draft|spec_decode|acceptance|vocab"
+# Expect: high acceptance rate (>90%) but lower overall t/s than baseline — the
+# regression is in target-side verification, not in draft acceptance.
 
 # Inspect the cached models
 pct exec 151 -- find /opt/models/.cache -maxdepth 4 -name "*.gguf"
+
+# To roll back: clear LLAMA_DRAFT_REPO and re-run scripts/51-lxc-amd.sh
+# (or swap profile via swap-chat-model.sh, which doesn't enable spec-decode).
 ```
 
 ### High GPU temperatures on V620 (>85°C)

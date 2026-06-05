@@ -28,8 +28,8 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 
 | Service | Model | Port | Notes |
 |---|---|---|---|
-| chat (default profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | both V620s tensor-split 1,1; 256K ctx; `--reasoning-format deepseek`, `--jinja`, `--api-key`, thinking-mode-off auto-injected by router for `rag-*` aliases |
-| chat (alt profile `qwen3.6-hi`) | Qwen3.6-35B-A3B (UD-Q5_K_M, ~26.5 GB) | 8080 | higher-precision Q5 variant; same arch, ~4 GB more weight; tensor-split 1,1; 256K ctx; cache-reuse 1024. Use when precision matters more than throughput (deep research, careful RAG synthesis) |
+| chat (default profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q6_K, ~29 GB) | 8080 | both V620s tensor-split 1,1.5; 256K ctx; `--reasoning-format deepseek`, `--jinja`, `--api-key`, thinking-mode-off auto-injected by router for `rag-*` aliases. Pivoted from UD-Q4_K_M on 2026-05-27 — Q6_K captures ~99% of Q8 quality |
+| chat (alt profile `qwen3.6-fast`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | throughput-prioritized alternative; same arch, ~7 GB less weight; tensor-split 1,1; 256K ctx; cache-reuse 1024. Use when raw t/s matters more than precision (bulk batch workloads, low-stakes drafting). Replaces the prior `qwen3.6-hi` Q5 profile |
 | chat (alt profile `coder`) | Qwen3-Coder-Next 80B/3B-A (UD-IQ4_XS, ~38 GB) | 8080 | swaps in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh); tensor-split 1,1.5; 128K ctx; cache-reuse disabled (llama.cpp bug workaround). Only ONE chat profile occupies the chat slot at a time |
 | embed | Qwen3-Embedding-0.6B (Q8_0, 1024-dim) | 8082 | V620 #1 pinned; `--pooling last` (CRITICAL — `cls` produces wrong embeddings) |
 | rerank | BGE Reranker v2-m3 (Q4_K_M) | 8083 | V620 #2 pinned; `--reranking --pooling rank` |
@@ -46,7 +46,7 @@ Swap between chat profiles in 30–60 s with [`scripts/swap-chat-model.sh`](./sc
 - CORS middleware (`CORS_ALLOW_ORIGINS=*` by default) — required for browser-side clients loaded from `file://` (e.g. the local HTML artifact) to call the router via `fetch()`; OPTIONS preflight bypasses Bearer auth so the preflight succeeds
 - SSE keepalive frames every 12 s, plus an immediate `: ping` flushed before upstream connect so clients' read timers don't fire during prompt-processing latency; `MAX_STREAM_SECONDS=900` wall-clock cap prevents a wedged upstream from holding a chat slot forever
 - Fail-open degraded mode on upstream 5xx (emits a `service_degraded` SSE frame so AnythingLLM can fall back without breaking the stream)
-- Eight client-facing chat aliases — three each for `qwen3.6` (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) and `qwen3.6-hi` (`rag-qwen3.6-hi`, `qwen3.6-hi-think`, `qwen3.6-hi`), plus two for `coder` (`qwen3-coder`, `qwen3-coder-next`). Alias controls `chat_template_kwargs.enable_thinking` and `<think>...</think>` regex-stripping. `/v1/models` advertises only the aliases matching the currently-loaded chat profile (verified against the chat unit's reported model id); mismatched-profile requests still pass through to llama-server unchanged (useful for one-line A/B testing)
+- Eight client-facing chat aliases — three each for `qwen3.6` (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) and `qwen3.6-fast` (`rag-qwen3.6-fast`, `qwen3.6-fast-think`, `qwen3.6-fast`), plus two for `coder` (`qwen3-coder`, `qwen3-coder-next`). Alias controls `chat_template_kwargs.enable_thinking` and `<think>...</think>` regex-stripping. `/v1/models` advertises only the aliases matching the currently-loaded chat profile (verified against the chat unit's reported model id); mismatched-profile requests still pass through to llama-server unchanged (useful for one-line A/B testing)
 - Strips `[CONTEXT N]` / `(Context 0, 1)` chunk-reference markers from chat output (Qwen3.6 training-prior leak)
 - `/v1/completions` passthrough for FIM-style code completion (Continue.dev, Cody)
 - `POST /v1/tavily/search` proxy — holds the Tavily API key server-side so browser clients (e.g. the external HTML reporting artifact) can do live web search without ever seeing the key; whitelisted body fields, separate rate limit
@@ -128,8 +128,8 @@ Pick the model alias that matches your use case (alias must match the currently-
 |---|---|---|
 | AnythingLLM RAG (general) | `rag-qwen3.6` | `qwen3.6` |
 | OpenCode / Cline (reasoning on) | `qwen3.6-think` or `qwen3.6` | `qwen3.6` |
-| High-precision RAG / deep research | `rag-qwen3.6-hi` | `qwen3.6-hi` |
-| High-precision reasoning agent | `qwen3.6-hi-think` or `qwen3.6-hi` | `qwen3.6-hi` |
+| Throughput-prioritized RAG / bulk batch | `rag-qwen3.6-fast` | `qwen3.6-fast` |
+| Throughput-prioritized reasoning agent | `qwen3.6-fast-think` or `qwen3.6-fast` | `qwen3.6-fast` |
 | Coding agent (Coder-Next) | `qwen3-coder` or `qwen3-coder-next` | `coder` |
 | Embeddings | `qwen3-embed` | any (separate unit) |
 | Reranking | `bge-rerank` | any (separate unit) |

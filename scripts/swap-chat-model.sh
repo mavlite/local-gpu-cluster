@@ -20,12 +20,23 @@
 #
 # Profiles (extend by adding to the case in get_profile() below):
 #
-#   qwen3.6    Qwen3.6-35B-A3B UD-Q4_K_M  → alias rag-qwen3.6
-#              RAG / general / research / tool use. The default.
+#   qwen3.6        Qwen3.6-35B-A3B UD-Q6_K    → alias rag-qwen3.6
+#                  RAG / general / research / tool use. The default.
+#                  ~29 GB weights — near-lossless precision (Q6_K
+#                  captures ~99% of Q8 quality). Pivoted from UD-Q4_K_M
+#                  on 2026-05-27; see chat-quant-pivot-q6k memory.
 #
-#   coder      Qwen3-Coder-Next UD-IQ4_XS → alias qwen3-coder
-#              Coding-specific. 80B / 3B-A MoE; native tool use.
-#              First use downloads ~38 GB.
+#   qwen3.6-fast   Qwen3.6-35B-A3B UD-Q4_K_M  → alias rag-qwen3.6-fast
+#                  Throughput-prioritized alternative. ~22 GB weights.
+#                  Use when raw t/s matters more than precision (bulk
+#                  batch workloads, low-stakes drafting). Replaces the
+#                  prior qwen3.6-hi (UD-Q5_K_M) profile — Q6_K being
+#                  the new default makes Q5 a strictly-dominated middle
+#                  ground; Q4 survives as the genuine speed alternative.
+#
+#   coder          Qwen3-Coder-Next UD-IQ4_XS → alias qwen3-coder
+#                  Coding-specific. 80B / 3B-A MoE; native tool use.
+#                  First use downloads ~38 GB.
 #
 # Usage:
 #   ./swap-chat-model.sh qwen3.6        # switch to RAG/general model
@@ -74,28 +85,41 @@ ROUTER_VMID="${ROUTER_VMID:-153}"
 get_profile() {
   case "$1" in
     qwen3.6)
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6 1,1 262144 1024"
-      ;;
-    qwen3.6-hi)
-      # Higher-precision Q5_K_M variant of qwen3.6. ~26.5 GB weights vs
-      # ~22 GB for Q4_K_M. Useful for deep-research / RAG-synthesis
-      # sessions where precision matters more than throughput.
+      # Default profile, pivoted to UD-Q6_K on 2026-05-27. ~29 GB weights
+      # (vs ~22 GB at Q4) — captures ~99% of Q8 precision quality, costs
+      # ~3.5 GB of additional weight per card at a 1,1 tensor-split.
       #
-      # Tensor-split tuning history (2026-05-26):
-      #   1,1   → GPU 0 82% / GPU 1 51% (~31pp asymmetry from non-split
-      #           tensor mass landing on --main-gpu, same pattern as Coder).
-      #   1,1.5 → measured GPU 0 73% / GPU 1 60% (~13pp residual). Both
-      #           cards well above the 3-GB-free headroom target. Locked
-      #           as the final config. Going to 1,2 would balance fully
-      #           but risks over-correcting; 1,1.5 keeps consistency with
-      #           the coder profile's split.
+      # Tensor-split: 1,1.5 (not 1,1).
+      #   At 1,1 the asymmetry from ~10 GB non-split tensor mass on
+      #   --main-gpu 0 plus +3.5 GB extra weight share would push GPU 0
+      #   peak to ~95% under heavy prefill (Q4_K_M at 1,1 already hit
+      #   84% peak / ~5 GB free; +3.5 GB makes it 1.5 GB free — too close
+      #   to OOM). 1,1.5 mirrors the empirical tuning the now-retired
+      #   qwen3.6-hi profile arrived at for Q5_K_M, which has the same
+      #   asymmetry character.
+      #
+      # The numbers above are predicted. Run scripts/tools/stability-
+      # test-coder.sh (or equivalent prefill stress) and update the
+      # measurements in day-2-ops.md § 4.4 + get_profile_vram_estimate()
+      # below after the first redeploy of this profile.
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024"
+      ;;
+    qwen3.6-fast)
+      # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
+      # Replaces the prior qwen3.6-hi (UD-Q5_K_M) profile: with Q6_K now
+      # the default, Q5 is a strictly-dominated middle ground; Q4 lives
+      # on as the genuine speed alternative for bulk-batch or low-stakes
+      # drafting workloads where raw t/s matters more than precision.
+      #
+      # Tensor-split: 1,1 — this is the empirically-validated split for
+      # Q4_K_M weights from the 2026-05-26 measurements (peak 84%/52%
+      # under 90K prefill, ~5.1 GB free on GPU 0). Don't change to 1,1.5
+      # — Q4's smaller weight share keeps the asymmetry tolerable.
       #
       # CACHE_REUSE=1024 is set but llama.cpp emits "cache_reuse is not
-      # supported by this context, it will be disabled" at load — likely
-      # because Q5_K_M + q8_0 KV trips a code path llama.cpp hasn't
-      # implemented. Effective behavior is CACHE_REUSE=0. Harmless;
-      # documented for future readers who'll see the warning.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q5_K_M rag-qwen3.6-hi 1,1.5 262144 1024"
+      # supported by this context, it will be disabled" at load (Q*_K_M
+      # + q8_0 KV behavior). Effective is CACHE_REUSE=0. Harmless.
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024"
       ;;
     coder)
       echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0"
@@ -106,16 +130,16 @@ get_profile() {
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-hi coder)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
 get_profile_description() {
   case "$1" in
-    qwen3.6)    echo "Qwen3.6-35B-A3B UD-Q4_K_M — RAG / general (default)" ;;
-    qwen3.6-hi) echo "Qwen3.6-35B-A3B UD-Q5_K_M — higher-precision Q5; deep research" ;;
-    coder)      echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific" ;;
-    *)          echo "" ;;
+    qwen3.6)      echo "Qwen3.6-35B-A3B UD-Q6_K — RAG / general (default; near-lossless precision)" ;;
+    qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
+    coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific" ;;
+    *)            echo "" ;;
   esac
 }
 
@@ -124,10 +148,10 @@ get_profile_description() {
 # when day-2-ops.md § 4.4 table is updated.
 get_profile_vram_estimate() {
   case "$1" in
-    qwen3.6)    echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills" ;;
-    qwen3.6-hi) echo "idle 73% / 60%; peak 81% / 68% under 90K prefill; ~6.1 GB free GPU 0 at peak; bounded across repeated heavy prefills" ;;
-    coder)      echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
-    *)          echo "(no VRAM data — run stability-test after swap to characterize)" ;;
+    qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
+    qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
+    coder)        echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
+    *)            echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
 
@@ -138,9 +162,9 @@ usage() {
 Usage: $(basename "$0") [--force] [--follow] {${PROFILE_NAMES[*]/ /|}|--status}
 
 Profiles:
-  qwen3.6     — Qwen3.6-35B-A3B UD-Q4_K_M (RAG / general — default)
-  qwen3.6-hi  — Qwen3.6-35B-A3B UD-Q5_K_M (higher-precision Q5; deep research)
-  coder       — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
+  qwen3.6       — Qwen3.6-35B-A3B UD-Q6_K (RAG / general — default; near-lossless precision)
+  qwen3.6-fast  — Qwen3.6-35B-A3B UD-Q4_K_M (throughput-prioritized alternative)
+  coder         — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
 
 Flags:
   --status  Show currently-loaded profile (no changes)
@@ -154,7 +178,7 @@ EOF
 
 # Extract the --hf-repo value from the current chat unit. Returns "" if not
 # found or the unit doesn't exist yet. Format example:
-#   unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q4_K_M
+#   unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q6_K
 detect_current_hfrepo() {
   pct exec "$AMD_VMID" -- bash -c '
     awk "/--hf-repo / {
@@ -171,8 +195,8 @@ detect_current_hfrepo() {
 
 # Match a detected --hf-repo string against the known profiles. Matches on
 # the full "repo:quant" pair because multiple profiles can share a repo
-# (e.g., qwen3.6 and qwen3.6-hi both use unsloth/Qwen3.6-35B-A3B-GGUF, just
-# different quants). Echoes the matching profile name or "unknown".
+# (e.g., qwen3.6 and qwen3.6-fast both use unsloth/Qwen3.6-35B-A3B-GGUF,
+# just different quants). Echoes the matching profile name or "unknown".
 identify_profile() {
   local hfrepo="$1"  # e.g., "unsloth/Qwen3.6-35B-A3B-GGUF:UD-Q5_K_M"
   for name in "${PROFILE_NAMES[@]}"; do
