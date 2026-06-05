@@ -1,7 +1,50 @@
-# Session handoff — latest: 2026-05-26 (chat profiles + RAG automation)
+# Session handoff — latest: 2026-06-05 (Q6_K pivot commit + coder/OpenCode outage)
 
 Latest session at the top. Prior sessions preserved below for historical
 context. Nothing here assumes you have the prior conversation cached.
+
+---
+
+## 2026-06-05 — Q6_K pivot committed (local) + diagnosed "LLM not responding" in OpenCode
+
+Two unrelated things this session: landed the long-pending Q6_K documentation pivot
+as a commit, and root-caused a live "OpenCode lost connectivity" outage.
+
+### 1. Q6_K chat-quant pivot — COMMITTED LOCALLY, NOT PUSHED, NOT DEPLOYED
+
+Commit `cb1ff1c` (`feat: default chat quant UD-Q4_K_M -> UD-Q6_K; qwen3.6-hi -> qwen3.6-fast profile`)
+captures the 9-file change set that had been sitting uncommitted in the working tree:
+
+- Default `qwen3.6` profile pivots UD-Q4_K_M (~22 GB) -> **UD-Q6_K (~29 GB)**, tensor-split `1,1` -> `1,1.5`, pool budget ~36 GB -> ~43 GB of 64.
+- `qwen3.6-hi` (UD-Q5_K_M) profile **renamed to `qwen3.6-fast` (UD-Q4_K_M)** across `swap-chat-model.sh`, router `ALIAS_MAP` (`rag-qwen3.6-fast*`), and all docs. Q5 retired as strictly dominated.
+- Spec-decode rationale rewritten: a vocab-matched draft now exists (Qwen3.5-0.8B + llama.cpp PR #19493); it stays disabled because A3B MoE per-token expert-load regresses throughput 3-12%, **not** vocab mismatch.
+
+**Status flags — do NOT treat the new Q6_K numbers as validated:**
+- The commit is **local to one workstation; `git push` has not run** (HEAD is 1 ahead of `origin/main`).
+- The cluster **has not been redeployed** — it is still running UD-Q4_K_M at `1,1`.
+- Q6_K VRAM rows in [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template) and `get_profile_vram_estimate()` are **PENDING/predicted** — RE-MEASURE via `swap-chat-model.sh qwen3.6` + stability test after the first redeploy, then update those strings.
+
+### 2. Outage: "LLM not responding in OpenCode" — root-caused, fix = swap profile
+
+**Symptom:** OpenCode (workstation) appeared to lose connectivity; the model stopped responding mid-session.
+
+**NOT the cause:** network, crashed unit, or wedged process. All boundary probes were healthy — router `/healthz` 200 in 22 ms (`upstream: chat/embed/rerank all ok`), chat unit `/health` 200 in 2 ms, a tiny completion returned in 0.18 s.
+
+**Root cause:** the chat slot had been swapped to the **`coder` profile** (`active_chat_profile: qwen3-coder`, 128K ctx, OOM-adjacent ~2.6 GB headroom), but OpenCode (`~/.config/opencode/config.json`) is hard-pinned to the **`qwen3.6` aliases** (`model: qwen3.6-think`, `small_model: rag-qwen3.6`) with **`limit.context: 200000`**. Mechanics:
+- `/v1/models` is profile-filtered, so it stopped advertising `qwen3.6-think` / `rag-qwen3.6` entirely (only `qwen3-coder*` showing).
+- `resolve_alias` rewrites the model name but llama-server **serves whatever is loaded** — small turns silently answered by Coder-Next and worked.
+- The open session, growing toward the 200K OpenCode believes it has, **overflows coder's 128K window**; the router's `MAX_CHAT_INPUT_TOKENS` gate (sized for qwen3.6's 256K) does not catch it. Overflow stalls/errors, OpenCode retries (chatMaxRetries=3) into it -> "not responding."
+
+**Fix (chosen 2026-06-05):** `./scripts/swap-chat-model.sh qwen3.6` on the host — restores the expected model AND the 256K window, so even the oversized open session fits (200K < 256K). Run by the operator on the host (this workstation has no SSH route configured).
+
+**Latent hazard worth a durable fix:** the profile swap and the client context limit are **decoupled** — nothing stops a 200K-configured client from hitting a 128K-loaded model, and passthrough silently serves the *wrong model* on alias mismatch. Candidate guards (deferred, not yet implemented):
+1. Router rejects (or 421/409s) requests whose alias's `backend` != the currently-loaded profile, instead of passthrough to the wrong model.
+2. Router derives an effective input cap from the *loaded* profile's ctx (e.g. coder -> 128K) rather than a static `MAX_CHAT_INPUT_TOKENS`.
+3. `swap-chat-model.sh` prints a louder reminder that OpenCode/AnythingLLM clients pinned to qwen3.6 aliases will break while coder is loaded.
+
+### Repo state snapshot (2026-06-05)
+
+**Branch:** `main`. **HEAD:** `cb1ff1c` (Q6_K pivot) — **1 commit ahead of `origin/main`, unpushed.** Plus this handoff edit committed on top. Cluster running the pre-pivot UD-Q4_K_M profile.
 
 ---
 
