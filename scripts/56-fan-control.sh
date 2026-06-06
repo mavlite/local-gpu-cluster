@@ -27,14 +27,21 @@ load_config
 
 FAN_PWM_PATH="${FAN_PWM_PATH:-}"
 
-# Fan-curve tunables (override in config.env). Defaults chosen 2026-06-05 to stop
-# a 1-2s V620 thermal-alarm chirp on load spikes: the bridge ramps UP to the
-# curve target instantly but ramps DOWN by at most FAN_DECAY_STEP per poll, so
-# cooling leads the load and the fan doesn't oscillate back into the alarm.
-FAN_POLL_SECS="${FAN_POLL_SECS:-2}"     # bridge poll interval, seconds (was 5)
-FAN_DECAY_STEP="${FAN_DECAY_STEP:-8}"   # max PWM (0-255) drop per poll on ramp-down
+# Fan tunables (override in config.env). Tuned 2026-06-06 to kill the V620
+# thermal-alarm chirp at query start: the router stamps "chat active" in its
+# /healthz the instant a request ARRIVES (before any GPU work), and the bridge
+# polls that to PRE-RAMP the fans ahead of the prefill heat. The temp curve is
+# the steady-state floor; ramp UP is instant, ramp DOWN is capped at
+# FAN_DECAY_STEP per poll so the fan eases off slowly instead of oscillating.
+FAN_POLL_SECS="${FAN_POLL_SECS:-1}"     # bridge poll interval, seconds (1s for fast feed-forward)
+FAN_DECAY_STEP="${FAN_DECAY_STEP:-4}"   # max PWM (0-255) drop per poll on ramp-down (~48s 100%->25% glide)
 FAN_MIN_PWM="${FAN_MIN_PWM:-64}"        # idle floor (64 = 25%)
-for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM; do
+# Feed-forward boost: when the router reports a chat request within the last
+# FAN_BOOST_WINDOW seconds, drive the fans to FAN_BOOST_PWM regardless of temp.
+FAN_BOOST_URL="${FAN_BOOST_URL:-http://192.168.6.153:8000/healthz}"
+FAN_BOOST_WINDOW="${FAN_BOOST_WINDOW:-20}"   # seconds since last chat to keep boosting
+FAN_BOOST_PWM="${FAN_BOOST_PWM:-255}"        # PWM while boosting (255 = 100%)
+for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM FAN_BOOST_WINDOW FAN_BOOST_PWM; do
   [[ "${!_v}" =~ ^[0-9]+$ ]] || die "$_v must be a non-negative integer (got '${!_v}')"
 done
 
@@ -152,10 +159,13 @@ if [ "\${#PWMS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# Fan-curve tunables (baked at install from config.env)
+# Fan tunables (baked at install from config.env)
 POLL_SECS=$FAN_POLL_SECS
 DECAY_STEP=$FAN_DECAY_STEP
 MIN_PWM=$FAN_MIN_PWM
+BOOST_URL="$FAN_BOOST_URL"
+BOOST_WINDOW=$FAN_BOOST_WINDOW
+BOOST_PWM=$FAN_BOOST_PWM
 
 # Curve: max V620 edge temp -> target PWM duty (0-255). Shifted ~8C earlier than
 # the original so 100% engages at 72C (was 80C), keeping the cards clear of the
@@ -175,10 +185,13 @@ for p in "\${PWMS[@]}"; do
     echo 1 > "\${p}_enable" 2>/dev/null || true
 done
 
-# Asymmetric response: ramp UP to target instantly (cooling leads the spike, so
-# the 1-2s thermal-alarm chirp never has time to fire); ramp DOWN by at most
-# DECAY_STEP per poll so the fan eases off slowly instead of oscillating back
-# into the alarm. At DECAY_STEP=8 / POLL=2s a 100%->25% glide takes ~48s.
+# Response shaping. TARGET = max(temperature curve, feed-forward boost).
+#  - Feed-forward: if the router reports a chat request within BOOST_WINDOW s,
+#    drive BOOST_PWM. The router stamps this the instant a request ARRIVES
+#    (before the slot/queue, before any GPU work), so fans lead the prefill
+#    heat and the 1-2s thermal-alarm chirp never has time to fire.
+#  - Ramp UP to TARGET instantly; ramp DOWN by at most DECAY_STEP per poll so
+#    the fan eases off slowly. At DECAY_STEP=4 / POLL=1s a 100%->25% glide ~=48s.
 CUR=192   # start ~75% on boot; the curve settles it within a minute
 while true; do
     if [ -r "\$TEMP_FILE" ]; then
@@ -187,6 +200,13 @@ while true; do
         TARGET=\$(target_pwm "\$TEMP")
     else
         TARGET=192   # temp file missing (LXC down) — safe 75%
+    fi
+
+    # Feed-forward: poll the router for recent chat activity. Graceful — any
+    # failure / missing field just leaves the temperature curve in charge.
+    SSC=\$(curl -s -m 1 "\$BOOST_URL" 2>/dev/null | grep -oE '"seconds_since_chat":[0-9.]+' | head -1 | cut -d: -f2)
+    if [ -n "\$SSC" ] && awk "BEGIN{exit !(\$SSC < \$BOOST_WINDOW)}"; then
+        [ "\$BOOST_PWM" -gt "\$TARGET" ] && TARGET=\$BOOST_PWM
     fi
 
     if [ "\$TARGET" -ge "\$CUR" ]; then
