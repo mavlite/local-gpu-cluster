@@ -27,6 +27,17 @@ load_config
 
 FAN_PWM_PATH="${FAN_PWM_PATH:-}"
 
+# Fan-curve tunables (override in config.env). Defaults chosen 2026-06-05 to stop
+# a 1-2s V620 thermal-alarm chirp on load spikes: the bridge ramps UP to the
+# curve target instantly but ramps DOWN by at most FAN_DECAY_STEP per poll, so
+# cooling leads the load and the fan doesn't oscillate back into the alarm.
+FAN_POLL_SECS="${FAN_POLL_SECS:-2}"     # bridge poll interval, seconds (was 5)
+FAN_DECAY_STEP="${FAN_DECAY_STEP:-8}"   # max PWM (0-255) drop per poll on ramp-down
+FAN_MIN_PWM="${FAN_MIN_PWM:-64}"        # idle floor (64 = 25%)
+for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM; do
+  [[ "${!_v}" =~ ^[0-9]+$ ]] || die "$_v must be a non-negative integer (got '${!_v}')"
+done
+
 if [[ -z "$FAN_PWM_PATH" ]]; then
   step "Fan PWM discovery"
   warn "FAN_PWM_PATH is empty in config.env — cannot install fan bridge."
@@ -141,31 +152,55 @@ if [ "\${#PWMS[@]}" -eq 0 ]; then
     exit 1
 fi
 
+# Fan-curve tunables (baked at install from config.env)
+POLL_SECS=$FAN_POLL_SECS
+DECAY_STEP=$FAN_DECAY_STEP
+MIN_PWM=$FAN_MIN_PWM
+
+# Curve: max V620 edge temp -> target PWM duty (0-255). Shifted ~8C earlier than
+# the original so 100% engages at 72C (was 80C), keeping the cards clear of the
+# ~85C alarm line under load spikes.
+target_pwm() {
+    local t="\$1"
+    if   [ "\$t" -lt 44 ]; then echo 64    # <44C   25%  (idle)
+    elif [ "\$t" -lt 54 ]; then echo 102   # 44-53  40%
+    elif [ "\$t" -lt 62 ]; then echo 153   # 54-61  60%
+    elif [ "\$t" -lt 72 ]; then echo 204   # 62-71  80%
+    else                        echo 255   # >=72  100%
+    fi
+}
+
 # Switch every PWM to manual mode
 for p in "\${PWMS[@]}"; do
     echo 1 > "\${p}_enable" 2>/dev/null || true
 done
 
+# Asymmetric response: ramp UP to target instantly (cooling leads the spike, so
+# the 1-2s thermal-alarm chirp never has time to fire); ramp DOWN by at most
+# DECAY_STEP per poll so the fan eases off slowly instead of oscillating back
+# into the alarm. At DECAY_STEP=8 / POLL=2s a 100%->25% glide takes ~48s.
+CUR=192   # start ~75% on boot; the curve settles it within a minute
 while true; do
     if [ -r "\$TEMP_FILE" ]; then
         TEMP=\$(cat "\$TEMP_FILE" 2>/dev/null)
         TEMP=\${TEMP:-65}
-
-        if   [ "\$TEMP" -lt 50 ]; then PWM_VAL=64    # 25%
-        elif [ "\$TEMP" -lt 60 ]; then PWM_VAL=102   # 40%
-        elif [ "\$TEMP" -lt 70 ]; then PWM_VAL=153   # 60%
-        elif [ "\$TEMP" -lt 80 ]; then PWM_VAL=204   # 80%
-        else                          PWM_VAL=255    # 100%
-        fi
+        TARGET=\$(target_pwm "\$TEMP")
     else
-        # Temp file missing (LXC down) — safe fail-over to 75%
-        PWM_VAL=192
+        TARGET=192   # temp file missing (LXC down) — safe 75%
     fi
 
+    if [ "\$TARGET" -ge "\$CUR" ]; then
+        CUR=\$TARGET
+    else
+        CUR=\$(( CUR - DECAY_STEP ))
+        [ "\$CUR" -lt "\$TARGET" ] && CUR=\$TARGET
+    fi
+    [ "\$CUR" -lt "\$MIN_PWM" ] && CUR=\$MIN_PWM
+
     for p in "\${PWMS[@]}"; do
-        echo "\$PWM_VAL" > "\$p"
+        echo "\$CUR" > "\$p"
     done
-    sleep 5
+    sleep "\$POLL_SECS"
 done
 EOF
 
