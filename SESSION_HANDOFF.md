@@ -1,7 +1,69 @@
-# Session handoff — latest: 2026-05-26 (chat profiles + RAG automation)
+# Session handoff — latest: 2026-06-07 (crash fix + cooling + history reconcile)
 
 Latest session at the top. Prior sessions preserved below for historical
 context. Nothing here assumes you have the prior conversation cached.
+
+---
+
+## 2026-06-07 — chat crash loop FIXED, cooling settled, git history reconciled
+
+A long multi-day debugging arc. Three outcomes: the chat unit's crash loop is
+fixed, the V620 thermal alarm is understood (and accepted), and the forked git
+history is reconciled back into one `main`.
+
+### 1. Chat crash loop — FIXED via llama.cpp rebuild
+- **Symptom:** chat unit crash-looped (~every 12 min): `common.cpp:1489: failed
+  to remove sequence ... p1=-1` → `seq_rm` → `ggml_abort` (status=6/ABRT).
+- **Root cause:** Qwen3.6-35B-A3B is a **hybrid/recurrent** model; recurrent KV
+  can't be partially trimmed, so the slot's prefix-reuse `seq_rm` returns false
+  and the old build (**b9219**) *aborted* instead of degrading. Triggered by any
+  short request after a divergent one (OpenCode small_model + a 6-min keepalive
+  hitting the router from 127.0.0.1).
+- **Red herrings (don't retry):** `--cache-ram 0` (wrong layer) and `--swa-full`
+  (model isn't SWA — "swa_full is not supported by this model").
+- **FIX:** rebuilt llama.cpp **b9219 → b9547** in `/opt/llama.cpp` (LXC 151). The
+  14-request small-after-large hammer that always crashed b9219 ran clean;
+  `NRestarts=0` held. Old binary at `/root/llama-server.b9219.bak`.
+  **Do NOT downgrade llama.cpp below b9547.** Refs llama.cpp #22384/#21831/#24055.
+
+### 2. Earlier outage (start of the arc): OpenCode "LLM not responding"
+The chat slot had been swapped to the `coder` profile (128K ctx) while OpenCode
+was pinned to qwen3.6 aliases at 200K — silent passthrough + context overflow.
+Fixed by `swap-chat-model.sh qwen3.6`. Durable guard (router 409 on alias/profile
+mismatch) was designed but not built — deferred.
+
+### 3. Cooling — feed-forward deployed, residual chirp ACCEPTED
+The V620 thermal-alarm chirp on prefill is the GPU junction (~95-100°C at full
+fans) brushing its firmware crit (100°C). Power floor (250W), OD/voltage, clock
+range, and crit threshold are ALL firmware-locked — it's a hardware **airflow**
+ceiling, not software-fixable. The fan bridge now does optimal feed-forward
+(router stamps `seconds_since_chat` in /healthz → bridge pre-ramps fans before
+the prefill heat) + earlier curve + slow decay + 1s poll. Don't throttle clocks
+to mute a safe-by-design warning; real fix = more shroud airflow (hardware).
+
+### 4. Git history reconcile (this session)
+A stale workstation clone had **force-pushed** its parallel lineage over
+`origin/main`, orphaning the real host lineage (preserved as
+`backup/host-main-2026-06-05`). Only **13 files** truly differed. Reconciled by
+merging the host lineage into `main` (`-s ours`, keeping the Q6_K-pivot files
+which had no host-unique content) + grafting the 3 host-only VCF scripts
+(`ingest-vcf-urls*.sh`, `recover-long-urls.sh`) + this handoff, then merging the
+`cooling-2026-06-05` branch. Result fast-forwards `origin/main` — no force-push.
+
+### Live cluster vs tracked `main` (IMPORTANT)
+Some fixes live in **host runtime state**, not in `main`:
+- llama.cpp **b9547** (host build) — main builds from master; b9547 is the
+  known-good baseline (don't go below it).
+- `LLAMA_CACHE_RAM_MB=0` in host `config.env` (untracked). **Now that the crash
+  is fixed this can go back to 16384** to restore OpenCode prompt-cache speed —
+  disabling it was only a failed crash mitigation. Worth testing.
+- Fan bridge + publisher live-patched on the host; tracked `56`/`51` match.
+
+### Deferred / follow-ups
+- Test re-enabling `--cache-ram 16384` (perf) now that b9547 fixes the crash.
+- Router profile-mismatch 409 guard (designed, not built).
+- Q6_K profile is the doc default but UNVALIDATED on hardware (cluster runs Q4);
+  `get_profile_vram_estimate()` numbers for it are PENDING re-measure.
 
 ---
 
