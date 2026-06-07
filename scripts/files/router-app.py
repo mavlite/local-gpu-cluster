@@ -1330,12 +1330,20 @@ async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_i
 
 # ---------- Routes ----------
 
+# Monotonic timestamp of the most recent chat-request arrival. Surfaced in
+# /healthz as seconds_since_chat so the host fan bridge can pre-ramp the GPU
+# fans the instant a query lands — before any GPU compute heats the die.
+_last_chat_ts: Optional[float] = None
+
+
 @app.post("/v1/chat/completions")
 @limiter.limit(RATE_LIMIT_CHAT)
 async def chat(
     request: Request,
     x_strip_thinking: Optional[str] = Header(default=None, alias="X-Strip-Thinking"),
 ):
+    global _last_chat_ts
+    _last_chat_ts = time.monotonic()      # feed-forward signal for the host fan bridge
     body = await request.json()
     strip = should_strip_thinking(body, x_strip_thinking)
     stream = body.get("stream", False)
@@ -1764,4 +1772,5 @@ async def healthz():
         "ts": time.time(),
         "upstream": upstream_status,
         "active_chat_profile": active_chat_profile,
+        "seconds_since_chat": (time.monotonic() - _last_chat_ts) if _last_chat_ts is not None else None,
     }

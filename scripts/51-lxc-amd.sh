@@ -620,7 +620,9 @@ phase_5_13_publisher() {
     set -Eeuo pipefail
     cat > /usr/local/bin/v620-temp-publish.sh <<'EOF'
 #!/bin/bash
-# Publish max V620 edge temp every 5 seconds. Read by host fan bridge.
+# Publish max V620 edge temp every 2 seconds. Read by host fan bridge.
+# (2s, dropped from 5s on 2026-06-05, halves the temp-data staleness so the
+#  host fan bridge can react to load spikes before the V620 thermal alarm chirps.)
 mkdir -p /var/lib/v620-temps
 while true; do
     T1=$(rocm-smi -d 0 --showtemp 2>/dev/null | awk '/Temperature.*edge/ {print int($NF); exit}')
@@ -630,7 +632,7 @@ while true; do
     MAX=$(( T1 > T2 ? T1 : T2 ))
     echo "$MAX" > /var/lib/v620-temps/current-temp.tmp
     mv /var/lib/v620-temps/current-temp.tmp /var/lib/v620-temps/current-temp
-    sleep 5
+    sleep 2
 done
 EOF
     chmod +x /usr/local/bin/v620-temp-publish.sh
