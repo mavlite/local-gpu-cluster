@@ -74,6 +74,15 @@ EMBED_CONCURRENCY = int(os.environ.get("EMBED_CONCURRENCY", "4"))
 MAX_CHAT_INPUT_TOKENS = int(os.environ.get("MAX_CHAT_INPUT_TOKENS", "120000"))
 MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "16384"))
 
+# Profile-match guard. When the chat unit serves profile A but a client requests
+# a KNOWN alias whose backend is profile B, llama-server silently answers with A
+# under B's name — which broke OpenCode (pinned to qwen3.6 @256K) when the slot
+# was swapped to coder @128K: long sessions overflowed and hung. With this on, a
+# known cross-profile alias gets a fast 409 instead. Unknown model strings still
+# pass through (preserves one-line A/B testing). Set "0"/"false" to disable.
+STRICT_PROFILE_MATCH = os.environ.get("STRICT_PROFILE_MATCH", "1").strip().lower() not in ("0", "false", "no", "")
+PROFILE_CACHE_TTL = float(os.environ.get("PROFILE_CACHE_TTL", "10"))  # swaps restart the unit (~45s) >> TTL
+
 # Rate limit (slowapi syntax: "60/minute")
 RATE_LIMIT_CHAT = os.environ.get("RATE_LIMIT_CHAT", "60/minute")
 RATE_LIMIT_EMBED = os.environ.get("RATE_LIMIT_EMBED", "200/minute")
@@ -417,6 +426,31 @@ def resolve_alias(model: str) -> dict:
     # Unknown model: pass through unchanged. llama-server will warn but serve
     # the loaded model regardless of the requested name.
     return {"backend": model, "enable_thinking": None, "strip_thinking": False}
+
+
+# Short-TTL cache of the backend the chat unit is currently serving, so the
+# per-request profile-match guard doesn't pay an upstream round-trip every call.
+_active_backend_cache: dict = {"value": None, "expires": 0.0}
+
+
+async def get_active_backend(client: httpx.AsyncClient) -> Optional[str]:
+    """Return the alias the chat unit is currently serving (its /v1/models id),
+    or None if it can't be determined. Mirrors the selection in /v1/models and
+    /healthz. Cached PROFILE_CACHE_TTL seconds; fails open (None) so the guard
+    never blocks when the chat unit is unreachable."""
+    now = time.monotonic()
+    if now < _active_backend_cache["expires"]:
+        return _active_backend_cache["value"]
+    try:
+        r = await client.get(f"{V620_URL}/v1/models", headers=upstream_headers())
+        r.raise_for_status()
+        ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+        value = ids[0] if ids else None
+    except Exception:
+        return None  # fail-open; don't cache a failure
+    _active_backend_cache["value"] = value
+    _active_backend_cache["expires"] = now + PROFILE_CACHE_TTL
+    return value
 
 
 def should_strip_thinking(body: dict, header_value: Optional[str]) -> bool:
@@ -1375,6 +1409,25 @@ async def chat(
     messages = body.get("messages", [])
     text = _approx_text_from_messages(messages)
     async with httpx.AsyncClient() as client:
+        # Profile-match guard: a KNOWN alias whose backend != the loaded profile
+        # gets a fast 409 (before the chat slot) instead of being silently served
+        # by the wrong model. Unknown models pass through; fails open if the chat
+        # unit is unreachable.
+        if STRICT_PROFILE_MATCH and model in ALIAS_MAP:
+            active = await get_active_backend(client)
+            if active is not None and alias_info["backend"] != active:
+                ms = int((time.monotonic() - started) * 1000)
+                log_access("/v1/chat/completions", model, -1, 0, ms, 409,
+                           client_ip, error="profile_mismatch")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"model '{model}' targets profile backend "
+                        f"'{alias_info['backend']}', but the chat unit is serving "
+                        f"'{active}'. Swap profiles (scripts/swap-chat-model.sh) or "
+                        f"request an alias for the loaded profile (GET /v1/models)."
+                    ),
+                )
         token_count = await count_tokens(client, V620_URL, text)
     if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
         log_access("/v1/chat/completions", model, token_count, 0,
