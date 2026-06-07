@@ -1,50 +1,19 @@
-# Session handoff — latest: 2026-06-05 (Q6_K pivot commit + coder/OpenCode outage)
+# Session handoff — latest: 2026-05-26 (chat profiles + RAG automation)
 
 Latest session at the top. Prior sessions preserved below for historical
 context. Nothing here assumes you have the prior conversation cached.
 
 ---
 
-## 2026-06-05 — Q6_K pivot committed (local) + diagnosed "LLM not responding" in OpenCode
+## 🎯 Next session focus
 
-Two unrelated things this session: landed the long-pending Q6_K documentation pivot
-as a commit, and root-caused a live "OpenCode lost connectivity" outage.
+**Weekly status report** (`weekly_customer_adoption_review.html`) — last touched 2026-05-24. The cluster work that made it possible (server-side tool execution, Tavily proxy, CORS) is all done and stable; the report itself has three loose ends:
 
-### 1. Q6_K chat-quant pivot — COMMITTED LOCALLY, NOT PUSHED, NOT DEPLOYED
+1. **Three personal URL placeholders** to fill — search the file for `#PASTE_YOUR_` (scheduler link, Box share, TAM MP Box).
+2. **End-to-end Refresh-from-web flow not yet verified.** Load the file in a browser, ⚙ AI Settings → "Local + Tavily web search (via router proxy)", click 🔄 on Releases / Announcements / Events. Verify real URLs (no `#` placeholders), real CVE numbers, region-appropriate events.
+3. **Gitignore decision pending** — file contains personal/customer data. Options: gitignore live copy, sanitize as `.template.html` + gitignore live, or commit as-is (NOT recommended). See [GITIGNORE NOTE in 2026-05-24 section](#%EF%B8%8F-gitignore-note).
 
-Commit `cb1ff1c` (`feat: default chat quant UD-Q4_K_M -> UD-Q6_K; qwen3.6-hi -> qwen3.6-fast profile`)
-captures the 9-file change set that had been sitting uncommitted in the working tree:
-
-- Default `qwen3.6` profile pivots UD-Q4_K_M (~22 GB) -> **UD-Q6_K (~29 GB)**, tensor-split `1,1` -> `1,1.5`, pool budget ~36 GB -> ~43 GB of 64.
-- `qwen3.6-hi` (UD-Q5_K_M) profile **renamed to `qwen3.6-fast` (UD-Q4_K_M)** across `swap-chat-model.sh`, router `ALIAS_MAP` (`rag-qwen3.6-fast*`), and all docs. Q5 retired as strictly dominated.
-- Spec-decode rationale rewritten: a vocab-matched draft now exists (Qwen3.5-0.8B + llama.cpp PR #19493); it stays disabled because A3B MoE per-token expert-load regresses throughput 3-12%, **not** vocab mismatch.
-
-**Status flags — do NOT treat the new Q6_K numbers as validated:**
-- The commit is **local to one workstation; `git push` has not run** (HEAD is 1 ahead of `origin/main`).
-- The cluster **has not been redeployed** — it is still running UD-Q4_K_M at `1,1`.
-- Q6_K VRAM rows in [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template) and `get_profile_vram_estimate()` are **PENDING/predicted** — RE-MEASURE via `swap-chat-model.sh qwen3.6` + stability test after the first redeploy, then update those strings.
-
-### 2. Outage: "LLM not responding in OpenCode" — root-caused, fix = swap profile
-
-**Symptom:** OpenCode (workstation) appeared to lose connectivity; the model stopped responding mid-session.
-
-**NOT the cause:** network, crashed unit, or wedged process. All boundary probes were healthy — router `/healthz` 200 in 22 ms (`upstream: chat/embed/rerank all ok`), chat unit `/health` 200 in 2 ms, a tiny completion returned in 0.18 s.
-
-**Root cause:** the chat slot had been swapped to the **`coder` profile** (`active_chat_profile: qwen3-coder`, 128K ctx, OOM-adjacent ~2.6 GB headroom), but OpenCode (`~/.config/opencode/config.json`) is hard-pinned to the **`qwen3.6` aliases** (`model: qwen3.6-think`, `small_model: rag-qwen3.6`) with **`limit.context: 200000`**. Mechanics:
-- `/v1/models` is profile-filtered, so it stopped advertising `qwen3.6-think` / `rag-qwen3.6` entirely (only `qwen3-coder*` showing).
-- `resolve_alias` rewrites the model name but llama-server **serves whatever is loaded** — small turns silently answered by Coder-Next and worked.
-- The open session, growing toward the 200K OpenCode believes it has, **overflows coder's 128K window**; the router's `MAX_CHAT_INPUT_TOKENS` gate (sized for qwen3.6's 256K) does not catch it. Overflow stalls/errors, OpenCode retries (chatMaxRetries=3) into it -> "not responding."
-
-**Fix (chosen 2026-06-05):** `./scripts/swap-chat-model.sh qwen3.6` on the host — restores the expected model AND the 256K window, so even the oversized open session fits (200K < 256K). Run by the operator on the host (this workstation has no SSH route configured).
-
-**Latent hazard worth a durable fix:** the profile swap and the client context limit are **decoupled** — nothing stops a 200K-configured client from hitting a 128K-loaded model, and passthrough silently serves the *wrong model* on alias mismatch. Candidate guards (deferred, not yet implemented):
-1. Router rejects (or 421/409s) requests whose alias's `backend` != the currently-loaded profile, instead of passthrough to the wrong model.
-2. Router derives an effective input cap from the *loaded* profile's ctx (e.g. coder -> 128K) rather than a static `MAX_CHAT_INPUT_TOKENS`.
-3. `swap-chat-model.sh` prints a louder reminder that OpenCode/AnythingLLM clients pinned to qwen3.6 aliases will break while coder is loaded.
-
-### Repo state snapshot (2026-06-05)
-
-**Branch:** `main`. **HEAD:** `cb1ff1c` (Q6_K pivot) — **1 commit ahead of `origin/main`, unpushed.** Plus this handoff edit committed on top. Cluster running the pre-pivot UD-Q4_K_M profile.
+Pick this up first when starting the new session. The cluster infrastructure underneath is rock-solid (see below); the artifact is the only loose end.
 
 ---
 
@@ -58,9 +27,9 @@ A multi-theme session that started with a chat-model swap script and ended with 
 
 | Profile | Quant | Split | Ctx | Cache-reuse | Idle | Peak | Verdict |
 |---|---|---|---|---|---|---|---|
-| `qwen3.6` (default) | UD-Q4_K_M (~22 GB) | 1,1 | 256K | 1024† | 75 / 44 | 84 / 52 | OK |
-| `qwen3.6-hi` | UD-Q5_K_M (~26.5 GB) | 1,1.5 | 256K | 1024† | 73 / 60 | 81 / 68 | OK |
-| `coder` | UD-IQ4_XS (~38 GB) | 1,1.5 | 128K | 0 | 84 / 77 | 92 / 85 | OK |
+| `qwen3.6` (default) | UD-Q4_K_M (~22 GB) | 1,1 | 256K | 1024† | 75 / 44 | 84 / 52 | ✅ |
+| `qwen3.6-hi` | UD-Q5_K_M (~26.5 GB) | 1,1.5 | 256K | 1024† | 73 / 60 | 81 / 68 | ✅ |
+| `coder` | UD-IQ4_XS (~38 GB) | 1,1.5 | 128K | 0 | 84 / 77 | 92 / 85 | ✅ |
 
 †llama.cpp auto-disables `cache_reuse` for all Q*_K_M + q8_0 KV configs in this build — runtime warning emitted, effective behavior is 0 across the board.
 
@@ -83,7 +52,7 @@ A multi-theme session that started with a chat-model swap script and ended with 
 
 # Capture coder summary to a file (cleaner than scrolling 50K-char terminal):
 ./scripts/tools/stability-test-coder.sh --follow 2>&1 | tee /tmp/stab.log
-sed -n '/-- summary --/,$p' /tmp/stab.log
+sed -n '/── summary ──/,$p' /tmp/stab.log
 ```
 
 Workstation wrapper (PowerShell, in [`day-2-ops § 4.4`](./day-2-ops.md#-44-vram-budget-template)):
@@ -102,7 +71,7 @@ Set-Alias swap Swap-ClusterChatModel
 | `c3c10ad` | Doc: measured tuning numbers in `day-2-ops.md § 4.4` |
 | `f5bd9f3` | `scripts/tools/stability-test-coder.sh` (three escalating prefills, pass/fail) |
 | `77549ae` | Stability test reads chat-unit `--hf-repo` (authoritative) instead of `/v1/models` |
-| `8199b81` | Per-profile `LLAMA_CTX` (`qwen3.6=262144`, `coder=131072` to fix 98%->0.6GB headroom) |
+| `8199b81` | Per-profile `LLAMA_CTX` (`qwen3.6=262144`, `coder=131072` to fix 98%→0.6GB headroom) |
 | `2fe9589` | Per-profile `LLAMA_CACHE_REUSE` (`coder=0` to work around llama.cpp cache-reuse abort) |
 | `71256d8` | Doc: final measured values for coder profile |
 
@@ -112,18 +81,18 @@ Set-Alias swap Swap-ClusterChatModel
 
 **Third profile + rebalance (4 commits):**
 | `ccedb6e` | New `qwen3.6-hi` profile (UD-Q5_K_M, ~26.5 GB) wired up across swap script + router ALIAS_MAP + docs |
-| `2b22f86` | qwen3.6-hi initial VRAM measurement (1,1 split -> 82/51) |
+| `2b22f86` | qwen3.6-hi initial VRAM measurement (1,1 split → 82/51) |
 | `81908ec` | Rebalanced qwen3.6-hi to 1,1.5 split (predicted 73/60) |
 | `5f7df91` | Locked in 1,1.5 split + measured exactly matches prediction (73/60) |
 
 **UX improvements (2 commits):**
 | `9194185` | `--follow` flag on both swap-chat-model.sh and stability-test-coder.sh; dynamic `/v1/models` filters by loaded profile |
-| `6c4ad9c` | `--follow` rewrite (cursor approach was fragile; switched to `--since` timestamp + line count); `identify_profile` matches on repo+quant not just repo (fixes `qwen3.6-hi -> qwen3.6` misreporting) |
+| `6c4ad9c` | `--follow` rewrite (cursor approach was fragile; switched to `--since` timestamp + line count); `identify_profile` matches on repo+quant not just repo (fixes `qwen3.6-hi → qwen3.6` misreporting) |
 
 **Stability test refinements (3 commits):**
-| `9f5aa0f` | T1+T2 bundle: generalized stability test (auto-detect MODEL_ALIAS), threshold sanity (3x->5x slowdown, post-settle remeasure), swap UX (descriptions + VRAM characterization in `--status`), `/healthz` adds `active_chat_profile` |
+| `9f5aa0f` | T1+T2 bundle: generalized stability test (auto-detect MODEL_ALIAS), threshold sanity (3×→5× slowdown, post-settle remeasure), swap UX (descriptions + VRAM characterization in `--status`), `/healthz` adds `active_chat_profile` |
 | `949cce9` | Distinguish bounded one-time buffers (info) from runaway drift (fail) |
-| `c3bac2f` | T3a+T3b pair for proper runaway detection (was comparing T2->T3 which conflated first-allocation with compounding) |
+| `c3bac2f` | T3a+T3b pair for proper runaway detection (was comparing T2→T3 which conflated first-allocation with compounding) |
 
 **Full profile validation (1 commit):**
 | `326b401` | All three profiles load-tested with T3a/T3b methodology, measurements locked in |
@@ -145,15 +114,16 @@ Set-Alias swap Swap-ClusterChatModel
 
 1. **llama.cpp `cache_reuse` auto-disable is universal** (not Coder-Next-specific). Every Q*_K_M + q8_0 KV config trips `cache_reuse is not supported by this context, it will be disabled` at load. Our setting `CACHE_REUSE=1024` on `qwen3.6` and `qwen3.6-hi` has been a no-op the whole time.
 2. **Activation-buffer allocation is bounded but persistent.** First heavy prefill (~80K+ tokens) allocates ~+8pp VRAM that doesn't release post-request. Second consecutive heavy prefill stays at the same level — bounded, not runaway. Verified by T3a vs T3b delta = 0pp on all three profiles.
-3. **llama.cpp cache-reuse abort** on Coder-Next exact-match cached prompt replay. `common.cpp:1489: failed to remove sequence ... p1=-1` -> `status=6/ABRT`. Worked around per-profile (`coder` has `LLAMA_CACHE_REUSE=0`). Worth reporting upstream once minimal repro is built.
+3. **llama.cpp cache-reuse abort** on Coder-Next exact-match cached prompt replay. `common.cpp:1489: failed to remove sequence … p1=-1` → `status=6/ABRT`. Worked around per-profile (`coder` has `LLAMA_CACHE_REUSE=0`). Worth reporting upstream once minimal repro is built.
 
 ### Tier 3 deferred items (full implementation outlines preserved)
 
-- **MTP (Multi-Token Prediction) integration** — HF probe surfaced `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (updated 2026-05-20), an MTP-trained variant of our chat model. ~1.5-2x faster inference claimed, drop-in tokenizer-compatible. Implementation outline in [day-2-ops § 4.5](./day-2-ops.md#-45-enabling-spec-decode-when-a-compatible-draft-ships). Wiring needs: `51-lxc-amd.sh` to learn `--spec-type draft-mtp`, new profile field for spec type, ~22.7 GB download, re-stability-test. ~half-day work.
+- **MTP (Multi-Token Prediction) integration** — HF probe surfaced `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` (updated 2026-05-20), an MTP-trained variant of our chat model. ~1.5–2× faster inference claimed, drop-in tokenizer-compatible. Implementation outline in [day-2-ops § 4.5](./day-2-ops.md#-45-enabling-spec-decode-when-a-compatible-draft-ships). Wiring needs: `51-lxc-amd.sh` to learn `--spec-type draft-mtp`, new profile field for spec type, ~22.7 GB download, re-stability-test. ~half-day work.
 - **`hugo_sitemap` / `url_list_hashed` handler stubs** — intentionally not built (no current source needs them; YAGNI). Implement when a real source requires Last-Modified caching or hand-curated URL lists.
 - **Monitoring + alerting** — `/var/lib/rag-refresh/metrics.prom` is now ready for a Prometheus scraper, but node_exporter isn't deployed. Carry-over from 2026-05-24's list of standing items.
 - **Security hardening checklist** — carry-over from 2026-05-24.
 - **`scripts/tools/benchmark-coder-vs-rag.py`** — still broken (HF Inference Providers auth blocks it). Either provision a paid HF token or delete the script.
+- **Weekly status report** — see "🎯 Next session focus" at top.
 
 ### Repo state snapshot (2026-05-26)
 
@@ -169,7 +139,7 @@ c3bac2f  stability test: T3a + T3b pair for proper runaway-buffer detection
 9f5aa0f  T1 + T2: stability test generalization, threshold sanity, swap UX, /healthz
 eba2c0d  docs: audit-driven currency fixes for the swap workflow
 5f7df91  qwen3.6-hi: lock in 1,1.5 split with measured numbers
-81908ec  qwen3.6-hi: rebalance tensor-split 1,1 -> 1,1.5
+81908ec  qwen3.6-hi: rebalance tensor-split 1,1 → 1,1.5
 2b22f86  day-2-ops § 4.4: record qwen3.6-hi initial VRAM measurement
 ```
 
@@ -212,16 +182,18 @@ If phase 58 hasn't been deployed yet:
 # Session handoff — 2026-05-24 (prior session, kept for context)
 
 Continuation notes for picking this work up on another PC. Read top-to-bottom;
-nothing in here assumes you have the prior conversation cached.
+nothing in here assumes you have the prior conversation cached. Last activity:
+big-session day of cluster work + artifact build-out.
 
 ---
 
 ## TL;DR (2026-05-24)
 
 - **GPU cluster:** running, stable on Qwen3.6-35B-A3B. CORS works. Tavily proxy live.
+- **Artifact** (`weekly_customer_adoption_review.html`) — fully wired but **not yet tested end-to-end by you**. Three personal URL placeholders to fill in.
 - **RAG Phase 2** (openzfs / blog split / keycloak fixes) — resolved 2026-05-25 (commit 4f2b30e); full sdg-documentation wipe-loop baseline clean across all 5 sources.
 - **Docs refresh complete (2026-05-25, commits 5d3ab61 + cf4f277):** all docs aligned with live cluster state; new [`day-2-ops.md`](./day-2-ops.md) operations guide (14 sections, 1543 lines).
-- **All previously-deferred decisions resolved (2026-05-25):** (1) Coder-Next take 2 -> `UD-IQ4_XS` (38.4 GB) recommended in [day-2-ops.md § 4.4 worked example](./day-2-ops.md#-44-vram-budget-template); (2) router-side tool execution shipped in commits e79add8 (v1) + af935c4 (v2 fixes). Server-side OpenAI tools/tool_calls multi-turn loop with 5 tools (tavily_search / extract / crawl / map + web_fetch), end-to-end-verified — model executed 3 iterations and returned a cited answer about TrueNAS 26-BETA.1.
+- **All previously-deferred decisions resolved (2026-05-25):** (1) Coder-Next take 2 → `UD-IQ4_XS` (38.4 GB) recommended in [day-2-ops.md § 4.4 worked example](./day-2-ops.md#-44-vram-budget-template); (2) router-side tool execution shipped in commits e79add8 (v1) + af935c4 (v2 fixes). Server-side OpenAI tools/tool_calls multi-turn loop with 5 tools (tavily_search / extract / crawl / map + web_fetch), end-to-end-verified — model executed 3 iterations and returned a cited answer about TrueNAS 26-BETA.1.
 
 ---
 
@@ -229,7 +201,7 @@ nothing in here assumes you have the prior conversation cached.
 
 | LXC | Role | Model / process | Notes |
 |---|---|---|---|
-| 151 (`llamacpp-amd`) | chat / embed / rerank | `Qwen3.6-35B-A3B-UD-Q4_K_M` (alias `rag-qwen3.6`), `Qwen3-Embedding-0.6B-Q8_0`, `bge-reranker-v2-m3-Q4_K_M` | 32 GB LXC mem, `--mlock` on, 256K ctx, `--parallel 1`. Model files in HF cache layout under `/tank/models/.cache/` (host) -> `/opt/models/.cache/` (LXC bind mount). |
+| 151 (`llamacpp-amd`) | chat / embed / rerank | `Qwen3.6-35B-A3B-UD-Q4_K_M` (alias `rag-qwen3.6`), `Qwen3-Embedding-0.6B-Q8_0`, `bge-reranker-v2-m3-Q4_K_M` | 32 GB LXC mem, `--mlock` on, 256K ctx, `--parallel 1`. Model files in HF cache layout under `/tank/models/.cache/` (host) → `/opt/models/.cache/` (LXC bind mount). |
 | 153 (`llm-router`) | FastAPI router on :8000 | `/opt/llm-router/app.py` (uvicorn) | Bearer auth, CORS middleware, Tavily proxy at `/v1/tavily/search`, slowapi rate limits, Prometheus middleware. |
 | 154 (`anythingllm`) | AnythingLLM container | Docker compose at `/opt/anythingllm/docker-compose.yml` | Talks to router at `http://192.168.6.153:8000/v1` using `ROUTER_API_KEY` Bearer. Model alias = `rag-qwen3.6`. Token limit 131072. |
 | 155 (`mcp-stack`) | MCP servers | Not heavily used this session | Same provisioning script `55-lxc-mcp.sh`. |
@@ -250,7 +222,7 @@ nothing in here assumes you have the prior conversation cached.
 | `ROUTER_API_KEY` | `/etc/router.env` on LXC 153 (mode 600) | `scripts/53-lxc-router.sh` (openssl rand -hex 32) |
 | `LLAMACPP_API_KEY` | `/etc/llamacpp.env` on LXC 151 + mirrored to `/etc/router.env` on 153 | `scripts/51-lxc-amd.sh` |
 | `TAVILY_API_KEY` | `/etc/router.env` on LXC 153 + `scripts/config.env` on Proxmox host | You pasted it into `config.env` then ran 53-lxc-router.sh |
-| `ALLM_API_KEY` | AnythingLLM UI -> Settings -> API Keys (after first signup) | AnythingLLM itself |
+| `ALLM_API_KEY` | AnythingLLM UI → Settings → API Keys (after first signup) | AnythingLLM itself |
 
 To recover the keys on the new PC's terminal sessions:
 ```bash
@@ -277,9 +249,70 @@ b99e042 rag: harden refresh.py against interruption
 ...
 ```
 
-Recommend adding to `.gitignore`:
+**Uncommitted at end of session:**
+```
+ M .gitignore                                  <-- you were editing
+?? weekly_customer_adoption_review.html        <-- contains personal data; SEE GITIGNORE NOTE
+?? SESSION_HANDOFF.md                          <-- this file
+```
+
+Plus various uncommitted artifact-related edits to `weekly_customer_adoption_review.html` made this session (all the artifact work below is in that file). The CORS / Tavily proxy / model rollback work is all committed and pushed (commits 83b2d95, 13cea45, 0c032e4, 461b9d4).
+
+### ⚠️ GITIGNORE NOTE
+
+`weekly_customer_adoption_review.html` has Nathan Hudson's contact info, XcelEnergy customer name, scheduler placeholder, Box drive placeholder, full team roster, etc. Decide before committing:
+
+- **Option A — gitignore it.** Add `weekly_customer_adoption_review.html` to `.gitignore`. Keep the file locally only.
+- **Option B — sanitize + commit a template.** Replace personal data with placeholders, commit as `weekly_customer_adoption_review.template.html`, gitignore the live copy.
+- **Option C — commit as-is (NOT recommended).** Pushes personal data and TAM contact list to GitHub.
+
+You were already editing `.gitignore` when the session ended — probably for this reason.
+
+Also recommend adding to `.gitignore`:
 - `scripts/config.env` (contains `TAVILY_API_KEY` on the Proxmox host)
 - Any `*.env` you might generate
+
+---
+
+## Artifact (`weekly_customer_adoption_review.html`) — work done this session
+
+A weekly TAM customer-adoption HTML report (page 1 status, page 2 resources, page 3 team). Built-in Refresh-from-web flow that calls the local cluster + Tavily for live data. All changes are in this one file.
+
+### Major changes
+
+1. **AI Settings: 3rd provider option** — `Local + Tavily web search (via router proxy)` — uses local model AND has the router run Tavily searches server-side. Other two options preserved (Anthropic via Claude.ai, Local-only).
+2. **`PROMPTS` rewritten** — each Refresh button has `searchQueries` (Tavily params) + a user prompt that consumes search results as ground truth.
+3. **Bug fix** — restored missing `const data = await resp.json();` line in `callLocalOpenAI` (caused ReferenceError when refreshing).
+4. **7-day weekly cadence** — Releases / VMSAs queries use `time_range: "week"`, prompt explicitly asks for "every entry from the past 7 days." Empty week emits "No new entries this week." placeholder.
+5. **NEW section: This Week's Announcements** — between Releases and Upcoming Events on page 1. Teal-colored. Catches events ANNOUNCED in past 7 days regardless of when they occur (separate from forward-looking 90-day events list).
+6. **Resources table (page 2) populated** — 33 verified public URLs + 3 personal placeholders (`#PASTE_YOUR_SCHEDULER_URL`, `#PASTE_YOUR_BOX_SHARE_URL`, `#PASTE_YOUR_TAM_MP_BOX_URL`).
+7. **Footer links populated** — Broadcom Support Portal, VMware TAM Services YouTube, TAMLab YouTube (all verified).
+8. **Team cards (page 3): per-member action bar** — each card gets `↑ ↓ + ×` buttons in a dedicated 24px column (not overlapping the name). 3-column grid: photo + info + actions. Always visible (no hover needed). Print view reverts to 2-column.
+9. **Auto-populate report date** — IIFE runs at script load, sets `DEFAULT_DATA.fields.reportDate` to today's local-browser date in `MM-DD-YY` format. Still contenteditable so user can override.
+
+### Backend pieces that support the artifact
+
+- `scripts/files/router-app.py` — `POST /v1/tavily/search` endpoint, `CORSMiddleware`, auth-skip on OPTIONS preflight, `CORS_ALLOW_ORIGINS` env var.
+- `scripts/53-lxc-router.sh` — wires `TAVILY_API_KEY`, `RATE_LIMIT_TAVILY=30/minute`, `CORS_ALLOW_ORIGINS=*` into `/etc/router.env`.
+- `scripts/config.env.example` — documents `TAVILY_API_KEY` + `CORS_ALLOW_ORIGINS` + `RATE_LIMIT_TAVILY`.
+
+### Cost note
+
+Per refresh-button click, Tavily credits used:
+- Releases section: 3 searches
+- Announcements section: 3 searches
+- Events section: 4 searches
+- **Full weekly refresh = 10 credits.** Free tier 1000/mo → ~100 weeks.
+
+### Artifact open items (what you need to do)
+
+1. **Fill the 3 personal URL placeholders** in `weekly_customer_adoption_review.html`. Search for `#PASTE_YOUR_` to find them.
+2. **Test end-to-end:** load artifact in browser (`file://` or via repo path), ⚙ AI Settings → Local + Tavily, click 🔄 on all three sections. Verify:
+   - Real URLs in resulting tables (no `#` placeholders)
+   - Real CVE numbers for VMSAs (not `CVE-XXXX-XXXXX`)
+   - Region-appropriate events
+3. **Decide artifact gitignore strategy** (see GITIGNORE NOTE above).
+4. **Save the file as a "Week 1" baseline** via the 💾 Save button (top-toolbar) so future weeks can be loaded.
 
 ---
 
@@ -289,7 +322,7 @@ Recommend adding to `.gitignore`:
 
 - Added `CORSMiddleware` to `scripts/files/router-app.py` with configurable `CORS_ALLOW_ORIGINS` (default `*`).
 - Fixed auth middleware: now skips `OPTIONS` requests so CORS preflight from `file://` origins gets answered before auth runs.
-- Wired through `scripts/53-lxc-router.sh` -> persists in `/etc/router.env`.
+- Wired through `scripts/53-lxc-router.sh` → persists in `/etc/router.env`.
 - Verified: browsers loaded from `file://` can now POST to `http://192.168.6.153:8000` without CORS errors.
 
 ### Tavily search proxy (committed: 83b2d95)
@@ -299,17 +332,17 @@ Recommend adding to `.gitignore`:
 - Whitelisted request fields. Defaults block `raw_content`/`images` to keep responses small.
 - Rate-limited separately: `RATE_LIMIT_TAVILY=30/minute`.
 
-### Model swap attempt + rollback (committed: 461b9d4 -> 0c032e4)
+### Model swap attempt + rollback (committed: 461b9d4 → 0c032e4)
 
 - **Tried:** swap chat model from Qwen3.6-35B-A3B (22 GB) to Qwen3-Coder-Next UD-Q4_K_XL (49.6 GB).
-- **What happened:** OOM on V620 #0 at weight allocation (24.2 GB single alloc failed). Model is too big for 2x V620 (32 GB each, 64 GB total) when embed+rerank are co-resident.
+- **What happened:** OOM on V620 #0 at weight allocation (24.2 GB single alloc failed). Model is too big for 2× V620 (32 GB each, 64 GB total) when embed+rerank are co-resident.
 - **Decision:** rolled back to Qwen3.6-35B. Scripts reverted. Cluster running stable since.
 - **Lesson saved:** future Coder-Next attempt needs proper VRAM-budget exercise BEFORE downloading the 50 GB GGUF.
 
 ### Documentation fixes (committed in 83b2d95)
 
-- `scripts/config.env.example`: corrected "read-only mount" to "read-write bind mount" (the actual usage needs RW for HF cache).
-- `scripts/README.md`: added "Where models live" subsection documenting `/tank/models/` <-> `/opt/models/` bind-mount and HF cache layout.
+- `scripts/config.env.example`: corrected "read-only mount" to "read-write bind mount" (the artifact actually needs RW for HF cache).
+- `scripts/README.md`: added "Where models live" subsection documenting `/tank/models/` ↔ `/opt/models/` bind-mount and HF cache layout.
 
 ### RAG Phase 2 — RESOLVED 2026-05-25 (commit 4f2b30e)
 
@@ -329,7 +362,7 @@ Post-wipe baseline (all sdg-documentation sources):
 | opnsense-docs | 418 | 798 | 1.91 | 0 |
 | truenas-scale-docs | 452 | 904 | 2.00 | 0 |
 
-One stale `raw-recovered-` sidecar from 2026-05-20 was swept from truenas-api-v27 separately. Consistent ~2.0x workspace-list dup factor confirms an AnythingLLM `/workspace/{slug}` quirk (two rows per document) — non-blocking, known.
+One stale `raw-recovered-` sidecar from 2026-05-20 was swept from truenas-api-v27 separately. Consistent ~2.0× workspace-list dup factor confirms an AnythingLLM `/workspace/{slug}` quirk (two rows per document) — non-blocking, known.
 
 ---
 
@@ -340,18 +373,26 @@ One stale `raw-recovered-` sidecar from 2026-05-20 was swept from truenas-api-v2
    git clone <your-github-remote> local-gpu-cluster
    cd local-gpu-cluster
    ```
-2. **Verify cluster health** from the new PC:
+2. **Pull this handoff doc** (if it was committed) or re-create the artifact locally if not.
+3. **Verify cluster health** from the new PC:
    ```bash
    ssh gpu-cluster   # or wherever your Proxmox host is reachable
    pct exec 153 -- systemctl status llm-router
    pct exec 151 -- systemctl status llamacpp-chat llamacpp-embed llamacpp-rerank
    pct exec 154 -- docker ps
    ```
-3. **Read the open items** below. Pick what to resume.
+4. **Read the open items** below. Pick what to resume.
 
 ---
 
 ## Open items (prioritized)
+
+### Likely next (artifact + cluster smoke-test)
+
+- [ ] Fill 3 personal URL placeholders in `weekly_customer_adoption_review.html`
+- [ ] Decide artifact gitignore strategy (see GITIGNORE NOTE)
+- [ ] Reload artifact, test 🔄 Refresh on Releases / Announcements / Events with `Local + Tavily` provider
+- [ ] Save artifact as "Week 1" baseline
 
 ### Soon (RAG Phase 2) — DONE 2026-05-25
 
@@ -361,13 +402,13 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 
 - [x] Coder-Next take 2 — **analysis done 2026-05-25, deploy deferred**. Analysis added as worked example in [day-2-ops.md § 4.4](./day-2-ops.md#-44-vram-budget-template). Recommendation if/when deployed: `UD-IQ4_XS` (38.4 GB) — Q4-class Unsloth Dynamic quant, fits with ~10 GB per-card headroom alongside embed+rerank co-residency at 256K context. Backup: UD-IQ4_NL (39.2 GB) or more conservative UD-Q3_K_S (33.3 GB) if quality issues. **Caveat:** Coder-Next replaces Qwen3.6-35B-A3B in the chat slot; can't run both simultaneously. **Deploy decision (2026-05-25): staying with Qwen3.6** — empirical benchmark via [`scripts/tools/benchmark-coder-vs-rag.py`](./scripts/tools/benchmark-coder-vs-rag.py) (commit d534311) attempted but blocked on HF Inference Providers auth (token rejected with 401 even on whoami); rather than burn more time on the benchmark or commit local VRAM blind, keeping the current Qwen3.6-35B-A3B as the chat model. Router has `qwen3-coder` + `qwen3-coder-next` aliases pre-configured in [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP` (commit 0c44407) so future deploy is one-command swap per day-2-ops § 4.4. The failed UD-Q4_K_XL (49.6 GB) cache directory has been removed from `/tank/models/.cache/`; ~50 GB reclaimed. To deploy later: re-fetch via the day-2-ops procedure, run `scripts/51-lxc-amd.sh` + `scripts/53-lxc-router.sh`.
 - [x] `setup-runbook.md` Phase 5 rewrite + `local-gpu-cluster-v2.md` model-section rewrite — **done 2026-05-25** in commit 5d3ab61 (5-file refresh against ground-truth). Day-2-ops follow-on doc added in cf4f277.
-- [x] Router-side tool execution — **done 2026-05-25** in commits e79add8 (v1: tool registry + 5 tools + multi-turn loop) and af935c4 (v2 fixes: Tavily results -> markdown, tool_call_id synthesis, MAX_TOOL_ITERATIONS 5->10, log enhancement). Verified end-to-end: model executed `tavily_search x2 + tavily_extract x1` in 3 iterations, produced cited answer about TrueNAS 26-BETA.1. Pre-existing `/v1/tavily/search` proxy retained for browser-side direct use; clients can opt in to server-side execution per-request via `"tool_execution": "server"`. See [day-2-ops.md § 6.8](./day-2-ops.md#-68-server-side-tool-execution).
+- [x] Router-side tool execution — **done 2026-05-25** in commits e79add8 (v1: tool registry + 5 tools + multi-turn loop) and af935c4 (v2 fixes: Tavily results → markdown, tool_call_id synthesis, MAX_TOOL_ITERATIONS 5→10, log enhancement). Verified end-to-end: model executed `tavily_search ×2 + tavily_extract ×1` in 3 iterations, produced cited answer about TrueNAS 26-BETA.1. Pre-existing `/v1/tavily/search` proxy retained for browser-side direct use; clients can opt in to server-side execution per-request via `"tool_execution": "server"`. See [day-2-ops.md § 6.8](./day-2-ops.md#-68-server-side-tool-execution).
 - [ ] **Monitoring & alerting setup** — surfaced by the day-2-ops review (cf4f277). The router exposes `/metrics` (Prometheus, IP-allowlisted) but there's no scrape config, no alert rules, no dashboards. Scope: Prometheus scrape configuration for the router endpoint, suggested alert thresholds (chat p95 latency, 5xx rate, embed queue depth, /tank disk %, fan-bridge down), and integration patterns with an external receiver (Grafana / AlertManager / ntfy / Discord webhook). Day-2-ops.md §2 + §12 cover reading existing metrics manually; this item is about closing the loop into proactive alerting.
 - [ ] **Security hardening checklist** — surfaced by the day-2-ops review (cf4f277). Current posture is Bearer auth on the router + IP-allowlists on `/metrics`, assuming LAN-only deployment behind a firewall. Scope for hardening: per-LXC SSH audit (key-only, non-default port, hardened sshd_config), fail2ban or equivalent against brute-force, audit logging strategy (who-did-what beyond access.log), secrets-at-rest review (file modes on /etc/router.env etc.), TLS termination if any service ever needs to be exposed beyond LAN. Becomes more important if the cluster's network exposure changes.
 
 ### Standing items (no urgent action)
 
-- [x] Implement Phase 2 RSS handler — **done 2026-05-25** in commit 57adec5. Handler at [`scripts/rag/handlers/rss.py`](./scripts/rag/handlers/rss.py); feedparser + trafilatura pipeline; new top-level `removal_policy: additive_only` source field (in [`scripts/rag/lib/plan.py`](./scripts/rag/lib/plan.py) + [`scripts/rag/refresh.py`](./scripts/rag/refresh.py)) prevents the diff layer from deleting historical entries that fall out of an RSS feed's sliding window. **truenas-blog itself stays parked**: TrueNAS / iXsystems publish no public feed (probed `/feed`, `/blog/feed`, `/blog/index.xml`, `/sitemap.xml`, all variants — either 404 or 301 -> SPA-fallback HTML). 595 historical entries remain searchable through the sdg-documentation workspace. Handler is reusable for any future source that DOES have a feed (homenetworkguy, klarasystems, ServeTheHome, Phase Two community blogs) — just add a new sources.yaml entry with `handler: rss` and `removal_policy: additive_only`. For fresh TrueNAS blog content specifically, the server-side tool execution route ([day-2-ops § 6.8](./day-2-ops.md#-68-server-side-tool-execution)) covers live web search via `tavily_search`.
+- [x] Implement Phase 2 RSS handler — **done 2026-05-25** in commit 57adec5. Handler at [`scripts/rag/handlers/rss.py`](./scripts/rag/handlers/rss.py); feedparser + trafilatura pipeline; new top-level `removal_policy: additive_only` source field (in [`scripts/rag/lib/plan.py`](./scripts/rag/lib/plan.py) + [`scripts/rag/refresh.py`](./scripts/rag/refresh.py)) prevents the diff layer from deleting historical entries that fall out of an RSS feed's sliding window. **truenas-blog itself stays parked**: TrueNAS / iXsystems publish no public feed (probed `/feed`, `/blog/feed`, `/blog/index.xml`, `/sitemap.xml`, all variants — either 404 or 301 → SPA-fallback HTML). 595 historical entries remain searchable through the sdg-documentation workspace. Handler is reusable for any future source that DOES have a feed (homenetworkguy, klarasystems, ServeTheHome, Phase Two community blogs) — just add a new sources.yaml entry with `handler: rss` and `removal_policy: additive_only`. For fresh TrueNAS blog content specifically, the server-side tool execution route ([day-2-ops § 6.8](./day-2-ops.md#-68-server-side-tool-execution)) covers live web search via `tavily_search`.
 - [ ] Implement Phase 2 split: `sphinx_sitemap` collect()/fetch() so `--dry-run` isn't expensive
 - [ ] migrate_backfill: extract_url shape fix for refresh.py-uploaded docs
 - [ ] cleanup script: batch-size handling (1800s timeout on 409 removes)
@@ -382,7 +423,9 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 - **Cluster context window** is 256K (Qwen3.6 n_ctx_train), with `--parallel 1` and `CHAT_CONCURRENCY=1` so a single request gets the full window. Router enforces `MAX_CHAT_INPUT_TOKENS=200000` (leaves ~56K for output/thinking).
 - **OpenCode config** is `~/.config/opencode/config.json` and includes Tavily MCP. That key is also what's in `/etc/router.env` (TAVILY_API_KEY) — they should match.
 - **Router models endpoint** returns 5 aliases that all resolve to the same llama-server backend with different behaviors: `rag-qwen3.6` strips `<think>` blocks via heuristic, `qwen3.6-think` keeps them in `reasoning_content`, `qwen3.6` is non-thinking. Pick the right alias for the use case.
+- **Artifact's Refresh-from-web flow** has 3 modes (radio buttons in ⚙ AI Settings): Anthropic (Claude.ai only), Local-only (no web), Local+Tavily (use this for daily work).
 - **OpenCode reasoning support** is independent of the router. OpenCode handles `<think>` blocks based on its own config; the `rag-qwen3.6` alias on the router is best for RAG queries (no thinking) and `qwen3.6-think` is best for coding/agent tasks.
+- **Print view** of the artifact: Ctrl+P. Print CSS hides toolbar, refresh buttons, row-actions, etc. The team-card grid reverts to 2-column in print. Should produce a clean 3-page PDF.
 - **vzdump backups** of LXCs go to `/tank/backups/` (or wherever `vzdump` is configured). Run periodically — both the chat model setup and the router config are non-trivial to rebuild from scratch.
 
 ---
@@ -391,6 +434,7 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 
 | File | Purpose |
 |---|---|
+| `weekly_customer_adoption_review.html` | The TAM artifact. Self-contained (HTML + CSS + JS in one file). All this session's artifact work is here. |
 | `scripts/files/router-app.py` | FastAPI router. Auth, CORS, admission control, Tavily proxy, /v1/{chat,embed,rerank,models,tavily/search}. |
 | `scripts/51-lxc-amd.sh` | Provisions LXC 151 (chat/embed/rerank llama-server units). |
 | `scripts/53-lxc-router.sh` | Provisions LXC 153 (router). Wires API keys and env into `/etc/router.env`. |
@@ -405,4 +449,4 @@ All five items shipped in commit 4f2b30e and the full sdg-documentation workspac
 
 ---
 
-*End of handoff. If something here is wrong or missing, that's a bug in the recorded notes — open the file on the original PC and diff against this doc.*
+*End of handoff. If something here is wrong or missing, that's a bug in my memory of the session — open the file on the original PC and diff against this doc.*
