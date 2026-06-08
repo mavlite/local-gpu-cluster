@@ -131,13 +131,15 @@ get_profile() {
       # Tensor split 1,1: Mistral's embedding table is ~500 MB (vs Qwen3.6's
       # ~2.7 GB), so GPU 0 non-split overhead is modest; symmetric split works.
       #
-      # CTX 262144 (256K) — Mistral's embedding table is small (~500 MB) and
-      # KV at 256K q8_0 splits ~10.5 GB per card, keeping both GPUs ~75%.
-      # If n_ctx_train in the GGUF is only 128K, llama.cpp warns at startup
-      # but does not abort; quality beyond training context may vary.
-      # CACHE_REUSE=0: conservative default; unknown behavior with Mistral
-      #               architecture's KV cache in llama.cpp.
-      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1 262144 0"
+      # n_ctx_train = 393216 (384K) — confirmed from GGUF on first deploy 2026-06-08.
+      # CTX 262144 (256K) is well within training range.
+      # KV type q4_0 (set in config.env) halves KV size vs q8_0; required because
+      # GPU 0 has ~8.5 GB fixed overhead (ROCm + embedder) leaving ~9.2 GB for KV,
+      # which is below the 11.4 GB q8_0 needs at 256K. q4_0 needs ~4.6 GB. ✓
+      # Tensor split 1,1.5: GPU 1 has >30 GB free vs GPU 0's ~22 GB; shifts
+      # ~5 GB of weight to GPU 1 to balance the asymmetric overhead.
+      # CACHE_REUSE=0: conservative default for new Mistral architecture.
+      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0"
       ;;
     *)
       return 1
@@ -167,7 +169,7 @@ get_profile_vram_estimate() {
     qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
-    devstral)     echo "(first deploy; predicted idle ~80% / ~40% at 1,1 split — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
+    devstral)     echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     *)            echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }

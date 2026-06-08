@@ -327,7 +327,7 @@ Models are downloaded by `llama-server`'s `--hf-repo` flag into `LLAMA_CACHE=/op
     └── blobs/<sha256>               ← actual file
 ```
 
-Currently cached on the host (verified live 2026-05-27):
+Currently cached on the host (verified live 2026-06-08):
 
 | Repo | File | Size | Used by |
 |---|---|---|---|
@@ -338,6 +338,7 @@ Currently cached on the host (verified live 2026-05-27):
 | `gpustack/bge-reranker-v2-m3-GGUF` | `bge-reranker-v2-m3-Q4_K_M.gguf` | ~1.5 GB | rerank |
 | `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | ~400 MB | unused (historical draft attempt — vocab 151,936 mismatch; safe to delete) |
 | `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | unused (leftover from failed swap; see [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) |
+| `unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF` | `Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf` | ~25 GB | **chat (`devstral` profile) — active 2026-06-08** |
 
 ### § 4.2 Pre-fetching a model
 
@@ -548,8 +549,9 @@ Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
 | `coder` **final** | `1,1.5` | **128K** | **0** | **84% / 92%** | **77% / 85%** | **~2.6 GB at peak** | re-validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS. Cache-reuse abort is now structurally impossible (set to 0) |
+| `devstral` (Devstral Small 2 24B Q8_0, ~25 GB, **q4_0 KV**) | `1,1.5` | 256K | 0 | **83% / PENDING** | **75% / PENDING** | **~5.1 GB idle; peak not yet measured** | validated 2026-06-08: idle 26.7 GB / 23.1 GB. q4_0 KV required (q8_0 at 256K needs 11.4 GB on GPU 0, exceeds headroom). n_ctx_train=393216 (384K). Peak under heavy prefill — run stability test and update. |
 
-**Universal pattern across all three profiles:** a one-time +8pp activation-buffer allocation on the first heavy prefill (~80K+ tokens), then bounded — repeat heavy requests stay at the same VRAM level. This is intrinsic to the current llama.cpp build on V620 + ROCm, not a per-profile issue. The post-settle drift is real (buffer is held, not released), but it's a one-shot allocation, not compounding fragmentation. Safe to ignore on any profile that meets the ≥3 GB free at peak target.
+**Universal pattern across all profiles:** a one-time +8pp activation-buffer allocation on the first heavy prefill (~80K+ tokens), then bounded — repeat heavy requests stay at the same VRAM level. This is intrinsic to the current llama.cpp build on V620 + ROCm, not a per-profile issue. The post-settle drift is real (buffer is held, not released), but it's a one-shot allocation, not compounding fragmentation. Safe to ignore on any profile that meets the ≥3 GB free at peak target.
 
 The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms appeared. The split balances *idle* VRAM; the ctx caps the *post-prefill* allocation peak; the cache-reuse disable eliminates a llama.cpp abort on duplicate-prompt replays. All three together are needed for sustained operation.
 
