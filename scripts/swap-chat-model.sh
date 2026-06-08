@@ -124,13 +124,28 @@ get_profile() {
     coder)
       echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0"
       ;;
+    devstral)
+      # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
+      # ~25 GB weights (Q8_0 ≈ 1 byte/param × 24B).
+      #
+      # Tensor split 1,1: Mistral's embedding table is ~500 MB (vs Qwen3.6's
+      # ~2.7 GB), so GPU 0 non-split overhead is modest; symmetric split works.
+      #
+      # CTX 262144 (256K) — Mistral's embedding table is small (~500 MB) and
+      # KV at 256K q8_0 splits ~10.5 GB per card, keeping both GPUs ~75%.
+      # If n_ctx_train in the GGUF is only 128K, llama.cpp warns at startup
+      # but does not abort; quality beyond training context may vary.
+      # CACHE_REUSE=0: conservative default; unknown behavior with Mistral
+      #               architecture's KV cache in llama.cpp.
+      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1 262144 0"
+      ;;
     *)
       return 1
       ;;
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -139,6 +154,7 @@ get_profile_description() {
     qwen3.6)      echo "Qwen3.6-35B-A3B UD-Q6_K — RAG / general (default; near-lossless precision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific" ;;
+    devstral)     echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     *)            echo "" ;;
   esac
 }
@@ -151,6 +167,7 @@ get_profile_vram_estimate() {
     qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
+    devstral)     echo "(first deploy; predicted idle ~80% / ~40% at 1,1 split — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
     *)            echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
@@ -165,6 +182,7 @@ Profiles:
   qwen3.6       — Qwen3.6-35B-A3B UD-Q6_K (RAG / general — default; near-lossless precision)
   qwen3.6-fast  — Qwen3.6-35B-A3B UD-Q4_K_M (throughput-prioritized alternative)
   coder         — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
+  devstral      — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
 
 Flags:
   --status  Show currently-loaded profile (no changes)

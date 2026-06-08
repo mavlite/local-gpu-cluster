@@ -403,6 +403,10 @@ ALIAS_MAP: dict[str, dict] = {
     # regex-strip — Coder typically doesn't emit <think> blocks).
     "qwen3-coder":      {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
     "qwen3-coder-next": {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
+    # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
+    # No thinking mode (Mistral architecture); enable_thinking=None (no injection),
+    # strip_thinking=False (model never emits <think> blocks).
+    "devstral":         {"backend": "devstral", "enable_thinking": None, "strip_thinking": False},
 }
 
 
