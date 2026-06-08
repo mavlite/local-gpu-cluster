@@ -83,6 +83,15 @@ MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "16384"))
 STRICT_PROFILE_MATCH = os.environ.get("STRICT_PROFILE_MATCH", "1").strip().lower() not in ("0", "false", "no", "")
 PROFILE_CACHE_TTL = float(os.environ.get("PROFILE_CACHE_TTL", "10"))  # swaps restart the unit (~45s) >> TTL
 
+# Auto-swap: when a cross-profile alias is requested and SWAP_WEBHOOK_URL is set,
+# trigger the swap instead of returning 409. Empty SWAP_WEBHOOK_URL preserves
+# the existing 409 behavior (useful when the webhook hasn't been deployed yet).
+# SWAP_TIMEOUT: seconds to wait for the swap. Default 120 covers warm loads (~45s).
+# Cold first-use downloads can take many minutes; raise SWAP_TIMEOUT for those.
+SWAP_WEBHOOK_URL = os.environ.get("SWAP_WEBHOOK_URL", "")
+SWAP_WEBHOOK_KEY = os.environ.get("SWAP_WEBHOOK_KEY", "")
+SWAP_TIMEOUT = int(os.environ.get("SWAP_TIMEOUT", "120"))
+
 # Rate limit (slowapi syntax: "60/minute")
 RATE_LIMIT_CHAT = os.environ.get("RATE_LIMIT_CHAT", "60/minute")
 RATE_LIMIT_EMBED = os.environ.get("RATE_LIMIT_EMBED", "200/minute")
@@ -299,6 +308,20 @@ async def metrics_ip_allowlist(request: Request, call_next):
 
 chat_sem = asyncio.Semaphore(CHAT_CONCURRENCY)
 embed_sem = asyncio.Semaphore(EMBED_CONCURRENCY)
+
+# Reverse-lookup from llama-server alias (ALIAS_MAP "backend" field) to the
+# swap-chat-model.sh profile name. Used by the auto-swap path.
+BACKEND_TO_PROFILE: dict[str, str] = {
+    "rag-qwen3.6":      "qwen3.6",
+    "rag-qwen3.6-fast": "qwen3.6-fast",
+    "qwen3-coder":      "coder",
+    "devstral":         "devstral",
+}
+
+# Serializes concurrent auto-swap requests. Only one swap runs at a time.
+# Callers waiting on the lock re-check the active backend after acquiring:
+# if another caller already completed the swap, they skip the webhook call.
+_swap_lock = asyncio.Lock()
 
 
 # ---------- Auth headers for upstream calls ----------
@@ -1366,6 +1389,64 @@ async def tool_loop_nonstream(initial_body: dict, strip_thinking: bool, client_i
     )
 
 
+# ---------- Auto-swap ----------
+
+async def trigger_swap_and_wait(wanted_backend: str) -> bool:
+    """Trigger a model swap via swap-webhook.py and wait for the backend to switch.
+
+    Calls SWAP_WEBHOOK_URL/swap?profile=<profile> — the webhook runs
+    swap-chat-model.sh synchronously and returns only when the model is active.
+
+    Uses _swap_lock to prevent concurrent swaps. If another caller completes the
+    swap first (detected by re-checking under lock), skips the webhook call.
+
+    Returns True when wanted_backend is active; False on failure or timeout.
+    """
+    profile = BACKEND_TO_PROFILE.get(wanted_backend)
+    if not profile or not SWAP_WEBHOOK_URL or not SWAP_WEBHOOK_KEY:
+        return False
+
+    async with _swap_lock:
+        # Re-check under lock: a concurrent caller may have already swapped.
+        # Invalidate cache first so this is an authoritative probe, not a stale hit.
+        _active_backend_cache["expires"] = 0.0
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            current = await get_active_backend(c)
+        if current == wanted_backend:
+            return True
+
+        # The webhook blocks until swap-chat-model.sh finishes and systemctl
+        # reports the model active. Use SWAP_TIMEOUT+30 as read timeout so the
+        # swap has room to complete even with some overhead.
+        webhook_timeout = httpx.Timeout(
+            connect=10.0, read=float(SWAP_TIMEOUT + 30), write=10.0, pool=5.0
+        )
+        try:
+            async with httpx.AsyncClient(timeout=webhook_timeout) as c:
+                r = await c.post(
+                    f"{SWAP_WEBHOOK_URL}/swap",
+                    params={"profile": profile},
+                    headers={"Authorization": f"Bearer {SWAP_WEBHOOK_KEY}"},
+                )
+            if r.status_code != 200:
+                return False
+        except Exception:
+            return False
+
+        # Brief confirmation poll: swap-chat-model.sh waits for systemctl active,
+        # but the router's /v1/models probe may trail by a second while llama.cpp
+        # finishes initializing.
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            _active_backend_cache["expires"] = 0.0
+            async with httpx.AsyncClient(timeout=3.0) as c:
+                current = await get_active_backend(c)
+            if current == wanted_backend:
+                return True
+            await asyncio.sleep(1)
+        return False
+
+
 # ---------- Routes ----------
 
 # Monotonic timestamp of the most recent chat-request arrival. Surfaced in
@@ -1420,18 +1501,92 @@ async def chat(
         if STRICT_PROFILE_MATCH and model in ALIAS_MAP:
             active = await get_active_backend(client)
             if active is not None and alias_info["backend"] != active:
-                ms = int((time.monotonic() - started) * 1000)
-                log_access("/v1/chat/completions", model, -1, 0, ms, 409,
-                           client_ip, error="profile_mismatch")
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"model '{model}' targets profile backend "
-                        f"'{alias_info['backend']}', but the chat unit is serving "
-                        f"'{active}'. Swap profiles (scripts/swap-chat-model.sh) or "
-                        f"request an alias for the loaded profile (GET /v1/models)."
-                    ),
-                )
+                wanted = alias_info["backend"]
+                if SWAP_WEBHOOK_URL and wanted in BACKEND_TO_PROFILE:
+                    # Auto-swap path. For streaming requests, return an SSE response
+                    # immediately so the client receives keepalive pings during the
+                    # swap (~45s warm load). Non-streaming requests block here until
+                    # the swap completes, then fall through to forward normally.
+                    if stream:
+                        # Capture all closure values now — body["model"] and
+                        # chat_template_kwargs are already finalized above.
+                        _wanted = wanted
+                        _url = url
+                        _body = body
+                        _strip = strip
+                        _swap_wall_limit = float(SWAP_TIMEOUT + 60)
+
+                        async def _swap_then_stream():
+                            yield b": ping\n\n"
+                            swap_task = asyncio.create_task(
+                                trigger_swap_and_wait(_wanted)
+                            )
+                            wall_start = time.monotonic()
+                            while not swap_task.done():
+                                if time.monotonic() - wall_start > _swap_wall_limit:
+                                    swap_task.cancel()
+                                    yield DEGRADED_FRAME
+                                    yield DONE_FRAME
+                                    return
+                                done, _ = await asyncio.wait(
+                                    {swap_task}, timeout=KEEPALIVE_INTERVAL
+                                )
+                                if swap_task not in done:
+                                    yield b": ping\n\n"
+                            try:
+                                ok = swap_task.result()
+                            except Exception:
+                                ok = False
+                            if not ok:
+                                yield DEGRADED_FRAME
+                                yield DONE_FRAME
+                                return
+                            async for chunk in sse_stream_with_keepalive(
+                                _url, _body, _strip
+                            ):
+                                yield chunk
+
+                        log_access(
+                            "/v1/chat/completions", model, -1, -1,
+                            int((time.monotonic() - started) * 1000),
+                            200, client_ip,
+                            error=f"auto-swap-stream:{active}->{wanted}",
+                        )
+                        return StreamingResponse(
+                            _swap_then_stream(), media_type="text/event-stream"
+                        )
+
+                    # Non-streaming: block until swap completes, then fall through
+                    # to the normal token-count → chat_sem → forward path.
+                    if not await trigger_swap_and_wait(wanted):
+                        log_access(
+                            "/v1/chat/completions", model, -1, 0,
+                            int((time.monotonic() - started) * 1000),
+                            503, client_ip,
+                            error=f"auto-swap-failed:{active}->{wanted}",
+                        )
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                f"auto-swap to '{wanted}' failed or timed out. "
+                                f"Try manually: swap-chat-model.sh "
+                                f"{BACKEND_TO_PROFILE.get(wanted, wanted)}"
+                            ),
+                        )
+                    # Swap succeeded — fall through to forward the request.
+                else:
+                    ms = int((time.monotonic() - started) * 1000)
+                    log_access("/v1/chat/completions", model, -1, 0, ms, 409,
+                               client_ip, error="profile_mismatch")
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"model '{model}' targets profile backend "
+                            f"'{alias_info['backend']}', but the chat unit is serving "
+                            f"'{active}'. Swap profiles (scripts/swap-chat-model.sh) or "
+                            f"request an alias for the loaded profile (GET /v1/models)."
+                        ),
+                    )
         token_count = await count_tokens(client, V620_URL, text)
     if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
         log_access("/v1/chat/completions", model, token_count, 0,
