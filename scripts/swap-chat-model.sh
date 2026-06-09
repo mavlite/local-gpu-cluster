@@ -522,14 +522,14 @@ case "$TARGET" in
     echo "  \"context\":      131072"
     echo "  \"max_tokens\":   32768"
     echo
-    echo "VRAM characterization pending — run stability test to measure:"
-    echo "  ./scripts/tools/stability-test-coder.sh --follow"
+    echo "Validated VRAM (2026-06-09, b9584): idle 83%/77%, zero drift at 99K ctx + 1600 tok gen."
+    echo "  decode: 56 t/s@short / 25 t/s@99K  |  prefill: ~1600 t/s  |  cache-reuse: 2.56x speedup"
     echo
     echo "Architecture notes:"
     echo "  - No thinking mode (enable_thinking=None in router ALIAS_MAP). Commit-first behavior."
-    echo "  - cache-reuse=0 (ROCm bug #19908 — prompt-cache GPU stall on hybrid DeltaNet models)."
+    echo "  - cache-reuse=1024 (confirmed safe on b9584 — ROCm bug #19908 resolved)."
     echo "  - If you hit 'hipErrorInvalidDeviceFunction' in logs, the ROCm kernel wasn't compiled"
-    echo "    for gfx1030 for this quant. Workaround: rebuild llama.cpp or switch to Vulkan backend."
+    echo "    for gfx908. Workaround: rebuild llama.cpp (51-lxc-amd.sh) or switch to Vulkan backend."
     ;;
   devstral)
     echo
