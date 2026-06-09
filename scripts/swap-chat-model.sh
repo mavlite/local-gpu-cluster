@@ -36,7 +36,11 @@
 #
 #   coder          Qwen3-Coder-Next UD-IQ4_XS → alias qwen3-coder
 #                  Coding-specific. 80B / 3B-A MoE; native tool use.
-#                  First use downloads ~38 GB.
+#                  First use downloads ~38 GB (pre-fetch with download-coder.sh).
+#                  Architecture: hybrid Gated DeltaNet + MoE (same class as
+#                  Qwen3.6-35B-A3B — b9547 fix covers the seq_rm abort).
+#                  ROCm note: cache-reuse=0 disables prompt-cache (bug #19908
+#                  causes GPU stall on cached-prompt replay with hybrid models).
 #
 # Usage:
 #   ./swap-chat-model.sh qwen3.6        # switch to RAG/general model
@@ -102,7 +106,7 @@ get_profile() {
       # test-coder.sh (or equivalent prefill stress) and update the
       # measurements in day-2-ops.md § 4.4 + get_profile_vram_estimate()
       # below after the first redeploy of this profile.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0"
       ;;
     qwen3.6-fast)
       # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
@@ -119,10 +123,25 @@ get_profile() {
       # CACHE_REUSE=1024 is set but llama.cpp emits "cache_reuse is not
       # supported by this context, it will be disabled" at load (Q*_K_M
       # + q8_0 KV behavior). Effective is CACHE_REUSE=0. Harmless.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024 q8_0"
       ;;
     coder)
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0"
+      # Qwen3-Coder-Next UD-IQ4_XS — 80B total / 3B active MoE.
+      # UD-IQ4_XS (~38 GB) is the right quant for this hardware: Q4_K_M
+      # (~48.5 GB) would push GPU1 to ~97% idle at the 1,1.5 split (OOM
+      # under prefill). IQ4_XS is minimal loss for a pure agentic workflow.
+      #
+      # KV_TYPE=q8_0: at 128K ctx, q8_0 KV costs ~4-5 GB — well within
+      # the ~4.9 GB idle headroom. Do NOT use q4_0 here (unlike devstral).
+      # If LLAMA_KV_TYPE is q4_0 in config.env from a prior devstral run,
+      # this profile overwrites it back to q8_0.
+      #
+      # CACHE_REUSE=0: hybrid DeltaNet architecture triggers a ROCm GPU
+      # stall when a cached prompt replays (llama.cpp #19908 — open).
+      # Disabling cache-reuse is the workaround. Same class as the
+      # seq_rm abort fixed in b9547; b9547+ handles the abort but the
+      # stall is a separate code path.
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0 q8_0"
       ;;
     devstral)
       # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
@@ -133,13 +152,12 @@ get_profile() {
       #
       # n_ctx_train = 393216 (384K) — confirmed from GGUF on first deploy 2026-06-08.
       # CTX 262144 (256K) is well within training range.
-      # KV type q4_0 (set in config.env) halves KV size vs q8_0; required because
-      # GPU 0 has ~8.5 GB fixed overhead (ROCm + embedder) leaving ~9.2 GB for KV,
-      # which is below the 11.4 GB q8_0 needs at 256K. q4_0 needs ~4.6 GB. ✓
-      # Tensor split 1,1.5: GPU 1 has >30 GB free vs GPU 0's ~22 GB; shifts
-      # ~5 GB of weight to GPU 1 to balance the asymmetric overhead.
+      # KV_TYPE=q4_0: required — GPU 0 has ~8.5 GB fixed overhead (ROCm +
+      # embedder) leaving ~9.2 GB for KV. q8_0 at 256K needs 11.4 GB (OOM);
+      # q4_0 needs ~4.6 GB. This KV_TYPE is DEVSTRAL-SPECIFIC. Swapping from
+      # devstral back to any other profile resets KV_TYPE to q8_0 automatically.
       # CACHE_REUSE=0: conservative default for new Mistral architecture.
-      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0"
+      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0 q4_0"
       ;;
     *)
       return 1
@@ -155,7 +173,7 @@ get_profile_description() {
   case "$1" in
     qwen3.6)      echo "Qwen3.6-35B-A3B UD-Q6_K — RAG / general (default; near-lossless precision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
-    coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific" ;;
+    coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)     echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     *)            echo "" ;;
   esac
@@ -233,11 +251,11 @@ identify_profile() {
 # Rewrite the six LLAMA_* keys in config.env atomically. Uses Python so
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
-  local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" <<'PY'
+  local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6" kv_type="$7"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split, ctx, cache_reuse = sys.argv[1:8]
+path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type = sys.argv[1:9]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
@@ -245,6 +263,7 @@ targets = {
     "LLAMA_TENSOR_SPLIT": tensor_split,
     "LLAMA_CTX": ctx,
     "LLAMA_CACHE_REUSE": cache_reuse,
+    "LLAMA_KV_TYPE": kv_type,
 }
 
 try:
@@ -338,7 +357,7 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE TARGET_KV_TYPE <<<"$profile_line"
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -361,9 +380,9 @@ target_desc=$(get_profile_description "$TARGET")
 [[ -n "$target_desc" ]] && echo "  target:        $target_desc"
 target_vram=$(get_profile_vram_estimate "$TARGET")
 [[ -n "$target_vram" ]] && echo "  expected VRAM: $target_vram"
-echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE})"
+echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE} KV_TYPE=${TARGET_KV_TYPE})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE" "$TARGET_KV_TYPE"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
@@ -455,6 +474,7 @@ echo " --alias:         ${TARGET_ALIAS}"
 echo " --tensor-split:  ${TARGET_SPLIT}"
 echo " --ctx-size:      ${TARGET_CTX}"
 echo " --cache-reuse:   ${TARGET_CACHE_REUSE}"
+echo " --cache-type-k/v ${TARGET_KV_TYPE}"
 echo "============================================================"
 
 if [[ -n "$notable_warnings" ]]; then
@@ -466,3 +486,41 @@ echo
 echo "Smoke test through the router:"
 echo "  ROUTER_KEY=\$(pct exec ${ROUTER_VMID} -- awk -F= '/^ROUTER_API_KEY=/{print \$2}' /etc/router.env)"
 echo "  curl -sf -H \"Authorization: Bearer \$ROUTER_KEY\" http://192.168.6.${ROUTER_VMID}:8000/v1/models | jq '.data[].id'"
+
+# Profile-specific post-swap guidance
+case "$TARGET" in
+  coder)
+    echo
+    echo "OpenCode config for this profile (~/.opencode/config.json or provider settings):"
+    echo "  \"model\":        \"router/qwen3-coder\""
+    echo "  \"small_model\":  \"router/qwen3-coder\""
+    echo "  \"context\":      131072"
+    echo "  \"max_tokens\":   32768"
+    echo
+    echo "VRAM characterization pending — run stability test to measure:"
+    echo "  ./scripts/tools/stability-test-coder.sh --follow"
+    echo
+    echo "Architecture notes:"
+    echo "  - No thinking mode (enable_thinking=None in router ALIAS_MAP). Commit-first behavior."
+    echo "  - cache-reuse=0 (ROCm bug #19908 — prompt-cache GPU stall on hybrid DeltaNet models)."
+    echo "  - If you hit 'hipErrorInvalidDeviceFunction' in logs, the ROCm kernel wasn't compiled"
+    echo "    for gfx1030 for this quant. Workaround: rebuild llama.cpp or switch to Vulkan backend."
+    ;;
+  devstral)
+    echo
+    echo "OpenCode config for this profile:"
+    echo "  \"model\":        \"router/devstral\""
+    echo "  \"small_model\":  \"router/devstral\""
+    echo "  \"context\":      262144"
+    echo "  \"max_tokens\":   32768"
+    echo "  NOTE: KV_TYPE set to q4_0 (required for devstral at 256K ctx on this hardware)."
+    ;;
+  qwen3.6|qwen3.6-fast)
+    echo
+    echo "OpenCode config for this profile:"
+    echo "  \"model\":        \"router/qwen3.6\""
+    echo "  \"small_model\":  \"router/qwen3.6\""
+    echo "  \"context\":      262144"
+    echo "  \"max_tokens\":   32768"
+    ;;
+esac
