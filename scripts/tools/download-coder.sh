@@ -79,7 +79,7 @@ log "Installing huggingface-hub + hf_transfer in LXC ${AMD_VMID} (idempotent)...
 pct exec "$AMD_VMID" -- bash -se <<'GUEST'
   set -Eeuo pipefail
   if ! python3 -c "import huggingface_hub, hf_transfer" 2>/dev/null; then
-    pip3 install -q --break-system-packages huggingface-hub hf_transfer 2>&1 | tail -5
+    pip3 install -q --break-system-packages --ignore-installed huggingface-hub hf_transfer 2>&1 | tail -5
   fi
 GUEST
 
