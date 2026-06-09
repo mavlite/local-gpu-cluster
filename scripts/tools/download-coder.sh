@@ -97,6 +97,7 @@ pct exec "$AMD_VMID" -- env \
   bash -se <<'GUEST'
   set -Eeuo pipefail
   export HF_HUB_ENABLE_HF_TRANSFER=1
+  export PATH="/usr/local/bin:$PATH"
 
   huggingface-cli download "$HF_REPO" "$HF_FILENAME" \
     --cache-dir "$CACHE_DIR" \
