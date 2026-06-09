@@ -159,13 +159,35 @@ get_profile() {
       # CACHE_REUSE=0: conservative default for new Mistral architecture.
       echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0 q4_0"
       ;;
+    devstral-large)
+      # Devstral 2 (123B) UD-IQ2_M — full-size Mistral-architecture code model.
+      # ~43.5 GB weights. SWE-bench 72.2% vs Small 2's 68.0%.
+      #
+      # Architecture: 88 layers, 8 KV heads (GQA), 128 head_dim, 256K n_ctx_train,
+      # no sliding window. Pure dense transformer — same ROCm code path as devstral.
+      # model_type=ministral3.
+      #
+      # VRAM constraint: GPU 0 carries ~8.5 GB fixed overhead (ROCm + embedder).
+      # At 1,1.5 split: GPU 0 → 17.4 GB model + 8.5 = 25.9 GB (4.8 GB free),
+      # GPU 1 → 26.1 GB model + 0.4 = 26.5 GB (4.2 GB free).
+      # UD-IQ3_XXS (49 GB) was evaluated and rejected: GPU 1 only has 0.9 GB
+      # remaining — insufficient for any practical KV cache.
+      #
+      # CTX 65536 (64K): q4_0 KV at 64K costs 2.95 GB total (88 layers × 8 heads
+      # × 128 dim × 0.5 bytes × 65536). GPU 1 share (60%) = 1.77 GB, leaving
+      # 2.43 GB for compute buffers. Comfortable but not lavish.
+      #
+      # KV_TYPE=q4_0: flash attn enabled (Mistral, no DeltaNet), V cache needs FA.
+      # Same reasoning as devstral. CACHE_REUSE=0: conservative.
+      echo "unsloth/Devstral-2-123B-Instruct-2512-GGUF UD-IQ2_M devstral-large 1,1.5 65536 0 q4_0"
+      ;;
     *)
       return 1
       ;;
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -174,8 +196,9 @@ get_profile_description() {
     qwen3.6)      echo "Qwen3.6-35B-A3B UD-Q6_K — RAG / general (default; near-lossless precision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
-    devstral)     echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
-    *)            echo "" ;;
+    devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
+    devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
+    *)               echo "" ;;
   esac
 }
 
@@ -187,8 +210,9 @@ get_profile_vram_estimate() {
     qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
-    devstral)     echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
-    *)            echo "(no VRAM data — run stability-test after swap to characterize)" ;;
+    devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
+    devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
+    *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
 
@@ -202,7 +226,8 @@ Profiles:
   qwen3.6       — Qwen3.6-35B-A3B UD-Q6_K (RAG / general — default; near-lossless precision)
   qwen3.6-fast  — Qwen3.6-35B-A3B UD-Q4_K_M (throughput-prioritized alternative)
   coder         — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
-  devstral      — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
+  devstral        — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
+  devstral-large  — Devstral 2 123B UD-IQ2_M (full-size, 64K ctx)
 
 Flags:
   --status  Show currently-loaded profile (no changes)
@@ -514,6 +539,18 @@ case "$TARGET" in
     echo "  \"context\":      262144"
     echo "  \"max_tokens\":   32768"
     echo "  NOTE: KV_TYPE set to q4_0 (required for devstral at 256K ctx on this hardware)."
+    ;;
+  devstral-large)
+    echo
+    echo "OpenCode config for this profile:"
+    echo "  \"model\":        \"router/devstral-large\""
+    echo "  \"small_model\":  \"router/devstral-large\""
+    echo "  \"context\":      65536"
+    echo "  \"max_tokens\":   16384"
+    echo
+    echo "  NOTE: Context is 64K (hardware limit at UD-IQ2_M quant on 64 GB VRAM)."
+    echo "  NOTE: KV_TYPE set to q4_0 (same constraint as devstral — flash_attn + Mistral arch)."
+    echo "  NOTE: VRAM is tight on GPU 1 (~2.2 GB compute headroom). If OOM, reduce ctx further."
     ;;
   qwen3.6|qwen3.6-fast)
     echo

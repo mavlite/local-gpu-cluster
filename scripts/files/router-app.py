@@ -316,6 +316,7 @@ BACKEND_TO_PROFILE: dict[str, str] = {
     "rag-qwen3.6-fast": "qwen3.6-fast",
     "qwen3-coder":      "coder",
     "devstral":         "devstral",
+    "devstral-large":   "devstral-large",
 }
 
 # Serializes concurrent auto-swap requests. Only one swap runs at a time.
@@ -429,7 +430,10 @@ ALIAS_MAP: dict[str, dict] = {
     # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
     # No thinking mode (Mistral architecture); enable_thinking=None (no injection),
     # strip_thinking=False (model never emits <think> blocks).
-    "devstral":         {"backend": "devstral", "enable_thinking": None, "strip_thinking": False},
+    "devstral":         {"backend": "devstral",       "enable_thinking": None, "strip_thinking": False},
+    # Devstral 2 (123B) UD-IQ2_M — full-size Mistral code model.
+    # Same architecture class as devstral; no thinking mode injection.
+    "devstral-large":   {"backend": "devstral-large", "enable_thinking": None, "strip_thinking": False},
 }
 
 
