@@ -136,12 +136,12 @@ get_profile() {
       # If LLAMA_KV_TYPE is q4_0 in config.env from a prior devstral run,
       # this profile overwrites it back to q8_0.
       #
-      # CACHE_REUSE=0: hybrid DeltaNet architecture triggers a ROCm GPU
-      # stall when a cached prompt replays (llama.cpp #19908 — open).
-      # Disabling cache-reuse is the workaround. Same class as the
-      # seq_rm abort fixed in b9547; b9547+ handles the abort but the
-      # stall is a separate code path.
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 0 q8_0"
+      # CACHE_REUSE=1024: originally set to 0 as workaround for llama.cpp
+      # #19908 (ROCm GPU stall on cached DeltaNet prompt replay). Confirmed
+      # safe on b9584 — stability test 2026-06-09 showed T3b (99K repeat)
+      # completing in 61s vs 157s first-pass (2.56× speedup, sim=1.000,
+      # f_keep=0.984). The b9582 regression that caused the stall is fixed.
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 1024 q8_0"
       ;;
     devstral)
       # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
@@ -209,7 +209,7 @@ get_profile_vram_estimate() {
   case "$1" in
     qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
-    coder)        echo "idle 84% / 77%; peak 92% / 85% under 82K prefill; 2.6 GB free GPU 0 at peak" ;;
+    coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
