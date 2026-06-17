@@ -1,0 +1,19 @@
+# Overrides for the upstream memory-vault docker-compose.yml.
+# - Bind PGDATA onto the tank ZFS dataset (snapshot + backup coverage).
+# - Replace the default DB password with a generated one (${MEMVAULT_DB_PASSWORD}
+#   is substituted by docker compose from /opt/memory-vault/.env).
+# - Do NOT publish Postgres on the host network; only the app container needs it
+#   over the compose network (lists in override REPLACE the base list).
+services:
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${MEMVAULT_DB_PASSWORD}
+    ports: []
+    volumes:
+      - /opt/memory-vault-data/pgdata:/var/lib/postgresql/data
+  app:
+    environment:
+      DB_PASSWORD: ${MEMVAULT_DB_PASSWORD}
+      API_AUTH_ENABLED: "true"
+      API_CORS_ORIGINS: "*"
+    restart: unless-stopped
