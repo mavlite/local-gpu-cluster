@@ -113,61 +113,72 @@ async def list_tools() -> list[Tool]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    async with httpx.AsyncClient(timeout=30.0) as c:
-        if name == "remember":
-            payload = {
-                REMEMBER_FIELD_TEXT: arguments["text"],
-                REMEMBER_FIELD_SPACE: _space(arguments.get("space")),
-            }
-            r = await c.post(f"{API_URL}{REMEMBER_PATH}", json=payload, headers=_headers())
-            r.raise_for_status()
-            return [TextContent(type="text", text=f"stored: {r.text[:500]}")]
+async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
+    arguments = arguments or {}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            if name == "remember":
+                payload = {
+                    REMEMBER_FIELD_TEXT: arguments["text"],
+                    REMEMBER_FIELD_SPACE: _space(arguments.get("space")),
+                }
+                r = await c.post(f"{API_URL}{REMEMBER_PATH}", json=payload, headers=_headers())
+                r.raise_for_status()
+                return [TextContent(type="text", text=f"stored: {r.text[:500]}")]
 
-        if name == "recall":
-            payload = {
-                RECALL_FIELD_QUERY: arguments["query"],
-                RECALL_FIELD_SPACE: _space(arguments.get("space")),
-                RECALL_FIELD_LIMIT: int(arguments.get("top_n", 5)),
-            }
-            r = await c.post(f"{API_URL}{RECALL_PATH}", json=payload, headers=_headers())
-            r.raise_for_status()
-            data = r.json()
-            hits = data.get(RECALL_RESULTS_KEY, data if isinstance(data, list) else [])
-            if not hits:
-                return [TextContent(type="text", text="No memories found.")]
-            lines = []
-            for i, h in enumerate(hits, 1):
-                text = next((h[k] for k in RECALL_ITEM_TEXT_KEYS if k in h), str(h))
-                score = next((h[k] for k in RECALL_ITEM_SCORE_KEYS if k in h), None)
-                tag = f" (score {score:.3f})" if isinstance(score, (int, float)) else ""
-                lines.append(f"{i}.{tag} {text}")
-            return [TextContent(type="text", text="\n".join(lines))]
+            if name == "recall":
+                payload = {
+                    RECALL_FIELD_QUERY: arguments["query"],
+                    RECALL_FIELD_SPACE: _space(arguments.get("space")),
+                    RECALL_FIELD_LIMIT: int(arguments.get("top_n", 5)),
+                }
+                r = await c.post(f"{API_URL}{RECALL_PATH}", json=payload, headers=_headers())
+                r.raise_for_status()
+                data = r.json()
+                hits = data.get(RECALL_RESULTS_KEY, data if isinstance(data, list) else [])
+                if not hits:
+                    return [TextContent(type="text", text="No memories found.")]
+                lines = []
+                for i, h in enumerate(hits, 1):
+                    text = next((h[k] for k in RECALL_ITEM_TEXT_KEYS if k in h), str(h))
+                    score = next((h[k] for k in RECALL_ITEM_SCORE_KEYS if k in h), None)
+                    tag = f" (score {score:.3f})" if isinstance(score, (int, float)) else ""
+                    lines.append(f"{i}.{tag} {text}")
+                return [TextContent(type="text", text="\n".join(lines))]
 
-        if name == "forget":
-            path = FORGET_PATH.format(id=arguments["chunk_id"])
-            r = await c.delete(f"{API_URL}{path}", headers=_headers())
-            r.raise_for_status()
-            return [TextContent(type="text", text=f"forgotten: {arguments['chunk_id']}")]
+            if name == "forget":
+                path = FORGET_PATH.format(id=arguments["chunk_id"])
+                r = await c.delete(f"{API_URL}{path}", headers=_headers())
+                r.raise_for_status()
+                return [TextContent(type="text", text=f"forgotten: {arguments['chunk_id']}")]
 
-        if name == "memory_status":
-            r = await c.get(f"{API_URL}{STATUS_PATH}", headers=_headers())
-            if r.status_code == 404:
-                r = await c.get(f"{API_URL}/api/spaces", headers=_headers())
-            r.raise_for_status()
-            return [TextContent(type="text", text=r.text[:1000])]
+            if name == "memory_status":
+                r = await c.get(f"{API_URL}{STATUS_PATH}", headers=_headers())
+                if r.status_code == 404:
+                    r = await c.get(f"{API_URL}/api/spaces", headers=_headers())
+                r.raise_for_status()
+                return [TextContent(type="text", text=r.text[:1000])]
 
-        return [TextContent(type="text", text=f"unknown tool: {name}")]
+            return [TextContent(type="text", text=f"unknown tool: {name}")]
+    except httpx.HTTPStatusError as e:
+        return [TextContent(type="text",
+                            text=f"Memory Vault returned {e.response.status_code}: {e.response.text[:300]}")]
+    except httpx.HTTPError as e:
+        return [TextContent(type="text", text=f"Memory Vault unreachable: {type(e).__name__}")]
 
 
 _sse = SseServerTransport("/messages/")
 
 
 async def handle_sse(request):
-    # Capture the per-connection memory space from ?space=.
-    _space_var.set(request.query_params.get("space") or DEFAULT_SPACE)
-    async with _sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
-        await server.run(read, write, server.create_initialization_options())
+    # Capture the per-connection memory space from ?space=; reset on disconnect
+    # so the ContextVar can't leak across connections that reuse a task context.
+    token = _space_var.set(request.query_params.get("space") or DEFAULT_SPACE)
+    try:
+        async with _sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
+            await server.run(read, write, server.create_initialization_options())
+    finally:
+        _space_var.reset(token)
 
 
 app = Starlette(routes=[
