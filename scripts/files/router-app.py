@@ -654,6 +654,74 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
         task.cancel()
 
 
+async def sse_passthrough_with_keepalive(upstream_url: str, payload: dict):
+    """Stream an upstream SSE response verbatim with proactive keepalives.
+
+    Identical keepalive/abort machinery to sse_stream_with_keepalive, but yields
+    upstream chunks UNMODIFIED — used for the Anthropic /v1/messages passthrough,
+    where the <think>/[CONTEXT] regex rewrites would corrupt the event-stream JSON.
+    """
+    stream_started = time.monotonic()
+    yield b": ping\n\n"
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def upstream_reader():
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream("POST", upstream_url, json=payload,
+                                         headers=upstream_headers()) as r:
+                    if r.status_code >= 500:
+                        await queue.put(("degraded", None))
+                        return
+                    async for chunk in r.aiter_text():
+                        await queue.put(("data", chunk))
+                    await queue.put(("eof", None))
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException,
+                httpx.RemoteProtocolError):
+            await queue.put(("degraded", None))
+        except Exception:
+            await queue.put(("degraded", None))
+
+    task = asyncio.create_task(upstream_reader())
+    try:
+        while True:
+            if time.monotonic() - stream_started > MAX_STREAM_SECONDS:
+                yield DEGRADED_FRAME
+                yield DONE_FRAME
+                return
+            try:
+                msg_type, payload_chunk = await asyncio.wait_for(
+                    queue.get(), timeout=KEEPALIVE_INTERVAL)
+            except asyncio.TimeoutError:
+                yield b": ping\n\n"
+                continue
+            if msg_type == "degraded":
+                yield DEGRADED_FRAME
+                yield DONE_FRAME
+                return
+            if msg_type == "eof":
+                break
+            yield payload_chunk.encode()
+    finally:
+        task.cancel()
+
+
+def _approx_text_from_anthropic(body: dict) -> str:
+    """Best-effort text for token-budget admission on an Anthropic Messages body.
+    Reuses _approx_text_from_messages for messages and prepends the top-level
+    `system` field (string or list of {type:text,text})."""
+    parts = []
+    system = body.get("system")
+    if isinstance(system, str):
+        parts.append(system)
+    elif isinstance(system, list):
+        for blk in system:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                parts.append(blk.get("text", ""))
+    parts.append(_approx_text_from_messages(body.get("messages", [])))
+    return "\n".join(parts)
+
+
 # ---------- Tool registry + handlers ----------
 #
 # Server-side tool execution. When a chat completion request includes
@@ -1762,6 +1830,84 @@ async def completions(request: Request):
                        int((time.monotonic() - started) * 1000),
                        r.status_code, client_ip)
             return JSONResponse(data, status_code=r.status_code)
+
+
+@app.post("/v1/messages")
+@limiter.limit(RATE_LIMIT_CHAT)
+async def anthropic_messages(request: Request):
+    """Anthropic Messages API passthrough for local Claude Code.
+
+    llama-server speaks /v1/messages natively (llama.cpp PR #17570); the router
+    only adds bearer auth (middleware), chat_sem admission, token-budget guard,
+    and SSE keepalive — it does NOT translate or mutate the body/stream.
+    """
+    global _last_chat_ts
+    _last_chat_ts = time.monotonic()
+    body = await request.json()
+    stream = bool(body.get("stream", False))
+    url = f"{V620_URL}/v1/messages"
+    started = time.monotonic()
+    client_ip = request.client.host if request.client else "?"
+    model = body.get("model", "?")
+
+    # Rewrite a known client alias to its backend (parity with /v1/chat/completions);
+    # llama-server serves the loaded model regardless, so this is best-effort.
+    alias_info = resolve_alias(model)
+    if alias_info["backend"] != model:
+        body["model"] = alias_info["backend"]
+
+    text = _approx_text_from_anthropic(body)
+    async with httpx.AsyncClient() as client:
+        token_count = await count_tokens(client, V620_URL, text)
+    if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
+        log_access("/v1/messages", model, token_count, 0,
+                   int((time.monotonic() - started) * 1000), 413, client_ip,
+                   error="exceeds_max_chat_input_tokens")
+        raise HTTPException(
+            status_code=413,
+            detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
+        )
+
+    async with chat_sem:
+        if stream:
+            log_access("/v1/messages", model, token_count, -1,
+                       int((time.monotonic() - started) * 1000), 200, client_ip,
+                       error="stream-started")
+            return StreamingResponse(
+                sse_passthrough_with_keepalive(url, body),
+                media_type="text/event-stream",
+            )
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
+            try:
+                r = await c.post(url, json=body, headers=upstream_headers())
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+                log_access("/v1/messages", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error=type(e).__name__)
+                return JSONResponse(
+                    _error_body("service_degraded", f"upstream: {type(e).__name__}"),
+                    status_code=502,
+                )
+            log_access("/v1/messages", model, token_count, 0,
+                       int((time.monotonic() - started) * 1000), r.status_code, client_ip)
+            return JSONResponse(r.json(), status_code=r.status_code)
+
+
+@app.post("/v1/messages/count_tokens")
+@limiter.limit(RATE_LIMIT_CHAT)
+async def anthropic_count_tokens(request: Request):
+    """Passthrough for Claude Code's token-counting preflight."""
+    body = await request.json()
+    async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
+        try:
+            r = await c.post(f"{V620_URL}/v1/messages/count_tokens",
+                             json=body, headers=upstream_headers())
+            return JSONResponse(r.json(), status_code=r.status_code)
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return JSONResponse(
+                _error_body("service_degraded", f"upstream: {type(e).__name__}"),
+                status_code=502,
+            )
 
 
 # Qwen3 Embedding requires <|endoftext|> appended to each input.
