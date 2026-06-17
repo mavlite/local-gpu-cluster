@@ -184,6 +184,36 @@ if lxc_running "$AMD_VMID"; then
     bash -c "! pct exec $AMD_VMID -- command -v nvidia-smi >/dev/null 2>&1"
 fi
 
+# ---------- Memory Vault (LXC 156) ----------
+MV_VMID="${MEMVAULT_VMID:-156}"
+if lxc_exists "$MV_VMID"; then
+  step "Verify Memory Vault stack + bridge"
+  MV_IP="$(lxc_get_ip "$MV_VMID" || true)"
+  # 1. docker compose services up
+  pct exec "$MV_VMID" -- bash -lc 'cd /opt/memory-vault && docker compose ps --status running --format "{{.Service}}"' \
+    | grep -q app && ok "memory-vault app container up" || warn "memory-vault app not running"
+  # 2. dashboard/REST listening
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://${MV_IP}:8000/" || echo 000)"
+  [[ "$code" != "000" ]] && ok "REST/dashboard listening (HTTP $code)" || warn "REST not reachable"
+  # 3. SSE bridge handshake
+  if curl -sN -m 5 "http://${MV_IP}:3005/sse" | head -1 | grep -qi event; then
+    ok "MCP-SSE bridge handshake OK on :3005"
+  else
+    warn "MCP-SSE bridge not responding on :3005"
+  fi
+  # 4. bridge service active
+  pct exec "$MV_VMID" -- systemctl is-active --quiet memory-vault-bridge \
+    && ok "memory-vault-bridge.service active" || warn "memory-vault-bridge.service not active"
+fi
+
+# ---------- Router Anthropic passthrough (LXC 153) ----------
+step "Verify router /v1/messages route is registered"
+if curl -s "http://${ROUTER_IP:-192.168.6.153}:8000/openapi.json" | grep -q '/v1/messages'; then
+  ok "router exposes /v1/messages"
+else
+  warn "router /v1/messages not found — redeploy 53-lxc-router.sh"
+fi
+
 # ---------- summary ----------
 step "Summary"
 printf "  Pass: %d   Fail: %d   Skipped: %d\n" "$PASS" "$FAIL" "$SKIPPED"
