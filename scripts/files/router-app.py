@@ -1888,9 +1888,19 @@ async def anthropic_messages(request: Request):
                     _error_body("service_degraded", f"upstream: {type(e).__name__}"),
                     status_code=502,
                 )
+            try:
+                data = r.json()
+            except json.JSONDecodeError:
+                log_access("/v1/messages", model, token_count, 0,
+                           int((time.monotonic() - started) * 1000), 502, client_ip,
+                           error="upstream_invalid_json")
+                return JSONResponse(
+                    _error_body("upstream_invalid_json", r.text[:500]),
+                    status_code=502,
+                )
             log_access("/v1/messages", model, token_count, 0,
                        int((time.monotonic() - started) * 1000), r.status_code, client_ip)
-            return JSONResponse(r.json(), status_code=r.status_code)
+            return JSONResponse(data, status_code=r.status_code)
 
 
 @app.post("/v1/messages/count_tokens")
