@@ -1840,6 +1840,12 @@ async def anthropic_messages(request: Request):
     llama-server speaks /v1/messages natively (llama.cpp PR #17570); the router
     only adds bearer auth (middleware), chat_sem admission, token-budget guard,
     and SSE keepalive — it does NOT translate or mutate the body/stream.
+
+    NOTE (phase 1): unlike /v1/chat/completions, this route does NOT apply the
+    STRICT_PROFILE_MATCH guard / auto-swap. If the chat slot is serving a
+    different profile than the requested model, llama-server answers with the
+    loaded model under the requested name. Acceptable for single-user local use;
+    revisit if cross-profile Claude Code usage becomes common.
     """
     global _last_chat_ts
     _last_chat_ts = time.monotonic()

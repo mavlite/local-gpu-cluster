@@ -40,7 +40,7 @@ Anthropic passthrough (LXC 153, `:8000`). The router applies admission control;
 
 ```bash
 export ANTHROPIC_BASE_URL=http://192.168.6.153:8000
-export ANTHROPIC_AUTH_TOKEN=<ROUTER_API_KEY>
+export ANTHROPIC_AUTH_TOKEN=<ROUTER_API_KEY>   # sent as 'Authorization: Bearer' — matches the router's bearer auth (NOT ANTHROPIC_API_KEY, which sends x-api-key)
 export ANTHROPIC_MODEL=rag-qwen3.6        # or a loaded coder alias (see GET /v1/models)
 claude
 ```
