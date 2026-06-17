@@ -12,6 +12,7 @@ services:
     volumes:
       - /opt/memory-vault-data/pgdata:/var/lib/postgresql/data
   app:
+    image: ${MEMVAULT_IMAGE}
     environment:
       DB_PASSWORD: ${MEMVAULT_DB_PASSWORD}
       API_AUTH_ENABLED: "true"

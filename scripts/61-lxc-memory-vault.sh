@@ -50,7 +50,7 @@ phase_create() {
     --unprivileged 1 \
     --ostype ubuntu \
     --onboot 1 \
-    --startup order=5 \
+    --startup order=5,up=5 \
     --start 0
 }
 
@@ -116,10 +116,16 @@ phase_deploy() {
     cd /opt/memory-vault
     install -m 0644 /opt/memory-vault-override.yml docker-compose.override.yml
 
-    # Generate a strong DB password once; persist in .env for compose substitution.
-    if [[ ! -f /opt/memory-vault/.env ]]; then
-      umask 077
+    # Persist compose substitution vars in .env. Password generated once (stable
+    # across re-runs); image pin (re)written every run so config changes take effect.
+    umask 077
+    if [[ ! -f /opt/memory-vault/.env ]] || ! grep -q '^MEMVAULT_DB_PASSWORD=' /opt/memory-vault/.env; then
       printf 'MEMVAULT_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" > /opt/memory-vault/.env
+    fi
+    if grep -q '^MEMVAULT_IMAGE=' /opt/memory-vault/.env; then
+      sed -i "s|^MEMVAULT_IMAGE=.*|MEMVAULT_IMAGE=$MV_IMAGE|" /opt/memory-vault/.env
+    else
+      printf 'MEMVAULT_IMAGE=%s\n' "$MV_IMAGE" >> /opt/memory-vault/.env
     fi
     chmod 600 /opt/memory-vault/.env
 
