@@ -75,6 +75,21 @@ class TestMvCommon(unittest.TestCase):
     def test_watchdog_missing_transcript_no_nudge(self):
         self.assertFalse(mv.watchdog_should_nudge("/no/file", 1, "/tmp/sent-x"))
 
+    def test_watchdog_bare_filename_sentinel_no_crash(self):
+        # A sentinel path with no directory component must not raise (Windows hazard).
+        import os as _os
+        cwd = _os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            t = os.path.join(d, "t.jsonl")
+            with open(t, "wb") as f:
+                f.write(b"x" * 1000)
+            _os.chdir(d)
+            try:
+                self.assertTrue(mv.watchdog_should_nudge(t, 500, "bare-sentinel"))
+                self.assertTrue(os.path.exists("bare-sentinel"))
+            finally:
+                _os.chdir(cwd)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

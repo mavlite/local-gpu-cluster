@@ -101,7 +101,9 @@ def watchdog_should_nudge(transcript_path, threshold_bytes, sentinel_path):
     if size < threshold_bytes or os.path.exists(sentinel_path):
         return False
     try:
-        os.makedirs(os.path.dirname(sentinel_path), exist_ok=True)
+        d = os.path.dirname(sentinel_path)
+        if d:
+            os.makedirs(d, exist_ok=True)
         with open(sentinel_path, "w", encoding="utf-8") as f:
             f.write("nudged")
     except OSError:
