@@ -34,6 +34,14 @@ EMBED_URL="${EMBED_URL:-http://${AMD_IP}:8082}"
 RERANK_URL="${RERANK_URL:-http://${AMD_IP}:8083}"
 KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-12}"
 
+# Model warm-up keepalive timer (Phase 7.5) — distinct from KEEPALIVE_INTERVAL
+# above (which is the SSE ping cadence during streaming). Default OFF: the
+# periodic warm-up ping keeps the chat model hot in VRAM, but on an otherwise
+# idle single-user cluster it wakes the GPU and cycles the fans every few
+# minutes. Set ROUTER_KEEPALIVE=on to restore warm models / snappy cold starts.
+ROUTER_KEEPALIVE="${ROUTER_KEEPALIVE:-off}"
+ROUTER_KEEPALIVE_INTERVAL="${ROUTER_KEEPALIVE_INTERVAL:-5min}"
+
 # Admission control + rate limit (consumed by router-app.py rewrite).
 # CHAT_CONCURRENCY=1 matches the upstream chat unit's --parallel 1, which is
 # set that way to give every request the full Qwen3.6 trained context window
@@ -306,12 +314,30 @@ GUEST
 }
 
 phase_7_5_keepalive_timer() {
-  step "7.5 — Install model-keepalive systemd timer (eliminates cold-start latency)"
-  pct exec "$ROUTER_VMID" -- bash -se <<'GUEST'
+  step "7.5 — Configure model-keepalive timer (ROUTER_KEEPALIVE=$ROUTER_KEEPALIVE)"
+  pct exec "$ROUTER_VMID" -- env \
+    "ROUTER_KEEPALIVE=$ROUTER_KEEPALIVE" \
+    "KA_INTERVAL=$ROUTER_KEEPALIVE_INTERVAL" \
+    bash -se <<'GUEST'
     set -Eeuo pipefail
+
+    # Default OFF: the warm-up ping keeps the chat model hot, but on an idle
+    # single-user cluster it wakes the GPU and cycles the fans every few minutes.
+    # When off, proactively remove any previously-installed units so re-runs
+    # converge (this is what makes `ROUTER_KEEPALIVE=off` persistent).
+    if [[ "${ROUTER_KEEPALIVE,,}" != "on" ]]; then
+      systemctl disable --now llm-router-keepalive.timer 2>/dev/null || true
+      rm -f /etc/systemd/system/llm-router-keepalive.timer \
+            /etc/systemd/system/llm-router-keepalive.service \
+            /usr/local/bin/llm-router-keepalive.sh
+      systemctl daemon-reload
+      echo "keepalive disabled (ROUTER_KEEPALIVE=off) — model warms on first request"
+      exit 0
+    fi
+
     # Tiny periodic ping to the chat model so its weights stay hot in VRAM. The
     # llamacpp-chat unit doesn't unload weights but the first request after a
-    # long idle period eats a 2-5s warm-up. Hitting it every 5 minutes pre-warms
+    # long idle period eats a 2-5s warm-up. Hitting it periodically pre-warms
     # the cache and keeps p99 latency consistent.
     cat > /usr/local/bin/llm-router-keepalive.sh <<'SH'
 #!/bin/bash
@@ -349,14 +375,14 @@ Type=oneshot
 ExecStart=/usr/local/bin/llm-router-keepalive.sh
 EOF
 
-    cat > /etc/systemd/system/llm-router-keepalive.timer <<'EOF'
+    cat > /etc/systemd/system/llm-router-keepalive.timer <<EOF
 [Unit]
-Description=Periodic warm-up ping every 5 minutes
+Description=Periodic warm-up ping (interval ${KA_INTERVAL})
 After=llm-router.service
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+OnUnitActiveSec=${KA_INTERVAL}
 RandomizedDelaySec=20s
 
 [Install]
