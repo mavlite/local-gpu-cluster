@@ -32,7 +32,10 @@ def main():
             count = int(env.get("MEMVAULT_PRIMER_COUNT", mv.DEFAULT_PRIMER_COUNT))
         except (TypeError, ValueError):
             count = mv.DEFAULT_PRIMER_COUNT
-        memories = mv.recent_memories(api_url, token, space, count)
+        try:
+            memories = mv.recent_memories(api_url, token, space, count)
+        except Exception:
+            memories = []
 
     context = mv.build_session_context(memories, space)
     sys.stdout.write(json.dumps({

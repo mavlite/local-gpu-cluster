@@ -97,7 +97,6 @@ class TestSessionStartHook(unittest.TestCase):
         import importlib
         mod = importlib.import_module("memory_session_start")
         importlib.reload(mod)
-        out = []
         with mock.patch.object(mod.mv, "load_env", return_value={"MEMVAULT_API_URL": "http://x:8000", "MEMVAULT_HOOKS_TOKEN": "tok"}), \
              mock.patch.object(mod.mv, "recent_memories", return_value=recent), \
              mock.patch.object(mod.mv, "resolve_space", return_value="proj"), \
