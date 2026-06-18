@@ -3,12 +3,14 @@
 # - Replace the default DB password with a generated one (${MEMVAULT_DB_PASSWORD}
 #   is substituted by docker compose from /opt/memory-vault/.env).
 # - Do NOT publish Postgres on the host network; only the app container needs it
-#   over the compose network (lists in override REPLACE the base list).
+#   over the compose network. NOTE: docker compose MERGES list fields like `ports`
+#   by APPENDING, so `ports: []` does NOT remove the base mapping — the `!reset`
+#   tag (compose >= 2.24.4) is required to drop the inherited `5432:5432` publish.
 services:
   db:
     environment:
       POSTGRES_PASSWORD: ${MEMVAULT_DB_PASSWORD}
-    ports: []
+    ports: !reset []
     volumes:
       - /opt/memory-vault-data/pgdata:/var/lib/postgresql/data
   app:
