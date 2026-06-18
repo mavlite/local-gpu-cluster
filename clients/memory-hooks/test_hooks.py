@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import sys
@@ -89,6 +90,36 @@ class TestMvCommon(unittest.TestCase):
                 self.assertTrue(os.path.exists("bare-sentinel"))
             finally:
                 _os.chdir(cwd)
+
+
+class TestSessionStartHook(unittest.TestCase):
+    def _run_main(self, payload, recent):
+        import importlib
+        mod = importlib.import_module("memory_session_start")
+        importlib.reload(mod)
+        out = []
+        with mock.patch.object(mod.mv, "load_env", return_value={"MEMVAULT_API_URL": "http://x:8000", "MEMVAULT_HOOKS_TOKEN": "tok"}), \
+             mock.patch.object(mod.mv, "recent_memories", return_value=recent), \
+             mock.patch.object(mod.mv, "resolve_space", return_value="proj"), \
+             mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             mock.patch("sys.stdout", io.StringIO()) as fake_out, \
+             self.assertRaises(SystemExit) as cm:
+            mod.main()
+        out = fake_out.getvalue()
+        return cm.exception.code, json.loads(out)
+
+    def test_emits_primer_and_instruction(self):
+        code, obj = self._run_main({"cwd": "/p", "source": "startup"}, ["decided X"])
+        self.assertEqual(code, 0)
+        self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        ctx = obj["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("decided X", ctx)
+        self.assertIn("recall", ctx)
+
+    def test_no_memories_still_valid_json_exit0(self):
+        code, obj = self._run_main({"cwd": "/p"}, [])
+        self.assertEqual(code, 0)
+        self.assertIn("additionalContext", obj["hookSpecificOutput"])
 
 
 if __name__ == "__main__":
