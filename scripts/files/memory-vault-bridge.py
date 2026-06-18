@@ -58,6 +58,28 @@ def _space(override: str | None) -> str:
     return override or _space_var.get()
 
 
+# Memory Vault rejects ingest/search into a space that doesn't exist yet
+# (404 "Unknown space"). The per-repo ?space= model needs spaces to materialize
+# on first use, so the bridge idempotently creates them. Cached per process so
+# it's one POST per space per bridge lifetime.
+_known_spaces: set[str] = set()
+
+
+async def _ensure_space(client: httpx.AsyncClient, space: str) -> None:
+    if space in _known_spaces:
+        return
+    try:
+        r = await client.post(
+            f"{API_URL}/api/spaces",
+            json={"name": space, "description": f"Auto-created by memory-vault-bridge for '{space}'"},
+            headers=_headers(),
+        )
+    except httpx.HTTPError:
+        return  # leave uncached; the real error surfaces on the subsequent call
+    if r.status_code < 500:  # 2xx created, or 4xx already-exists — either way it exists now
+        _known_spaces.add(space)
+
+
 server = Server("memory-vault")
 
 
@@ -119,18 +141,22 @@ async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
     try:
         async with httpx.AsyncClient(timeout=30.0) as c:
             if name == "remember":
+                space = _space(arguments.get("space"))
+                await _ensure_space(c, space)
                 payload = {
                     REMEMBER_FIELD_TEXT: arguments["text"],
-                    REMEMBER_FIELD_SPACE: _space(arguments.get("space")),
+                    REMEMBER_FIELD_SPACE: space,
                 }
                 r = await c.post(f"{API_URL}{REMEMBER_PATH}", json=payload, headers=_headers())
                 r.raise_for_status()
                 return [TextContent(type="text", text=f"stored: {r.text[:500]}")]
 
             if name == "recall":
+                space = _space(arguments.get("space"))
+                await _ensure_space(c, space)
                 payload = {
                     RECALL_FIELD_QUERY: arguments["query"],
-                    RECALL_FIELD_SPACE: [_space(arguments.get("space"))],
+                    RECALL_FIELD_SPACE: [space],
                     RECALL_FIELD_LIMIT: int(arguments.get("top_n", 5)),
                 }
                 r = await c.post(f"{API_URL}{RECALL_PATH}", json=payload, headers=_headers())
