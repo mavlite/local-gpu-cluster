@@ -193,8 +193,8 @@ if lxc_exists "$MV_VMID"; then
   pct exec "$MV_VMID" -- bash -lc 'cd /opt/memory-vault && docker compose ps --status running --format "{{.Service}}"' \
     | grep -q app && ok "memory-vault app container up" || warn "memory-vault app not running"
   # 2. dashboard/REST listening
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://${MV_IP}:8000/" || echo 000)"
-  [[ "$code" != "000" ]] && ok "REST/dashboard listening (HTTP $code)" || warn "REST not reachable"
+  code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://${MV_IP}:8000/" 2>/dev/null || true)"
+  [[ "$code" =~ ^[2-4][0-9][0-9]$ ]] && ok "REST/dashboard listening (HTTP $code)" || warn "REST not reachable (code=${code:-none})"
   # 3. SSE bridge port accepting connections (the MCP SDK's SSE transport does not
   #    emit a parseable line to a bare curl, so check the listener directly).
   if pct exec "$MV_VMID" -- bash -lc 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/3005" 2>/dev/null'; then
