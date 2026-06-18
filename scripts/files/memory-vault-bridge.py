@@ -31,16 +31,17 @@ REMEMBER_PATH = "/api/ingest/text"
 REMEMBER_FIELD_TEXT = "text"
 REMEMBER_FIELD_SPACE = "space"
 
+# Confirmed against the live memory-vault 1.0.1 /openapi.json (2026-06-18).
 RECALL_PATH = "/api/search"
 RECALL_FIELD_QUERY = "query"
-RECALL_FIELD_SPACE = "space"
+RECALL_FIELD_SPACE = "spaces"           # /api/search takes a LIST of spaces, not a single string
 RECALL_FIELD_LIMIT = "limit"
-RECALL_RESULTS_KEY = "results"          # array of hits in the /api/search response
+RECALL_RESULTS_KEY = "results"          # response: {results:[{chunk_id,content,similarity,space,...}], ...}
 RECALL_ITEM_TEXT_KEYS = ("content", "text", "chunk")
-RECALL_ITEM_SCORE_KEYS = ("score", "rrf_score", "similarity")
+RECALL_ITEM_SCORE_KEYS = ("similarity", "score", "rrf_score")
 
-FORGET_PATH = "/api/chunks/{id}"        # DELETE; confirm in openapi.json
-STATUS_PATH = "/api/stats"             # confirm; falls back to /api/spaces
+FORGET_PATH = "/api/chunks/{id}"        # DELETE /api/chunks/{chunk_id}
+STATUS_PATH = "/api/health"             # falls back to /api/spaces on 404
 
 # Per-connection memory space (set at SSE connect from ?space=).
 _space_var: contextvars.ContextVar[str] = contextvars.ContextVar("space", default=DEFAULT_SPACE)
@@ -129,7 +130,7 @@ async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             if name == "recall":
                 payload = {
                     RECALL_FIELD_QUERY: arguments["query"],
-                    RECALL_FIELD_SPACE: _space(arguments.get("space")),
+                    RECALL_FIELD_SPACE: [_space(arguments.get("space"))],
                     RECALL_FIELD_LIMIT: int(arguments.get("top_n", 5)),
                 }
                 r = await c.post(f"{API_URL}{RECALL_PATH}", json=payload, headers=_headers())
@@ -142,8 +143,10 @@ async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
                 for i, h in enumerate(hits, 1):
                     text = next((h[k] for k in RECALL_ITEM_TEXT_KEYS if k in h), str(h))
                     score = next((h[k] for k in RECALL_ITEM_SCORE_KEYS if k in h), None)
-                    tag = f" (score {score:.3f})" if isinstance(score, (int, float)) else ""
-                    lines.append(f"{i}.{tag} {text}")
+                    cid = h.get("chunk_id") if isinstance(h, dict) else None
+                    score_tag = f" (score {score:.3f})" if isinstance(score, (int, float)) else ""
+                    id_tag = f" [id={cid}]" if cid else ""
+                    lines.append(f"{i}.{id_tag}{score_tag} {text}")
                 return [TextContent(type="text", text="\n".join(lines))]
 
             if name == "forget":
