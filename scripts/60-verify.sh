@@ -195,11 +195,12 @@ if lxc_exists "$MV_VMID"; then
   # 2. dashboard/REST listening
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://${MV_IP}:8000/" || echo 000)"
   [[ "$code" != "000" ]] && ok "REST/dashboard listening (HTTP $code)" || warn "REST not reachable"
-  # 3. SSE bridge handshake
-  if curl -sN -m 5 "http://${MV_IP}:3005/sse" | head -1 | grep -qi event; then
-    ok "MCP-SSE bridge handshake OK on :3005"
+  # 3. SSE bridge port accepting connections (the MCP SDK's SSE transport does not
+  #    emit a parseable line to a bare curl, so check the listener directly).
+  if pct exec "$MV_VMID" -- bash -lc 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/3005" 2>/dev/null'; then
+    ok "MCP-SSE bridge listening on :3005"
   else
-    warn "MCP-SSE bridge not responding on :3005"
+    warn "MCP-SSE bridge not listening on :3005"
   fi
   # 4. bridge service active
   pct exec "$MV_VMID" -- systemctl is-active --quiet memory-vault-bridge \
@@ -208,7 +209,9 @@ fi
 
 # ---------- Router Anthropic passthrough (LXC 153) ----------
 step "Verify router /v1/messages route is registered"
-if curl -s "http://${ROUTER_IP:-192.168.6.153}:8000/openapi.json" | grep -q '/v1/messages'; then
+# The router bearer-auths everything except /healthz, so fetch its key from LXC 153.
+_RK="$(pct exec "${ROUTER_VMID:-153}" -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env 2>/dev/null || true)"
+if curl -s -H "Authorization: Bearer ${_RK}" "http://${ROUTER_IP:-192.168.6.153}:8000/openapi.json" | grep -q '/v1/messages'; then
   ok "router exposes /v1/messages"
 else
   warn "router /v1/messages not found — redeploy 53-lxc-router.sh"
