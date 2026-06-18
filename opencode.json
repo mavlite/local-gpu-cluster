@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memory": {
+      "type": "remote",
+      "url": "http://192.168.6.223:3005/sse?space=local-gpu-cluster",
+      "enabled": true
+    }
+  }
+}
