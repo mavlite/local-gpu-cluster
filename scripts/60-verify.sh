@@ -47,23 +47,31 @@ ROUTER_KEY="$(pct exec "$ROUTER_VMID" -- awk -F= '/^ROUTER_API_KEY=/{print $2}' 
 
 # ---------- Group 1: Host (V620-only) ----------
 step "1. Host: 2× V620, no NVIDIA"
-gpu_count="$(lspci -nn | grep -ciE 'vga|3d controller' || true)"
-check "lspci shows 2 GPU entries"          [ "$gpu_count" -eq 2 ]
-check "No nvidia-smi binary on host"       bash -c '! command -v nvidia-smi'
-check "Both V620 render nodes present"     bash -c '[ -e /dev/dri/renderD128 ] && [ -e /dev/dri/renderD129 ]'
-check "No renderD130 (no 3rd GPU)"         bash -c '[ ! -e /dev/dri/renderD130 ]'
+# V620s identify by PCI device id 1002:73a1 — they enumerate as "Display
+# controller", not "VGA"/"3D controller", so the old vga|3d grep counted 0.
+# The Ryzen 7600 iGPU adds an extra DRI render node, so don't assume a fixed
+# renderD12x layout; rocminfo (group 3) is the authoritative "exactly 2 V620s".
+v620_count="$(lspci -nn | grep -c '1002:73a1' || true)"
+check "lspci shows 2 V620 GPUs (1002:73a1)"  [ "$v620_count" -eq 2 ]
+check "No nvidia-smi binary on host"         bash -c '! command -v nvidia-smi'
+rnode_count="$(ls /dev/dri/renderD* 2>/dev/null | wc -l)"
+check "DRI render nodes present (>=2)"        [ "$rnode_count" -ge 2 ]
 
 # ---------- Group 2: IOMMU + AMDGPU ----------
 step "2. IOMMU active + AMDGPU loaded"
-check "dmesg shows AMD IOMMU enabled" \
-  bash -c 'dmesg | grep -qE "AMD-Vi: Interrupt remapping enabled|Detected AMD IOMMU"'
+# Check sysfs (persistent) rather than dmesg, which rotates past the IOMMU init
+# line on a long-lived host.
+check "IOMMU active (sysfs groups present)" \
+  bash -c '[ -d /sys/kernel/iommu_groups ] && [ "$(ls /sys/kernel/iommu_groups 2>/dev/null | wc -l)" -gt 0 ]'
 check "amdgpu kernel module loaded"   bash -c 'lsmod | grep -q "^amdgpu"'
 
 # ---------- Group 3: ROCm sees both V620s ----------
 step "3. ROCm sees both V620s (LXC $AMD_VMID)"
 if lxc_exists "$AMD_VMID" && lxc_running "$AMD_VMID"; then
+  # Match the agent Name line whose value is exactly gfx1030 (anchored), NOT the
+  # ISA line "amdgcn-amd-amdhsa--gfx1030" — otherwise each agent counts twice.
   rocm_count="$(pct exec "$AMD_VMID" -- rocminfo 2>/dev/null \
-                | grep -c 'Name:.*gfx1030' || true)"
+                | grep -cE 'Name:[[:space:]]+gfx1030$' || true)"
   check "rocminfo shows 2 gfx1030 agents" [ "$rocm_count" -eq 2 ]
 else
   skip_test "LXC $AMD_VMID not running"
@@ -85,12 +93,21 @@ step "5. Direct endpoint health on LXC 151 (auth required)"
 if [[ -z "$LLAMACPP_KEY" ]]; then
   skip_test "LLAMACPP_API_KEY not present in /etc/llamacpp.env — run 51-lxc-amd.sh first"
 else
-  for port in 8080 8082 8083; do
-    check "151:$port returns 200 with Bearer auth" \
-      bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Authorization: Bearer $LLAMACPP_KEY' http://localhost:$port/v1/models); [ \"\$code\" = '200' ]"
-    check "151:$port returns 401 WITHOUT auth (gate works)" \
-      bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 http://localhost:$port/v1/models); [ \"\$code\" = '401' ]"
-  done
+  # llama.cpp keeps /health and /v1/models PUBLIC even with --api-key, so testing
+  # those for 401 is wrong. Liveness uses /v1/models (200 w/ auth); the gate test
+  # hits each port's actual GATED inference route (401 without auth).
+  check "151:8080 up (200 /v1/models w/ auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Authorization: Bearer $LLAMACPP_KEY' http://localhost:8080/v1/models); [ \"\$code\" = '200' ]"
+  check "151:8080 gate works (401 on /v1/chat/completions w/o auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}' http://localhost:8080/v1/chat/completions); [ \"\$code\" = '401' ] || [ \"\$code\" = '403' ]"
+  check "151:8082 up (200 /v1/models w/ auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Authorization: Bearer $LLAMACPP_KEY' http://localhost:8082/v1/models); [ \"\$code\" = '200' ]"
+  check "151:8082 gate works (401 on /v1/embeddings w/o auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'Content-Type: application/json' -d '{\"input\":\"x\"}' http://localhost:8082/v1/embeddings); [ \"\$code\" = '401' ] || [ \"\$code\" = '403' ]"
+  check "151:8083 up (200 /v1/models w/ auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'Authorization: Bearer $LLAMACPP_KEY' http://localhost:8083/v1/models); [ \"\$code\" = '200' ]"
+  check "151:8083 gate works (401 on /v1/rerank w/o auth)" \
+    bash -c "code=\$(pct exec $AMD_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'Content-Type: application/json' -d '{\"query\":\"x\",\"documents\":[\"y\"]}' http://localhost:8083/v1/rerank); [ \"\$code\" = '401' ] || [ \"\$code\" = '403' ]"
 fi
 
 # ---------- Group 6: Embedding correctness ----------
@@ -108,10 +125,12 @@ fi
 # ---------- Group 7: Rerank correctness ----------
 step "7. Rerank correctness (Paris > Berlin for 'capital of France')"
 if [[ -n "$LLAMACPP_KEY" ]] && lxc_running "$AMD_VMID"; then
+  # The rerank response is {"results":[{"index":N,"relevance_score":X},...]} sorted
+  # best-first — no "document" field. Map results[0].index back to the input docs.
   top="$(pct exec "$AMD_VMID" -- bash -c "curl -fsS -m 10 -H 'Authorization: Bearer $LLAMACPP_KEY' http://localhost:8083/v1/rerank \
         -H 'Content-Type: application/json' \
         -d '{\"query\":\"capital of France\",\"documents\":[\"Paris is in France\",\"Berlin is in Germany\"]}' \
-        | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[\"results\"][0].get(\"document\",\"\"))'" 2>/dev/null || true)"
+        | python3 -c 'import json,sys;docs=[\"Paris is in France\",\"Berlin is in Germany\"];d=json.load(sys.stdin);print(docs[d[\"results\"][0][\"index\"]])'" 2>/dev/null || true)"
   check "Top reranked doc mentions Paris" bash -c "[[ \"$top\" == *Paris* ]]"
 else
   skip_test "Need LXC $AMD_VMID running + LLAMACPP_API_KEY"
@@ -124,7 +143,7 @@ if lxc_running "$ROUTER_VMID"; then
     check "Router unauthed → 403" \
       bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '403' ] || [ \"\$code\" = '401' ]"
     check "Router authed → 200" \
-      bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Authorization: Bearer $ROUTER_KEY' -X POST -H 'Content-Type: application/json' -d '{\"model\":\"rag-qwen3.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '200' ]"
+      bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Authorization: Bearer $ROUTER_KEY' -X POST -H 'Content-Type: application/json' -d '{\"model\":\"rag-qwen3.6\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '200' ]"
   else
     skip_test "ROUTER_API_KEY not present — run 53-lxc-router.sh first"
   fi
@@ -150,13 +169,26 @@ else
   skip_test "AnythingLLM LXC $ALLM_VMID not running"
 fi
 
-# ---------- Group 11: MCP SSE endpoints ----------
-step "11. MCP SSE endpoints"
+# ---------- Group 11: MCP server (mcp-sdg on :3004) ----------
+# v2 consolidated the MCP layer into mcp-sdg.service (:3004). The v1 docker
+# servers on :3002/:3003 (anythingllm-search, broadcom-techdocs) are OPTIONAL and
+# only checked if their listeners actually exist.
+step "11. MCP server (LXC $MCP_VMID): mcp-sdg on :3004"
 if lxc_running "$MCP_VMID"; then
-  for port in 3002 3003 3004; do
-    check "MCP port $port reachable" \
-      pct exec "$MCP_VMID" -- bash -c "timeout 3 curl -fsS http://localhost:$port/sse >/dev/null 2>&1 || \
-                                       timeout 3 curl -fsS http://localhost:$port/ >/dev/null 2>&1"
+  check "mcp-sdg.service active" \
+    bash -c "pct exec $MCP_VMID -- systemctl is-active mcp-sdg | grep -q '^active$'"
+  check "mcp-sdg :3004 listening" \
+    bash -c "pct exec $MCP_VMID -- bash -c 'timeout 3 bash -c \"echo > /dev/tcp/127.0.0.1/3004\" 2>/dev/null'"
+  # Non-streaming probe: '/' returns 404 fast (the SSE endpoint is /sse); any HTTP
+  # status (not 000) proves it's responding.
+  check "mcp-sdg :3004 responds (HTTP, not refused)" \
+    bash -c "code=\$(pct exec $MCP_VMID -- curl -s -o /dev/null -m 3 -w '%{http_code}' http://localhost:3004/); [ \"\$code\" != '000' ]"
+  for port in 3002 3003; do
+    if pct exec "$MCP_VMID" -- bash -c "timeout 2 bash -c 'echo > /dev/tcp/127.0.0.1/$port' 2>/dev/null"; then
+      check "optional MCP :$port reachable" true
+    else
+      skip_test "optional MCP :$port not deployed (v1 docker stack)"
+    fi
   done
 else
   skip_test "MCP LXC $MCP_VMID not running"
@@ -195,13 +227,15 @@ if lxc_exists "$MV_VMID"; then
   # 2. dashboard/REST listening
   code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://${MV_IP}:8000/" 2>/dev/null || true)"
   [[ "$code" =~ ^[2-4][0-9][0-9]$ ]] && ok "REST/dashboard listening (HTTP $code)" || warn "REST not reachable (code=${code:-none})"
-  # 3. SSE bridge port accepting connections (the MCP SDK's SSE transport does not
-  #    emit a parseable line to a bare curl, so check the listener directly).
+  # 3. Streamable HTTP bridge: port listening + /mcp responds (307/400/406 = alive).
   if pct exec "$MV_VMID" -- bash -lc 'timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/3005" 2>/dev/null'; then
-    ok "MCP-SSE bridge listening on :3005"
+    ok "MCP bridge listening on :3005"
   else
-    warn "MCP-SSE bridge not listening on :3005"
+    warn "MCP bridge not listening on :3005"
   fi
+  mcode="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://${MV_IP}:3005/mcp" 2>/dev/null || true)"
+  [[ "$mcode" =~ ^[234][0-9][0-9]$ ]] && ok "MCP bridge /mcp responds (HTTP $mcode)" \
+    || warn "MCP bridge /mcp not responding (code=${mcode:-none})"
   # 4. bridge service active
   pct exec "$MV_VMID" -- systemctl is-active --quiet memory-vault-bridge \
     && ok "memory-vault-bridge.service active" || warn "memory-vault-bridge.service not active"
