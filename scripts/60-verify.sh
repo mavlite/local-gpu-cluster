@@ -68,10 +68,11 @@ check "amdgpu kernel module loaded"   bash -c 'lsmod | grep -q "^amdgpu"'
 # ---------- Group 3: ROCm sees both V620s ----------
 step "3. ROCm sees both V620s (LXC $AMD_VMID)"
 if lxc_exists "$AMD_VMID" && lxc_running "$AMD_VMID"; then
-  # Match the agent Name line whose value is exactly gfx1030 (anchored), NOT the
-  # ISA line "amdgcn-amd-amdhsa--gfx1030" — otherwise each agent counts twice.
+  # Count gfx1030 agent Name lines, excluding the ISA line ("amdgcn-...-gfx1030").
+  # Anchoring on $ is fragile (rocminfo pads the value with trailing spaces), so
+  # filter out the amdgcn ISA lines instead — leaves one line per GPU agent.
   rocm_count="$(pct exec "$AMD_VMID" -- rocminfo 2>/dev/null \
-                | grep -cE 'Name:[[:space:]]+gfx1030$' || true)"
+                | grep gfx1030 | grep -vc amdgcn || true)"
   check "rocminfo shows 2 gfx1030 agents" [ "$rocm_count" -eq 2 ]
 else
   skip_test "LXC $AMD_VMID not running"
