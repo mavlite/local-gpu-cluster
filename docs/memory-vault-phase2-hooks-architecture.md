@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-18
 - **Status:** Approved (design) — pending implementation plan
-- **Builds on:** `2026-06-17-memory-vault-deployment-design.md` (phase 1, deployed). Memory Vault is live at `http://192.168.6.223:8000` (DHCP), MCP-SSE bridge at `:3005`, per-repo `?space=` convention.
+- **Builds on:** [`memory-vault-architecture.md`](./memory-vault-architecture.md) (phase 1). Memory Vault is live at `http://192.168.6.223:8000` (DHCP), MCP-SSE bridge at `:3005`, per-repo `?space=` convention.
 
 ## 1. Goal
 

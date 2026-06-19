@@ -21,7 +21,7 @@ End-to-end build of the second-generation local LLM cluster. Replaces the v1 set
 
 The big architectural shifts vs. v1: Proxmox VE host with one LXC per service (replacing bare-metal Ubuntu), llama.cpp replacing Ollama for performance and speculative-decoding support, and a request-aware router replacing the dual-port no-think proxy.
 
-> **Scope note.** This document describes one verified configuration on the author's hardware as of the revision date. Paths, IPs, and ports are illustrative — adapt to your environment. Versions move quickly; check upstream documentation before acting on version-specific details here. For the previous-generation setup on dual Xeon hardware with NVIDIA-only GPUs, see [`local-gpu-cluster-reference.md`](./local-gpu-cluster-reference.md) (v1).
+> **Scope note.** This document describes one verified configuration on the author's hardware as of the revision date. Paths, IPs, and ports are illustrative — adapt to your environment. Versions move quickly; check upstream documentation before acting on version-specific details here. For the previous-generation setup on dual Xeon hardware with NVIDIA-only GPUs, see [`docs/archive/local-gpu-cluster-reference.md`](./docs/archive/local-gpu-cluster-reference.md) (v1).
 
 ---
 

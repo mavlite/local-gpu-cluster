@@ -43,7 +43,6 @@ This guide is for the operator who inherits or maintains a running cluster — c
 | AnythingLLM env defaults | [scripts/54-lxc-anythingllm.sh](./scripts/54-lxc-anythingllm.sh) |
 | RAG ingest system | [scripts/rag/README.md](./scripts/rag/README.md) |
 | Past pain points + how they were fixed | [LESSONS.md](./LESSONS.md) |
-| Current session state / decisions in flight | [SESSION_HANDOFF.md](./SESSION_HANDOFF.md) |
 
 ---
 
@@ -337,7 +336,7 @@ Currently cached on the host (verified live 2026-06-08):
 | `Qwen/Qwen3-Embedding-0.6B-GGUF` | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ~1 GB | embed |
 | `gpustack/bge-reranker-v2-m3-GGUF` | `bge-reranker-v2-m3-Q4_K_M.gguf` | ~1.5 GB | rerank |
 | `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | ~400 MB | unused (historical draft attempt — vocab 151,936 mismatch; safe to delete) |
-| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | unused (leftover from failed swap; see [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) |
+| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | unused (leftover from a failed swap) |
 | `unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF` | `Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf` | ~25 GB | **chat (`devstral` profile) — active 2026-06-08** |
 
 ### § 4.2 Pre-fetching a model
@@ -407,7 +406,7 @@ If you intend to keep the new model around, **add it to [`get_profile()`](./scri
 
 ### § 4.4 VRAM budget template
 
-Captured from the [Qwen3-Coder-Next OOM lesson](./SESSION_HANDOFF.md) (May 2026): a 49.6 GB GGUF was downloaded and tried before checking VRAM math; it failed at weight allocation. Always run this before downloading anything > 30 GB.
+From the Qwen3-Coder-Next OOM incident (May 2026): a 49.6 GB GGUF was downloaded and tried before checking VRAM math; it failed at weight allocation. Always run this before downloading anything > 30 GB.
 
 | Component | Formula | Current values (Q6_K default) |
 |---|---|---|
@@ -428,7 +427,7 @@ For a 50 GB GGUF model at Q4_K_M: weights alone are ~32 GB, ~16 GB per card → 
 
 **Worked example — Qwen3-Coder-Next sizing (May 2026):**
 
-[`unsloth/Qwen3-Coder-Next-GGUF`](https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF) is an **80B-total / 3B-activated MoE** coder model with the same 256K trained context as Qwen3.6, but with a hybrid **Gated Attention + Gated DeltaNet** architecture. The first attempt (May 2026, [SESSION_HANDOFF.md](./SESSION_HANDOFF.md)) downloaded `UD-Q4_K_XL` (49.6 GB) blind and OOM'd on V620 #0 at a 24.2 GB single allocation. This worked example captures the post-mortem analysis.
+[`unsloth/Qwen3-Coder-Next-GGUF`](https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF) is an **80B-total / 3B-activated MoE** coder model with the same 256K trained context as Qwen3.6, but with a hybrid **Gated Attention + Gated DeltaNet** architecture. The first attempt (May 2026) downloaded `UD-Q4_K_XL` (49.6 GB) blind and OOM'd on V620 #0 at a 24.2 GB single allocation. This worked example captures the post-mortem analysis.
 
 Per-card target with embed + rerank co-resident:
 
@@ -1171,7 +1170,7 @@ $PY /root/local-gpu-cluster/scripts/rag/refresh.py --source $SRC --force
 $PY /root/local-gpu-cluster/scripts/rag/cleanup_interrupted_refresh.py --source $SRC --apply
 ```
 
-For wiping every source at once, see the bash loop pattern in [SESSION_HANDOFF.md](./SESSION_HANDOFF.md) ("Full sweep" from 2026-05-25).
+For wiping every source at once, use the full-sweep bash loop shown later in this section (iterate the source list, running `refresh.py --force` then `cleanup_interrupted_refresh.py --apply` for each).
 
 ### § 8.6 The workspace ~2.0× dup-factor
 
@@ -1305,7 +1304,7 @@ for src in keycloak-docs openzfs-docs truenas-api-v27 opnsense-docs truenas-scal
 done
 ```
 
-This is the same wipe loop documented in [SESSION_HANDOFF.md § "Full sweep"](./SESSION_HANDOFF.md). Expect 1-2 hours wall-clock for the full corpus.
+Expect 1-2 hours wall-clock for the full corpus.
 
 ### § 9.4 Updating the `.embedder-sha` pin
 
@@ -1823,7 +1822,6 @@ Cross-reference index. When you want X, this is where to find the authoritative 
 | RAG ingest system reference | [scripts/rag/README.md](./scripts/rag/README.md) | — |
 | Document ingestion helper tools | [scripts/tools/README.md](./scripts/tools/README.md) | — |
 | Past failures + fixes | [LESSONS.md](./LESSONS.md) | — |
-| Current session decisions | [SESSION_HANDOFF.md](./SESSION_HANDOFF.md) | — |
 | Operator/assistant rules | [RULES.md](./RULES.md) | [TASK-LOOP.md](./TASK-LOOP.md) |
 
 ### Components → files

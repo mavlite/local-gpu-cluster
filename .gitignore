@@ -2,3 +2,7 @@
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+# Local-only operator notes — contain session state / customer data, not for publishing
+SESSION_HANDOFF.md
+weekly_customer_adoption_review.html

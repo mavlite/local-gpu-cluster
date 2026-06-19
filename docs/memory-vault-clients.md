@@ -7,7 +7,7 @@ bridge is at `http://192.168.6.223:3005/sse`. Pin a **memory space per repo** vi
 > **IP note:** LXC 156 runs on **DHCP** (lease `192.168.6.223` as of 2026-06-18).
 > `.156` from the original design was already taken by the monitoring/SearXNG LXC.
 > Because this is a plain DHCP lease, the IP can change on renewal and break the
-> pinned URLs below — **add a DHCP reservation** for MAC `bc:24:11:05:76:8d → 192.168.6.223`
+> pinned URLs below — **add a DHCP reservation** for the LXC's MAC (e.g. `<LXC-MAC> → 192.168.6.223`)
 > on your router to make it stable.
 
 ## OpenCode (`opencode.json`)

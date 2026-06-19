@@ -1,9 +1,7 @@
 # Memory Vault — operator runbook (host-side deploy)
 
-All file artifacts are committed on branch `feat/memory-vault-deployment`. The steps
-below run **as root on the Proxmox host** (and a couple from a client). They were
-deliberately NOT run during implementation (the workstation can't reach the host).
-Plan reference: `docs/superpowers/plans/2026-06-17-memory-vault-deployment.md`.
+The steps below run **as root on the Proxmox host** (and a couple from a client).
+Architecture and rationale: [`memory-vault-architecture.md`](./memory-vault-architecture.md).
 
 Prereqs: a checkout of this repo on the Proxmox host (or push `scripts/` to it),
 `config.env` present, ZFS pool `tank` mounted, router (LXC 153) reachable.

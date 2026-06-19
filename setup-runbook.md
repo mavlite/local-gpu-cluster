@@ -456,7 +456,7 @@ pveversion --verbose
 
 # Confirm kernel version
 uname -r
-# Expect: 6.14.x-pve or similar
+# Expect: 6.17.x-pve or similar (any PVE 9.x kernel is fine)
 
 # Confirm CPU is recognized
 lscpu | grep -i "model name"

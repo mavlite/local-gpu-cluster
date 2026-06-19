@@ -62,7 +62,7 @@ Swap between chat profiles in 30–60 s with [`scripts/swap-chat-model.sh`](./sc
 | `vcf-reference` | VMware Cloud Foundation 9.0+ technical reference (Broadcom techdocs — release-notes, deployment, lifecycle, security, licensing) |
 | `sdg-documentation` | Self-hosted infrastructure tools (OPNsense, Keycloak, OpenZFS, TrueNAS Scale + TrueNAS API v27) |
 
-Document counts vary per refresh cycle and are managed by the declarative RAG system at [`scripts/rag/`](./scripts/rag/) — see [`scripts/rag/sources.yaml`](./scripts/rag/sources.yaml) for the source list and [`SESSION_HANDOFF.md`](./SESSION_HANDOFF.md) for a recent post-wipe baseline.
+Document counts vary per refresh cycle and are managed by the declarative RAG system at [`scripts/rag/`](./scripts/rag/) — see [`scripts/rag/sources.yaml`](./scripts/rag/sources.yaml) for the source list.
 
 Both workspaces tuned for strict factual lookup: `chatMode=query`, `similarityThreshold=0` (rely on rerank for quality filtering), `topN=10` (vcf-reference) / `12` (sdg-documentation), `vectorSearchMode=rerank`, refusal sentinel on no-match. Workspace tuning is applied by [`scripts/57-configure-anythingllm.sh`](./scripts/57-configure-anythingllm.sh) via the AnythingLLM REST API.
 
@@ -77,7 +77,7 @@ The AnythingLLM `/workspace/{slug}` REST endpoint returns ~2 rows per underlying
 | [`setup-runbook.md`](./setup-runbook.md) | Operational deployment runbook. Phases 1-11 from BIOS to final acceptance suite. The exact *how* of greenfield deployment. |
 | [`day-2-ops.md`](./day-2-ops.md) | Day-2 operations guide. What to do *after* the cluster is running: health checks, troubleshooting, model swaps, key rotation, RAG operations, embedder retuning, updates, hardware changes. |
 | [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md) | Architecture reference. Hardware rationale, GPU passthrough strategy, LXC vs VM trade-offs. The *why*. |
-| [`local-gpu-cluster-reference.md`](./local-gpu-cluster-reference.md) | Historical v1 reference (Dell T7910 + 3× RTX 3060 + Ollama). Kept for context. |
+| [`docs/archive/local-gpu-cluster-reference.md`](./docs/archive/local-gpu-cluster-reference.md) | Historical v1 reference (Dell T7910 + 3× RTX 3060 + Ollama). Archived for context. |
 | [`scripts/README.md`](./scripts/README.md) | Bootstrap automation under `scripts/`. Idempotent shell+python scripts for Phases 4-11. |
 
 ---
