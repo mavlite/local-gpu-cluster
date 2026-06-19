@@ -40,11 +40,11 @@ If any differ from the constants block at the top of
 `STATUS_PATH`), edit those constants (one place) before step 3. Optionally commit the
 schema: `cp /tmp/mv-openapi.json docs/memory-vault-openapi.json` and commit.
 
-## 3. Deploy the MCP-SSE bridge
+## 3. Deploy the MCP (Streamable HTTP) bridge
 ```bash
 LGC_DIR=scripts bash scripts/62-memory-vault-bridge.sh
-# SSE handshake:
-curl -sN -m 5 "http://$(pct exec 156 -- hostname -I | awk '{print $1}'):3005/sse" | head -3   # expect 'event: endpoint'
+# Liveness (Streamable HTTP at /mcp): expect an HTTP status (e.g. 400/406), NOT a refused connection
+curl -s -o /dev/null -w "%{http_code}\n" "http://$(pct exec 156 -- hostname -I | awk '{print $1}'):3005/mcp"
 ```
 Round-trip test (from a host/client with python + `mcp` installed) — see plan Task 5
 Step 4; confirm a `remember` then `recall` of a canary phrase returns it. If `recall`

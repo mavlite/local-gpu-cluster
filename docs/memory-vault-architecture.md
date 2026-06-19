@@ -105,12 +105,12 @@ is the central design decision.
 ### OpenCode (`opencode.json`)
 ```jsonc
 "mcp": {
-  "memory": { "type": "remote", "url": "http://192.168.6.156:3005/sse?space=local-gpu-cluster" }
+  "memory": { "type": "remote", "url": "http://192.168.6.156:3005/mcp?space=local-gpu-cluster" }
 }
 ```
 
 ### Claude Code
-- Memory MCP — `.mcp.json` remote SSE entry, identical URL/space pattern.
+- Memory MCP — `.mcp.json` `http` (Streamable HTTP) entry, identical URL/space pattern.
 - Local-LLM backend — shipped as a small `.env` / helper template:
 ```bash
 ANTHROPIC_BASE_URL=http://192.168.6.153:8000   # router listens on :8000 (uvicorn, LXC 153)

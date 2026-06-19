@@ -22,9 +22,11 @@ load_config
 AMD_VMID="${AMD_VMID:-151}"
 AMD_HOSTNAME="${AMD_HOSTNAME:-llamacpp-amd}"
 AMD_CORES="${AMD_CORES:-8}"
-# 20 GB: live working set is ~2 GB anon + reclaimable GGUF mmap cache; 20 GB still
-# survives the chat profile's --cache-ram 16384 host-KV cache. Was 32768 (host is 64 GB).
-AMD_MEMORY="${AMD_MEMORY:-20480}"
+# 32 GB: load-bearing — do NOT shrink. The chat unit's --mlock + --cache-ram 16384
+# + ~29 GB model mmap need this headroom; a smaller ceiling makes the cgroup reclaim
+# the mmap'd weight pages mid-DMA, causing SDMA host->device page faults on model
+# load (incident 2026-06-19, when this was 12288). See operator notes / day-2-ops.
+AMD_MEMORY="${AMD_MEMORY:-32768}"
 AMD_SWAP="${AMD_SWAP:-8192}"
 AMD_ROOTFS_SIZE="${AMD_ROOTFS_SIZE:-64}"
 LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)

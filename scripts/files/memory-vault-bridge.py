@@ -1,26 +1,34 @@
-"""MCP-over-SSE bridge to a self-hosted Memory Vault REST API.
+"""MCP (Streamable HTTP) bridge to a self-hosted Memory Vault REST API.
 
-Exposes `remember`, `recall`, `forget`, `memory_status` as MCP tools over SSE so
-remote clients (OpenCode, Claude Code) can use the cluster's existing remote-MCP
-pattern. Each SSE connection is scoped to a memory space via `?space=<slug>` on
-the connect URL; tools also accept an explicit `space` override.
+Exposes `remember`, `recall`, `forget`, `memory_status` as MCP tools over
+Streamable HTTP so remote clients (OpenCode, Claude Code) can use the cluster's
+remote-MCP pattern. Each request is scoped to a memory space via `?space=<slug>`
+on the /mcp URL; tools also accept an explicit `space` override.
+
+Served at /mcp in stateless mode. The deprecated HTTP+SSE transport desynced the
+initialize handshake with current clients on mcp>=1.28 ("Received request before
+initialization was complete" on every tools/call); stateless Streamable HTTP has
+no per-session init state to desync.
 
 Env (from /etc/memory-vault-bridge.env):
     MEMVAULT_API_URL        base URL of the Memory Vault REST API (e.g. http://127.0.0.1:8000)
     MEMVAULT_API_TOKEN      bearer token minted via `memory-vault token create`
-    MEMVAULT_DEFAULT_SPACE  space used when a connection omits ?space=
-    MCP_HOST / MCP_PORT     SSE listen address (default 0.0.0.0:3005)
+    MEMVAULT_DEFAULT_SPACE  space used when a request omits ?space=
+    MCP_HOST / MCP_PORT     HTTP listen address (default 0.0.0.0:3005)
 """
+import contextlib
 import contextvars
 import os
+from urllib.parse import parse_qs
 
 import httpx
 import uvicorn
 from mcp.server.lowlevel import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 from starlette.applications import Starlette
-from starlette.routing import Mount, Route
+from starlette.routing import Mount
+from starlette.types import Receive, Scope, Send
 
 # ---- REST contract (confirm against docs/memory-vault-openapi.json, Task 3) ----
 API_URL = os.environ.get("MEMVAULT_API_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -196,24 +204,36 @@ async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
         return [TextContent(type="text", text=f"Memory Vault unreachable: {type(e).__name__}")]
 
 
-_sse = SseServerTransport("/messages/")
+# Stateless Streamable HTTP: each request is self-contained, so there is no
+# per-session initialize state to desync (the failure mode of the old SSE
+# transport on mcp>=1.28), and the per-request ?space= ContextVar set below
+# propagates into the tool handler within the same request task.
+_session_manager = StreamableHTTPSessionManager(
+    app=server,
+    event_store=None,
+    json_response=True,
+    stateless=True,
+)
 
 
-async def handle_sse(request):
-    # Capture the per-connection memory space from ?space=; reset on disconnect
-    # so the ContextVar can't leak across connections that reuse a task context.
-    token = _space_var.set(request.query_params.get("space") or DEFAULT_SPACE)
+async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
+    # Per-request memory space from ?space= on the /mcp URL; the explicit `space`
+    # tool argument still backstops it.
+    qs = parse_qs(scope.get("query_string", b"").decode())
+    token = _space_var.set((qs.get("space") or [DEFAULT_SPACE])[0] or DEFAULT_SPACE)
     try:
-        async with _sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
-            await server.run(read, write, server.create_initialization_options())
+        await _session_manager.handle_request(scope, receive, send)
     finally:
         _space_var.reset(token)
 
 
-app = Starlette(routes=[
-    Route("/sse", endpoint=handle_sse),
-    Mount("/messages/", app=_sse.handle_post_message),
-])
+@contextlib.asynccontextmanager
+async def _lifespan(_app: Starlette):
+    async with _session_manager.run():
+        yield
+
+
+app = Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=_lifespan)
 
 
 if __name__ == "__main__":

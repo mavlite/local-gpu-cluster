@@ -1,8 +1,9 @@
 # Memory Vault — client wiring
 
-Shared persistent-memory service on LXC 156 (`192.168.6.223`). The MCP-over-SSE
-bridge is at `http://192.168.6.223:3005/sse`. Pin a **memory space per repo** via
-`?space=<repo-slug>` so OpenCode and Claude Code working the same repo share memory.
+Shared persistent-memory service on LXC 156 (`192.168.6.223`). The MCP
+(Streamable HTTP) bridge is at `http://192.168.6.223:3005/mcp`. Pin a **memory
+space per repo** via `?space=<repo-slug>` so OpenCode and Claude Code working the
+same repo share memory.
 
 > **IP note:** LXC 156 runs on **DHCP** (lease `192.168.6.223` as of 2026-06-18).
 > `.156` from the original design was already taken by the monitoring/SearXNG LXC.
@@ -17,7 +18,7 @@ bridge is at `http://192.168.6.223:3005/sse`. Pin a **memory space per repo** vi
   "mcp": {
     "memory": {
       "type": "remote",
-      "url": "http://192.168.6.223:3005/sse?space=local-gpu-cluster"
+      "url": "http://192.168.6.223:3005/mcp?space=local-gpu-cluster"
     }
   }
 }
@@ -29,14 +30,14 @@ bridge is at `http://192.168.6.223:3005/sse`. Pin a **memory space per repo** vi
 {
   "mcpServers": {
     "memory": {
-      "type": "sse",
-      "url": "http://192.168.6.223:3005/sse?space=local-gpu-cluster"
+      "type": "http",
+      "url": "http://192.168.6.223:3005/mcp?space=local-gpu-cluster"
     }
   }
 }
 ```
 
-Or: `claude mcp add --transport sse memory "http://192.168.6.223:3005/sse?space=local-gpu-cluster"`
+Or: `claude mcp add --transport http memory "http://192.168.6.223:3005/mcp?space=local-gpu-cluster"`
 
 ## Claude Code — run against the local LLM (optional)
 
