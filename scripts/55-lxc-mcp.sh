@@ -22,7 +22,8 @@ load_config
 MCP_VMID="${MCP_VMID:-155}"
 MCP_HOSTNAME="${MCP_HOSTNAME:-mcp-stack}"
 MCP_CORES="${MCP_CORES:-2}"
-MCP_MEMORY="${MCP_MEMORY:-4096}"
+# 2 GB: 3 lightweight MCP servers, ~75 MB live. Was 4096 (host is 64 GB, not 128).
+MCP_MEMORY="${MCP_MEMORY:-2048}"
 MCP_ROOTFS_SIZE="${MCP_ROOTFS_SIZE:-16}"
 LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)
 BRIDGE="${BRIDGE:-vmbr0}"

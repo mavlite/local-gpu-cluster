@@ -20,7 +20,9 @@ load_config
 MV_VMID="${MEMVAULT_VMID:-156}"
 MV_HOSTNAME="${MEMVAULT_HOSTNAME:-memory-vault}"
 MV_CORES="${MEMVAULT_CORES:-4}"
-MV_MEMORY="${MEMVAULT_MEMORY:-8192}"
+# 4 GB: ~140 MB idle, but Postgres HNSW builds + sentence-transformers + spaCy spike
+# during ingest — keep headroom. Was 8192 (host is 64 GB, not 128).
+MV_MEMORY="${MEMVAULT_MEMORY:-4096}"
 MV_ROOTFS_SIZE="${MEMVAULT_ROOTFS_SIZE:-32}"
 MV_STORAGE_MOUNT="${MEMVAULT_STORAGE_MOUNT:-/tank/memory-vault}"
 MV_IMAGE="${MEMVAULT_IMAGE:-ghcr.io/mihaibuilds/memory-vault:1.0.1}"

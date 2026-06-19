@@ -372,7 +372,7 @@ The boot drive uses **ext4 with LVM** (not ZFS). Rationale:
 4. Filesystem: **ext4**
 5. Set the advanced options (values below assume a **1 TB boot NVMe**; scale proportionally — see notes):
    - `hdsize`: leave default (full disk)
-   - `swapsize`: **8** (8 GB — emergency cushion only; you have 128 GB RAM)
+   - `swapsize`: **8** (8 GB — emergency cushion only; the host has 64 GB RAM)
    - `maxroot`: **64** (64 GB for `pve/root` — holds the OS, `/var/log`, and `/var/lib/vz` which is `local` storage. Backups land on `/tank/backups`, not here.)
    - `minfree`: **32** (32 GB LVM-thin reserve — never let the thin pool fill or it corrupts)
    - `maxvz`: leave default (auto-computed as `hdsize − maxroot − swapsize − minfree` ≈ 896 GB on a 1 TB drive; this becomes `local-lvm` for LXC rootfs)
@@ -688,14 +688,14 @@ zfs list
 
 **ZFS ARC tuning (important — boot drive is ext4, but `/tank` is ZFS):**
 
-ZFS will use up to 50% of host RAM for ARC by default. On this 128 GB system that's 64 GB — more than you want, given LXCs need RAM for model inference. Cap ARC at a sensible value:
+ZFS will use up to 50% of host RAM for ARC by default. On this **64 GB** system that's 32 GB — far more than you want, given LXCs need RAM for model inference and you want headroom for proxmox/hyper-V validation-lab VMs. Cap ARC at a sensible value (8 GB is comfortable here — measured ARC working set sits around 6 GB):
 
 ```bash
-# Cap ARC at 16 GB (adjust based on your RAM and workload)
-echo "options zfs zfs_arc_max=17179869184" > /etc/modprobe.d/zfs.conf
+# Cap ARC at 8 GB (adjust based on your RAM and workload)
+echo "options zfs zfs_arc_max=8589934592" > /etc/modprobe.d/zfs.conf
 update-initramfs -u
 # Takes effect on next reboot, or live with:
-echo 17179869184 > /sys/module/zfs/parameters/zfs_arc_max
+echo 8589934592 > /sys/module/zfs/parameters/zfs_arc_max
 ```
 
 ### Step 4.9 — Add ZFS storage to Proxmox
