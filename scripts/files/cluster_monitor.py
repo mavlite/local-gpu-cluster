@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+import json
+import subprocess
+import urllib.error
+import urllib.request
 
 # ─────────────────────────── 1. Core types ───────────────────────────
 
@@ -44,3 +48,52 @@ class HttpResult:
     status: int          # HTTP status code; 0 == transport failure
     body: str
     error: str | None = None
+
+
+# ─────────────────────────── 2. Probes (IO seam) ───────────────────────────
+
+
+class Probes:
+    """All cluster IO funnels through here so checks are testable. Never
+    raises for expected failures — returns a non-zero CmdResult / status==0
+    HttpResult instead, so one broken endpoint can't crash a collection cycle.
+    """
+
+    def cmd(self, args: list[str], timeout: float = 10.0) -> CmdResult:
+        try:
+            p = subprocess.run(
+                args, capture_output=True, text=True, timeout=timeout, check=False,
+            )
+            return CmdResult(p.returncode, p.stdout, p.stderr)
+        except FileNotFoundError as e:
+            return CmdResult(127, "", str(e))
+        except subprocess.TimeoutExpired:
+            return CmdResult(124, "", f"timeout after {timeout}s: {' '.join(args)}")
+        except OSError as e:  # noqa: BLE001 - any spawn failure becomes a result
+            return CmdResult(125, "", str(e))
+
+    def http(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict | None = None,
+        json_body: dict | None = None,
+        timeout: float = 5.0,
+    ) -> HttpResult:
+        data = None
+        hdrs = dict(headers or {})
+        if json_body is not None:
+            data = json.dumps(json_body).encode("utf-8")
+            hdrs.setdefault("Content-Type", "application/json")
+        req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                return HttpResult(resp.status, body)
+        except urllib.error.HTTPError as e:
+            # A 4xx/5xx is a real HTTP status, not a transport failure.
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+            return HttpResult(e.code, body)
+        except (urllib.error.URLError, OSError) as e:
+            return HttpResult(0, "", str(getattr(e, "reason", e)))
