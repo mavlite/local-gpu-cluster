@@ -8,6 +8,10 @@
 #   tag (compose >= 2.24.4) is required to drop the inherited `5432:5432` publish.
 services:
   db:
+    # Must restart on reboot/daemon-restart too — without this, only `app`
+    # (below) came back after a host reboot and looped "Database not reachable"
+    # (incident 2026-06-19). Both services need the policy.
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${MEMVAULT_DB_PASSWORD}
     ports: !reset []
