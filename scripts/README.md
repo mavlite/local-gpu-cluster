@@ -23,6 +23,7 @@ retuning, updates, hardware changes).
 | 11.5  | `61-lxc-memory-vault.sh` | Memory Vault LXC 156, Docker, ZFS dataset, docker compose stack with override config |
 | 12    | `62-memory-vault-bridge.sh` | MCP-over-SSE bridge in LXC 156 (port 3005), Python venv + mcp SDK + uvicorn, systemd unit |
 | 12.5  | `63-cluster-monitor.sh` | Read-only cluster health + metrics dashboard (host systemd service, port 8888), SQLite state, Python 3 stdlib only |
+| 12.6  | `64-memory-vault-backup-timer.sh` | Host systemd timer (daily 02:30) running pg_dump backup inside LXC 156 via `pct exec`; dumps to tank-backed dir, retains 14 |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.

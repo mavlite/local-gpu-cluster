@@ -62,11 +62,20 @@ curl -s http://192.168.6.153:8000/v1/messages -H "Authorization: Bearer <ROUTER_
 ```
 A 502 means the loaded llama-server build lacks `/v1/messages` (need ≥ b9584).
 
-## 5. Nightly backup timer (plan Task 7 Step 2)
-Push `scripts/files/memory-vault-backup.sh` into LXC 156 and install the
-`memory-vault-backup.service` + `.timer` (exact commands in plan Task 7 Step 2), then:
+## 5. Nightly backup timer
+Run the installer on the PVE host — it pushes `scripts/files/memory-vault-backup.sh`
+into LXC 156 (`/usr/local/bin/memory-vault-backup.sh`), installs a **host** systemd
+`memory-vault-backup.service` + `.timer` (daily 02:30) whose service runs the dump
+inside 156 via `pct exec`, and runs one backup immediately to validate:
 ```bash
-pct exec 156 -- /opt/memory-vault-bridge/backup.sh    # expect "backup written: ..."
+LGC_DIR=scripts bash scripts/64-memory-vault-backup-timer.sh
+```
+Host placement keeps scheduled jobs visible alongside `rag-refresh.timer` and matches
+what the cluster-monitor `backup_timer` check probes (`systemctl is-active
+memory-vault-backup.timer` on the host). Verify:
+```bash
+systemctl list-timers memory-vault-backup.timer --no-pager   # NEXT/LAST populated
+pct exec 156 -- ls -lt /opt/memory-vault-data/backups        # expect memory_vault-*.sql.gz
 ```
 
 ## 6. Full verification + clients
