@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 import json as _json
 
@@ -566,6 +567,41 @@ class TestCollector(unittest.TestCase):
         ids = {r.id for r in col.run_once()}
         self.assertEqual(ids, {"a", "b"})
         store.close()
+
+
+class TestConfigAndCli(unittest.TestCase):
+    def test_default_config_has_required_keys(self):
+        cfg = cm.DEFAULT_CONFIG
+        for k in ("router_url", "bind_host", "bind_port", "intervals",
+                  "sample_window_s", "lxc_ram_ceilings", "rag_metrics_path"):
+            self.assertIn(k, cfg)
+        self.assertEqual(cfg["lxc_ram_ceilings"]["151"], 32768)
+
+    def test_load_config_missing_returns_defaults(self):
+        cfg = cm.load_config("/nonexistent/path.json")
+        self.assertEqual(cfg["router_url"], cm.DEFAULT_CONFIG["router_url"])
+
+    def test_load_config_overrides(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(_json.dumps({"bind_port": 9999, "bearer_token": "x"}))
+            path = f.name
+        cfg = cm.load_config(path)
+        os.unlink(path)
+        self.assertEqual(cfg["bind_port"], 9999)
+        self.assertEqual(cfg["bearer_token"], "x")
+        self.assertEqual(cfg["router_url"], cm.DEFAULT_CONFIG["router_url"])
+
+    def test_format_once_table(self):
+        results = [cm.CheckResult("anythingllm", "health", cm.STATUS_OK, "HTTP 200"),
+                   cm.CheckResult("gpu_vram_0", "metrics", cm.STATUS_FAIL, "99%")]
+        table = cm.format_once_table(results)
+        self.assertIn("anythingllm", table)
+        self.assertIn("FAIL", table)
+
+    def test_main_once_returns_1_on_fail(self):
+        # Point at a config whose endpoints all fail -> at least one FAIL.
+        rc = cm.main(["--once", "--config", "/nonexistent.json"])
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

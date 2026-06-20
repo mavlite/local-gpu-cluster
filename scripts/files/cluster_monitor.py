@@ -7,14 +7,17 @@ Python 3 standard library ONLY. v1 observes and suggests; it never mutates.
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -874,3 +877,112 @@ def make_handler(store: Store, cfg: dict):
 def build_server(store: Store, cfg: dict) -> ThreadingHTTPServer:
     return ThreadingHTTPServer(
         (cfg["bind_host"], int(cfg["bind_port"])), make_handler(store, cfg))
+
+
+# ─────────────────────────── 9. Config + main ───────────────────────────
+
+DEFAULT_CONFIG: dict = {
+    # endpoints
+    "router_url": "http://192.168.6.153:8000",
+    "anythingllm_url": "http://192.168.6.154:3001",
+    "mcp_sdg_url": "http://192.168.6.155:3004",
+    "memvault_rest_url": "http://192.168.6.223:8000",
+    "memvault_bridge_url": "http://192.168.6.223:3005/mcp",
+    "memvault_vmid": 156,
+    "router_vmid": 153,
+    "router_env_path": "/etc/router.env",
+    "tavily_query": "cluster monitor reachability probe",
+    # server
+    "bind_host": "127.0.0.1",
+    "bind_port": 8888,
+    "bearer_token": "",
+    "dashboard_title": "Cluster Monitor",
+    "sample_window_s": 3600,
+    "sample_retention_s": 86400,
+    "db_path": "/var/lib/cluster-monitor/state.db",
+    # collector
+    "intervals": {"health": 20, "metrics": 60, "freshness": 300},
+    "alert_cooldown_s": 900,
+    # checks
+    "lxc_ids": [151, 153, 154, 155, 156],
+    "lxc_ram_ceilings": {"151": 32768},
+    "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
+    "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
+    "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
+    "rag_metrics_path": "/var/lib/rag-refresh/metrics.prom",
+    "rag_stale_after_s": 93600,
+    "rag_timer_name": "rag-refresh.timer",
+    "backup_timer_name": "memory-vault-backup.timer",
+}
+
+
+def load_config(path) -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                cfg.update(json.load(fh))
+        except (ValueError, OSError) as e:
+            _LOG.warning("config %s unreadable (%s); using defaults", path, e)
+    return cfg
+
+
+def format_once_table(results: list[CheckResult]) -> str:
+    width = max((len(r.id) for r in results), default=4)
+    lines = []
+    for r in sorted(results, key=lambda x: (x.group, x.id)):
+        lines.append(f"{r.status.upper():5} {r.id:<{width}}  {r.detail}")
+    return "\n".join(lines)
+
+
+def _build(cfg: dict):
+    store = Store(cfg["db_path"])
+    notifier = LogNotifier(_LOG)
+    engine = AlertEngine(notifier, cooldown_s=cfg["alert_cooldown_s"])
+    collector = Collector(REGISTRY, store, Probes(), engine, cfg)
+    return store, collector
+
+
+def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    ap = argparse.ArgumentParser(description="Local GPU cluster monitor")
+    ap.add_argument("--config", default="/etc/cluster-monitor.json")
+    ap.add_argument("--once", action="store_true",
+                    help="run all checks once, print a table, exit")
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--port", type=int, default=None)
+    args = ap.parse_args(argv)
+
+    cfg = load_config(args.config)
+    if args.host:
+        cfg["bind_host"] = args.host
+    if args.port:
+        cfg["bind_port"] = args.port
+
+    if args.once:
+        # --once uses an in-memory store so it never touches the service DB.
+        cfg = dict(cfg, db_path=":memory:")
+        store, collector = _build(cfg)
+        results = collector.run_once()
+        print(format_once_table(results))
+        store.close()
+        return 1 if any(r.status == STATUS_FAIL for r in results) else 0
+
+    store, collector = _build(cfg)
+    collector.start()
+    server = build_server(store, cfg)
+    _LOG.info("serving on http://%s:%s", cfg["bind_host"], cfg["bind_port"])
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        collector.stop()
+        server.server_close()
+        store.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
