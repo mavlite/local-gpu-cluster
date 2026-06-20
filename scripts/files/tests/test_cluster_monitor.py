@@ -375,5 +375,87 @@ class TestMetricsChecks(unittest.TestCase):
         self.assertEqual(out[0].unit, "%")
 
 
+class TestPromParser(unittest.TestCase):
+    def test_parse_prom_labels_and_values(self):
+        text = (
+            "# HELP rag_refresh_last_run_timestamp x\n"
+            "# TYPE rag_refresh_last_run_timestamp gauge\n"
+            "rag_refresh_last_run_timestamp 1718764500\n"
+            'rag_refresh_run_total{status="ok"} 5\n'
+            'rag_refresh_run_total{status="error"} 1\n'
+        )
+        m = cm.parse_prom(text)
+        self.assertEqual(m["rag_refresh_last_run_timestamp"][0][1], 1718764500.0)
+        totals = {lbl["status"]: v for lbl, v in m["rag_refresh_run_total"]}
+        self.assertEqual(totals["error"], 1.0)
+
+
+class TestFreshnessChecks(unittest.TestCase):
+    CFG = {
+        "rag_metrics_path": "/var/lib/rag-refresh/metrics.prom",
+        "rag_stale_after_s": 93600,
+        "rag_timer_name": "rag-refresh.timer",
+        "backup_timer_name": "memory-vault-backup.timer",
+        "memvault_vmid": 156,
+        "lxc_ram_ceilings": {"151": 32768},
+        "router_url": "http://r:8000",
+        "router_vmid": 153,
+        "router_env_path": "/etc/router.env",
+        "tavily_query": "site reachability probe",
+    }
+
+    def test_rag_refresh_fresh_ok(self):
+        prom = "rag_refresh_last_run_timestamp 2000000\nrag_refresh_run_total{status=\"ok\"} 3\n"
+        fp = FakeProbes(cmd_map={
+            "cat /var/lib/rag-refresh/metrics.prom": cm.CmdResult(0, prom, ""),
+            "systemctl list-timers rag-refresh.timer --no-pager":
+                cm.CmdResult(0, "NEXT LEFT LAST PASSED UNIT\nx x x x rag-refresh.timer\n", "")})
+        out = {r.id: r for r in cm.check_rag_refresh(fp, self.CFG, now=2000300.0)}
+        self.assertEqual(out["rag_refresh"].status, cm.STATUS_OK)
+
+    def test_rag_refresh_stale_warns(self):
+        prom = "rag_refresh_last_run_timestamp 1000000\n"
+        fp = FakeProbes(cmd_map={
+            "cat /var/lib/rag-refresh/metrics.prom": cm.CmdResult(0, prom, ""),
+            "systemctl list-timers rag-refresh.timer --no-pager": cm.CmdResult(0, "", "")})
+        out = {r.id: r for r in cm.check_rag_refresh(fp, self.CFG, now=2000000.0)}
+        self.assertEqual(out["rag_refresh"].status, cm.STATUS_WARN)
+
+    def test_rag_refresh_missing_metrics_warns_with_action(self):
+        fp = FakeProbes()  # cat fails (127)
+        out = {r.id: r for r in cm.check_rag_refresh(fp, self.CFG, now=2000000.0)}
+        self.assertEqual(out["rag_refresh"].status, cm.STATUS_WARN)
+        self.assertIn("58-rag-refresh-timer", out["rag_refresh"].suggested_action)
+
+    def test_restart_policies_fail_when_not_unless_stopped(self):
+        docker_out = "/memory-vault-db-1 no\n/memory-vault-app-1 unless-stopped\n"
+        fp = FakeProbes(cmd_map={
+            "pct exec 156 -- docker inspect --format {{.Name}} {{.HostConfig.RestartPolicy.Name}} $(docker ps -aq)":
+                cm.CmdResult(0, docker_out, "")})
+        out = cm.check_restart_policies(fp, self.CFG)
+        self.assertEqual(out[0].status, cm.STATUS_FAIL)
+        self.assertIn("memory-vault-db-1", out[0].detail)
+
+    def test_lxc_ram_ceilings_drift_fails(self):
+        fp = FakeProbes(cmd_map={
+            "pct config 151": cm.CmdResult(0, "memory: 12288\n", "")})
+        out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
+        self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_FAIL)
+        self.assertIn("pct_set_mem(151, 32768)",
+                      out["lxc_ram_ceiling_151"].suggested_action)
+
+    def test_lxc_ram_ceilings_match_ok(self):
+        fp = FakeProbes(cmd_map={
+            "pct config 151": cm.CmdResult(0, "memory: 32768\n", "")})
+        out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
+        self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_OK)
+
+    def test_backup_timer_present_ok(self):
+        fp = FakeProbes(cmd_map={
+            "systemctl is-active memory-vault-backup.timer": cm.CmdResult(0, "active\n", "")})
+        out = cm.check_backup_timer(fp, self.CFG)
+        self.assertEqual(out[0].status, cm.STATUS_OK)
+
+
 if __name__ == "__main__":
     unittest.main()

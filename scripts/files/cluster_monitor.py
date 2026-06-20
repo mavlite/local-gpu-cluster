@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 import json
+import re
 import sqlite3
 import subprocess
 import urllib.error
@@ -266,6 +267,31 @@ class AlertEngine:
 
 
 # ─────────────────────── 5. Check helpers + parsers ───────────────────────
+
+_PROM_LINE = re.compile(r'^(?P<name>[a-zA-Z_:][\w:]*)(?:\{(?P<labels>[^}]*)\})?\s+(?P<val>[-+0-9.eE]+)\s*$')
+
+
+def parse_prom(text: str) -> dict[str, list[tuple[dict, float]]]:
+    out: dict[str, list[tuple[dict, float]]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _PROM_LINE.match(line)
+        if not m:
+            continue
+        labels: dict[str, str] = {}
+        if m.group("labels"):
+            for pair in m.group("labels").split(","):
+                if "=" in pair:
+                    k, _, v = pair.partition("=")
+                    labels[k.strip()] = v.strip().strip('"')
+        try:
+            val = float(m.group("val"))
+        except ValueError:
+            continue
+        out.setdefault(m.group("name"), []).append((labels, val))
+    return out
 
 
 @dataclass(frozen=True)
@@ -529,6 +555,113 @@ def check_lxc_mem(probes, cfg) -> list[CheckResult]:
     return out
 
 
+def check_rag_refresh(probes, cfg, now: float | None = None) -> list[CheckResult]:
+    import time as _t
+    now = _t.time() if now is None else now
+    res = probes.cmd(["cat", cfg["rag_metrics_path"]])
+    if res.rc != 0:
+        # No metrics file => the refresh has never run / timer not installed.
+        return [CheckResult(
+            "rag_refresh", "freshness", STATUS_WARN,
+            "no RAG refresh metrics found (timer not installed or never run)",
+            suggested_action="run scripts/58-rag-refresh-timer.sh on host")]
+    m = parse_prom(res.stdout)
+    last = m.get("rag_refresh_last_run_timestamp", [({}, 0.0)])[0][1]
+    age = now - last
+    errors = sum(v for lbl, v in m.get("rag_refresh_run_total", [])
+                 if lbl.get("status") in ("error", "halted"))
+    status = STATUS_OK
+    detail = f"last run {age/3600:.1f}h ago"
+    if errors > 0:
+        status, detail = STATUS_WARN, f"{int(errors)} source(s) errored; last run {age/3600:.1f}h ago"
+    if age > cfg["rag_stale_after_s"]:
+        status = STATUS_WARN
+        detail = f"stale: last successful run {age/3600:.1f}h ago"
+    out = [CheckResult("rag_refresh", "freshness", status, detail,
+                       value=round(age / 3600.0, 2), unit="h")]
+    return out
+
+
+def check_backup_timer(probes, cfg) -> list[CheckResult]:
+    res = probes.cmd(["systemctl", "is-active", cfg["backup_timer_name"]])
+    active = res.stdout.strip() == "active"
+    return [CheckResult(
+        "backup_timer", "freshness",
+        STATUS_OK if active else STATUS_WARN,
+        f"{cfg['backup_timer_name']} {res.stdout.strip() or 'inactive'}",
+        suggested_action=None if active else "enable_timer(memory-vault-backup.timer)")]
+
+
+def check_restart_policies(probes, cfg) -> list[CheckResult]:
+    vmid = cfg["memvault_vmid"]
+    res = probes.cmd([
+        "pct", "exec", str(vmid), "--", "docker", "inspect",
+        "--format", "{{.Name}} {{.HostConfig.RestartPolicy.Name}}",
+        "$(docker ps -aq)"])
+    if res.rc != 0:
+        return [CheckResult("restart_policies", "freshness", STATUS_WARN,
+                            f"could not inspect containers on LXC {vmid}")]
+    bad = []
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] != "unless-stopped":
+            bad.append(parts[0].lstrip("/"))
+    if bad:
+        return [CheckResult(
+            "restart_policies", "freshness", STATUS_FAIL,
+            f"not unless-stopped: {', '.join(bad)}",
+            suggested_action=f"docker update --restart unless-stopped {' '.join(bad)}")]
+    return [CheckResult("restart_policies", "freshness", STATUS_OK,
+                        "all Memory Vault containers restart unless-stopped")]
+
+
+def check_lxc_ram_ceilings(probes, cfg) -> list[CheckResult]:
+    out: list[CheckResult] = []
+    for vmid, expected in sorted(cfg.get("lxc_ram_ceilings", {}).items()):
+        conf = probes.cmd(["pct", "config", str(vmid)])
+        if conf.rc != 0:
+            out.append(CheckResult(f"lxc_ram_ceiling_{vmid}", "freshness", STATUS_WARN,
+                                   f"pct config {vmid} failed"))
+            continue
+        actual = None
+        for line in conf.stdout.splitlines():
+            if line.startswith("memory:"):
+                actual = int(line.split(":", 1)[1].strip() or 0)
+        if actual == int(expected):
+            out.append(CheckResult(f"lxc_ram_ceiling_{vmid}", "freshness", STATUS_OK,
+                                   f"LXC {vmid} ceiling {actual} MiB (expected)"))
+        else:
+            out.append(CheckResult(
+                f"lxc_ram_ceiling_{vmid}", "freshness", STATUS_FAIL,
+                f"LXC {vmid} ceiling {actual} MiB, expected {expected} MiB",
+                suggested_action=f"pct_set_mem({vmid}, {expected})"))
+    return out
+
+
+def check_tavily_proxy(probes, cfg) -> list[CheckResult]:
+    # Read ROUTER_API_KEY at runtime from the router LXC; never persist it.
+    keyres = probes.cmd([
+        "pct", "exec", str(cfg["router_vmid"]), "--",
+        "bash", "-lc",
+        f"set -a; . {cfg['router_env_path']} 2>/dev/null; printf %s \"$ROUTER_API_KEY\""])
+    key = keyres.stdout.strip()
+    if not key:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_WARN,
+                            "ROUTER_API_KEY unreadable; skipping Tavily probe")]
+    res = probes.http(
+        "POST", f"{cfg['router_url']}/v1/tavily/search",
+        headers={"Authorization": f"Bearer {key}"},
+        json_body={"query": cfg["tavily_query"], "max_results": 1})
+    if res.status == 200:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_OK, "Tavily proxy 200")]
+    if res.status == 503:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_FAIL,
+                            "Tavily 503 (key invalid or upstream down)",
+                            suggested_action="check TAVILY_API_KEY in /etc/router.env")]
+    return [CheckResult("tavily_proxy", "freshness", STATUS_WARN,
+                        f"Tavily proxy HTTP {res.status or 'unreachable'}")]
+
+
 REGISTRY.extend([
     Check("router_healthz", "health", check_router_healthz),
     Check("anythingllm", "health", check_anythingllm),
@@ -541,4 +674,9 @@ REGISTRY.extend([
     Check("host_cpu", "metrics", check_host_cpu),
     Check("zfs_arc", "metrics", check_zfs_arc),
     Check("lxc_mem", "metrics", check_lxc_mem),
+    Check("rag_refresh", "freshness", check_rag_refresh),
+    Check("backup_timer", "freshness", check_backup_timer),
+    Check("restart_policies", "freshness", check_restart_policies),
+    Check("lxc_ram_ceilings", "freshness", check_lxc_ram_ceilings),
+    Check("tavily_proxy", "freshness", check_tavily_proxy),
 ])
