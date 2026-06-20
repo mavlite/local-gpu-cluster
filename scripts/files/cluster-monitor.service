@@ -1,0 +1,19 @@
+[Unit]
+Description=Local GPU cluster monitor (read-only health/metrics dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: rocm-smi, pct, and pct-exec docker inspection are host-scoped
+# and require it. The service is READ-ONLY (no mutating commands) — see
+# docs/cluster-monitor-design.md sections 7-8 for the privilege footprint and
+# the hard security requirements before any future action layer is added.
+ExecStart=/usr/bin/python3 /opt/cluster-monitor/cluster_monitor.py --config /etc/cluster-monitor.json
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

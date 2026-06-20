@@ -1,8 +1,8 @@
 # Bootstrap scripts for local-gpu-cluster
 
-Idempotent automation of Phases 4–11 of [`setup-runbook.md`](../setup-runbook.md).
-Each script is independently runnable and may be invoked through the top-level
-orchestrator.
+Idempotent automation of Phases 4–11 of [`setup-runbook.md`](../setup-runbook.md), plus
+post-deployment phases 11.5–12.5. Each script is independently runnable and may be invoked through
+the top-level orchestrator.
 
 Once the cluster is deployed, see [`day-2-ops.md`](../day-2-ops.md) for operational
 procedures (health checks, model swaps, key rotation, RAG refresh, embedder
@@ -20,6 +20,9 @@ retuning, updates, hardware changes).
 | 10    | `57-configure-anythingllm.sh` | Create + tune RAG workspaces via REST API (needs `ALLM_API_KEY`) |
 | 10.5  | `58-rag-refresh-timer.sh` | Systemd timer (daily 03:15 UTC by default) running `scripts/rag/refresh.py` on the PVE host via `/opt/vcf-scraper-venv`. Emits Prometheus textfile metrics to `/var/lib/rag-refresh/metrics.prom` after each run. |
 | 11    | `60-verify.sh`          | Appendix C smoke tests                                     |
+| 11.5  | `61-lxc-memory-vault.sh` | Memory Vault LXC 156, Docker, ZFS dataset, docker compose stack with override config |
+| 12    | `62-memory-vault-bridge.sh` | MCP-over-SSE bridge in LXC 156 (port 3005), Python venv + mcp SDK + uvicorn, systemd unit |
+| 12.5  | `63-cluster-monitor.sh` | Read-only cluster health + metrics dashboard (host systemd service, port 8888), SQLite state, Python 3 stdlib only |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.
