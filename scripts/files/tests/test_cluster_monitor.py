@@ -186,5 +186,40 @@ class TestNotifiers(unittest.TestCase):
         self.assertTrue(any("router_chat_upstream" in m for m in caught.output))
 
 
+class TestCheckHelpers(unittest.TestCase):
+    def test_status_for_higher_is_worse(self):
+        self.assertEqual(cm.status_for(50, warn=90, fail=98), cm.STATUS_OK)
+        self.assertEqual(cm.status_for(92, warn=90, fail=98), cm.STATUS_WARN)
+        self.assertEqual(cm.status_for(99, warn=90, fail=98), cm.STATUS_FAIL)
+
+    def test_status_for_lower_is_worse(self):
+        # e.g. free memory percent: low is bad
+        self.assertEqual(
+            cm.status_for(5, warn=10, fail=3, higher_is_worse=False), cm.STATUS_WARN)
+        self.assertEqual(
+            cm.status_for(2, warn=10, fail=3, higher_is_worse=False), cm.STATUS_FAIL)
+        self.assertEqual(
+            cm.status_for(50, warn=10, fail=3, higher_is_worse=False), cm.STATUS_OK)
+
+    def test_http_alive_2xx_ok(self):
+        fp = FakeProbes(http_map={("GET", "http://h:3001/"): cm.HttpResult(200, "")})
+        status, _ = cm.http_alive(fp, "http://h:3001/")
+        self.assertEqual(status, cm.STATUS_OK)
+
+    def test_http_alive_transport_fail(self):
+        fp = FakeProbes()  # no route -> status 0
+        status, detail = cm.http_alive(fp, "http://h:3001/")
+        self.assertEqual(status, cm.STATUS_FAIL)
+        self.assertIn("no route", detail)
+
+    def test_http_alive_any_http_treats_4xx_as_alive(self):
+        fp = FakeProbes(http_map={("GET", "http://h:3005/mcp"): cm.HttpResult(406, "")})
+        status, _ = cm.http_alive(fp, "http://h:3005/mcp", alive_any_http=True)
+        self.assertEqual(status, cm.STATUS_OK)
+
+    def test_registry_exists_and_is_list(self):
+        self.assertIsInstance(cm.REGISTRY, list)
+
+
 if __name__ == "__main__":
     unittest.main()

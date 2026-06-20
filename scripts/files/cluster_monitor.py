@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
+from typing import Callable
 
 # ─────────────────────────── 1. Core types ───────────────────────────
 
@@ -262,3 +263,47 @@ class AlertEngine:
         if last_ts is None:
             return False
         return (now - last_ts) < self._cooldown_s
+
+
+# ─────────────────────── 5. Check helpers + parsers ───────────────────────
+
+
+@dataclass(frozen=True)
+class Check:
+    id: str
+    group: str
+    fn: "Callable[[Probes, dict], list[CheckResult]]"
+
+
+def status_for(value: float, warn: float, fail: float, *,
+               higher_is_worse: bool = True) -> str:
+    if higher_is_worse:
+        if value >= fail:
+            return STATUS_FAIL
+        if value >= warn:
+            return STATUS_WARN
+        return STATUS_OK
+    if value <= fail:
+        return STATUS_FAIL
+    if value <= warn:
+        return STATUS_WARN
+    return STATUS_OK
+
+
+def http_alive(probes, url: str, *, ok_statuses=None,
+               alive_any_http: bool = False) -> tuple[str, str]:
+    """Returns (status, detail). alive_any_http=True => any HTTP reply is ok."""
+    res = probes.http("GET", url)
+    if res.status == 0:
+        return STATUS_FAIL, f"unreachable: {res.error}"
+    if alive_any_http:
+        return STATUS_OK, f"HTTP {res.status}"
+    ok_statuses = ok_statuses or range(200, 400)
+    if res.status in ok_statuses:
+        return STATUS_OK, f"HTTP {res.status}"
+    return STATUS_FAIL, f"HTTP {res.status}"
+
+
+# ─────────────────────── 6. Checks + REGISTRY ───────────────────────
+
+REGISTRY: list[Check] = []
