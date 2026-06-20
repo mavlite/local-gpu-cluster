@@ -307,3 +307,71 @@ def http_alive(probes, url: str, *, ok_statuses=None,
 # ─────────────────────── 6. Checks + REGISTRY ───────────────────────
 
 REGISTRY: list[Check] = []
+
+
+def check_router_healthz(probes, cfg) -> list[CheckResult]:
+    res = probes.http("GET", f"{cfg['router_url']}/healthz")
+    if res.status == 0:
+        return [CheckResult(
+            "router_up", "health", STATUS_FAIL,
+            f"router unreachable: {res.error}",
+            suggested_action="restart_unit(153, llm-router)")]
+    try:
+        data = json.loads(res.body)
+    except ValueError:
+        return [CheckResult("router_up", "health", STATUS_FAIL,
+                            f"router /healthz non-JSON (HTTP {res.status})")]
+    out: list[CheckResult] = []
+    upstreams = data.get("upstream", {})
+    for name in ("chat", "embed", "rerank"):
+        up = bool(upstreams.get(name))
+        out.append(CheckResult(
+            f"router_{name}_upstream", "health",
+            STATUS_OK if up else STATUS_FAIL,
+            f"{name} upstream {'reachable' if up else 'DOWN'}",
+            suggested_action=None if up else f"restart_unit(151, llamacpp-{name})"))
+    profile = str(data.get("active_chat_profile", "unknown"))
+    out.append(CheckResult("loaded_chat_profile", "freshness", STATUS_INFO, profile))
+    ssc = data.get("seconds_since_chat")
+    if ssc is not None:
+        out.append(CheckResult(
+            "last_chat_completion", "freshness",
+            status_for(float(ssc), warn=3600, fail=86400),
+            f"{int(ssc)}s since last chat completion",
+            value=float(ssc), unit="s"))
+    return out
+
+
+def check_anythingllm(probes, cfg) -> list[CheckResult]:
+    status, detail = http_alive(probes, f"{cfg['anythingllm_url']}/")
+    return [CheckResult("anythingllm", "health", status, detail,
+                        suggested_action=None if status == STATUS_OK
+                        else "restart_unit(154, anythingllm)")]
+
+
+def check_mcp_sdg(probes, cfg) -> list[CheckResult]:
+    status, detail = http_alive(probes, f"{cfg['mcp_sdg_url']}/", alive_any_http=True)
+    return [CheckResult("mcp_sdg", "health", status, detail)]
+
+
+def check_memvault_rest(probes, cfg) -> list[CheckResult]:
+    status, detail = http_alive(probes, f"{cfg['memvault_rest_url']}/api/health")
+    return [CheckResult("memvault_rest", "health", status, detail,
+                        suggested_action=None if status == STATUS_OK
+                        else "compose_up(156)")]
+
+
+def check_memvault_bridge(probes, cfg) -> list[CheckResult]:
+    status, detail = http_alive(probes, cfg["memvault_bridge_url"], alive_any_http=True)
+    return [CheckResult("memvault_bridge", "health", status, detail,
+                        suggested_action=None if status == STATUS_OK
+                        else "restart_unit(156, memory-vault-bridge)")]
+
+
+REGISTRY.extend([
+    Check("router_healthz", "health", check_router_healthz),
+    Check("anythingllm", "health", check_anythingllm),
+    Check("mcp_sdg", "health", check_mcp_sdg),
+    Check("memvault_rest", "health", check_memvault_rest),
+    Check("memvault_bridge", "health", check_memvault_bridge),
+])

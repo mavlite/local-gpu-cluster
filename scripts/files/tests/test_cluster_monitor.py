@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import json as _json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -219,6 +220,59 @@ class TestCheckHelpers(unittest.TestCase):
 
     def test_registry_exists_and_is_list(self):
         self.assertIsInstance(cm.REGISTRY, list)
+
+
+class TestHealthChecks(unittest.TestCase):
+    CFG = {
+        "router_url": "http://r:8000",
+        "anythingllm_url": "http://a:3001",
+        "mcp_sdg_url": "http://m:3004",
+        "memvault_rest_url": "http://v:8000",
+        "memvault_bridge_url": "http://v:3005/mcp",
+    }
+
+    def test_router_healthz_parses_upstreams(self):
+        body = _json.dumps({
+            "upstream": {"chat": True, "embed": True, "rerank": False},
+            "active_chat_profile": "qwen3-coder",
+            "seconds_since_chat": 42,
+        })
+        fp = FakeProbes(http_map={
+            ("GET", "http://r:8000/healthz"): cm.HttpResult(200, body)})
+        out = {r.id: r for r in cm.check_router_healthz(fp, self.CFG)}
+        self.assertEqual(out["router_chat_upstream"].status, cm.STATUS_OK)
+        self.assertEqual(out["router_rerank_upstream"].status, cm.STATUS_FAIL)
+        self.assertEqual(out["loaded_chat_profile"].detail, "qwen3-coder")
+        self.assertEqual(out["last_chat_completion"].value, 42.0)
+
+    def test_router_healthz_unreachable_one_fail_tile(self):
+        fp = FakeProbes()
+        out = cm.check_router_healthz(fp, self.CFG)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].id, "router_up")
+        self.assertEqual(out[0].status, cm.STATUS_FAIL)
+
+    def test_anythingllm_ok(self):
+        fp = FakeProbes(http_map={("GET", "http://a:3001/"): cm.HttpResult(200, "")})
+        self.assertEqual(cm.check_anythingllm(fp, self.CFG)[0].status, cm.STATUS_OK)
+
+    def test_mcp_sdg_any_http_alive(self):
+        fp = FakeProbes(http_map={("GET", "http://m:3004/"): cm.HttpResult(404, "")})
+        self.assertEqual(cm.check_mcp_sdg(fp, self.CFG)[0].status, cm.STATUS_OK)
+
+    def test_memvault_rest_down(self):
+        fp = FakeProbes()
+        self.assertEqual(cm.check_memvault_rest(fp, self.CFG)[0].status, cm.STATUS_FAIL)
+
+    def test_memvault_bridge_alive_on_406(self):
+        fp = FakeProbes(http_map={("GET", "http://v:3005/mcp"): cm.HttpResult(406, "")})
+        self.assertEqual(cm.check_memvault_bridge(fp, self.CFG)[0].status, cm.STATUS_OK)
+
+    def test_health_checks_registered(self):
+        ids = {c.id for c in cm.REGISTRY}
+        for cid in ("router_healthz", "anythingllm", "mcp_sdg",
+                    "memvault_rest", "memvault_bridge"):
+            self.assertIn(cid, ids)
 
 
 if __name__ == "__main__":
