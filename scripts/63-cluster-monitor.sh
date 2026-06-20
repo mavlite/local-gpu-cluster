@@ -63,7 +63,11 @@ fi
 step "63.4 — Install + enable systemd unit"
 install -m 0644 "$UNIT_SRC" /etc/systemd/system/cluster-monitor.service
 systemctl daemon-reload
-systemctl enable --now cluster-monitor.service
+systemctl enable cluster-monitor.service
+# Use restart (not just `enable --now`) so re-running this installer to upgrade
+# actually reloads the new code — `enable --now` no-ops on an already-running
+# service and would leave the old code resident.
+systemctl restart cluster-monitor.service
 
 step "63.5 — Smoke-check"
 sleep 2
