@@ -569,6 +569,45 @@ class TestCollector(unittest.TestCase):
         store.close()
 
 
+class TestStoreConcurrency(unittest.TestCase):
+    def test_concurrent_record_and_snapshot_no_errors(self):
+        import os
+        import tempfile
+        import threading
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        store = cm.Store(path)
+        errors = []
+        N = 400
+
+        def writer():
+            for i in range(N):
+                try:
+                    store.record(
+                        cm.CheckResult("c%d" % (i % 5), "metrics",
+                                       cm.STATUS_OK, "d", value=float(i)),
+                        now=1000.0 + i)
+                except Exception as e:  # noqa: BLE001
+                    errors.append("w:" + repr(e))
+
+        def reader():
+            for _ in range(N):
+                try:
+                    store.snapshot(3600.0, now=5000.0)
+                except Exception as e:  # noqa: BLE001
+                    errors.append("r:" + repr(e))
+
+        threads = [threading.Thread(target=writer)]
+        threads += [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        store.close()
+        os.unlink(path)
+        self.assertEqual(errors, [], "concurrent Store access raised: %s" % errors[:3])
+
+
 class TestConfigAndCli(unittest.TestCase):
     def test_default_config_has_required_keys(self):
         cfg = cm.DEFAULT_CONFIG

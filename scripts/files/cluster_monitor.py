@@ -139,64 +139,68 @@ class Store:
 
     def __init__(self, path: str):
         self._db = sqlite3.connect(path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._db.executescript(_SCHEMA)
         self._db.commit()
 
     def record(self, result: CheckResult, now: float) -> str:
-        cur = self._db.execute(
-            "SELECT status, last_ok_at FROM check_state WHERE id=?", (result.id,)
-        )
-        row = cur.fetchone()
-        prev_status = row[0] if row else ""
-        prev_last_ok = row[1] if row else None
-        last_ok = now if result.status == STATUS_OK else prev_last_ok
-        self._db.execute(
-            "INSERT INTO check_state"
-            " (id, grp, status, detail, value, unit, suggested_action,"
-            "  updated_at, last_ok_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?)"
-            " ON CONFLICT(id) DO UPDATE SET"
-            "  grp=excluded.grp, status=excluded.status, detail=excluded.detail,"
-            "  value=excluded.value, unit=excluded.unit,"
-            "  suggested_action=excluded.suggested_action,"
-            "  updated_at=excluded.updated_at, last_ok_at=excluded.last_ok_at",
-            (result.id, result.group, result.status, result.detail, result.value,
-             result.unit, result.suggested_action, now, last_ok),
-        )
-        if result.value is not None:
-            self._db.execute(
-                "INSERT INTO samples (id, ts, value) VALUES (?,?,?)",
-                (result.id, now, float(result.value)),
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT status, last_ok_at FROM check_state WHERE id=?", (result.id,)
             )
-        self._db.commit()
-        return prev_status
+            row = cur.fetchone()
+            prev_status = row[0] if row else ""
+            prev_last_ok = row[1] if row else None
+            last_ok = now if result.status == STATUS_OK else prev_last_ok
+            self._db.execute(
+                "INSERT INTO check_state"
+                " (id, grp, status, detail, value, unit, suggested_action,"
+                "  updated_at, last_ok_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                "  grp=excluded.grp, status=excluded.status, detail=excluded.detail,"
+                "  value=excluded.value, unit=excluded.unit,"
+                "  suggested_action=excluded.suggested_action,"
+                "  updated_at=excluded.updated_at, last_ok_at=excluded.last_ok_at",
+                (result.id, result.group, result.status, result.detail, result.value,
+                 result.unit, result.suggested_action, now, last_ok),
+            )
+            if result.value is not None:
+                self._db.execute(
+                    "INSERT INTO samples (id, ts, value) VALUES (?,?,?)",
+                    (result.id, now, float(result.value)),
+                )
+            self._db.commit()
+            return prev_status
 
     def prune(self, now: float, retention_s: float) -> int:
-        cur = self._db.execute(
-            "DELETE FROM samples WHERE ts < ?", (now - retention_s,)
-        )
-        self._db.commit()
-        return cur.rowcount
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM samples WHERE ts < ?", (now - retention_s,)
+            )
+            self._db.commit()
+            return cur.rowcount
 
     def snapshot(self, sample_window_s: float, now: float) -> list[dict]:
-        out: list[dict] = []
-        rows = self._db.execute(
-            "SELECT id, grp, status, detail, value, unit, suggested_action,"
-            " updated_at, last_ok_at FROM check_state ORDER BY grp, id"
-        ).fetchall()
-        for r in rows:
-            cid = r[0]
-            samples = self._db.execute(
-                "SELECT ts, value FROM samples WHERE id=? AND ts>=? ORDER BY ts",
-                (cid, now - sample_window_s),
+        with self._lock:
+            out: list[dict] = []
+            rows = self._db.execute(
+                "SELECT id, grp, status, detail, value, unit, suggested_action,"
+                " updated_at, last_ok_at FROM check_state ORDER BY grp, id"
             ).fetchall()
-            out.append({
-                "id": cid, "group": r[1], "status": r[2], "detail": r[3],
-                "value": r[4], "unit": r[5], "suggested_action": r[6],
-                "updated_at": r[7], "last_ok_at": r[8],
-                "samples": [[s[0], s[1]] for s in samples],
-            })
-        return out
+            for r in rows:
+                cid = r[0]
+                samples = self._db.execute(
+                    "SELECT ts, value FROM samples WHERE id=? AND ts>=? ORDER BY ts",
+                    (cid, now - sample_window_s),
+                ).fetchall()
+                out.append({
+                    "id": cid, "group": r[1], "status": r[2], "detail": r[3],
+                    "value": r[4], "unit": r[5], "suggested_action": r[6],
+                    "updated_at": r[7], "last_ok_at": r[8],
+                    "samples": [[s[0], s[1]] for s in samples],
+                })
+            return out
 
     def close(self) -> None:
         self._db.close()
