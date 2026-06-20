@@ -72,7 +72,10 @@ LGC_DIR=scripts bash scripts/64-memory-vault-backup-timer.sh
 ```
 Host placement keeps scheduled jobs visible alongside `rag-refresh.timer` and matches
 what the cluster-monitor `backup_timer` check probes (`systemctl is-active
-memory-vault-backup.timer` on the host). Verify:
+memory-vault-backup.timer` on the host). The installer also **disables any
+pre-existing in-156 `memory-vault-backup.timer`** (earlier deploys installed one
+inside the container, where the host monitor can't see it) so backups don't run
+twice. Verify:
 ```bash
 systemctl list-timers memory-vault-backup.timer --no-pager   # NEXT/LAST populated
 pct exec 156 -- ls -lt /opt/memory-vault-data/backups        # expect memory_vault-*.sql.gz

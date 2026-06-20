@@ -80,14 +80,25 @@ EOF
 systemctl daemon-reload
 systemctl enable --now memory-vault-backup.timer
 
-step "64.3 — Run one backup now to validate (non-fatal)"
+step "64.3 — Disable any pre-existing in-LXC timer (avoid double backups)"
+# Earlier Memory Vault deploys may have installed an in-156 timer of the same
+# name. The host timer supersedes it (and is the one the cluster-monitor can
+# see), so disable the in-container one to prevent duplicate nightly dumps.
+if pct exec "$MEMVAULT_VMID" -- systemctl is-enabled memory-vault-backup.timer >/dev/null 2>&1; then
+  pct exec "$MEMVAULT_VMID" -- systemctl disable --now memory-vault-backup.timer
+  ok "Disabled in-LXC $MEMVAULT_VMID memory-vault-backup.timer (superseded by host timer)"
+else
+  skip "No enabled in-LXC backup timer to disable"
+fi
+
+step "64.4 — Run one backup now to validate (non-fatal)"
 if systemctl start memory-vault-backup.service; then
   ok "Initial backup completed"
 else
   warn "Initial backup run failed — check 'journalctl -u memory-vault-backup.service'"
 fi
 
-step "64.4 — Smoke-check timer state"
+step "64.5 — Smoke-check timer state"
 systemctl list-timers memory-vault-backup.timer --no-pager || true
 
 ok "Phase 64 complete."
