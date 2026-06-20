@@ -459,7 +459,7 @@ def check_memvault_bridge(probes, cfg) -> list[CheckResult]:
 
 
 def check_gpu_vram(probes, cfg) -> list[CheckResult]:
-    res = probes.cmd(["rocm-smi", "--showmeminfo", "vram", "--json"])
+    res = probes.cmd(["pct", "exec", str(cfg["gpu_vmid"]), "--", "rocm-smi", "--showmeminfo", "vram", "--json"])
     if res.rc != 0:
         return [CheckResult("gpu_vram", "metrics", STATUS_FAIL,
                             f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
@@ -476,7 +476,7 @@ def check_gpu_vram(probes, cfg) -> list[CheckResult]:
 
 
 def check_gpu_temp(probes, cfg) -> list[CheckResult]:
-    res = probes.cmd(["rocm-smi", "--showtemp", "--json"])
+    res = probes.cmd(["pct", "exec", str(cfg["gpu_vmid"]), "--", "rocm-smi", "--showtemp", "--json"])
     if res.rc != 0:
         return [CheckResult("gpu_temp", "metrics", STATUS_FAIL,
                             f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
@@ -894,6 +894,7 @@ DEFAULT_CONFIG: dict = {
     "memvault_bridge_url": "http://192.168.6.223:3005/mcp",
     "memvault_vmid": 156,
     "router_vmid": 153,
+    "gpu_vmid": 151,
     "router_env_path": "/etc/router.env",
     "tavily_query": "cluster monitor reachability probe",
     # server

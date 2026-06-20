@@ -324,6 +324,7 @@ class TestMetricsChecks(unittest.TestCase):
         "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
         "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
         "lxc_ids": [151],
+        "gpu_vmid": 151,
     }
 
     def test_gpu_vram_per_card_tiles(self):
@@ -332,7 +333,7 @@ class TestMetricsChecks(unittest.TestCase):
                       "VRAM Total Used Memory (B)": "33500000000"},  # ~97.5%
         })
         fp = FakeProbes(cmd_map={
-            "rocm-smi --showmeminfo vram --json": cm.CmdResult(0, text, "")})
+            "pct exec 151 -- rocm-smi --showmeminfo vram --json": cm.CmdResult(0, text, "")})
         out = cm.check_gpu_vram(fp, self.CFG)
         self.assertEqual(out[0].id, "gpu_vram_0")
         self.assertEqual(out[0].status, cm.STATUS_WARN)  # >=90 <98
@@ -341,7 +342,7 @@ class TestMetricsChecks(unittest.TestCase):
     def test_gpu_temp_fail_high(self):
         text = _json.dumps({"card0": {"Temperature (Sensor junction) (C)": "106"}})
         fp = FakeProbes(cmd_map={
-            "rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
         out = cm.check_gpu_temp(fp, self.CFG)
         self.assertEqual(out[0].status, cm.STATUS_FAIL)
 
@@ -374,6 +375,29 @@ class TestMetricsChecks(unittest.TestCase):
         out = cm.check_lxc_mem(fp, self.CFG)
         self.assertEqual(out[0].id, "lxc_mem_151")
         self.assertEqual(out[0].unit, "%")
+
+    def test_gpu_checks_parse_real_host_rocm_json(self):
+        vram = ('{"card0": {"VRAM Total Memory (B)": "32195477504",'
+                ' "VRAM Total Used Memory (B)": "26791415808"},'
+                ' "card1": {"VRAM Total Memory (B)": "32195477504",'
+                ' "VRAM Total Used Memory (B)": "25166573568"}}')
+        temp = ('{"card0": {"Temperature (Sensor edge) (C)": "31.0",'
+                ' "Temperature (Sensor junction) (C)": "32.0",'
+                ' "Temperature (Sensor memory) (C)": "32.0"},'
+                ' "card1": {"Temperature (Sensor edge) (C)": "28.0",'
+                ' "Temperature (Sensor junction) (C)": "29.0",'
+                ' "Temperature (Sensor memory) (C)": "30.0"}}')
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showmeminfo vram --json": cm.CmdResult(0, vram, ""),
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, temp, "")})
+        vres = {r.id: r for r in cm.check_gpu_vram(fp, self.CFG)}
+        self.assertEqual(set(vres), {"gpu_vram_0", "gpu_vram_1"})
+        self.assertEqual(vres["gpu_vram_0"].unit, "%")
+        self.assertEqual(vres["gpu_vram_0"].status, cm.STATUS_OK)   # ~83% < 90 warn
+        tres = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(tres["gpu_temp_0"].value, 32.0)   # junction, not edge(31) or memory(32 coincid.)
+        self.assertEqual(tres["gpu_temp_1"].value, 29.0)   # junction, not edge(28)
+        self.assertEqual(tres["gpu_temp_0"].status, cm.STATUS_OK)
 
 
 class TestPromParser(unittest.TestCase):
