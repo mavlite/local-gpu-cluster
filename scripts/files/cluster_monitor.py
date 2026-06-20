@@ -240,7 +240,7 @@ class AlertEngine:
     def __init__(self, notifier: Notifier, cooldown_s: float = 900.0):
         self._notifier = notifier
         self._cooldown_s = cooldown_s
-        self._last_fire: dict[str, tuple[str, float]] = {}  # id -> (status, ts)
+        self._last_fire: dict[tuple[str, str], float] = {}  # (id, status) -> ts
 
     def evaluate(self, result: CheckResult, prev_status: str, now: float):
         is_problem = result.status in _PROBLEM
@@ -249,7 +249,7 @@ class AlertEngine:
         if is_problem and not was_problem:
             if self._suppressed(result.id, result.status, now):
                 return None
-            self._last_fire[result.id] = (result.status, now)
+            self._last_fire[(result.id, result.status)] = now
             event = AlertEvent(result.id, "fired", result.status, result.detail, now)
         elif was_problem and result.status == STATUS_OK:
             event = AlertEvent(result.id, "resolved", result.status, result.detail, now)
@@ -258,8 +258,7 @@ class AlertEngine:
         return event
 
     def _suppressed(self, check_id: str, status: str, now: float) -> bool:
-        last = self._last_fire.get(check_id)
-        if last is None:
+        last_ts = self._last_fire.get((check_id, status))
+        if last_ts is None:
             return False
-        last_status, last_ts = last
-        return last_status == status and (now - last_ts) < self._cooldown_s
+        return (now - last_ts) < self._cooldown_s

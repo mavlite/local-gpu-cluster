@@ -163,6 +163,14 @@ class TestAlertEngine(unittest.TestCase):
         ev = self.eng.evaluate(self._r(cm.STATUS_WARN), prev_status="ok", now=100.0)
         self.assertEqual(ev.kind, "fired")
 
+    def test_cooldown_is_per_status_not_per_id(self):
+        # fail fires at t=100; a different-status (warn) fire at t=200 must not
+        # reset fail's cooldown -> a fail re-fire at t=300 (200s < 900s) stays suppressed.
+        self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=100.0)
+        self.eng.evaluate(self._r(cm.STATUS_WARN), prev_status="ok", now=200.0)
+        ev = self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=300.0)
+        self.assertIsNone(ev)
+
 
 class TestNotifiers(unittest.TestCase):
     def test_noop_send_is_silent(self):
