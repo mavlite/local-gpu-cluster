@@ -269,6 +269,15 @@ class TestHealthChecks(unittest.TestCase):
         fp = FakeProbes(http_map={("GET", "http://v:3005/mcp"): cm.HttpResult(406, "")})
         self.assertEqual(cm.check_memvault_bridge(fp, self.CFG)[0].status, cm.STATUS_OK)
 
+    def test_last_chat_completion_threshold_configurable(self):
+        body = _json.dumps({"upstream": {"chat": True, "embed": True, "rerank": True},
+                            "active_chat_profile": "p", "seconds_since_chat": 42})
+        fp = FakeProbes(http_map={
+            ("GET", "http://r:8000/healthz"): cm.HttpResult(200, body)})
+        cfg = dict(self.CFG, chat_idle_warn_s=10, chat_idle_fail_s=100)
+        out = {r.id: r for r in cm.check_router_healthz(fp, cfg)}
+        self.assertEqual(out["last_chat_completion"].status, cm.STATUS_WARN)  # 42 >= 10, < 100
+
     def test_health_checks_registered(self):
         ids = {c.id for c in cm.REGISTRY}
         for cid in ("router_healthz", "anythingllm", "mcp_sdg",
@@ -508,6 +517,10 @@ class TestDashboardHTML(unittest.TestCase):
         self.assertIn("location.hash", html)
         self.assertIn("history.replaceState", html)
 
+    def test_dashboard_rounds_displayed_values(self):
+        self.assertIn("Math.round", cm.DASHBOARD_HTML)
+        self.assertIn("fmtNum", cm.DASHBOARD_HTML)
+
 
 class TestRouting(unittest.TestCase):
     def _cfg(self, token=""):
@@ -672,6 +685,10 @@ class TestConfigAndCli(unittest.TestCase):
         table = cm.format_once_table(results)
         self.assertIn("anythingllm", table)
         self.assertIn("FAIL", table)
+
+    def test_default_config_has_chat_idle_thresholds(self):
+        self.assertEqual(cm.DEFAULT_CONFIG["chat_idle_warn_s"], 3600)
+        self.assertEqual(cm.DEFAULT_CONFIG["chat_idle_fail_s"], 86400)
 
     def test_main_once_returns_1_on_fail(self):
         # Point at a config whose endpoints all fail -> at least one FAIL.

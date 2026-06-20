@@ -426,7 +426,9 @@ def check_router_healthz(probes, cfg) -> list[CheckResult]:
     if ssc is not None:
         out.append(CheckResult(
             "last_chat_completion", "freshness",
-            status_for(float(ssc), warn=3600, fail=86400),
+            status_for(float(ssc),
+                       warn=cfg.get("chat_idle_warn_s", 3600),
+                       fail=cfg.get("chat_idle_fail_s", 86400)),
             f"{int(ssc)}s since last chat completion",
             value=float(ssc), unit="s"))
     return out
@@ -812,6 +814,7 @@ var CM_TOKEN = cmToken();
 function rel(ts){ if(!ts) return "never"; const s=Math.floor(Date.now()/1000-ts);
   if(s<60) return s+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago";
   if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+function fmtNum(v){ return (typeof v === "number" && isFinite(v)) ? (Math.round(v*10)/10) : v; }
 function spark(samples){
   if(!samples || samples.length<2) return "";
   const vs=samples.map(s=>s[1]); const min=Math.min(...vs), max=Math.max(...vs);
@@ -823,7 +826,7 @@ function spark(samples){
 }
 function tile(c){
   const v = (c.value!==null && c.value!==undefined) ?
-    '<span class="val">'+c.value+(c.unit||"")+'</span>' : "";
+    '<span class="val">'+fmtNum(c.value)+(c.unit||"")+'</span>' : "";
   const act = c.suggested_action ? '<div class="action">fix: '+c.suggested_action+'</div>' : "";
   return '<div class="tile '+c.status+'"><div class="id">'+c.id+v+'</div>'+
     '<div class="detail">'+(c.detail||"")+'</div>'+
@@ -930,6 +933,8 @@ DEFAULT_CONFIG: dict = {
     # checks
     "lxc_ids": [151, 153, 154, 155, 156],
     "lxc_ram_ceilings": {"151": 32768},
+    "chat_idle_warn_s": 3600,
+    "chat_idle_fail_s": 86400,
     "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
     "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
     "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
