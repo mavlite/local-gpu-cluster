@@ -60,6 +60,15 @@ EOF
   ok "Wrote $CONFIG_PATH"
 fi
 
+# The service binds to whatever is in the config (which we may have just left
+# as-is on a re-run). Read the effective bind back so the smoke-check + summary
+# below target the address the service actually listens on — not the env default
+# (a config bound to the LAN IP would otherwise fail a loopback probe).
+if [[ -f "$CONFIG_PATH" ]]; then
+  MON_BIND_HOST=$(python3 -c "import json;print(json.load(open('$CONFIG_PATH')).get('bind_host','$MON_BIND_HOST'))" 2>/dev/null || echo "$MON_BIND_HOST")
+  MON_BIND_PORT=$(python3 -c "import json;print(json.load(open('$CONFIG_PATH')).get('bind_port',$MON_BIND_PORT))" 2>/dev/null || echo "$MON_BIND_PORT")
+fi
+
 step "63.4 — Install + enable systemd unit"
 install -m 0644 "$UNIT_SRC" /etc/systemd/system/cluster-monitor.service
 systemctl daemon-reload
