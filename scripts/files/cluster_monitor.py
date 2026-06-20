@@ -922,7 +922,7 @@ def load_config(path) -> dict:
         try:
             with open(path, encoding="utf-8") as fh:
                 cfg.update(json.load(fh))
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, TypeError) as e:
             _LOG.warning("config %s unreadable (%s); using defaults", path, e)
     return cfg
 
@@ -971,15 +971,17 @@ def main(argv=None) -> int:
 
     store, collector = _build(cfg)
     collector.start()
-    server = build_server(store, cfg)
-    _LOG.info("serving on http://%s:%s", cfg["bind_host"], cfg["bind_port"])
+    server = None
     try:
+        server = build_server(store, cfg)
+        _LOG.info("serving on http://%s:%s", cfg["bind_host"], cfg["bind_port"])
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         collector.stop()
-        server.server_close()
+        if server is not None:
+            server.server_close()
         store.close()
     return 0
 

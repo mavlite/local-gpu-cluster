@@ -603,6 +603,15 @@ class TestConfigAndCli(unittest.TestCase):
         rc = cm.main(["--once", "--config", "/nonexistent.json"])
         self.assertEqual(rc, 1)
 
+    def test_load_config_non_dict_json_returns_defaults(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(_json.dumps([1, 2, 3]))   # valid JSON, not an object
+            path = f.name
+        cfg = cm.load_config(path)
+        os.unlink(path)
+        self.assertEqual(cfg["router_url"], cm.DEFAULT_CONFIG["router_url"])
+        self.assertEqual(cfg["bind_port"], cm.DEFAULT_CONFIG["bind_port"])
+
 
 if __name__ == "__main__":
     unittest.main()
