@@ -39,6 +39,55 @@ class TestProbes(unittest.TestCase):
         self.assertEqual(fp.cmd(["unknown"]).rc, 127)
 
 
+class TestStore(unittest.TestCase):
+    def setUp(self):
+        self.store = cm.Store(":memory:")
+
+    def tearDown(self):
+        self.store.close()
+
+    def _res(self, status, value=None):
+        return cm.CheckResult(id="gpu_vram_0", group="metrics",
+                              status=status, detail="d", value=value, unit="%")
+
+    def test_first_record_returns_empty_prev_status(self):
+        prev = self.store.record(self._res(cm.STATUS_OK, 10.0), now=100.0)
+        self.assertEqual(prev, "")
+
+    def test_record_returns_previous_status(self):
+        self.store.record(self._res(cm.STATUS_OK, 10.0), now=100.0)
+        prev = self.store.record(self._res(cm.STATUS_FAIL, 99.0), now=101.0)
+        self.assertEqual(prev, "ok")
+
+    def test_last_ok_at_only_set_on_ok(self):
+        self.store.record(self._res(cm.STATUS_OK, 10.0), now=100.0)
+        self.store.record(self._res(cm.STATUS_FAIL, 99.0), now=200.0)
+        snap = {s["id"]: s for s in self.store.snapshot(3600.0, now=250.0)}
+        self.assertEqual(snap["gpu_vram_0"]["last_ok_at"], 100.0)
+        self.assertEqual(snap["gpu_vram_0"]["status"], "fail")
+
+    def test_samples_recorded_and_windowed(self):
+        self.store.record(self._res(cm.STATUS_OK, 10.0), now=100.0)
+        self.store.record(self._res(cm.STATUS_OK, 20.0), now=160.0)
+        snap = {s["id"]: s for s in self.store.snapshot(120.0, now=200.0)}
+        vals = [v for _, v in snap["gpu_vram_0"]["samples"]]
+        self.assertEqual(vals, [10.0, 20.0])
+        # Narrow window drops the old sample.
+        snap2 = {s["id"]: s for s in self.store.snapshot(50.0, now=200.0)}
+        self.assertEqual([v for _, v in snap2["gpu_vram_0"]["samples"]], [20.0])
+
+    def test_value_none_records_no_sample(self):
+        self.store.record(self._res(cm.STATUS_OK, None), now=100.0)
+        snap = {s["id"]: s for s in self.store.snapshot(3600.0, now=200.0)}
+        self.assertEqual(snap["gpu_vram_0"]["samples"], [])
+
+    def test_prune_deletes_old_samples(self):
+        self.store.record(self._res(cm.STATUS_OK, 10.0), now=100.0)
+        self.store.record(self._res(cm.STATUS_OK, 20.0), now=1000.0)
+        deleted = self.store.prune(now=1000.0, retention_s=500.0)
+        self.assertEqual(deleted, 1)
+
+
 class TestCoreTypes(unittest.TestCase):
     def test_checkresult_to_dict_roundtrip(self):
         r = cm.CheckResult(
