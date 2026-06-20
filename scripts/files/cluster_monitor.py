@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import re
@@ -749,3 +750,51 @@ class Collector:
                 self._store.prune(now, retention)
             # Wake at the finest cadence; cheap no-op cycles otherwise.
             self._stop.wait(min(intervals.values()))
+
+
+# ─────────────────────────── 8. HTTP server ───────────────────────────
+
+DASHBOARD_HTML = "<html><body>dashboard pending</body></html>"  # replaced in Task 11
+
+
+def route(path: str, auth_header, store: Store, cfg: dict):
+    """Pure request router -> (http_status, content_type, body)."""
+    if path == "/healthz":
+        return 200, "application/json", json.dumps({"status": "ok"})
+    if path == "/" or path == "/index.html":
+        return 200, "text/html", DASHBOARD_HTML
+    if path == "/api/status":
+        token = cfg.get("bearer_token", "")
+        if token:
+            expected = f"Bearer {token}"
+            if auth_header != expected:
+                return 401, "application/json", json.dumps({"error": "unauthorized"})
+        snap = store.snapshot(cfg["sample_window_s"], now=time.time())
+        payload = {"title": cfg.get("dashboard_title", "Cluster Monitor"),
+                   "generated_at": time.time(), "checks": snap}
+        return 200, "application/json", json.dumps(payload)
+    return 404, "application/json", json.dumps({"error": "not found"})
+
+
+def make_handler(store: Store, cfg: dict):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            code, ctype, body = route(
+                self.path.split("?", 1)[0], self.headers.get("Authorization"),
+                store, cfg)
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, fmt, *args):  # quiet; journald handles logging
+            _LOG.debug("http %s", fmt % args)
+
+    return Handler
+
+
+def build_server(store: Store, cfg: dict) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer(
+        (cfg["bind_host"], int(cfg["bind_port"])), make_handler(store, cfg))

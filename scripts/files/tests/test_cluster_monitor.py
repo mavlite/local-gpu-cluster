@@ -457,6 +457,59 @@ class TestFreshnessChecks(unittest.TestCase):
         self.assertEqual(out[0].status, cm.STATUS_OK)
 
 
+class TestRouting(unittest.TestCase):
+    def _cfg(self, token=""):
+        return {"bearer_token": token, "sample_window_s": 3600,
+                "dashboard_title": "Cluster Monitor"}
+
+    def _store_with_one(self):
+        s = cm.Store(":memory:")
+        s.record(cm.CheckResult("anythingllm", "health", cm.STATUS_OK, "ok"), now=100.0)
+        return s
+
+    def test_healthz_ungated(self):
+        st = self._store_with_one()
+        code, ctype, body = cm.route("/healthz", None, st, self._cfg(token="secret"))
+        self.assertEqual(code, 200)
+        self.assertIn("ok", body)
+        st.close()
+
+    def test_api_status_returns_json(self):
+        st = self._store_with_one()
+        code, ctype, body = cm.route("/api/status", None, st, self._cfg())
+        self.assertEqual(code, 200)
+        self.assertEqual(ctype, "application/json")
+        data = _json.loads(body)
+        self.assertEqual(data["checks"][0]["id"], "anythingllm")
+        st.close()
+
+    def test_api_status_401_without_token(self):
+        st = self._store_with_one()
+        code, _, _ = cm.route("/api/status", None, st, self._cfg(token="secret"))
+        self.assertEqual(code, 401)
+        st.close()
+
+    def test_api_status_ok_with_token(self):
+        st = self._store_with_one()
+        code, _, _ = cm.route("/api/status", "Bearer secret", st, self._cfg(token="secret"))
+        self.assertEqual(code, 200)
+        st.close()
+
+    def test_unknown_path_404(self):
+        st = self._store_with_one()
+        code, _, _ = cm.route("/nope", None, st, self._cfg())
+        self.assertEqual(code, 404)
+        st.close()
+
+    def test_dashboard_root_served(self):
+        st = self._store_with_one()
+        code, ctype, body = cm.route("/", None, st, self._cfg())
+        self.assertEqual(code, 200)
+        self.assertEqual(ctype, "text/html")
+        self.assertIn("<html", body.lower())
+        st.close()
+
+
 class TestCollector(unittest.TestCase):
     def _cfg(self):
         return dict(TestHealthChecks.CFG, **{
