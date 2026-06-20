@@ -797,6 +797,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div id="root"></div>
 <script>
 const GROUPS = ["health","metrics","freshness"];
+function cmToken(){
+  // One-time capture from URL hash (e.g. #token=abc): store, then scrub the URL.
+  var h = location.hash || "";
+  var m = h.match(/token=([^&]+)/);
+  if(m){
+    try{ localStorage.setItem("cm_token", decodeURIComponent(m[1])); }catch(e){}
+    // Remove the fragment from the address bar without reloading.
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  try{ return localStorage.getItem("cm_token") || ""; }catch(e){ return ""; }
+}
+var CM_TOKEN = cmToken();
 function rel(ts){ if(!ts) return "never"; const s=Math.floor(Date.now()/1000-ts);
   if(s<60) return s+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago";
   if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
@@ -819,9 +831,16 @@ function tile(c){
 }
 async function refresh(){
   try{
-    const r = await fetch("/api/status", {cache:"no-store"});
-    if(!r.ok){ document.getElementById("root").innerHTML =
-      '<div class="down">API '+r.status+'</div>'; return; }
+    const opts = {cache:"no-store"};
+    if(CM_TOKEN){ opts.headers = {Authorization: "Bearer " + CM_TOKEN}; }
+    const r = await fetch("/api/status", opts);
+    if(!r.ok){
+      var msg = r.status===401
+        ? 'API 401 — unauthorized. Append #token=YOUR_TOKEN to the URL once.'
+        : 'API '+r.status;
+      document.getElementById("root").innerHTML = '<div class="down">'+msg+'</div>';
+      return;
+    }
     const data = await r.json();
     const byGroup = {}; GROUPS.forEach(g=>byGroup[g]=[]);
     data.checks.forEach(c=>{ (byGroup[c.group]=byGroup[c.group]||[]).push(c); });

@@ -496,6 +496,18 @@ class TestDashboardHTML(unittest.TestCase):
         for token in ("ok", "warn", "fail"):
             self.assertIn(token, html)
 
+    def test_dashboard_sends_bearer_token_when_present(self):
+        html = cm.DASHBOARD_HTML
+        self.assertIn("localStorage", html)
+        self.assertIn("Authorization", html)
+        self.assertIn("Bearer ", html)
+        self.assertIn("cm_token", html)
+
+    def test_dashboard_reads_token_from_hash_not_query(self):
+        html = cm.DASHBOARD_HTML
+        self.assertIn("location.hash", html)
+        self.assertIn("history.replaceState", html)
+
 
 class TestRouting(unittest.TestCase):
     def _cfg(self, token=""):
