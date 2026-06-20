@@ -304,6 +304,59 @@ def http_alive(probes, url: str, *, ok_statuses=None,
     return STATUS_FAIL, f"HTTP {res.status}"
 
 
+def _rocm_find(d: dict, needle: str):
+    for k, v in d.items():
+        if needle.lower() in k.lower():
+            return v
+    return None
+
+
+def parse_rocm_vram_json(text: str) -> list[tuple[int, float, float]]:
+    data = json.loads(text)
+    rows: list[tuple[int, float, float]] = []
+    for key, card in sorted(data.items()):
+        if not key.startswith("card") or not isinstance(card, dict):
+            continue
+        total = _rocm_find(card, "VRAM Total Memory")
+        used = _rocm_find(card, "VRAM Total Used Memory")
+        if total is None or used is None:
+            continue
+        idx = int(key.replace("card", "") or 0)
+        rows.append((idx, float(used) / 1048576.0, float(total) / 1048576.0))
+    return rows
+
+
+def parse_rocm_temp_json(text: str) -> list[tuple[int, float]]:
+    data = json.loads(text)
+    rows: list[tuple[int, float]] = []
+    for key, card in sorted(data.items()):
+        if not key.startswith("card") or not isinstance(card, dict):
+            continue
+        t = _rocm_find(card, "junction")
+        if t is None:
+            t = _rocm_find(card, "Temperature")
+        if t is None:
+            continue
+        idx = int(key.replace("card", "") or 0)
+        rows.append((idx, float(t)))
+    return rows
+
+
+def parse_meminfo(text: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        name, _, rest = line.partition(":")
+        parts = rest.split()
+        if parts:
+            try:
+                out[name.strip()] = float(parts[0])
+            except ValueError:
+                pass
+    return out
+
+
 # ─────────────────────── 6. Checks + REGISTRY ───────────────────────
 
 REGISTRY: list[Check] = []
@@ -368,10 +421,124 @@ def check_memvault_bridge(probes, cfg) -> list[CheckResult]:
                         else "restart_unit(156, memory-vault-bridge)")]
 
 
+def check_gpu_vram(probes, cfg) -> list[CheckResult]:
+    res = probes.cmd(["rocm-smi", "--showmeminfo", "vram", "--json"])
+    if res.rc != 0:
+        return [CheckResult("gpu_vram", "metrics", STATUS_FAIL,
+                            f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
+    out: list[CheckResult] = []
+    for idx, used, total in parse_rocm_vram_json(res.stdout):
+        pct = (used / total * 100.0) if total else 0.0
+        out.append(CheckResult(
+            f"gpu_vram_{idx}", "metrics",
+            status_for(pct, cfg["gpu_vram_warn_pct"], cfg["gpu_vram_fail_pct"]),
+            f"card {idx}: {used:.0f}/{total:.0f} MiB ({pct:.0f}%)",
+            value=round(pct, 1), unit="%"))
+    return out or [CheckResult("gpu_vram", "metrics", STATUS_FAIL,
+                               "no cards parsed from rocm-smi")]
+
+
+def check_gpu_temp(probes, cfg) -> list[CheckResult]:
+    res = probes.cmd(["rocm-smi", "--showtemp", "--json"])
+    if res.rc != 0:
+        return [CheckResult("gpu_temp", "metrics", STATUS_FAIL,
+                            f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
+    out: list[CheckResult] = []
+    for idx, temp in parse_rocm_temp_json(res.stdout):
+        out.append(CheckResult(
+            f"gpu_temp_{idx}", "metrics",
+            status_for(temp, cfg["gpu_temp_warn_c"], cfg["gpu_temp_fail_c"]),
+            f"card {idx} junction {temp:.0f}C", value=temp, unit="C"))
+    return out or [CheckResult("gpu_temp", "metrics", STATUS_FAIL,
+                               "no temps parsed from rocm-smi")]
+
+
+def check_host_mem(probes, cfg) -> list[CheckResult]:
+    res = probes.cmd(["cat", "/proc/meminfo"])
+    if res.rc != 0:
+        return [CheckResult("host_mem", "metrics", STATUS_FAIL, "no /proc/meminfo")]
+    m = parse_meminfo(res.stdout)
+    total, avail = m.get("MemTotal", 0.0), m.get("MemAvailable", 0.0)
+    pct_avail = (avail / total * 100.0) if total else 0.0
+    return [CheckResult(
+        "host_mem", "metrics",
+        status_for(pct_avail, cfg["host_mem_warn_pct"], cfg["host_mem_fail_pct"],
+                   higher_is_worse=False),
+        f"{avail/1048576:.1f} GiB avail of {total/1048576:.1f} GiB ({pct_avail:.0f}%)",
+        value=round(pct_avail, 1), unit="%")]
+
+
+def check_host_cpu(probes, cfg) -> list[CheckResult]:
+    load = probes.cmd(["cat", "/proc/loadavg"])
+    nproc = probes.cmd(["nproc"])
+    if load.rc != 0:
+        return [CheckResult("host_cpu", "metrics", STATUS_FAIL, "no /proc/loadavg")]
+    one = float(load.stdout.split()[0])
+    cores = int(nproc.stdout.strip() or "1") if nproc.rc == 0 else 1
+    ratio = one / cores if cores else one
+    return [CheckResult(
+        "host_cpu", "metrics",
+        status_for(ratio, warn=1.0, fail=2.0),
+        f"load1 {one:.2f} over {cores} cores ({ratio:.2f}/core)",
+        value=one, unit="load1")]
+
+
+def check_zfs_arc(probes, cfg) -> list[CheckResult]:
+    res = probes.cmd(["cat", "/proc/spl/kstat/zfs/arcstats"])
+    if res.rc != 0:
+        return [CheckResult("zfs_arc", "metrics", STATUS_INFO, "no ARC stats (no ZFS?)")]
+    size = c_max = 0.0
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "size":
+            size = float(parts[2])
+        elif len(parts) == 3 and parts[0] == "c_max":
+            c_max = float(parts[2])
+    pct = (size / c_max * 100.0) if c_max else 0.0
+    return [CheckResult("zfs_arc", "metrics", STATUS_INFO,
+                        f"ARC {size/1073741824:.1f} GiB of {c_max/1073741824:.1f} GiB cap",
+                        value=round(pct, 1), unit="%")]
+
+
+def check_lxc_mem(probes, cfg) -> list[CheckResult]:
+    out: list[CheckResult] = []
+    for vmid in cfg.get("lxc_ids", []):
+        conf = probes.cmd(["pct", "config", str(vmid)])
+        if conf.rc != 0:
+            out.append(CheckResult(f"lxc_mem_{vmid}", "metrics", STATUS_FAIL,
+                                   f"pct config {vmid} failed"))
+            continue
+        ceiling_mib = 0.0
+        for line in conf.stdout.splitlines():
+            if line.startswith("memory:"):
+                ceiling_mib = float(line.split(":", 1)[1].strip() or 0)
+        mi = probes.cmd(["pct", "exec", str(vmid), "--", "cat", "/proc/meminfo"])
+        if mi.rc != 0:
+            out.append(CheckResult(f"lxc_mem_{vmid}", "metrics", STATUS_WARN,
+                                   f"ceiling {ceiling_mib:.0f} MiB; usage unavailable"))
+            continue
+        m = parse_meminfo(mi.stdout)
+        total_kb, avail_kb = m.get("MemTotal", 0.0), m.get("MemAvailable", 0.0)
+        used_mib = (total_kb - avail_kb) / 1024.0
+        pct = (used_mib / ceiling_mib * 100.0) if ceiling_mib else 0.0
+        out.append(CheckResult(
+            f"lxc_mem_{vmid}", "metrics",
+            status_for(pct, warn=85, fail=95),
+            f"LXC {vmid}: {used_mib:.0f} MiB used of {ceiling_mib:.0f} MiB ceiling ({pct:.0f}%)",
+            value=round(pct, 1), unit="%"))
+    return out
+
+
 REGISTRY.extend([
     Check("router_healthz", "health", check_router_healthz),
     Check("anythingllm", "health", check_anythingllm),
     Check("mcp_sdg", "health", check_mcp_sdg),
     Check("memvault_rest", "health", check_memvault_rest),
     Check("memvault_bridge", "health", check_memvault_bridge),
+    Check("gpu_vram", "metrics", check_gpu_vram),
+    Check("gpu_temp", "metrics", check_gpu_temp),
+    Check("host_mem", "metrics", check_host_mem),
+    Check("host_cpu", "metrics", check_host_cpu),
+    Check("zfs_arc", "metrics", check_zfs_arc),
+    Check("lxc_mem", "metrics", check_lxc_mem),
 ])

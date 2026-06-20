@@ -275,5 +275,94 @@ class TestHealthChecks(unittest.TestCase):
             self.assertIn(cid, ids)
 
 
+class TestMetricsParsers(unittest.TestCase):
+    def test_parse_rocm_vram_json(self):
+        text = _json.dumps({
+            "card0": {"VRAM Total Memory (B)": "34359738368",
+                      "VRAM Total Used Memory (B)": "17179869184"},
+            "card1": {"VRAM Total Memory (B)": "34359738368",
+                      "VRAM Total Used Memory (B)": "1073741824"},
+        })
+        rows = cm.parse_rocm_vram_json(text)
+        self.assertEqual(len(rows), 2)
+        idx, used, total = rows[0]
+        self.assertEqual(idx, 0)
+        self.assertAlmostEqual(used, 16384.0, places=0)   # MiB
+        self.assertAlmostEqual(total, 32768.0, places=0)
+
+    def test_parse_rocm_temp_json(self):
+        text = _json.dumps({
+            "card0": {"Temperature (Sensor junction) (C)": "95.0"},
+            "card1": {"Temperature (Sensor junction) (C)": "60.0"},
+        })
+        rows = dict(cm.parse_rocm_temp_json(text))
+        self.assertEqual(rows[0], 95.0)
+        self.assertEqual(rows[1], 60.0)
+
+    def test_parse_meminfo(self):
+        text = "MemTotal:       65809920 kB\nMemAvailable:    6580992 kB\n"
+        d = cm.parse_meminfo(text)
+        self.assertEqual(d["MemTotal"], 65809920.0)
+        self.assertEqual(d["MemAvailable"], 6580992.0)
+
+
+class TestMetricsChecks(unittest.TestCase):
+    CFG = {
+        "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
+        "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
+        "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
+        "lxc_ids": [151],
+    }
+
+    def test_gpu_vram_per_card_tiles(self):
+        text = _json.dumps({
+            "card0": {"VRAM Total Memory (B)": "34359738368",
+                      "VRAM Total Used Memory (B)": "33500000000"},  # ~97.5%
+        })
+        fp = FakeProbes(cmd_map={
+            "rocm-smi --showmeminfo vram --json": cm.CmdResult(0, text, "")})
+        out = cm.check_gpu_vram(fp, self.CFG)
+        self.assertEqual(out[0].id, "gpu_vram_0")
+        self.assertEqual(out[0].status, cm.STATUS_WARN)  # >=90 <98
+        self.assertEqual(out[0].unit, "%")
+
+    def test_gpu_temp_fail_high(self):
+        text = _json.dumps({"card0": {"Temperature (Sensor junction) (C)": "106"}})
+        fp = FakeProbes(cmd_map={
+            "rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        out = cm.check_gpu_temp(fp, self.CFG)
+        self.assertEqual(out[0].status, cm.STATUS_FAIL)
+
+    def test_host_mem_low_available_warns(self):
+        text = "MemTotal: 1000 kB\nMemAvailable: 80 kB\n"  # 8% avail
+        fp = FakeProbes(cmd_map={"cat /proc/meminfo": cm.CmdResult(0, text, "")})
+        out = cm.check_host_mem(fp, self.CFG)
+        self.assertEqual(out[0].status, cm.STATUS_WARN)
+
+    def test_host_cpu_value(self):
+        fp = FakeProbes(cmd_map={
+            "cat /proc/loadavg": cm.CmdResult(0, "1.50 1.0 0.9 1/100 1234", ""),
+            "nproc": cm.CmdResult(0, "8\n", "")})
+        out = cm.check_host_cpu(fp, self.CFG)
+        self.assertEqual(out[0].value, 1.5)
+
+    def test_zfs_arc_value(self):
+        arcstats = "name type data\nsize 4 8589934592\nc_max 4 17179869184\n"
+        fp = FakeProbes(cmd_map={
+            "cat /proc/spl/kstat/zfs/arcstats": cm.CmdResult(0, arcstats, "")})
+        out = cm.check_zfs_arc(fp, self.CFG)
+        self.assertEqual(out[0].id, "zfs_arc")
+        self.assertAlmostEqual(out[0].value, 50.0, places=0)  # 8G of 16G cap
+
+    def test_lxc_mem_uses_ceiling_and_used(self):
+        fp = FakeProbes(cmd_map={
+            "pct config 151": cm.CmdResult(0, "memory: 32768\ncores: 8\n", ""),
+            "pct exec 151 -- cat /proc/meminfo":
+                cm.CmdResult(0, "MemTotal: 33554432 kB\nMemAvailable: 16777216 kB\n", "")})
+        out = cm.check_lxc_mem(fp, self.CFG)
+        self.assertEqual(out[0].id, "lxc_mem_151")
+        self.assertEqual(out[0].unit, "%")
+
+
 if __name__ == "__main__":
     unittest.main()
