@@ -457,6 +457,21 @@ class TestFreshnessChecks(unittest.TestCase):
         self.assertEqual(out[0].status, cm.STATUS_OK)
 
 
+class TestDashboardHTML(unittest.TestCase):
+    def test_html_is_self_contained(self):
+        html = cm.DASHBOARD_HTML
+        self.assertIn("<html", html.lower())
+        self.assertIn("/api/status", html)        # polls the API
+        self.assertNotIn("http://", html)         # no external assets
+        self.assertNotIn("https://", html)
+        self.assertIn("setInterval", html)        # auto-refresh
+
+    def test_html_references_status_classes(self):
+        html = cm.DASHBOARD_HTML
+        for token in ("ok", "warn", "fail"):
+            self.assertIn(token, html)
+
+
 class TestRouting(unittest.TestCase):
     def _cfg(self, token=""):
         return {"bearer_token": token, "sample_window_s": 3600,

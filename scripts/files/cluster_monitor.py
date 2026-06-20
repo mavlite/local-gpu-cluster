@@ -754,7 +754,83 @@ class Collector:
 
 # ─────────────────────────── 8. HTTP server ───────────────────────────
 
-DASHBOARD_HTML = "<html><body>dashboard pending</body></html>"  # replaced in Task 11
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Cluster Monitor</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; background:#0f1115; color:#e6e6e6; }
+  header { padding: 12px 20px; background:#171a21; border-bottom:1px solid #262b36;
+           display:flex; justify-content:space-between; align-items:center; }
+  h1 { font-size: 16px; margin:0; font-weight:600; }
+  #updated { font-size:12px; color:#8a93a6; }
+  .group { padding: 8px 20px 0; }
+  .group h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
+              color:#8a93a6; margin:14px 0 6px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; }
+  .tile { border:1px solid #262b36; border-radius:8px; padding:10px 12px; background:#141821; }
+  .tile .id { font-size:13px; font-weight:600; }
+  .tile .detail { font-size:12px; color:#aab2c5; margin-top:4px; }
+  .tile .meta { font-size:11px; color:#6f7891; margin-top:6px; }
+  .tile .action { font-size:11px; color:#d8a657; margin-top:4px; }
+  .tile.ok { border-left:4px solid #4caf50; }
+  .tile.warn { border-left:4px solid #e0a800; }
+  .tile.fail { border-left:4px solid #e05260; }
+  .tile.info { border-left:4px solid #4f86c6; }
+  .val { float:right; font-variant-numeric:tabular-nums; color:#cfd6e4; }
+  svg { display:block; margin-top:8px; }
+  .down { color:#e05260; padding:20px; }
+</style>
+</head>
+<body>
+<header><h1>Cluster Monitor</h1><span id="updated">connecting...</span></header>
+<div id="root"></div>
+<script>
+const GROUPS = ["health","metrics","freshness"];
+function rel(ts){ if(!ts) return "never"; const s=Math.floor(Date.now()/1000-ts);
+  if(s<60) return s+"s ago"; if(s<3600) return Math.floor(s/60)+"m ago";
+  if(s<86400) return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+function spark(samples){
+  if(!samples || samples.length<2) return "";
+  const vs=samples.map(s=>s[1]); const min=Math.min(...vs), max=Math.max(...vs);
+  const w=240,h=28,span=(max-min)||1;
+  const pts=samples.map((s,i)=>{const x=i/(samples.length-1)*w;
+    const y=h-((s[1]-min)/span)*h; return x.toFixed(1)+","+y.toFixed(1);}).join(" ");
+  return '<svg width="'+w+'" height="'+h+'"><polyline fill="none" stroke="#4f86c6" '+
+         'stroke-width="1.5" points="'+pts+'"/></svg>';
+}
+function tile(c){
+  const v = (c.value!==null && c.value!==undefined) ?
+    '<span class="val">'+c.value+(c.unit||"")+'</span>' : "";
+  const act = c.suggested_action ? '<div class="action">fix: '+c.suggested_action+'</div>' : "";
+  return '<div class="tile '+c.status+'"><div class="id">'+c.id+v+'</div>'+
+    '<div class="detail">'+(c.detail||"")+'</div>'+
+    '<div class="meta">last ok: '+rel(c.last_ok_at)+'</div>'+act+spark(c.samples)+'</div>';
+}
+async function refresh(){
+  try{
+    const r = await fetch("/api/status", {cache:"no-store"});
+    if(!r.ok){ document.getElementById("root").innerHTML =
+      '<div class="down">API '+r.status+'</div>'; return; }
+    const data = await r.json();
+    const byGroup = {}; GROUPS.forEach(g=>byGroup[g]=[]);
+    data.checks.forEach(c=>{ (byGroup[c.group]=byGroup[c.group]||[]).push(c); });
+    let html="";
+    Object.keys(byGroup).forEach(g=>{ if(!byGroup[g].length) return;
+      html += '<div class="group"><h2>'+g+'</h2><div class="grid">'+
+        byGroup[g].map(tile).join("")+'</div></div>'; });
+    document.getElementById("root").innerHTML = html;
+    document.getElementById("updated").textContent = "updated "+new Date().toLocaleTimeString();
+  }catch(e){ document.getElementById("updated").textContent = "offline"; }
+}
+refresh(); setInterval(refresh, 15000);
+</script>
+</body>
+</html>
+"""
 
 
 def route(path: str, auth_header, store: Store, cfg: dict):
