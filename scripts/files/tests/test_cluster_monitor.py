@@ -430,7 +430,7 @@ class TestFreshnessChecks(unittest.TestCase):
     def test_restart_policies_fail_when_not_unless_stopped(self):
         docker_out = "/memory-vault-db-1 no\n/memory-vault-app-1 unless-stopped\n"
         fp = FakeProbes(cmd_map={
-            "pct exec 156 -- docker inspect --format {{.Name}} {{.HostConfig.RestartPolicy.Name}} $(docker ps -aq)":
+            "pct exec 156 -- bash -lc docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}' $(docker ps -aq)":
                 cm.CmdResult(0, docker_out, "")})
         out = cm.check_restart_policies(fp, self.CFG)
         self.assertEqual(out[0].status, cm.STATUS_FAIL)

@@ -595,9 +595,9 @@ def check_backup_timer(probes, cfg) -> list[CheckResult]:
 def check_restart_policies(probes, cfg) -> list[CheckResult]:
     vmid = cfg["memvault_vmid"]
     res = probes.cmd([
-        "pct", "exec", str(vmid), "--", "docker", "inspect",
-        "--format", "{{.Name}} {{.HostConfig.RestartPolicy.Name}}",
-        "$(docker ps -aq)"])
+        "pct", "exec", str(vmid), "--", "bash", "-lc",
+        "docker inspect --format '{{.Name}} {{.HostConfig.RestartPolicy.Name}}'"
+        " $(docker ps -aq)"])
     if res.rc != 0:
         return [CheckResult("restart_policies", "freshness", STATUS_WARN,
                             f"could not inspect containers on LXC {vmid}")]
