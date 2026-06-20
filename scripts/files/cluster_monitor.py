@@ -317,7 +317,7 @@ def parse_rocm_vram_json(text: str) -> list[tuple[int, float, float]]:
     for key, card in sorted(data.items()):
         if not key.startswith("card") or not isinstance(card, dict):
             continue
-        total = _rocm_find(card, "VRAM Total Memory")
+        total = _rocm_find(card, "VRAM Total Memory (B)")
         used = _rocm_find(card, "VRAM Total Used Memory")
         if total is None or used is None:
             continue

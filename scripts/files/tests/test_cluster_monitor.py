@@ -305,6 +305,17 @@ class TestMetricsParsers(unittest.TestCase):
         self.assertEqual(d["MemTotal"], 65809920.0)
         self.assertEqual(d["MemAvailable"], 6580992.0)
 
+    def test_parse_rocm_vram_json_used_before_total(self):
+        # Key order with "Used" before "Total" must not confuse the total lookup.
+        text = _json.dumps({
+            "card0": {"VRAM Total Used Memory (B)": "1073741824",
+                      "VRAM Total Memory (B)": "34359738368"},
+        })
+        rows = cm.parse_rocm_vram_json(text)
+        idx, used, total = rows[0]
+        self.assertAlmostEqual(used, 1024.0, places=0)    # 1 GiB used
+        self.assertAlmostEqual(total, 32768.0, places=0)  # 32 GiB total
+
 
 class TestMetricsChecks(unittest.TestCase):
     CFG = {
