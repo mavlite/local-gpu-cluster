@@ -114,5 +114,69 @@ class TestCoreTypes(unittest.TestCase):
         self.assertIsNone(r.suggested_action)
 
 
+class RecordingNotifier(cm.Notifier):
+    def __init__(self):
+        self.events = []
+    def send(self, event):
+        self.events.append(event)
+
+
+class TestAlertEngine(unittest.TestCase):
+    def setUp(self):
+        self.n = RecordingNotifier()
+        self.eng = cm.AlertEngine(self.n, cooldown_s=900.0)
+
+    def _r(self, status):
+        return cm.CheckResult(id="router_chat_upstream", group="health",
+                              status=status, detail="d")
+
+    def test_ok_to_fail_fires(self):
+        ev = self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=100.0)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.kind, "fired")
+        self.assertEqual(self.n.events[-1].status, "fail")
+
+    def test_fail_to_ok_resolves(self):
+        self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=100.0)
+        ev = self.eng.evaluate(self._r(cm.STATUS_OK), prev_status="fail", now=200.0)
+        self.assertEqual(ev.kind, "resolved")
+
+    def test_steady_state_no_event(self):
+        ev = self.eng.evaluate(self._r(cm.STATUS_OK), prev_status="ok", now=100.0)
+        self.assertIsNone(ev)
+
+    def test_cooldown_suppresses_repeat_fire(self):
+        self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=100.0)
+        # Flap back then fail again inside the cooldown window -> suppressed.
+        self.eng.evaluate(self._r(cm.STATUS_OK), prev_status="fail", now=150.0)
+        ev = self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=200.0)
+        self.assertIsNone(ev)
+        # After cooldown elapses, it fires again.
+        ev2 = self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="ok", now=1200.0)
+        self.assertIsNotNone(ev2)
+
+    def test_first_sight_fail_fires(self):
+        ev = self.eng.evaluate(self._r(cm.STATUS_FAIL), prev_status="", now=100.0)
+        self.assertEqual(ev.kind, "fired")
+
+    def test_warn_counts_as_problem(self):
+        ev = self.eng.evaluate(self._r(cm.STATUS_WARN), prev_status="ok", now=100.0)
+        self.assertEqual(ev.kind, "fired")
+
+
+class TestNotifiers(unittest.TestCase):
+    def test_noop_send_is_silent(self):
+        cm.NoopNotifier().send(
+            cm.AlertEvent("x", "fired", "fail", "d", 1.0))  # must not raise
+
+    def test_log_notifier_writes(self):
+        import logging
+        logger = logging.getLogger("test_cm_alert")
+        with self.assertLogs(logger, level="WARNING") as caught:
+            cm.LogNotifier(logger).send(
+                cm.AlertEvent("router_chat_upstream", "fired", "fail", "down", 1.0))
+        self.assertTrue(any("router_chat_upstream" in m for m in caught.output))
+
+
 if __name__ == "__main__":
     unittest.main()

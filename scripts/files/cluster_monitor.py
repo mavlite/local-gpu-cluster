@@ -191,3 +191,75 @@ class Store:
 
     def close(self) -> None:
         self._db.close()
+
+
+# ─────────────────────────── 4. Alert engine ───────────────────────────
+
+_PROBLEM = frozenset({STATUS_WARN, STATUS_FAIL})
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    check_id: str
+    kind: str          # "fired" | "resolved"
+    status: str
+    detail: str
+    ts: float
+
+
+class Notifier:
+    def send(self, event: AlertEvent) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class NoopNotifier(Notifier):
+    def send(self, event: AlertEvent) -> None:
+        return None
+
+
+class LogNotifier(Notifier):
+    """Delivers to a stdlib logger -> journald under systemd."""
+
+    def __init__(self, logger):
+        self._log = logger
+
+    def send(self, event: AlertEvent) -> None:
+        if event.kind == "resolved":
+            self._log.info("RESOLVED %s: %s", event.check_id, event.detail)
+        else:
+            self._log.warning(
+                "ALERT %s [%s]: %s", event.check_id, event.status, event.detail
+            )
+
+
+class AlertEngine:
+    """Diffs new vs previous status and fires on transitions, with per-check
+    cooldown + dedup. Pure-ish: caller supplies prev_status and now.
+    """
+
+    def __init__(self, notifier: Notifier, cooldown_s: float = 900.0):
+        self._notifier = notifier
+        self._cooldown_s = cooldown_s
+        self._last_fire: dict[str, tuple[str, float]] = {}  # id -> (status, ts)
+
+    def evaluate(self, result: CheckResult, prev_status: str, now: float):
+        is_problem = result.status in _PROBLEM
+        was_problem = prev_status in _PROBLEM
+        event = None
+        if is_problem and not was_problem:
+            if self._suppressed(result.id, result.status, now):
+                return None
+            self._last_fire[result.id] = (result.status, now)
+            event = AlertEvent(result.id, "fired", result.status, result.detail, now)
+        elif was_problem and result.status == STATUS_OK:
+            event = AlertEvent(result.id, "resolved", result.status, result.detail, now)
+        if event is not None:
+            self._notifier.send(event)
+        return event
+
+    def _suppressed(self, check_id: str, status: str, now: float) -> bool:
+        last = self._last_fire.get(check_id)
+        if last is None:
+            return False
+        last_status, last_ts = last
+        return last_status == status and (now - last_ts) < self._cooldown_s
