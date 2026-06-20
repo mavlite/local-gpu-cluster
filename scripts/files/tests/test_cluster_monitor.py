@@ -457,5 +457,48 @@ class TestFreshnessChecks(unittest.TestCase):
         self.assertEqual(out[0].status, cm.STATUS_OK)
 
 
+class TestCollector(unittest.TestCase):
+    def _cfg(self):
+        return dict(TestHealthChecks.CFG, **{
+            "intervals": {"health": 20, "metrics": 60, "freshness": 300},
+            "sample_retention_s": 86400,
+        })
+
+    def test_run_checks_records_and_returns(self):
+        store = cm.Store(":memory:")
+        fp = FakeProbes(http_map={
+            ("GET", "http://a:3001/"): cm.HttpResult(200, "")})
+        eng = cm.AlertEngine(cm.NoopNotifier())
+        only = [c for c in cm.REGISTRY if c.id == "anythingllm"]
+        col = cm.Collector(only, store, fp, eng, self._cfg())
+        results = col.run_checks(groups={"health"}, now=100.0)
+        self.assertEqual(results[0].id, "anythingllm")
+        snap = store.snapshot(3600, now=100.0)
+        self.assertEqual(snap[0]["status"], "ok")
+        store.close()
+
+    def test_check_exception_becomes_fail_not_crash(self):
+        store = cm.Store(":memory:")
+        def boom(probes, cfg):
+            raise RuntimeError("kaboom")
+        col = cm.Collector([cm.Check("boom", "health", boom)], store,
+                           FakeProbes(), cm.AlertEngine(cm.NoopNotifier()), self._cfg())
+        results = col.run_checks(groups=None, now=100.0)
+        self.assertEqual(results[0].id, "boom")
+        self.assertEqual(results[0].status, cm.STATUS_FAIL)
+        self.assertIn("kaboom", results[0].detail)
+        store.close()
+
+    def test_run_once_runs_all_groups(self):
+        store = cm.Store(":memory:")
+        col = cm.Collector(
+            [cm.Check("a", "health", lambda p, c: [cm.CheckResult("a", "health", cm.STATUS_OK, "")]),
+             cm.Check("b", "freshness", lambda p, c: [cm.CheckResult("b", "freshness", cm.STATUS_OK, "")])],
+            store, FakeProbes(), cm.AlertEngine(cm.NoopNotifier()), self._cfg())
+        ids = {r.id for r in col.run_once()}
+        self.assertEqual(ids, {"a", "b"})
+        store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

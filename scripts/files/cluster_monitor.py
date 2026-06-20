@@ -10,9 +10,12 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass
 import json
+import logging
 import re
 import sqlite3
 import subprocess
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Callable
@@ -680,3 +683,69 @@ REGISTRY.extend([
     Check("lxc_ram_ceilings", "freshness", check_lxc_ram_ceilings),
     Check("tavily_proxy", "freshness", check_tavily_proxy),
 ])
+
+# ─────────────────────────── 7. Collector ───────────────────────────
+
+_LOG = logging.getLogger("cluster_monitor")
+
+
+class Collector:
+    def __init__(self, checks, store: Store, probes, alert_engine: AlertEngine,
+                 cfg: dict, now_fn=time.time):
+        self._checks = checks
+        self._store = store
+        self._probes = probes
+        self._alerts = alert_engine
+        self._cfg = cfg
+        self._now_fn = now_fn
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_run: dict[str, float] = {}
+
+    def run_checks(self, groups, now: float) -> list[CheckResult]:
+        results: list[CheckResult] = []
+        for check in self._checks:
+            if groups is not None and check.group not in groups:
+                continue
+            results.extend(self._run_one(check, now))
+        return results
+
+    def _run_one(self, check: Check, now: float) -> list[CheckResult]:
+        try:
+            produced = check.fn(self._probes, self._cfg)
+        except Exception as e:  # noqa: BLE001 - one bad check must not kill the cycle
+            _LOG.exception("check %s raised", check.id)
+            produced = [CheckResult(check.id, check.group, STATUS_FAIL,
+                                    f"check raised: {e}")]
+        for r in produced:
+            prev = self._store.record(r, now)
+            self._alerts.evaluate(r, prev, now)
+        return produced
+
+    def run_once(self) -> list[CheckResult]:
+        return self.run_checks(groups=None, now=self._now_fn())
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name="collector",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _loop(self) -> None:
+        intervals = self._cfg["intervals"]
+        retention = self._cfg["sample_retention_s"]
+        while not self._stop.is_set():
+            now = self._now_fn()
+            due = {g for g, iv in intervals.items()
+                   if now - self._last_run.get(g, 0.0) >= iv}
+            if due:
+                self.run_checks(groups=due, now=now)
+                for g in due:
+                    self._last_run[g] = now
+                self._store.prune(now, retention)
+            # Wake at the finest cadence; cheap no-op cycles otherwise.
+            self._stop.wait(min(intervals.values()))
