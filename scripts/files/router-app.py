@@ -317,6 +317,7 @@ BACKEND_TO_PROFILE: dict[str, str] = {
     "qwen3-coder":      "coder",
     "devstral":         "devstral",
     "devstral-large":   "devstral-large",
+    "qwen3.8":          "qwen3.8",
 }
 
 # Serializes concurrent auto-swap requests. Only one swap runs at a time.
@@ -397,6 +398,10 @@ STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() 
 #   enable_thinking  : bool — value to inject into chat_template_kwargs.
 #                             Client-supplied chat_template_kwargs takes
 #                             precedence (we setdefault, not overwrite).
+#   reasoning_effort : str|None — value to inject into chat_template_kwargs.
+#                             Qwen3.8 only; its template defaults to 'xhigh'.
+#                             Supported: 'xhigh', 'medium', 'low' ('high' is
+#                             silently remapped to 'xhigh' by the template).
 #   strip_thinking   : bool — whether to regex-strip <think>...</think> from
 #                             the response. Belt-and-suspenders for
 #                             enable_thinking=False cases where the model
@@ -434,6 +439,37 @@ ALIAS_MAP: dict[str, dict] = {
     # Devstral 2 (123B) UD-IQ2_M — full-size Mistral code model.
     # Same architecture class as devstral; no thinking mode injection.
     "devstral-large":   {"backend": "devstral-large", "enable_thinking": None, "strip_thinking": False},
+    # Qwen3.8-27B — DENSE 27B, hybrid Gated DeltaNet + Gated Attention, 262K.
+    # Thinking semantics match Qwen3.6 (same reasoning-first post-training), so
+    # the same three-alias shape applies. Backend alias is "qwen3.8"
+    # (config.env LLAMA_ALIAS), NOT "rag-qwen3.8" — unlike the Qwen3.6 profile
+    # where the backend itself is named rag-*.
+    #
+    # Token cost of thinking, measured 2026-08-19 on a one-line arithmetic probe:
+    #   thinking ON  -> 152 chars reasoning_content, 72 completion_tokens
+    #   thinking OFF ->   0 chars reasoning_content, 25 completion_tokens
+    # So thinking roughly TRIPLES the completion budget on short answers. That
+    # is the real reason rag-* exists: on a large (e.g. Tavily-enriched) prompt
+    # with a fixed max_tokens, reasoning can consume the whole budget and leave
+    # content empty with finish_reason="length".
+    # (An earlier single sample had thinking-OFF answer incorrectly; it did not
+    # replicate, so treat accuracy parity as unmeasured rather than degraded.)
+    #
+    # NOTE: the chat unit runs with --reasoning-format deepseek, so reasoning
+    # lands in a separate reasoning_content field and never pollutes content
+    # with inline <think>. strip_thinking stays True on the rag- alias purely
+    # as belt-and-braces if that flag is ever dropped.
+    "rag-qwen3.8":     {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
+    "qwen3.8-think":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "medium"},
+    "qwen3.8":         {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "medium"},
+    # Escape hatch: full-depth reasoning for hard one-off problems. Expect
+    # ~73s and ~2700 tokens per answer, and a real risk of finish_reason=
+    # "length" with empty content on constraint-heavy prompts. Do NOT point an
+    # agent loop at this.
+    "qwen3.8-xhigh":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "xhigh"},
 }
 
 
@@ -453,10 +489,12 @@ def resolve_alias(model: str) -> dict:
         return ALIAS_MAP[model]
     # Legacy fallback: any rag-* / -rag model name gets thinking-off behavior.
     if RAG_MODEL_RE.search(model):
-        return {"backend": model, "enable_thinking": False, "strip_thinking": True}
+        return {"backend": model, "enable_thinking": False, "strip_thinking": True,
+                "reasoning_effort": None}
     # Unknown model: pass through unchanged. llama-server will warn but serve
     # the loaded model regardless of the requested name.
-    return {"backend": model, "enable_thinking": None, "strip_thinking": False}
+    return {"backend": model, "enable_thinking": None, "strip_thinking": False,
+            "reasoning_effort": None}
 
 
 # Short-TTL cache of the backend the chat unit is currently serving, so the
@@ -1560,6 +1598,17 @@ async def chat(
     if alias_info["enable_thinking"] is not None:
         ctk = body.setdefault("chat_template_kwargs", {})
         ctk.setdefault("enable_thinking", alias_info["enable_thinking"])
+
+    # Qwen3.8's chat template defaults reasoning_effort to 'xhigh', which tells
+    # the model to "consider plausible alternatives" and makes it reason until it
+    # exhausts max_tokens on constraint-heavy prompts -- returning
+    # finish_reason="length" with EMPTY content. Measured 2026-08-19 on three
+    # such prompts x3 reps: xhigh 6/9 @ 73s/2709 tok, medium 9/9 @ 10s/482 tok,
+    # low 9/9 @ 9s/384 tok. Sampling, MTP and quantization were each ruled out
+    # first; this is the actual cause. setdefault so a client override wins.
+    if alias_info.get("reasoning_effort"):
+        ctk = body.setdefault("chat_template_kwargs", {})
+        ctk.setdefault("reasoning_effort", alias_info["reasoning_effort"])
 
     # Token-budget admission control. Use /tokenize on the chat upstream.
     # count_tokens returns -1 when /tokenize is unreachable (fail-open).

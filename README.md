@@ -8,7 +8,7 @@
 ![Model](https://img.shields.io/badge/chat-Qwen3.6--35B--A3B-blue)
 ![RAG](https://img.shields.io/badge/RAG-AnythingLLM%20%2B%20LanceDB-0a6cf5)
 
-Single-workstation LLM serving stack with all inference (chat + embedding + reranking) on two AMD Radeon Pro V620 cards running ROCm under Proxmox VE 9. Four LXCs separate the inference engine, an auth/admission router, the AnythingLLM RAG UI, and an MCP Docker host.
+Single-workstation LLM serving stack with all inference (chat + embedding + reranking) on two AMD Radeon Pro V620 cards running ROCm under Proxmox VE 9. Five LXCs separate the inference engine, an auth/admission router, the AnythingLLM RAG UI, an MCP Docker host, and the Memory Vault shared-memory service.
 
 This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and an older v1 build (Dell T7910 + 3× RTX 3060 with Ollama) are kept as historical reference.
 

@@ -304,7 +304,7 @@ LXCs are on a flat bridge (`vmbr0`) with each container getting its own DHCP-ass
 # /etc/network/interfaces (excerpt)
 auto vmbr0
 iface vmbr0 inet static
-    address 192.168.6.150/24       # host management IP
+    address 192.168.6.175/24       # host management IP
     gateway 192.168.6.1
     bridge-ports enp4s0            # 10 GbE Marvell AQC113CS
     bridge-stp off

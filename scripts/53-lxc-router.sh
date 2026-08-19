@@ -83,13 +83,13 @@ TOOL_EXECUTION_DEFAULT="${TOOL_EXECUTION_DEFAULT:-client}"
 # range deny list) are hardcoded in router-app.py.
 WEB_FETCH_MAX_SIZE_KB="${WEB_FETCH_MAX_SIZE_KB:-1024}"
 WEB_FETCH_TIMEOUT_SECONDS="${WEB_FETCH_TIMEOUT_SECONDS:-15}"
-PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.150}"
+PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.175}"
 METRICS_ALLOWED_IPS="${METRICS_ALLOWED_IPS:-127.0.0.1,${PROXMOX_HOST_IP}}"
 # CORS allow-origins. Needed when HTML pages loaded from file:// (Origin: null)
 # or arbitrary LAN origins call this router via fetch(). Default "*" is OK
 # because (a) this LXC sits on a LAN-only IP behind your firewall, and
 # (b) every protected endpoint already requires Bearer auth. Tighten to an
-# explicit comma-separated origin list (e.g., "http://192.168.6.150,https://app.lan")
+# explicit comma-separated origin list (e.g., "http://192.168.6.175,https://app.lan")
 # once the legitimate caller set is known.
 CORS_ALLOW_ORIGINS="${CORS_ALLOW_ORIGINS:-*}"
 
@@ -357,10 +357,24 @@ trap 'rm -rf "$tmpdir"' EXIT
 umask 077
 printf 'Authorization: Bearer %s\n' "$ROUTER_API_KEY" > "$tmpdir/auth"
 
+# Ask the router which alias the CURRENTLY LOADED profile answers to instead
+# of hardcoding one. Only one chat model is resident at a time and the router
+# 409s a cross-profile alias, so a fixed name silently breaks after any swap.
+# Prefers a rag-* (thinking-stripped) alias.
+MODEL=$(curl -s -m 10 -H "@$tmpdir/auth" http://127.0.0.1:8000/v1/models 2>/dev/null \
+  | python3 -c 'import sys,json
+try:
+    ids=[m["id"] for m in json.load(sys.stdin).get("data",[])]
+    chat=[i for i in ids if i not in ("qwen3-embed","bge-rerank")]
+    print(next((i for i in chat if i.startswith("rag-")), chat[0] if chat else ""))
+except Exception:
+    print("")')
+[ -z "$MODEL" ] && MODEL=rag-qwen3.8
+
 curl -s -m 30 -o /dev/null \
     -H "@$tmpdir/auth" \
     -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"."}],"max_tokens":1}' \
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\".\"}],\"max_tokens\":1}" \
     http://127.0.0.1:8000/v1/chat/completions || true
 SH
     chmod 0755 /usr/local/bin/llm-router-keepalive.sh
