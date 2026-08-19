@@ -26,7 +26,7 @@ AMD_CORES="${AMD_CORES:-8}"
 # + ~29 GB model mmap need this headroom; a smaller ceiling makes the cgroup reclaim
 # the mmap'd weight pages mid-DMA, causing SDMA host->device page faults on model
 # load (incident 2026-06-19, when this was 12288). See operator notes / day-2-ops.
-AMD_MEMORY="${AMD_MEMORY:-32768}"
+AMD_MEMORY="${AMD_MEMORY:-65536}"
 AMD_SWAP="${AMD_SWAP:-8192}"
 AMD_ROOTFS_SIZE="${AMD_ROOTFS_SIZE:-64}"
 LXC_STORAGE="${LXC_STORAGE:-local-lvm}"   # V620-only: ext4 + LVM-thin (was local-zfs)

@@ -372,7 +372,7 @@ The boot drive uses **ext4 with LVM** (not ZFS). Rationale:
 4. Filesystem: **ext4**
 5. Set the advanced options (values below assume a **1 TB boot NVMe**; scale proportionally — see notes):
    - `hdsize`: leave default (full disk)
-   - `swapsize`: **8** (8 GB — emergency cushion only; the host has 64 GB RAM)
+   - `swapsize`: **8** (8 GB — emergency cushion only; the host has 128 GB RAM)
    - `maxroot`: **64** (64 GB for `pve/root` — holds the OS, `/var/log`, and `/var/lib/vz` which is `local` storage. Backups land on `/tank/backups`, not here.)
    - `minfree`: **32** (32 GB LVM-thin reserve — never let the thin pool fill or it corrupts)
    - `maxvz`: leave default (auto-computed as `hdsize − maxroot − swapsize − minfree` ≈ 896 GB on a 1 TB drive; this becomes `local-lvm` for LXC rootfs)
@@ -400,7 +400,7 @@ Set per your location. Typical:
 
 - Management interface: select the **10 GbE Marvell** port (likely `enp4s0`, but verify against the wired connection actually plugged in)
 - Hostname (FQDN): `gpu-cluster.local` (or per your local convention)
-- IP address (CIDR): `192.168.6.150/24` (or your chosen static IP)
+- IP address (CIDR): `192.168.6.175/24` (or your chosen static IP)
 - Gateway: `192.168.6.1`
 - DNS server: your local DNS (e.g., `192.168.6.1` or `1.1.1.1`)
 
@@ -413,7 +413,7 @@ Click "Install" and wait ~5 minutes. The system will reboot when complete.
 After reboot, access the web UI from another machine:
 
 ```
-https://192.168.6.150:8006
+https://192.168.6.175:8006
 ```
 
 Log in as `root@pam` with the password set during install. Accept the self-signed certificate warning.
@@ -423,7 +423,7 @@ Log in as `root@pam` with the password set during install. Accept the self-signe
 SSH into the host:
 
 ```bash
-ssh root@192.168.6.150
+ssh root@192.168.6.175
 ```
 
 Disable the enterprise repos and enable no-subscription:
@@ -467,7 +467,7 @@ free -h | head -2
 ```
 
 **Stop and verify before proceeding:**
-- [ ] Web UI accessible at https://192.168.6.150:8006
+- [ ] Web UI accessible at https://192.168.6.175:8006
 - [ ] CPU correctly identified
 - [ ] All RAM detected
 - [ ] No-subscription repo working (`apt update` succeeds)
@@ -688,11 +688,11 @@ zfs list
 
 **ZFS ARC tuning (important — boot drive is ext4, but `/tank` is ZFS):**
 
-ZFS will use up to 50% of host RAM for ARC by default. On this **64 GB** system that's 32 GB — far more than you want, given LXCs need RAM for model inference and you want headroom for proxmox/hyper-V validation-lab VMs. Cap ARC at a sensible value (8 GB is comfortable here — measured ARC working set sits around 6 GB):
+ZFS will use up to 50% of host RAM for ARC by default. On this **128 GB** system that's 64 GB — more than you want, given LXCs need RAM for model inference and you want headroom for proxmox/hyper-V validation-lab VMs. Cap it explicitly. **16 GB** is the current setting (raised from 8 GB on 2026-08-19 with the RAM upgrade): the old 8 GB cap sat permanently full against a 180 GB model dataset, so model loads and profile swaps were re-reading from disk every time:
 
 ```bash
-# Cap ARC at 8 GB (adjust based on your RAM and workload)
-echo "options zfs zfs_arc_max=8589934592" > /etc/modprobe.d/zfs.conf
+# Cap ARC at 16 GB (adjust based on your RAM and workload)
+echo "options zfs zfs_arc_max=17179869184" > /etc/modprobe.d/zfs.conf
 update-initramfs -u
 # Takes effect on next reboot, or live with:
 echo 8589934592 > /sys/module/zfs/parameters/zfs_arc_max
@@ -1772,7 +1772,7 @@ MAX_CHAT_INPUT_TOKENS=100000
 MAX_EMBED_INPUT_TOKENS=8192
 RATE_LIMIT_CHAT=60/minute
 RATE_LIMIT_EMBED=200/minute
-METRICS_ALLOWED_IPS=127.0.0.1,192.168.6.150
+METRICS_ALLOWED_IPS=127.0.0.1,192.168.6.175
 EOF
   # Preserve existing API key lines
   grep -E "^(ROUTER_API_KEY|LLAMACPP_API_KEY)=" /etc/router.env >> /tmp/router-env-new
@@ -3564,7 +3564,7 @@ scrape_configs:
   # Proxmox VE itself via PVE Exporter
   - job_name: 'pve'
     static_configs:
-      - targets: ['192.168.6.150:9221']
+      - targets: ['192.168.6.175:9221']
 EOF
 
 docker compose up -d

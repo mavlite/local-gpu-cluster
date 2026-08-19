@@ -71,7 +71,7 @@ pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank
 curl -sf http://192.168.6.153:8000/healthz | jq
 
 # ROCm sees both V620s
-pct exec 151 -- rocminfo 2>/dev/null | grep -c "gfx1030"   # expect 2
+pct exec 151 -- rocminfo 2>/dev/null | grep -c "Device Type:.*GPU"   # expect 2
 
 # Fan-bridge (only if 56-fan-control.sh was run)
 systemctl is-active v620-fan-bridge.service 2>/dev/null && cat /var/lib/v620-temps/current-temp
@@ -119,7 +119,7 @@ awk -v cutoff=$(($(date +%s) - 3600)) '$0 ~ /"ts": [0-9]+\.[0-9]+/ {print}' acce
 **Prometheus / metrics endpoint:**
 
 - URL: `http://192.168.6.153:8000/metrics`
-- IP-allowlisted via `METRICS_ALLOWED_IPS` (default `127.0.0.1,192.168.6.150` per [`scripts/53-lxc-router.sh`](./scripts/53-lxc-router.sh)). Calls from other IPs get 403.
+- IP-allowlisted via `METRICS_ALLOWED_IPS` (default `127.0.0.1,192.168.6.175` per [`scripts/53-lxc-router.sh`](./scripts/53-lxc-router.sh)). Calls from other IPs get 403.
 - Sample query (from the PVE host or loopback):
 
 ```bash
@@ -156,10 +156,14 @@ pct exec 151 -- rocm-smi --showuse --showmemuse --showtemp -d 0 1
 
 A healthy cluster shows:
 
-- All 4 LXCs `running` in `pct list`
+- All 5 LXCs `running` in `pct list` (151, 153, 154, 155, 156)
 - 3 services `active` on LXC 151 (chat / embed / rerank)
 - Router `/healthz` returns `{"ok": true, "upstream": {"chat": "ok", "embed": "ok", "rerank": "ok"}}`
-- ROCm shows exactly 2 `gfx1030` agents
+- ROCm shows exactly 2 GPU agents
+  > **Do not count `gfx1030` lines.** `rocminfo` prints that string twice per
+  > agent (`Name: gfx1030` and `Name: amdgcn-amd-amdhsa--gfx1030`), so
+  > `grep -c "gfx1030"` returns **4** on ROCm 7.2.3 and reads as a failure.
+  > Count `Device Type:.*GPU` instead. (Corrected 2026-08-19.)
 - V620 temps idle around 30-45°C, under load 60-80°C (fan bridge keeps cards below 85°C)
 - `/tank` has at least 15% free
 - Access log has recent entries with `status: 200` and `duration_ms` consistent with [§ 12](#-12-performance-baselines) expectations
@@ -248,7 +252,7 @@ If an upstream is wedged, restart it: `pct exec 151 -- systemctl restart llamacp
 ### § 3.5 ROCm only sees one V620
 
 ```bash
-pct exec 151 -- rocminfo | grep -c "gfx1030"   # should be 2
+pct exec 151 -- rocminfo | grep -c "Device Type:.*GPU"   # should be 2
 ```
 
 If it returns 1 (or 0):
@@ -790,7 +794,7 @@ Default `CORS_ALLOW_ORIGINS=*` is fine for a LAN-only cluster but can be tighten
 
 ```bash
 # config.env
-CORS_ALLOW_ORIGINS=http://192.168.6.150,https://app.lan,file://
+CORS_ALLOW_ORIGINS=http://192.168.6.175,https://app.lan,file://
 ```
 
 Comma-separated. The router falls back to `["*"]` if the env var is empty. CORS preflight (OPTIONS) bypasses Bearer auth so the browser can complete the preflight before sending the actual authed request.
@@ -1371,12 +1375,15 @@ Recommended cadence:
 | 153 (llm-router) | Weekly | Stateless; rebuild via 53-lxc-router.sh is fast |
 | 154 (anythingllm) | **Daily** | Stateful (LanceDB, workspace settings); irreplaceable without re-embed |
 | 155 (mcp-stack) | Weekly | Mostly Docker images + Python venv |
+| 156 (memory-vault) | **Daily** | Stateful (shared-memory DB); the nightly dump timer (`scripts/64-memory-vault-backup-timer.sh`) covers the DB, but not the container itself |
 
 Set up via PVE web UI → Datacenter → Backup → Add, or via cron:
 
 ```bash
 # /etc/cron.d/cluster-vzdump
-30 2 * * *     root  vzdump 154 --storage tank-backups --mode snapshot --compress zstd
+# Stateful daily. 156 (memory-vault) was MISSING here until 2026-08-19.
+30 2 * * *     root  vzdump 154 156 --storage tank-backups --mode snapshot --compress zstd
+# Stateless weekly.
 30 2 * * 0     root  vzdump 151 153 155 --storage tank-backups --mode snapshot --compress zstd
 ```
 
@@ -1463,9 +1470,37 @@ zpool scrub tank       # monthly; reads every block + checksums (takes hours)
 ### § 11.1 Pre-update snapshot (always do this first)
 
 ```bash
-zfs snapshot -r tank@pre-update-$(date +%Y%m%d-%H%M)
-vzdump 154 --storage tank-backups --mode snapshot --compress zstd  # stateful LXC only
+TS=$(date +%Y%m%d-%H%M)
+
+# 1. ZFS snapshot — covers the BIND-MOUNTED data only:
+#    /tank/models, /tank/anythingllm, /tank/memory-vault, /tank/mcp
+zfs snapshot -r tank@pre-update-$TS
+
+# 2. vzdump — covers the LXC ROOTFS, which ZFS does NOT.
+#    Every rootfs lives on local-lvm (`pct config <vmid> | grep rootfs`), so the
+#    snapshot above protects none of it: not /opt/llama.cpp/build, not the ROCm
+#    install, not the router/MCP venvs. Dump all five.
+vzdump 151 153 154 155 156 --storage tank-backups \n  --mode snapshot --compress zstd --notes-template "pre-update $TS"
+
+# 3. Record what you are rolling back TO — "roll back to a known-good commit"
+#    (§ 11.4) needs a commit to name.
+mkdir -p /root/pre-update-$TS
+{
+  pveversion; uname -r; zfs version | head -1
+  pct exec 151 -- /opt/llama.cpp/build/bin/llama-server --version 2>&1 | head -1
+  pct exec 151 -- bash -c 'cd /opt/llama.cpp && git rev-parse HEAD'
+  pct exec 151 -- cat /opt/rocm/.info/version
+  pct exec 151 -- rocm-smi --showmeminfo vram
+} > /root/pre-update-$TS/manifest.txt 2>&1
+cp /root/local-gpu-cluster/scripts/config.env /root/pre-update-$TS/
 ```
+
+> **Sizing:** the full five-LXC dump was 24 GB / 2m22s as measured 2026-08-19
+> (151 alone is 16.2 GB). `tank-backups` had 743 GB free.
+
+> **Capture a performance baseline too**, not just a liveness check — see the
+> Verification block at the end of this section. Without a before-number you
+> cannot tell an upgrade regression from noise.
 
 ### § 11.2 PVE host update
 
@@ -1479,7 +1514,7 @@ apt full-upgrade -y
 After reboot, verify everything came up:
 
 ```bash
-pct list                       # all 4 running
+pct list                       # all 5 running (151/153/154/155/156)
 systemctl is-active v620-fan-bridge.service 2>/dev/null
 zpool status tank
 ```
@@ -1489,9 +1524,9 @@ zpool status tank
 Per-LXC apt upgrade:
 
 ```bash
-for vmid in 151 153 154 155; do
+for vmid in 151 153 154 155 156; do   # 156 = memory-vault; do not omit it
   echo "=== $vmid ==="
-  pct exec $vmid -- bash -c "apt update && apt upgrade -y"
+  pct exec $vmid -- env DEBIAN_FRONTEND=noninteractive bash -c     "apt-get update -qq && apt-get -y -o Dpkg::Options::=--force-confold full-upgrade"
 done
 ```
 
@@ -1499,7 +1534,7 @@ LXC 151 is more sensitive — ROCm userspace updates can come through this path.
 
 ```bash
 pct exec 151 -- systemctl restart llamacpp-chat llamacpp-embed llamacpp-rerank
-pct exec 151 -- rocminfo | grep -c gfx1030   # confirm both GPUs still visible
+pct exec 151 -- rocminfo | grep -c "Device Type:.*GPU"   # confirm both GPUs still visible
 ```
 
 ### § 11.4 Rebuilding llama.cpp
@@ -1528,6 +1563,55 @@ pct exec 151 -- rm -f /opt/llama.cpp/build/bin/llama-server
 ```
 
 Watch the build log: a `gfx1030` build that suddenly takes much longer or fails often indicates a llama.cpp main-branch regression. Roll back to a known-good commit if needed.
+
+#### ⚠ A llama.cpp build tree is NOT relocatable
+
+Both procedures above rebuild **in place** at `/opt/llama.cpp/build`, and that is
+load-bearing. CMake bakes an **absolute** `RUNPATH` into every binary and `.so`:
+
+```
+RUNPATH [/opt/llama.cpp/build-new/bin:/opt/rocm-7.2.3/lib:/opt/rocm/lib:]
+```
+
+So the tempting "build into `build-new/`, validate, then swap" pattern **fails** —
+after `mv build-new build` the server dies at startup with:
+
+```
+error while loading shared libraries: libllama-server-impl.so: cannot open shared object file
+```
+
+A `cp -a build build-b9584` backup is broken the same way: its RUNPATH still
+points at `/opt/llama.cpp/build/bin`, so it only runs when moved back *into*
+`build`. (Hit during the b9584 → b10509 upgrade, 2026-08-19.)
+
+**To make a build tree relocatable** — do this once and swapping becomes safe:
+
+```bash
+pct exec 151 -- bash -s <<'GUEST'
+cd /opt/llama.cpp/build/bin
+for f in llama-server llama-cli $(ls *.so* 2>/dev/null); do
+  [ -f "$f" ] || continue
+  readelf -d "$f" 2>/dev/null | grep -q RUNPATH || continue
+  patchelf --set-rpath '$ORIGIN:/opt/rocm/lib:/opt/rocm-7.2.3/lib' "$f"
+done
+readelf -d llama-server | grep -i runpath   # expect [$ORIGIN:...]
+GUEST
+```
+
+`$ORIGIN` must reach `patchelf` **literally**. Inside a nested
+`ssh … pct exec … bash` heredoc chain, use quoted delimiters (`<<'GUEST'`) at
+every level, or it expands to empty and writes a broken `RUNPATH [\:/opt/rocm/lib]`.
+
+`/opt/llama.cpp/build` (b10509) and `/opt/llama.cpp/build-b9584` (rollback) are
+both patched, so rollback is now:
+
+```bash
+pct exec 151 -- systemctl stop llamacpp-chat llamacpp-embed llamacpp-rerank
+pct exec 151 -- bash -c 'cd /opt/llama.cpp && mv build build-bad && mv build-b9584 build'
+pct exec 151 -- systemctl start llamacpp-chat llamacpp-embed llamacpp-rerank
+```
+
+Any **future** build needs the same `patchelf` pass before it is moved.
 
 ### § 11.5 Updating AnythingLLM
 
@@ -1603,6 +1687,18 @@ pct start <vmid>
 ### Verification
 
 After any update, run the full [§ 2](#-2-cluster-health--observability) probe, plus:
+
+> **A smoke test is not a baseline.** The curl below proves the server answers;
+> it does not tell you whether the upgrade cost you 20% of your decode rate.
+> Capture t/s on BOTH sides of any upgrade (see § 11.1) — a `timings` block comes
+> back on every non-streamed completion:
+>
+> ```bash
+> KEY=$(pct exec 153 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/router.env)
+> pct exec 151 -- curl -s http://127.0.0.1:8080/v1/chat/completions >   -H 'Content-Type: application/json' -H "Authorization: Bearer $KEY" >   -d '{"messages":[{"role":"user","content":"Write a Python function that merges two sorted lists. Code only."}],"max_tokens":300}' >   | python3 -c 'import sys,json; t=json.load(sys.stdin)["timings"]; print("decode %.2f t/s  prefill %.1f t/s" % (t["predicted_per_second"], t["prompt_per_second"]))'
+> ```
+>
+> Reference (b10509, 2026-08-19): coder 57.83 t/s · qwen3.6 65.90 t/s · qwen3.8 49.51 t/s.
 
 ```bash
 # Smoke-test a chat request and an embed

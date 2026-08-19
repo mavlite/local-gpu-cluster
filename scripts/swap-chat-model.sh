@@ -42,6 +42,26 @@
 #                  ROCm note: cache-reuse=0 disables prompt-cache (bug #19908
 #                  causes GPU stall on cached-prompt replay with hybrid models).
 #
+#   devstral       Devstral Small 2 24B Q8_0  -> alias devstral
+#                  Mistral-architecture code model, ~25 GB. Requires q4_0 KV
+#                  (DEVSTRAL-SPECIFIC); swapping away resets KV_TYPE to q8_0.
+#
+#   devstral-large Devstral 2 123B UD-IQ2_M   -> alias devstral-large
+#                  Full-size Mistral code model, ~43.5 GB, 64K ctx.
+#
+#   qwen3.8        Qwen3.8-27B UD-Q6_K_XL     -> alias qwen3.8
+#                  The cluster's first DENSE chat profile (27.78B, hybrid Gated
+#                  DeltaNet + Gated Attention, 262K native). Every parameter is
+#                  read per token, so it is bandwidth-bound in a way the MoE
+#                  profiles are not -- which is why it is the only profile that
+#                  overrides --split-mode (tensor, +42.8%) and enables in-GGUF
+#                  MTP speculative decoding (--spec-type draft-mtp, +63.8%).
+#                  Together 19.05 -> 49.19 t/s, 2.58x. See the profile body.
+#
+# NOTE: profiles carry three fields beyond the model spec -- SPLIT_MODE,
+# SPEC_TYPE and SPEC_NMAX. All pre-existing profiles use "layer none 0", which
+# is exactly the behaviour they had before those fields existed.
+#
 # Usage:
 #   ./swap-chat-model.sh qwen3.6        # switch to RAG/general model
 #   ./swap-chat-model.sh coder          # switch to coding model

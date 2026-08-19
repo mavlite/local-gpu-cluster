@@ -83,13 +83,13 @@ TOOL_EXECUTION_DEFAULT="${TOOL_EXECUTION_DEFAULT:-client}"
 # range deny list) are hardcoded in router-app.py.
 WEB_FETCH_MAX_SIZE_KB="${WEB_FETCH_MAX_SIZE_KB:-1024}"
 WEB_FETCH_TIMEOUT_SECONDS="${WEB_FETCH_TIMEOUT_SECONDS:-15}"
-PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.150}"
+PROXMOX_HOST_IP="${PROXMOX_HOST_IP:-192.168.6.175}"
 METRICS_ALLOWED_IPS="${METRICS_ALLOWED_IPS:-127.0.0.1,${PROXMOX_HOST_IP}}"
 # CORS allow-origins. Needed when HTML pages loaded from file:// (Origin: null)
 # or arbitrary LAN origins call this router via fetch(). Default "*" is OK
 # because (a) this LXC sits on a LAN-only IP behind your firewall, and
 # (b) every protected endpoint already requires Bearer auth. Tighten to an
-# explicit comma-separated origin list (e.g., "http://192.168.6.150,https://app.lan")
+# explicit comma-separated origin list (e.g., "http://192.168.6.175,https://app.lan")
 # once the legitimate caller set is known.
 CORS_ALLOW_ORIGINS="${CORS_ALLOW_ORIGINS:-*}"
 
