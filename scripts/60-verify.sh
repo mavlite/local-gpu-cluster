@@ -143,8 +143,21 @@ if lxc_running "$ROUTER_VMID"; then
   if [[ -n "$ROUTER_KEY" ]]; then
     check "Router unauthed → 403" \
       bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 5 -X POST -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '403' ] || [ \"\$code\" = '401' ]"
+    # Ask the router which alias the CURRENTLY LOADED profile answers to instead
+    # of hardcoding one. Only one chat model is resident at a time and the router
+    # 409s a cross-profile alias, so a fixed name silently breaks after any swap.
+    # Prefers a rag-* (thinking-stripped) alias.
+    LIVE_MODEL=$(pct exec $ROUTER_VMID -- curl -s -m 10 -H "Authorization: Bearer $ROUTER_KEY" http://localhost:8000/v1/models 2>/dev/null \
+      | python3 -c 'import sys,json
+try:
+    ids=[m["id"] for m in json.load(sys.stdin).get("data",[])]
+    chat=[i for i in ids if i not in ("qwen3-embed","bge-rerank")]
+    print(next((i for i in chat if i.startswith("rag-")), chat[0] if chat else ""))
+except Exception:
+    print("")')
+    [ -z "$LIVE_MODEL" ] && LIVE_MODEL=rag-qwen3.8
     check "Router authed → 200" \
-      bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Authorization: Bearer $ROUTER_KEY' -X POST -H 'Content-Type: application/json' -d '{\"model\":\"rag-qwen3.6\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '200' ]"
+      bash -c "code=\$(pct exec $ROUTER_VMID -- curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Authorization: Bearer $ROUTER_KEY' -X POST -H 'Content-Type: application/json' -d '{\"model\":\"${LIVE_MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' http://localhost:8000/v1/chat/completions); [ \"\$code\" = '200' ]"
   else
     skip_test "ROUTER_API_KEY not present — run 53-lxc-router.sh first"
   fi

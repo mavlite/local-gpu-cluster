@@ -161,8 +161,8 @@ already pointing at the router for both LLM and embedder. Specifically:
 |--------|---------|--------|
 | `LLM_PROVIDER` | `generic-openai` | Use OpenAI-compatible upstream |
 | `GENERIC_OPEN_AI_BASE_PATH` | `http://<router>:8000/v1` | All chat requests via router |
-| `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3.6` | Picks the V620 main model (matches `LLAMA_ALIAS` in 51) |
-| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `131072` | Conservative AnythingLLM-side cap. Chat unit's `LLAMA_CTX` is 256K (`--parallel 1` → full window per slot), but AnythingLLM stays at 128K as headroom against client misbehavior; bumping it is safe up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap |
+| `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3.8` | Picks the V620 main model. MUST be an alias of the **currently loaded** profile — the router returns 409 for a cross-profile alias. The `rag-` prefix is required: it strips thinking, without which reasoning can consume the whole token budget and return empty content |
+| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `200000` | Conservative AnythingLLM-side cap. Chat unit's `LLAMA_CTX` is 256K (`--parallel 1` → full window per slot), but AnythingLLM stays at 128K as headroom against client misbehavior; bumping it is safe up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap |
 | `EMBEDDING_ENGINE` | `generic-openai` | Same provider style for embedder |
 | `EMBEDDING_BASE_PATH` | `http://<router>:8000/v1` | Embeddings via router |
 | `EMBEDDING_MODEL_PREF` | `qwen3-embed` | 1024-dim Qwen3-Embedding (matches `EMBED_ALIAS` in 51-lxc-amd.sh) |

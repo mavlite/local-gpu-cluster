@@ -43,9 +43,9 @@ ROCM_RELEASE="${ROCM_RELEASE:-latest}"
 # Verified model availability on HF (2026-05-27):
 #   unsloth/Qwen3.6-35B-A3B-GGUF        Qwen3.6-35B-A3B-UD-Q6_K.gguf   (~29 GB; default — pivoted from UD-Q4_K_M on 2026-05-27)
 #   unsloth/Qwen3.6-35B-A3B-GGUF        Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (~22 GB; qwen3.6-fast profile)
-LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3.6-35B-A3B-GGUF}"
-LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q6_K}"        # Unsloth Dynamic Q6_K — near-lossless precision (~99% of Q8 quality)
-LLAMA_ALIAS="${LLAMA_ALIAS:-rag-qwen3.6}"          # matches AnythingLLM ALLM_LLM_MODEL
+LLAMA_HF_REPO="${LLAMA_HF_REPO:-unsloth/Qwen3.8-27B-GGUF}"
+LLAMA_HF_QUANT="${LLAMA_HF_QUANT:-UD-Q6_K_XL}"     # near-lossless; -5.8% vs Q4 but MTP flattens the quant/speed curve
+LLAMA_ALIAS="${LLAMA_ALIAS:-qwen3.8}"              # backend alias; AnythingLLM uses the rag-* form (see 54)
 LLAMA_CTX="${LLAMA_CTX:-262144}"                   # 256K total; with --parallel 1 → full 256K per request (matches Qwen3.6 n_ctx_train)
 LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~11GB @ 256K total; 64GB VRAM has plenty of headroom
 # parallel=1 matches the router's CHAT_CONCURRENCY=1 single-user policy.
@@ -66,7 +66,7 @@ LLAMA_CACHE_RAM_MB="${LLAMA_CACHE_RAM_MB:-16384}"
 # 1,1.5 shifts more split weight to GPU 1, which has only the reranker (1.5 GB)
 # rather than the embedder + ~10 GB non-split tensor mass on GPU 0. Pre-pivot
 # default was 1,1 (Q4_K_M baseline); qwen3.6-fast profile keeps that.
-LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1.5}"
+LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1}"    # 1,1 for the DENSE qwen3.8 default; MoE profiles override to 1,1.5
 LLAMA_THREADS="${LLAMA_THREADS:-8}"
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
@@ -89,7 +89,7 @@ LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 ben
 #   - 'row' mode fails to load on this hardware; 'tensor' is the one that works.
 # Default stays 'layer' so existing MoE profiles are untouched; per-profile
 # override comes from swap-chat-model.sh.
-LLAMA_SPLIT_MODE="${LLAMA_SPLIT_MODE:-layer}"
+LLAMA_SPLIT_MODE="${LLAMA_SPLIT_MODE:-tensor}"     # tensor for the DENSE default (+42.8%); MoE profiles override to layer
 
 # Speculative decoding (in-process draft on the V620 chat unit).
 # DISABLED by default — NOT because of a vocab mismatch. As of 2026-03-02 Qwen3.5-0.8B
@@ -107,7 +107,7 @@ LLAMA_SPLIT_MODE="${LLAMA_SPLIT_MODE:-layer}"
 # Qwen/Qwen3.5-0.8B-GGUF and benchmark — expect to roll back.
 LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
-LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
+LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-3}"            # measured optimum for qwen3.8 under tensor split
 LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
 
 # ---------- In-GGUF speculative decoding (MTP) ----------
@@ -136,7 +136,7 @@ LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
 #
 # Speculative decoding is a SINGLE-STREAM optimization: the advantage is gone by
 # --parallel 4. It pairs correctly with our CHAT_CONCURRENCY=1 policy.
-LLAMA_SPEC_TYPE="${LLAMA_SPEC_TYPE:-none}"
+LLAMA_SPEC_TYPE="${LLAMA_SPEC_TYPE:-draft-mtp}"    # qwen3.8 ships MTP heads (+63.8%); MoE profiles override to none
 LLAMA_SPEC_PMIN="${LLAMA_SPEC_PMIN:-0}"
 
 # ---------- Embedder unit (V620 #1) ----------
