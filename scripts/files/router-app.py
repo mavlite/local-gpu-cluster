@@ -398,6 +398,10 @@ STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() 
 #   enable_thinking  : bool — value to inject into chat_template_kwargs.
 #                             Client-supplied chat_template_kwargs takes
 #                             precedence (we setdefault, not overwrite).
+#   reasoning_effort : str|None — value to inject into chat_template_kwargs.
+#                             Qwen3.8 only; its template defaults to 'xhigh'.
+#                             Supported: 'xhigh', 'medium', 'low' ('high' is
+#                             silently remapped to 'xhigh' by the template).
 #   strip_thinking   : bool — whether to regex-strip <think>...</think> from
 #                             the response. Belt-and-suspenders for
 #                             enable_thinking=False cases where the model
@@ -455,9 +459,17 @@ ALIAS_MAP: dict[str, dict] = {
     # lands in a separate reasoning_content field and never pollutes content
     # with inline <think>. strip_thinking stays True on the rag- alias purely
     # as belt-and-braces if that flag is ever dropped.
-    "rag-qwen3.8":   {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
-    "qwen3.8-think": {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False},
-    "qwen3.8":       {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False},
+    "rag-qwen3.8":     {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
+    "qwen3.8-think":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "medium"},
+    "qwen3.8":         {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "medium"},
+    # Escape hatch: full-depth reasoning for hard one-off problems. Expect
+    # ~73s and ~2700 tokens per answer, and a real risk of finish_reason=
+    # "length" with empty content on constraint-heavy prompts. Do NOT point an
+    # agent loop at this.
+    "qwen3.8-xhigh":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
+                        "reasoning_effort": "xhigh"},
 }
 
 
@@ -477,10 +489,12 @@ def resolve_alias(model: str) -> dict:
         return ALIAS_MAP[model]
     # Legacy fallback: any rag-* / -rag model name gets thinking-off behavior.
     if RAG_MODEL_RE.search(model):
-        return {"backend": model, "enable_thinking": False, "strip_thinking": True}
+        return {"backend": model, "enable_thinking": False, "strip_thinking": True,
+                "reasoning_effort": None}
     # Unknown model: pass through unchanged. llama-server will warn but serve
     # the loaded model regardless of the requested name.
-    return {"backend": model, "enable_thinking": None, "strip_thinking": False}
+    return {"backend": model, "enable_thinking": None, "strip_thinking": False,
+            "reasoning_effort": None}
 
 
 # Short-TTL cache of the backend the chat unit is currently serving, so the
@@ -1584,6 +1598,17 @@ async def chat(
     if alias_info["enable_thinking"] is not None:
         ctk = body.setdefault("chat_template_kwargs", {})
         ctk.setdefault("enable_thinking", alias_info["enable_thinking"])
+
+    # Qwen3.8's chat template defaults reasoning_effort to 'xhigh', which tells
+    # the model to "consider plausible alternatives" and makes it reason until it
+    # exhausts max_tokens on constraint-heavy prompts -- returning
+    # finish_reason="length" with EMPTY content. Measured 2026-08-19 on three
+    # such prompts x3 reps: xhigh 6/9 @ 73s/2709 tok, medium 9/9 @ 10s/482 tok,
+    # low 9/9 @ 9s/384 tok. Sampling, MTP and quantization were each ruled out
+    # first; this is the actual cause. setdefault so a client override wins.
+    if alias_info.get("reasoning_effort"):
+        ctk = body.setdefault("chat_template_kwargs", {})
+        ctk.setdefault("reasoning_effort", alias_info["reasoning_effort"])
 
     # Token-budget admission control. Use /tokenize on the chat upstream.
     # count_tokens returns -1 when /tokenize is unreachable (fail-open).
