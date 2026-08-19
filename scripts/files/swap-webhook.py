@@ -38,7 +38,33 @@ SWAP_WEBHOOK_PORT = int(os.environ.get("SWAP_WEBHOOK_PORT", "9100"))
 SWAP_WEBHOOK_BIND = os.environ.get("SWAP_WEBHOOK_BIND", "0.0.0.0")
 SWAP_SUBPROC_TIMEOUT = int(os.environ.get("SWAP_SUBPROC_TIMEOUT", "1800"))
 
-VALID_PROFILES = {"qwen3.6", "qwen3.6-fast", "coder", "devstral"}
+# Profile allowlist. DERIVED from swap-chat-model.sh's PROFILE_NAMES rather than
+# hardcoded — a static list silently rejects any profile added later with
+# "unknown_profile", which is exactly what happened when qwen3.8 and
+# devstral-large were added (this list still read qwen3.6/qwen3.6-fast/coder/
+# devstral). Parsed, never executed. Falls back to the known set if the script is
+# unreadable or its format changes, so the webhook still starts.
+_FALLBACK_PROFILES = {
+    "qwen3.6", "qwen3.6-fast", "coder", "devstral", "devstral-large", "qwen3.8",
+}
+
+
+def _discover_profiles(script_path: str) -> set:
+    """Read PROFILE_NAMES=(a b c) out of swap-chat-model.sh."""
+    try:
+        with open(script_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PROFILE_NAMES=("):
+                    inner = line.split("(", 1)[1].split(")", 1)[0]
+                    names = {p.strip().strip("'" + '"') for p in inner.split() if p.strip()}
+                    if names:
+                        return names
+    except OSError:
+        pass
+    return set(_FALLBACK_PROFILES)
+
+
+VALID_PROFILES = _discover_profiles(SWAP_SCRIPT) | _FALLBACK_PROFILES
 
 # ---------- Logging (systemd captures stdout) ----------
 
