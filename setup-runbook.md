@@ -2976,8 +2976,8 @@ uname -r   # Expect: 6.17.x-pve on PVE 9.1; 6.14.x is also fine on older PVE
 ls /dev/dri/   # Expect: card0, card1, renderD128, renderD129 (no renderD130)
 ls /dev/kfd
 
-# 1.4 Four LXCs present, no 152
-pct list | awk '$1 ~ /^(151|153|154|155)$/'
+# 1.4 Five LXCs present, no 152 (156 = memory-vault, added after the V2 build)
+pct list | awk '$1 ~ /^(151|153|154|155|156)$/'
 pct list | awk '$1 == "152"' | wc -l   # Expect: 0
 ```
 
@@ -3260,8 +3260,8 @@ rsync -aP /tank/models/ /mnt/external-backup/models/
 
 ### Recommended baseline strategy
 
-1. **Daily vzdump** of all 4 LXCs (`151 153 154 155`) to `tank-backups` (retention: 7d/4w/3m)
-2. **Daily ZFS snapshots** of `tank/anythingllm` and `tank/mcp` (retention: 14 days)
+1. **Daily vzdump** of all 5 LXCs (`151 153 154 155 156`) to `tank-backups` (retention: 7d/4w/3m)
+2. **Daily ZFS snapshots** of `tank/anythingllm`, `tank/mcp` and `tank/memory-vault` (retention: 14 days)
 3. **Weekly off-host copy** of vzdump archives to PBS or external storage
 4. **Skip** `/tank/models` backups (just record which models were loaded)
 
