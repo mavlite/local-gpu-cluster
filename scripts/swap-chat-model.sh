@@ -106,7 +106,7 @@ get_profile() {
       # test-coder.sh (or equivalent prefill stress) and update the
       # measurements in day-2-ops.md § 4.4 + get_profile_vram_estimate()
       # below after the first redeploy of this profile.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0 layer none 0"
       ;;
     qwen3.6-fast)
       # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
@@ -123,7 +123,7 @@ get_profile() {
       # CACHE_REUSE=1024 is set but llama.cpp emits "cache_reuse is not
       # supported by this context, it will be disabled" at load (Q*_K_M
       # + q8_0 KV behavior). Effective is CACHE_REUSE=0. Harmless.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024 q8_0"
+      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024 q8_0 layer none 0"
       ;;
     coder)
       # Qwen3-Coder-Next UD-IQ4_XS — 80B total / 3B active MoE.
@@ -141,7 +141,7 @@ get_profile() {
       # safe on b9584 — stability test 2026-06-09 showed T3b (99K repeat)
       # completing in 61s vs 157s first-pass (2.56× speedup, sim=1.000,
       # f_keep=0.984). The b9582 regression that caused the stall is fixed.
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 1024 q8_0"
+      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 1024 q8_0 layer none 0"
       ;;
     devstral)
       # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
@@ -157,7 +157,7 @@ get_profile() {
       # q4_0 needs ~4.6 GB. This KV_TYPE is DEVSTRAL-SPECIFIC. Swapping from
       # devstral back to any other profile resets KV_TYPE to q8_0 automatically.
       # CACHE_REUSE=0: conservative default for new Mistral architecture.
-      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0 q4_0"
+      echo "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF Q8_0 devstral 1,1.5 262144 0 q4_0 layer none 0"
       ;;
     devstral-large)
       # Devstral 2 (123B) UD-IQ2_M — full-size Mistral-architecture code model.
@@ -179,7 +179,53 @@ get_profile() {
       #
       # KV_TYPE=q4_0: flash attn enabled (Mistral, no DeltaNet), V cache needs FA.
       # Same reasoning as devstral. CACHE_REUSE=0: conservative.
-      echo "unsloth/Devstral-2-123B-Instruct-2512-GGUF UD-IQ2_M devstral-large 1,1.5 65536 0 q4_0"
+      echo "unsloth/Devstral-2-123B-Instruct-2512-GGUF UD-IQ2_M devstral-large 1,1.5 65536 0 q4_0 layer none 0"
+      ;;
+    qwen3.8)
+      # Qwen3.8-27B UD-Q6_K_XL — DENSE 27.78B, hybrid Gated DeltaNet + Gated
+      # Attention (16 x [3x DeltaNet -> 1x Attention]), 64 layers, 262K native.
+      # First DENSE chat profile on this cluster: unlike Qwen3.6-A3B (3B active)
+      # and Coder-Next (3B active), every parameter is read per token, so decode
+      # is bandwidth-bound on weight size. That is what makes the two flags below
+      # load-bearing rather than nice-to-have.
+      #
+      # SPLIT MODE = tensor (NOT layer). This is the first profile to override it.
+      # At batch 1, layer-split serializes the two V620s; tensor-split has both
+      # read concurrently. Measured +42.8% on its own (19.05 -> 27.21 t/s).
+      #
+      # SPEC TYPE = draft-mtp, n-max 3. Qwen3.8's GGUF carries blk.*.nextn.*
+      # multi-token-prediction heads that llama.cpp ignores without --spec-type.
+      # No draft model, so none of the MoE expert-load overhead that makes
+      # spec-decode a regression on the qwen3.6/coder profiles applies here.
+      #
+      # Measured 2026-08-19 (b10509, 262K ctx, q8_0 KV, --parallel 1):
+      #   layer  + no spec    19.05 t/s   (what the old defaults would have given)
+      #   tensor + no spec    27.33 t/s
+      #   tensor + mtp n-3    44.76 t/s   <- this profile, 2.35x the old default
+      # Quant sweep at this config: UD-Q4_K_XL 45.81 / UD-Q6_K_XL 43.13 / Q8_0 40.35.
+      # Q6_K_XL chosen: near-lossless for -5.8%, and MTP amortizes weight reads so
+      # the quant/speed curve is much flatter than the non-speculative case.
+      #
+      # TENSOR_SPLIT 1,1 — MEASURED, and the reason is specific to tensor mode:
+      # unlike --split-mode layer, the ratio governs COMPUTE as well as memory,
+      # so an uneven split makes one card do more of every matmul while the other
+      # waits at the sync point. Measured 2026-08-19:
+      #   1,1    GPU0 26.65 GB (89%) / GPU1 18.69 GB (62%)   49.51 t/s
+      #   1,1.5  GPU0 23.09 GB (77%) / GPU1 22.26 GB (74%)   37.70 t/s  (-22%)
+      # Balancing VRAM costs a fifth of throughput. Do not "fix" the asymmetry.
+      #
+      # The 89% on GPU 0 is SAFE — verified, not assumed. GPU 0 carries a fixed
+      # ~8.4 GB (ROCm context + embedder) regardless of model. The +8pp
+      # activation-buffer spike day-2-ops § 4.4 documents on heavy prefill is an
+      # MoE behaviour and does NOT occur here: prefill stress at 22K / 67K / 122K
+      # tokens moved GPU 0 from 26.6 -> 26.8 GB total (89% throughout), zero OOM.
+      # Decode degrades gracefully with depth: 45.3 (22K) / 34.1 (67K) / 32.6 t/s
+      # (122K); prefill 553 / 427 / 311 t/s.
+      #
+      # CACHE_REUSE 1024 is set but llama.cpp emits "cache_reuse is not supported
+      # by this context, it will be disabled" at load for this arch — effective
+      # value is 0. Harmless; left at 1024 so it activates if upstream adds support.
+      echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 1024 q8_0 tensor draft-mtp 3"
       ;;
     *)
       return 1
@@ -187,7 +233,7 @@ get_profile() {
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -198,6 +244,7 @@ get_profile_description() {
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
+    qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
     *)               echo "" ;;
   esac
 }
@@ -212,6 +259,7 @@ get_profile_vram_estimate() {
     coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
+    qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
@@ -277,10 +325,11 @@ identify_profile() {
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
   local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6" kv_type="$7"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" <<'PY'
+  local split_mode="$8" spec_type="$9" spec_nmax="${10}"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" "$split_mode" "$spec_type" "$spec_nmax" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type = sys.argv[1:9]
+path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type, split_mode, spec_type, spec_nmax = sys.argv[1:12]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
@@ -289,6 +338,9 @@ targets = {
     "LLAMA_CTX": ctx,
     "LLAMA_CACHE_REUSE": cache_reuse,
     "LLAMA_KV_TYPE": kv_type,
+    "LLAMA_SPLIT_MODE": split_mode,
+    "LLAMA_SPEC_TYPE": spec_type,
+    "LLAMA_SPEC_NMAX": spec_nmax,
 }
 
 try:
@@ -382,7 +434,7 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE TARGET_KV_TYPE <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE TARGET_KV_TYPE TARGET_SPLIT_MODE TARGET_SPEC_TYPE TARGET_SPEC_NMAX <<<"$profile_line"
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -405,9 +457,9 @@ target_desc=$(get_profile_description "$TARGET")
 [[ -n "$target_desc" ]] && echo "  target:        $target_desc"
 target_vram=$(get_profile_vram_estimate "$TARGET")
 [[ -n "$target_vram" ]] && echo "  expected VRAM: $target_vram"
-echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE} KV_TYPE=${TARGET_KV_TYPE})"
+echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE} KV_TYPE=${TARGET_KV_TYPE} SPLIT_MODE=${TARGET_SPLIT_MODE} SPEC_TYPE=${TARGET_SPEC_TYPE} SPEC_NMAX=${TARGET_SPEC_NMAX})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE" "$TARGET_KV_TYPE"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE" "$TARGET_KV_TYPE" "$TARGET_SPLIT_MODE" "$TARGET_SPEC_TYPE" "$TARGET_SPEC_NMAX"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
@@ -500,6 +552,8 @@ echo " --tensor-split:  ${TARGET_SPLIT}"
 echo " --ctx-size:      ${TARGET_CTX}"
 echo " --cache-reuse:   ${TARGET_CACHE_REUSE}"
 echo " --cache-type-k/v ${TARGET_KV_TYPE}"
+echo " --split-mode:    ${TARGET_SPLIT_MODE}"
+echo " --spec-type:     ${TARGET_SPEC_TYPE}$([ "$TARGET_SPEC_TYPE" != none ] && echo " (n-max ${TARGET_SPEC_NMAX})")"
 echo "============================================================"
 
 if [[ -n "$notable_warnings" ]]; then

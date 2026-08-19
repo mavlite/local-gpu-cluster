@@ -70,6 +70,27 @@ LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-1,1.5}"
 LLAMA_THREADS="${LLAMA_THREADS:-8}"
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-auto}"        # set to 'off' if §5.10 benchmark shows FA hurts
 
+# --split-mode: HOW the model is divided across the two V620s (distinct from
+# --tensor-split, which is the RATIO). llama.cpp's default is 'layer', which
+# splits layers across cards — so at batch 1 GPU 0 computes while GPU 1 idles and
+# the pair decodes at single-card bandwidth. 'tensor' splits each matmul instead,
+# so both cards read weights concurrently.
+#
+# Measured 2026-08-19 on b10509, Qwen3.8-27B UD-Q4_K_XL, --parallel 1:
+#   layer  19.05 t/s   ->   tensor  27.21 t/s   (+42.8%, before any spec flag)
+# The gain is decode-only; prefill is already batched and barely moves.
+#
+# CAVEATS when set to tensor:
+#   - skips the auto-fit pass; "llama_params_fit is not implemented for
+#     SPLIT_MODE_TENSOR, abort" is a WARNING, not an error — the server starts
+#     with whatever --ctx-size you passed. Verify n_ctx_slot in the boot log.
+#   - forces the CPU sampler ("backend sampling not supported with
+#     SPLIT_MODE_TENSOR"). Harmless at --parallel 1.
+#   - 'row' mode fails to load on this hardware; 'tensor' is the one that works.
+# Default stays 'layer' so existing MoE profiles are untouched; per-profile
+# override comes from swap-chat-model.sh.
+LLAMA_SPLIT_MODE="${LLAMA_SPLIT_MODE:-layer}"
+
 # Speculative decoding (in-process draft on the V620 chat unit).
 # DISABLED by default — NOT because of a vocab mismatch. As of 2026-03-02 Qwen3.5-0.8B
 # (vocab 248,320) is a vocab-match for Qwen3.6, and llama.cpp PR #19493 (merged 2026-04-19)
@@ -88,6 +109,35 @@ LLAMA_DRAFT_REPO="${LLAMA_DRAFT_REPO:-}"
 LLAMA_DRAFT_QUANT="${LLAMA_DRAFT_QUANT:-Q4_K_M}"
 LLAMA_SPEC_NMAX="${LLAMA_SPEC_NMAX:-16}"
 LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
+
+# ---------- In-GGUF speculative decoding (MTP) ----------
+# INDEPENDENT of LLAMA_DRAFT_REPO above. That path loads a SEPARATE draft model
+# and is the one the MoE rationale rejects. This one uses multi-token-prediction
+# heads trained into the model and shipped inside the quant itself — no second
+# model, no extra download, no cross-model expert-load overhead.
+#
+#   none       disabled (default — correct for Qwen3.6-35B-A3B and Coder-Next,
+#              whose GGUFs carry no nextn tensors)
+#   draft-mtp  use the built-in MTP heads. Requires a model quantized with them
+#              (Qwen3.8-27B has blk.*.nextn.*) and llama.cpp >= b10200-ish
+#              (PR #22673, July 2026). Silently ignored otherwise.
+#
+# Measured 2026-08-19 on b10509, Qwen3.8-27B UD-Q4_K_XL, 262K ctx, q8_0 KV,
+# --split-mode tensor, --parallel 1:
+#   none 27.33 t/s  ->  draft-mtp n-max 3  44.76 t/s   (+63.8%)
+# n-max sweep under tensor split: 2 -> 45.37, 3 -> 49.19, 4 -> 43.33 (at 131K/q4_0).
+# Sweet spot is 3; it MOVES with --split-mode, so re-sweep if that changes.
+#
+# --spec-draft-p-min is a NET LOSS on this hardware and stays 0. Gating raised
+# acceptance 0.48 -> 0.81 (0.60) / 0.88 (0.75) while dropping throughput 16% /
+# 23%: the V620s verify cheaply enough that every draft is worth attempting, so
+# acceptance is a vanity metric here. This is hardware-specific — the same knob
+# WINS on bandwidth-starved cards. Re-measure before changing.
+#
+# Speculative decoding is a SINGLE-STREAM optimization: the advantage is gone by
+# --parallel 4. It pairs correctly with our CHAT_CONCURRENCY=1 policy.
+LLAMA_SPEC_TYPE="${LLAMA_SPEC_TYPE:-none}"
+LLAMA_SPEC_PMIN="${LLAMA_SPEC_PMIN:-0}"
 
 # ---------- Embedder unit (V620 #1) ----------
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
@@ -379,11 +429,23 @@ phase_5_11_3_chat_unit() {
   # every flag after it.
   local draft_lines=""
   if [[ -n "$LLAMA_DRAFT_REPO" ]]; then
+    # Path A: EXTERNAL draft model (separate GGUF). Disabled by default.
     draft_lines="    --hf-repo-draft ${LLAMA_DRAFT_REPO}:${LLAMA_DRAFT_QUANT} \\
     --n-gpu-layers-draft all \\
     --spec-draft-n-max ${LLAMA_SPEC_NMAX} \\
     --spec-draft-n-min ${LLAMA_SPEC_NMIN} \\
 "
+  elif [[ "$LLAMA_SPEC_TYPE" != "none" ]]; then
+    # Path B: IN-GGUF speculative decoding (MTP). No draft repo and no
+    # --n-gpu-layers-draft — the heads are part of the main model, so there is
+    # no second model to place. Passing --hf-repo-draft here would be wrong.
+    draft_lines="    --spec-type ${LLAMA_SPEC_TYPE} \\
+    --spec-draft-n-max ${LLAMA_SPEC_NMAX} \\
+"
+    if [[ "${LLAMA_SPEC_PMIN}" != "0" ]]; then
+      draft_lines+="    --spec-draft-p-min ${LLAMA_SPEC_PMIN} \\
+"
+    fi
   fi
 
   pct exec "$AMD_VMID" -- env \
@@ -396,6 +458,7 @@ phase_5_11_3_chat_unit() {
     "LLAMA_CACHE_REUSE=$LLAMA_CACHE_REUSE" \
     "LLAMA_CACHE_RAM_MB=$LLAMA_CACHE_RAM_MB" \
     "LLAMA_TENSOR_SPLIT=$LLAMA_TENSOR_SPLIT" \
+    "LLAMA_SPLIT_MODE=$LLAMA_SPLIT_MODE" \
     "LLAMA_THREADS=$LLAMA_THREADS" \
     "LLAMA_FLASH_ATTN=$LLAMA_FLASH_ATTN" \
     "DRAFT_LINES=$draft_lines" \
@@ -432,6 +495,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --api-key "\${LLAMACPP_API_KEY}" \\
     --ctx-size "${LLAMA_CTX}" \\
     --n-gpu-layers all \\
+    --split-mode "${LLAMA_SPLIT_MODE}" \\
     --tensor-split "${LLAMA_TENSOR_SPLIT}" \\
     --threads "${LLAMA_THREADS}" \\
     --batch-size 2048 --ubatch-size 512 \\
