@@ -317,6 +317,7 @@ BACKEND_TO_PROFILE: dict[str, str] = {
     "qwen3-coder":      "coder",
     "devstral":         "devstral",
     "devstral-large":   "devstral-large",
+    "qwen3.8":          "qwen3.8",
 }
 
 # Serializes concurrent auto-swap requests. Only one swap runs at a time.
@@ -434,6 +435,29 @@ ALIAS_MAP: dict[str, dict] = {
     # Devstral 2 (123B) UD-IQ2_M — full-size Mistral code model.
     # Same architecture class as devstral; no thinking mode injection.
     "devstral-large":   {"backend": "devstral-large", "enable_thinking": None, "strip_thinking": False},
+    # Qwen3.8-27B — DENSE 27B, hybrid Gated DeltaNet + Gated Attention, 262K.
+    # Thinking semantics match Qwen3.6 (same reasoning-first post-training), so
+    # the same three-alias shape applies. Backend alias is "qwen3.8"
+    # (config.env LLAMA_ALIAS), NOT "rag-qwen3.8" — unlike the Qwen3.6 profile
+    # where the backend itself is named rag-*.
+    #
+    # Token cost of thinking, measured 2026-08-19 on a one-line arithmetic probe:
+    #   thinking ON  -> 152 chars reasoning_content, 72 completion_tokens
+    #   thinking OFF ->   0 chars reasoning_content, 25 completion_tokens
+    # So thinking roughly TRIPLES the completion budget on short answers. That
+    # is the real reason rag-* exists: on a large (e.g. Tavily-enriched) prompt
+    # with a fixed max_tokens, reasoning can consume the whole budget and leave
+    # content empty with finish_reason="length".
+    # (An earlier single sample had thinking-OFF answer incorrectly; it did not
+    # replicate, so treat accuracy parity as unmeasured rather than degraded.)
+    #
+    # NOTE: the chat unit runs with --reasoning-format deepseek, so reasoning
+    # lands in a separate reasoning_content field and never pollutes content
+    # with inline <think>. strip_thinking stays True on the rag- alias purely
+    # as belt-and-braces if that flag is ever dropped.
+    "rag-qwen3.8":   {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
+    "qwen3.8-think": {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False},
+    "qwen3.8":       {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False},
 }
 
 
