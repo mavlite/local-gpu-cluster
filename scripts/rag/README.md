@@ -161,7 +161,7 @@ Inspect the proposal. Three options:
 
 | Config key | Purpose |
 |---|---|
-| `sitemap_url` | sitemap.xml URL |
+| `sitemap_url` | sitemap.xml URL. May be a `<urlset>` **or a `<sitemapindex>`** — the handler follows an index one level down and unions the child `<urlset>`s (techdocs.broadcom.com ships 17 shards). Nested indexes are not followed. |
 | `base_url` | Doc root URL |
 | `fallback_index_pages` | List of section index page names to scrape if sitemap unavailable |
 | `include_patterns` | List of regex-ish substrings; URL must match at least one |
@@ -179,6 +179,27 @@ Inspect the proposal. Three options:
 
 Content extraction strategy: if the feed includes full content in `content:encoded` / `atom:content` (>1 KB heuristic), use it directly. Otherwise fetch the permalink and trafilatura-extract. On fetch failure, fall back to the feed's `summary` / `description` (even if short) rather than dropping the entry. Crawl delay applies only when an HTTP fetch happens.
 
+### Scraping techdocs.broadcom.com (VCF)
+
+`vcf-release-notes` targets the `vcf-reference` workspace and is **deliberately scoped to
+the release-notes subtree only** — 191 URLs, ~31 min/pass at the mandated 10s delay. The
+full us/en VCF 9.x tree is ~13,500 URLs, which would take ~37 hours per pass and is not
+viable on a timer. The remaining topical docs are the one-time 2026-05 bulk ingest and stay
+manual.
+
+Three things to know before touching this source:
+
+1. **Use a trafilatura handler, never AnythingLLM's upload-link scraper.** Broadcom renders
+   the whole VCF nav tree into server-side HTML. Measured 2026-08-22 on the same 59 URLs:
+   upload-link produced 992 KB / ~122k-token documents (~97% navigation), trafilatura
+   produced 368–4,424 chars. The bloated pages hash as near-identical and get
+   content-deduped — 59 uploads collapsed to 22 stored docs and every NSX page vanished.
+2. **Filter to `/us/en/`.** The same tree ships fr/fr, es/es and jp/ja; 180 of the 239
+   9.1 patch URLs were localizations.
+3. **`<lastmod>` is not a change signal here.** Broadcom restamps essentially every URL on
+   each site rebuild (13,484 of 13,494 read as `2026-08`). Only refresh.py's content-hash
+   comparison detects real changes.
+
 ## Source-level fields (shared across handlers)
 
 These fields live at the top level of each source entry in `sources.yaml`, not inside the handler-specific `config` block:
@@ -192,6 +213,8 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 | `doc_prefix` | required | `metadata.docSource` used for upload (also the dedup key in migrate / cleanup tools) |
 | `refresh_interval` | required | Used by `refresh.py` to skip sources not yet due (`30d`, `12h`, `90m`) |
 | `removal_policy` | `full` | When `additive_only`, URLs in state but missing from current collection are LEFT IN STATE rather than added to the removes list. Required for `rss` handler; harmless on other handlers but rarely useful. |
+| `crawl_delay_seconds` | from `defaults` (3) | Per-source politeness override. Set it when a host's robots.txt demands more than the global default — `vcf-release-notes` uses `10` because techdocs.broadcom.com mandates `Crawl-delay: 10`. Setting that globally would needlessly slow every other source. |
+| `request_timeout_seconds` | from `defaults` (30) | Per-source override; raise it for hosts serving multi-MB sitemap shards. |
 
 ## Roadmap
 

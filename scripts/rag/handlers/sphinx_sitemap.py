@@ -48,6 +48,7 @@ class SphinxSitemapHandler(Handler):
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             timeout=context.request_timeout_seconds,
+            crawl_delay=context.crawl_delay_seconds,
         )
 
         if not urls:
@@ -77,8 +78,9 @@ class SphinxSitemapHandler(Handler):
         include_patterns: list[str],
         exclude_patterns: list[str],
         timeout: int,
+        crawl_delay: int = 0,
     ) -> list[str]:
-        urls = self._try_sitemap(sitemap_url, timeout)
+        urls = self._try_sitemap(sitemap_url, timeout, crawl_delay)
         if not urls:
             urls = self._try_fallback_index(base_url, fallback_pages, timeout)
 
@@ -98,23 +100,58 @@ class SphinxSitemapHandler(Handler):
             out.append(u)
         return sorted(set(out))
 
-    def _try_sitemap(self, sitemap_url: str, timeout: int) -> list[str]:
+    def _try_sitemap(
+        self, sitemap_url: str, timeout: int, crawl_delay: int = 0
+    ) -> list[str]:
+        """Fetch a sitemap and return its page URLs.
+
+        Handles BOTH shapes of the sitemaps protocol:
+          <urlset>       -> the <loc>s ARE page URLs, return them.
+          <sitemapindex> -> the <loc>s are CHILD SITEMAPS; fetch each and
+                            return the union of their page URLs.
+
+        Large doc sites (techdocs.broadcom.com ships 17 sub-sitemaps) use the
+        index form. Without this, the handler would "succeed" and return a
+        handful of sitemap URLs instead of pages — which then fail extraction
+        and look like an empty source.
+        """
+        locs, is_index = self._fetch_sitemap_locs(sitemap_url, timeout)
+        if not is_index:
+            return locs
+
+        urls: list[str] = []
+        for child in locs:
+            if crawl_delay:
+                time.sleep(crawl_delay)
+            child_locs, child_is_index = self._fetch_sitemap_locs(child, timeout)
+            # One level of nesting only. Nested indexes are vanishingly rare
+            # and recursing risks an unbounded fetch loop on a malformed feed.
+            if child_is_index:
+                continue
+            urls.extend(child_locs)
+        return urls
+
+    def _fetch_sitemap_locs(
+        self, sitemap_url: str, timeout: int
+    ) -> tuple[list[str], bool]:
+        """Return (locs, is_sitemap_index) for one sitemap document."""
         try:
             r = requests.get(sitemap_url, timeout=timeout, allow_redirects=True)
             r.raise_for_status()
         except requests.RequestException:
-            return []
+            return [], False
         try:
             root = ET.fromstring(r.content)
         except ET.ParseError:
-            return []
+            return [], False
+        is_index = SITEMAP_NS_RE.sub("", root.tag) == "sitemapindex"
         # Sitemap XML uses xmlns; strip namespace prefixes to query <loc>.
-        urls: list[str] = []
+        locs: list[str] = []
         for elem in root.iter():
             tag = SITEMAP_NS_RE.sub("", elem.tag)
             if tag == "loc" and elem.text:
-                urls.append(elem.text.strip())
-        return urls
+                locs.append(elem.text.strip())
+        return locs, is_index
 
     def _try_fallback_index(
         self, base_url: str, pages: list[str], timeout: int

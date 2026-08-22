@@ -124,10 +124,18 @@ def refresh_one(
     src_state = state_mod.SourceState(state_dir, source_id)
 
     handler = get_handler(source["handler"])
+    # Per-source overrides win over globals. Needed because polite-crawl
+    # requirements are per-host: techdocs.broadcom.com robots.txt mandates
+    # Crawl-delay: 10, which would needlessly slow every other source if it
+    # were set globally.
     context = HandlerContext(
         cache_dir=state_dir / source_id / "cache",
-        crawl_delay_seconds=defaults.get("crawl_delay_seconds", 3),
-        request_timeout_seconds=defaults.get("request_timeout_seconds", 30),
+        crawl_delay_seconds=source.get(
+            "crawl_delay_seconds", defaults.get("crawl_delay_seconds", 3)
+        ),
+        request_timeout_seconds=source.get(
+            "request_timeout_seconds", defaults.get("request_timeout_seconds", 30)
+        ),
     )
 
     print(f"[{source_id}]  handler={source['handler']}  workspace={source['workspace']}")

@@ -191,6 +191,52 @@ sources:
       url_ext_to: ".html"
       url_encode_spaces: true
 
+  # ── Official: VMware Cloud Foundation 9.x release notes ─────────────────
+  # SCOPE IS DELIBERATELY NARROW. The us/en VCF 9.x corpus is ~13,500 URLs;
+  # at the 10s crawl-delay Broadcom's robots.txt mandates, a full pass would
+  # take ~37 hours. This source covers only the release-notes subtree
+  # (191 URLs, ~31 min/pass) — release notes, patch releases, BOM, product
+  # support notes, changelogs. That is the high-churn, currency-critical part:
+  # patch releases ship continuously between major versions, and a stale
+  # answer there is the one most likely to mislead.
+  #
+  # The remaining ~10,800 topical docs (infrastructure-operations, design,
+  # advanced-network-management, ...) are the one-time 2026-05-18/19 bulk
+  # ingest and stay manual. Re-run scripts/tools/recover-long-urls.sh against
+  # a filtered URL list to top those up.
+  #
+  # HANDLER CHOICE IS LOAD-BEARING. sphinx_sitemap uses trafilatura, which
+  # strips nav chrome. Do NOT switch this to an upload-link based path:
+  # verified 2026-08-22, Broadcom now renders the entire VCF nav tree into
+  # server-side HTML, so AnythingLLM's built-in scraper yields ~992 KB /
+  # ~122k-token documents that are ~97% navigation. Pages then hash as
+  # near-identical and get content-deduped — a 59-doc ingest silently
+  # collapsed to 22 and dropped every NSX page. See the banner in
+  # scripts/tools/ingest-urls.sh.
+  #
+  # NOTE: Broadcom stamps <lastmod> on essentially every URL at each site
+  # rebuild (13,484 of 13,494 read as 2026-08), so lastmod is useless as a
+  # change signal here. refresh.py's content-hash comparison is what actually
+  # detects real changes.
+  - id: vcf-release-notes
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x release notes"
+    refresh_interval: 7d
+    crawl_delay_seconds: 10       # techdocs.broadcom.com robots.txt: Crawl-delay: 10
+    request_timeout_seconds: 60   # sitemap shards are ~12 MB each
+    config:
+      # This is a <sitemapindex> of 17 shards; the handler follows it one
+      # level down to the <urlset>s.
+      sitemap_url: https://techdocs.broadcom.com/techdocs2-sitemap.xml
+      base_url: https://techdocs.broadcom.com
+      include_patterns:
+        # us/en only — the same tree also ships fr/fr, es/es and jp/ja, which
+        # would pollute an English-only corpus (180 of 239 patch URLs were
+        # localizations).
+        - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/release-notes'
+
 # ── Global defaults ────────────────────────────────────────────────────────
 defaults:
   # Halt a refresh that would delete more than this fraction of a source's
