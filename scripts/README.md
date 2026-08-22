@@ -13,6 +13,7 @@ retuning, updates, hardware changes).
 | 4     | `40-host-config.sh`     | IOMMU, AMD firmware, ZFS mirror, LXC template, THP disable (V620-only — no NVIDIA driver, no kernel pin) |
 | 5     | `51-lxc-amd.sh`         | V620 LXC, ROCm, llama.cpp HIP, **three systemd units** (chat/embed/rerank), API key, warm-up, SSH harden |
 | 6     | (removed)               | Old `52-lxc-nv.sh` (3060 LXC) was deleted in the V620-only pivot. |
+| 6.5   | `52-swap-webhook.sh`    | Host systemd service (port 9100) letting the router trigger profile swaps; generates `SWAP_WEBHOOK_KEY` and wires `SWAP_WEBHOOK_URL` into LXC 153. Allowlist is parsed from `swap-chat-model.sh` `PROFILE_NAMES`, never executed |
 | 7     | `53-lxc-router.sh`      | Router LXC, FastAPI app, API key gen, EnvironmentFile with admission control + rate limit + metrics IPs + Tavily proxy + CORS |
 | 8     | `54-lxc-anythingllm.sh` | AnythingLLM LXC, Docker, compose stack                     |
 | 9     | `55-lxc-mcp.sh`         | MCP stack LXC, Docker, optional rsync from previous host   |
@@ -45,6 +46,7 @@ runbook for those.
 | [`tools/stability-test-coder.sh`](./tools/stability-test-coder.sh) | Three escalating chat-completions requests (~2K → ~30K → ~100K input tokens) through the router; snapshots `rocm-smi` between each; scans `journalctl` for errors; reports peak VRAM, drift, latency, throughput. Re-run after any coder-profile tuning change. |
 | [`tools/`](./tools/) | Document ingestion tools (`ingest-urls.sh`, `recover-long-urls.sh`, `ingest-github-repo.sh`, `clear-workspace.sh`, etc.). See [`tools/README.md`](./tools/README.md). |
 | [`rag/refresh.py`](./rag/) | Declarative RAG corpus refresh (replaces ad-hoc ingest commands). See [`rag/README.md`](./rag/README.md). |
+| [`tools/doc-lint.py`](./tools/doc-lint.py) | Catch documentation drift. Three checks: resolves every `file.sh:NN` citation in the docs against the real file, greps a blacklist of phrases that were true once and are not now, and diffs `scripts/NN-*.sh` against the phase table above. Exit 0 clean / 1 findings, so it can gate CI. Run it before any docs PR — three manual sweeps still missed a rotted `--pooling last` citation and four stale strings that this catches in a second. Mark a deliberate historical quote with `<!-- doc-lint: allow -->`. |
 
 ## Quick start
 

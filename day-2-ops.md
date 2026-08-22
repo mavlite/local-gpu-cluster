@@ -326,7 +326,7 @@ ModuleNotFoundError: No module named 'mcp.server.fastmcp'
   /opt/mcp-sdg/server.py line 53
 ```
 
-**Cause:** the venv installed `'mcp>=1.2'` with no upper bound and picked up **mcp 2.0.0**,
+**Cause:** the venv installed `'mcp>=1.2'` with no upper bound and picked up **mcp 2.0.0**, <!-- doc-lint: allow -->
 which removed `mcp.server.fastmcp`. Both `58-mcp-sdg.sh` and `62-memory-vault-bridge.sh`
 now pin `'mcp>=1.2,<2'`.
 
@@ -1416,7 +1416,7 @@ This pin is used by [`setup-runbook.md`](./setup-runbook.md) Phase 6 to detect f
 
 ### § 9.5 Critical: don't use `--pooling cls` with Qwen3-Embedding
 
-Qwen3-Embedding-0.6B uses the final `<|endoftext|>` token for pooling. The router enforces this by appending `<|endoftext|>` to inputs missing it (see [`router-app.py`](./scripts/files/router-app.py) `_ensure_eot`). The embed unit MUST use `--pooling last` ([`scripts/51-lxc-amd.sh:92`](./scripts/51-lxc-amd.sh)).
+Qwen3-Embedding-0.6B uses the final `<|endoftext|>` token for pooling. The router enforces this by appending `<|endoftext|>` to inputs missing it (see [`router-app.py`](./scripts/files/router-app.py) `_ensure_eot`). The embed unit MUST use `--pooling last` ([`scripts/51-lxc-amd.sh:157`](./scripts/51-lxc-amd.sh)).
 
 If you accidentally set `--pooling cls`, embeddings are semantically wrong — retrieval becomes random — and there are no obvious error messages. The only symptom is "RAG suddenly returns irrelevant chunks." Full re-embed required to recover.
 
