@@ -287,7 +287,8 @@ Resulting layout:
 ├── anythingllm/                 # AnythingLLM persistent storage
 │   └── storage/
 └── mcp/                         # MCP container working state
-    └── vcf-doc-updater/
+    └── vcf-doc-updater/         # RETIRED — legacy state from the old
+                                 # auto-updater container; safe to remove
 ```
 
 Bind-mounting into LXCs is configured per-container in `/etc/pve/lxc/<vmid>.conf`:
@@ -1327,7 +1328,15 @@ The tool docstrings, `format_source()` helper, and routing-aware tool naming fro
 
 ---
 
-## 10. VCF Documentation Auto-Updater (Migrated)
+## 10. VCF Documentation Auto-Updater (RETIRED — historical record)
+
+> **This service is retired and is not deployed.** Verified live 2026-08-22: LXC 154 has no
+> `/opt/vcf-doc-updater`, and no container or timer runs it. The section below is kept as the
+> record of the v1→v2 migration.
+>
+> Corpus refresh is now `rag-refresh.timer` on the host, driving `scripts/rag/refresh.py`
+> declaratively from `scripts/rag/sources.yaml`. The VCF side is the `vcf-release-notes`
+> source (release-notes subtree, 7-day interval). See `scripts/rag/README.md`.
 
 The auto-updater service from v1 §9 also moves over with minimal change. It lives in the `mcp-stack` LXC alongside the MCP containers (same Docker host).
 
@@ -1381,7 +1390,7 @@ sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
 | `llamacpp-amd` (151) | 192.168.6.151 | 8083 | `llamacpp-rerank.service` (V620 #2 via `--main-gpu 1`) | BGE-Reranker-v2-m3 or Qwen3-Reranker-0.6B fallback |
 | `llm-router` (153) | 192.168.6.153 | 8000 | FastAPI router | per-request strip + keepalive |
 | `anythingllm` (154) | 192.168.6.154 | 3001 | AnythingLLM | Docker |
-| `anythingllm` (154) | 192.168.6.154 | (n/a) | vcf-doc-updater | internal cron, no port |
+| host | 192.168.6.175 | (n/a) | `rag-refresh.timer` → `scripts/rag/refresh.py` | Declarative corpus refresh for both workspaces. Replaced the old `vcf-doc-updater` container, which is **retired and not deployed** — verified live 2026-08-22, LXC 154 has no `/opt/vcf-doc-updater`. The VCF side is the `vcf-release-notes` source; see `scripts/rag/README.md` |
 | `mcp-stack` (155) | 192.168.6.155 | 3004 | mcp-sdg.service — sdg-documentation + vcf-reference (query_*/search_* tool pairs) | SSE |
 | `memory-vault` (156) | 192.168.6.223 (DHCP) | 8000 / 3005 | dashboard+REST (LAN) / MCP bridge (`/mcp`) | Docker + systemd |
 
@@ -1438,7 +1447,7 @@ Client-facing endpoint: **`http://192.168.6.153:8000/v1`** (the router). All cli
 │   └── .env
 ├── anythingllm-data/                        # bind-mounted from /tank/anythingllm
 │   └── storage/
-└── vcf-doc-updater/
+└── vcf-doc-updater/                       # RETIRED — not deployed; see § 10
     ├── docker-compose.yml
     └── state/state.sqlite
 ```
@@ -1569,12 +1578,14 @@ for port in 3002 3003 3004; do
 done
 # Expect each: "event: endpoint" line
 
-# === 17. Auto-updater health ===
-pct exec 154 -- sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
-  "SELECT id, datetime(started_at,'unixepoch','localtime') AS started,
-          discovered, unchanged, updated, new, deleted, errors, aborted
-   FROM runs ORDER BY id DESC LIMIT 3;"
-# Expect: discovered ~4900, errors=0, aborted=0
+# === 17. RAG corpus refresh health ===
+# (The old vcf-doc-updater container is retired — LXC 154 has no
+#  /opt/vcf-doc-updater. Corpus refresh is now rag-refresh.timer on the host.)
+systemctl list-timers rag-refresh.timer --no-pager
+grep -E 'rag_refresh_(document_count|errors_this_run)' /var/lib/rag-refresh/metrics.prom
+# Expect: timer active; errors_this_run 0 for every source. A source reporting
+# "halted_safety" has a plan awaiting review in /tank/rag-state/_proposals/ —
+# see scripts/rag/README.md.
 ```
 
 ---
