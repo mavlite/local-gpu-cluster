@@ -431,7 +431,7 @@ class TestFreshnessChecks(unittest.TestCase):
         "rag_timer_name": "rag-refresh.timer",
         "backup_timer_name": "memory-vault-backup.timer",
         "memvault_vmid": 156,
-        "lxc_ram_ceilings": {"151": 32768},
+        "lxc_ram_ceilings": {"151": 65536},
         "router_url": "http://r:8000",
         "router_vmid": 153,
         "router_env_path": "/etc/router.env",
@@ -475,12 +475,12 @@ class TestFreshnessChecks(unittest.TestCase):
             "pct config 151": cm.CmdResult(0, "memory: 12288\n", "")})
         out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
         self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_FAIL)
-        self.assertIn("pct_set_mem(151, 32768)",
+        self.assertIn("pct_set_mem(151, 65536)",
                       out["lxc_ram_ceiling_151"].suggested_action)
 
     def test_lxc_ram_ceilings_match_ok(self):
         fp = FakeProbes(cmd_map={
-            "pct config 151": cm.CmdResult(0, "memory: 32768\n", "")})
+            "pct config 151": cm.CmdResult(0, "memory: 65536\n", "")})
         out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
         self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_OK)
 
@@ -663,7 +663,7 @@ class TestConfigAndCli(unittest.TestCase):
         for k in ("router_url", "bind_host", "bind_port", "intervals",
                   "sample_window_s", "lxc_ram_ceilings", "rag_metrics_path"):
             self.assertIn(k, cfg)
-        self.assertEqual(cfg["lxc_ram_ceilings"]["151"], 32768)
+        self.assertEqual(cfg["lxc_ram_ceilings"]["151"], 65536)
 
     def test_load_config_missing_returns_defaults(self):
         cfg = cm.load_config("/nonexistent/path.json")

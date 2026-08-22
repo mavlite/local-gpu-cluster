@@ -932,7 +932,7 @@ DEFAULT_CONFIG: dict = {
     "alert_cooldown_s": 900,
     # checks
     "lxc_ids": [151, 153, 154, 155, 156],
-    "lxc_ram_ceilings": {"151": 32768},
+    "lxc_ram_ceilings": {"151": 65536},
     "chat_idle_warn_s": 3600,
     "chat_idle_fail_s": 86400,
     "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
