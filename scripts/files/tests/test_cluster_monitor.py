@@ -246,12 +246,22 @@ class TestHealthChecks(unittest.TestCase):
         self.assertEqual(out["loaded_chat_profile"].detail, "qwen3-coder")
         self.assertEqual(out["last_chat_completion"].value, 42.0)
 
-    def test_router_healthz_unreachable_one_fail_tile(self):
+    def test_router_healthz_unreachable_fans_out_to_upstream_ids(self):
+        """A failure must use the SAME check IDs a success would.
+
+        This previously collapsed to a single "router_up" row. Because the
+        store is keyed by check ID and success emits router_<name>_upstream,
+        that aggregate row could never be overwritten by a later success and
+        stayed FAIL on the dashboard permanently.
+        """
         fp = FakeProbes()
-        out = cm.check_router_healthz(fp, self.CFG)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].id, "router_up")
-        self.assertEqual(out[0].status, cm.STATUS_FAIL)
+        out = {r.id: r for r in cm.check_router_healthz(fp, self.CFG)}
+        self.assertEqual(
+            set(out),
+            {"router_chat_upstream", "router_embed_upstream",
+             "router_rerank_upstream"})
+        self.assertTrue(all(r.status == cm.STATUS_FAIL for r in out.values()))
+        self.assertNotIn("router_up", out)
 
     def test_anythingllm_ok(self):
         fp = FakeProbes(http_map={("GET", "http://a:3001/"): cm.HttpResult(200, "")})
@@ -408,6 +418,14 @@ class TestMetricsChecks(unittest.TestCase):
         self.assertEqual(tres["gpu_temp_1"].value, 29.0)   # junction, not edge(28)
         self.assertEqual(tres["gpu_temp_0"].status, cm.STATUS_OK)
 
+
+    def test_gpu_checks_fan_out_on_failure(self):
+        """Same invariant for the per-card GPU checks."""
+        fp = FakeProbes()  # rocm-smi not in cmd_map -> rc != 0
+        vram = {r.id for r in cm.check_gpu_vram(fp, self.CFG)}
+        temp = {r.id for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(vram, {"gpu_vram_0", "gpu_vram_1"})
+        self.assertEqual(temp, {"gpu_temp_0", "gpu_temp_1"})
 
 class TestPromParser(unittest.TestCase):
     def test_parse_prom_labels_and_values(self):

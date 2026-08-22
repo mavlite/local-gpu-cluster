@@ -399,18 +399,39 @@ def parse_meminfo(text: str) -> dict[str, float]:
 REGISTRY: list[Check] = []
 
 
+def _fanout_failure(base: str, group: str, ids: list[str], detail: str,
+                    suggested_action: str | None = None) -> list[CheckResult]:
+    """Emit a failure under the SAME check IDs a success would produce.
+
+    These checks fan out on success (gpu_vram -> gpu_vram_0, gpu_vram_1;
+    router_up -> router_chat_upstream, ...) but used to collapse to a single
+    aggregate ID on failure. Because the store is keyed by check ID, a
+    transient failure wrote an aggregate row that no later success could ever
+    overwrite -- it stayed FAIL on the dashboard forever. Three such rows
+    survived a reboot on 2026-08-21 and had to be deleted by hand.
+
+    Emitting the fan-out IDs on both paths makes the next successful run
+    clear the failure naturally.
+    """
+    return [CheckResult(cid, group, STATUS_FAIL, detail,
+                        suggested_action=suggested_action) for cid in ids]
+
+
 def check_router_healthz(probes, cfg) -> list[CheckResult]:
     res = probes.http("GET", f"{cfg['router_url']}/healthz")
+    upstream_ids = [f"router_{n}_upstream" for n in ("chat", "embed", "rerank")]
     if res.status == 0:
-        return [CheckResult(
-            "router_up", "health", STATUS_FAIL,
+        return _fanout_failure(
+            "router_up", "health", upstream_ids,
             f"router unreachable: {res.error}",
-            suggested_action="restart_unit(153, llm-router)")]
+            suggested_action="restart_unit(153, llm-router)")
     try:
         data = json.loads(res.body)
     except ValueError:
-        return [CheckResult("router_up", "health", STATUS_FAIL,
-                            f"router /healthz non-JSON (HTTP {res.status})")]
+        return _fanout_failure(
+            "router_up", "health", upstream_ids,
+            f"router /healthz non-JSON (HTTP {res.status})",
+            suggested_action="restart_unit(153, llm-router)")
     out: list[CheckResult] = []
     upstreams = data.get("upstream", {})
     for name in ("chat", "embed", "rerank"):
@@ -462,9 +483,10 @@ def check_memvault_bridge(probes, cfg) -> list[CheckResult]:
 
 def check_gpu_vram(probes, cfg) -> list[CheckResult]:
     res = probes.cmd(["pct", "exec", str(cfg["gpu_vmid"]), "--", "rocm-smi", "--showmeminfo", "vram", "--json"])
+    card_ids = [f"gpu_vram_{i}" for i in range(cfg.get("gpu_card_count", 2))]
     if res.rc != 0:
-        return [CheckResult("gpu_vram", "metrics", STATUS_FAIL,
-                            f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
+        return _fanout_failure("gpu_vram", "metrics", card_ids,
+                               f"rocm-smi failed: {res.stderr.strip() or res.rc}")
     out: list[CheckResult] = []
     for idx, used, total in parse_rocm_vram_json(res.stdout):
         pct = (used / total * 100.0) if total else 0.0
@@ -473,23 +495,24 @@ def check_gpu_vram(probes, cfg) -> list[CheckResult]:
             status_for(pct, cfg["gpu_vram_warn_pct"], cfg["gpu_vram_fail_pct"]),
             f"card {idx}: {used:.0f}/{total:.0f} MiB ({pct:.0f}%)",
             value=round(pct, 1), unit="%"))
-    return out or [CheckResult("gpu_vram", "metrics", STATUS_FAIL,
-                               "no cards parsed from rocm-smi")]
+    return out or _fanout_failure("gpu_vram", "metrics", card_ids,
+                                  "no cards parsed from rocm-smi")
 
 
 def check_gpu_temp(probes, cfg) -> list[CheckResult]:
     res = probes.cmd(["pct", "exec", str(cfg["gpu_vmid"]), "--", "rocm-smi", "--showtemp", "--json"])
+    card_ids = [f"gpu_temp_{i}" for i in range(cfg.get("gpu_card_count", 2))]
     if res.rc != 0:
-        return [CheckResult("gpu_temp", "metrics", STATUS_FAIL,
-                            f"rocm-smi failed: {res.stderr.strip() or res.rc}")]
+        return _fanout_failure("gpu_temp", "metrics", card_ids,
+                               f"rocm-smi failed: {res.stderr.strip() or res.rc}")
     out: list[CheckResult] = []
     for idx, temp in parse_rocm_temp_json(res.stdout):
         out.append(CheckResult(
             f"gpu_temp_{idx}", "metrics",
             status_for(temp, cfg["gpu_temp_warn_c"], cfg["gpu_temp_fail_c"]),
             f"card {idx} junction {temp:.0f}C", value=temp, unit="C"))
-    return out or [CheckResult("gpu_temp", "metrics", STATUS_FAIL,
-                               "no temps parsed from rocm-smi")]
+    return out or _fanout_failure("gpu_temp", "metrics", card_ids,
+                                  "no temps parsed from rocm-smi")
 
 
 def check_host_mem(probes, cfg) -> list[CheckResult]:
@@ -932,6 +955,7 @@ DEFAULT_CONFIG: dict = {
     "alert_cooldown_s": 900,
     # checks
     "lxc_ids": [151, 153, 154, 155, 156],
+    "gpu_card_count": 2,   # fan-out width for gpu_vram_N / gpu_temp_N failure rows
     "lxc_ram_ceilings": {"151": 65536},
     "chat_idle_warn_s": 3600,
     "chat_idle_fail_s": 86400,
