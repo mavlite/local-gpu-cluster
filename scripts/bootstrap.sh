@@ -34,7 +34,7 @@ PHASES=(
   "51:V620 LXC + ROCm + llama.cpp HIP + three systemd units (chat, embed, rerank) + API key + SSH harden:51-lxc-amd.sh"
   "52:Swap-webhook service on host (auto-swap profiles via router; wires SWAP_WEBHOOK_URL into LXC 153):52-swap-webhook.sh"
   "53:Router LXC (FastAPI auth + admission + Prometheus + rate-limit + API key):53-lxc-router.sh"
-  "54:AnythingLLM LXC (Docker + compose stack; ALLM_LLM_TOKEN_LIMIT=131072):54-lxc-anythingllm.sh"
+  "54:AnythingLLM LXC (Docker + compose stack; ALLM_LLM_TOKEN_LIMIT=200000):54-lxc-anythingllm.sh"
   "55:MCP stack LXC (Docker + remote MCP servers, with hardcoded-IP audit):55-lxc-mcp.sh"
   "56:V620 fan-control bridge (host hwmon PWM driven by GPU temp):56-fan-control.sh"
   "57:AnythingLLM workspace tuning via REST API (needs ALLM_API_KEY):57-configure-anythingllm.sh"

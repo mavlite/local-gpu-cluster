@@ -19,14 +19,23 @@ retuning, updates, hardware changes).
 | 5.13  | `56-fan-control.sh`     | Host PWM bridge (needs `FAN_PWM_PATH` discovered manually) |
 | 10    | `57-configure-anythingllm.sh` | Create + tune RAG workspaces via REST API (needs `ALLM_API_KEY`) |
 | 10.5  | `58-rag-refresh-timer.sh` | Systemd timer (daily 03:15 UTC by default) running `scripts/rag/refresh.py` on the PVE host via `/opt/vcf-scraper-venv`. Emits Prometheus textfile metrics to `/var/lib/rag-refresh/metrics.prom` after each run. |
+| 10.7  | `58-mcp-sdg.sh`         | `mcp-sdg.service` in LXC 155 (port 3004, SSE) — exposes the `sdg-documentation` + `vcf-reference` AnythingLLM workspaces as `query_*`/`search_*` MCP tool pairs. Python venv + mcp SDK (`mcp>=1.2,<2` — see note below) |
+| 10.8  | `59-llamacpp-restart-timer.sh` | Systemd timer in LXC 151 that periodically restarts `llamacpp-chat` (keeps weights hot / recovers a wedged unit) |
 | 11    | `60-verify.sh`          | Appendix C smoke tests                                     |
 | 11.5  | `61-lxc-memory-vault.sh` | Memory Vault LXC 156, Docker, ZFS dataset, docker compose stack with override config |
-| 12    | `62-memory-vault-bridge.sh` | MCP-over-SSE bridge in LXC 156 (port 3005), Python venv + mcp SDK + uvicorn, systemd unit |
+| 12    | `62-memory-vault-bridge.sh` | MCP **Streamable HTTP** bridge in LXC 156, mounted at `/mcp` on port 3005. Python venv + mcp SDK (`mcp>=1.2,<2` — see note below) + uvicorn + starlette, systemd unit. Uses the SDK's low-level `Server` + `StreamableHTTPSessionManager`, **not** FastMCP |
 | 12.5  | `63-cluster-monitor.sh` | Read-only cluster health + metrics dashboard (host systemd service, port 8888), SQLite state, Python 3 stdlib only |
 | 12.6  | `64-memory-vault-backup-timer.sh` | Host systemd timer (daily 02:30) running pg_dump backup inside LXC 156 via `pct exec`; dumps to tank-backed dir, retains 14 |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.
+
+> **MCP SDK pin (load-bearing).** Both MCP venvs install `'mcp>=1.2,<2'`. **mcp 2.0.0
+> removed `mcp.server.fastmcp`**, which `mcp-sdg` imports — an unbounded `mcp>=1.2` took
+> LXC 155 down from 2026-08-21 13:53 UTC to 2026-08-22 (8,677 crash-loop restarts, nothing
+> listening on 3004). The unit reports `activating`, never `failed`, so `systemctl is-failed`
+> misses it; probe the port. Do not relax the `<2` bound without porting `mcp-sdg-server.py`
+> off FastMCP.
 
 ### Runtime tools (not phases — invoked on demand after deployment)
 
@@ -101,10 +110,10 @@ as three separate `llama-server` systemd units with per-card pinning:
 
 | Where | Service (unit) | Model | VRAM | Port |
 |------|----------------|-------|------|------|
-| V620 LXC 151 | `llamacpp-chat.service` (both V620s, tensor-split per profile) | **Profile-switched** via [`swap-chat-model.sh`](./swap-chat-model.sh): `qwen3.6` (Qwen3.6-35B-A3B **UD-Q6_K**, 256K ctx, `tensor-split 1,1.5`, `cache-reuse 1024†`, ~29 GB — default since 2026-05-27), `qwen3.6-fast` (UD-Q4_K_M, 256K ctx, `tensor-split 1,1`, `cache-reuse 1024†`, ~22 GB — throughput-prioritized alternative; replaces the retired Q5 `qwen3.6-hi` profile), or `coder` (Qwen3-Coder-Next UD-IQ4_XS, 128K ctx, `tensor-split 1,1.5`, `cache-reuse 0`, ~38 GB). Common flags: q8_0 KV, `--cache-ram 16384 --mlock --log-prefix --reasoning-format deepseek --jinja --no-mmproj`. †llama.cpp auto-disables cache_reuse for Q*_K_M + q8_0 KV (universal behavior, not profile-specific) | ~29 GB (qwen3.6) / ~22 GB (qwen3.6-fast) / ~38 GB (coder) | 8080 |
+| V620 LXC 151 | `llamacpp-chat.service` (both V620s, tensor-split per profile) | **Profile-switched** via [`swap-chat-model.sh`](./swap-chat-model.sh): `qwen3.8` (Qwen3.8-27B **UD-Q6_K_XL**, 256K ctx (262144), `tensor-split 1,1`, `--split-mode tensor`, `--spec-type draft-mtp` n-3 (tensor/MTP gains measured on the Q4_K_XL sibling — see `51-lxc-amd.sh` bench comments), cache-reuse 1024 auto-disabled, ~23.6 GB — default), `qwen3.6` (UD-Q6_K, 256K, 1,1.5, ~29 GB), `qwen3.6-fast` (UD-Q4_K_M, 256K, 1,1, ~22 GB), `coder` (UD-IQ4_XS, 128K, 1,1.5, cache-reuse 1024, ~38 GB), `devstral` (Q8_0, 256K, 1,1.5, q4_0 KV, ~25 GB), `devstral-large` (UD-IQ2_M, 64K, 1,1.5, q4_0 KV, ~40.6 GB). Common flags: q8_0 KV, `--cache-ram 16384 --mlock --log-prefix --reasoning-format deepseek --jinja --no-mmproj`. †llama.cpp auto-disables cache_reuse for Q*_K_M + q8_0 KV (universal behavior, not profile-specific) | ~23.6 GB (qwen3.8) / ~29 GB (qwen3.6) / ~22 GB (qwen3.6-fast) / ~38 GB (coder) / ~25 GB (devstral) / ~40.6 GB (devstral-large) | 8080 |
 | V620 LXC 151 | `llamacpp-embed.service` (V620 #1, `--main-gpu 0`, `HIP_VISIBLE_DEVICES=0`) | Qwen3-Embedding-0.6B Q8_0, **`--pooling last`** (NOT cls), 1024-dim, `--ctx-size 65536 --parallel 4` (16 K per slot) | ~1.2 GB | 8082 |
 | V620 LXC 151 | `llamacpp-rerank.service` (V620 #2, `--main-gpu 1`, `HIP_VISIBLE_DEVICES=1`) | BGE-Reranker-v2-m3 Q4_K_M (gpustack GGUF; Qwen3-Reranker-0.6B is gated alt), `--embeddings --pooling rank --reranking` | ~1.5 GB | 8083 |
-| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/completions` FIM passthrough, `/v1/embeddings`, `/v1/rerank`, `/v1/tavily/search` proxy, `/v1/models`, `/healthz`, `/metrics`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control (chat=1, embed=4) + slowapi rate-limit + Prometheus + CORS middleware; eight chat aliases (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6` for the `qwen3.6` profile; `rag-qwen3.6-fast`, `qwen3.6-fast-think`, `qwen3.6-fast` for the `qwen3.6-fast` profile; `qwen3-coder`, `qwen3-coder-next` for the `coder` profile) all resolve to the active chat backend with different `enable_thinking` / `strip_thinking` defaults | — | 8000 |
+| Router LXC 153 | `llm-router.service` | FastAPI: routes by path (`/v1/chat/completions`, `/v1/completions` FIM passthrough, `/v1/embeddings`, `/v1/rerank`, `/v1/tavily/search` proxy, `/v1/models`, `/healthz`, `/metrics`) to LXC 151 ports 8080/8082/8083; Bearer auth on inbound (`ROUTER_API_KEY`) + Bearer on upstream (`LLAMACPP_API_KEY`); admission control (chat=1, embed=4) + slowapi rate-limit + Prometheus + CORS middleware; fourteen chat aliases across six profiles (`rag-qwen3.8`/`qwen3.8-think`/`qwen3.8`/`qwen3.8-xhigh` for `qwen3.8`; `rag-qwen3.6`/`qwen3.6-think`/`qwen3.6` for `qwen3.6`; `rag-qwen3.6-fast`/`qwen3.6-fast-think`/`qwen3.6-fast` for `qwen3.6-fast`; `qwen3-coder`/`qwen3-coder-next` for `coder`; `devstral`; `devstral-large`) all resolve to the active chat backend with different `enable_thinking` / `strip_thinking` / `reasoning_effort` defaults | — | 8000 |
 
 Override anything via `config.env` — see `config.env.example` for the full knob list
 (`LLAMA_*`, `EMBED_*`, `RERANK_*`, admission + rate-limit env vars on the router).
@@ -124,22 +133,31 @@ Override anything via `config.env` — see `config.env.example` for the full kno
 
 ### Why these choices
 
-- **Qwen3.6-35B-A3B at UD-Q4_K_M** is the chat target. MoE with 3B active params keeps
-  inference fast; ~22 GB on disk. Unsloth Dynamic (UD-) quant is calibrated against an
-  imatrix dataset and tends to score slightly better than vanilla Q4_K_M at the same size.
+- **Qwen3.8-27B at UD-Q6_K_XL** is the chat target (default profile). Dense 27B,
+  bandwidth-bound — tensor split (`--split-mode tensor`) plus in-GGUF MTP spec-decode
+  (`draft-mtp` n-3) are load-bearing for throughput; ~23.6 GB on disk.
+  Qwen3.6-35B-A3B (MoE, 3B active params) remains the RAG alternative: UD-Q6_K for
+  quality, UD-Q4_K_M (`qwen3.6-fast`) for throughput. Unsloth Dynamic (UD-) quant is
+  calibrated against an imatrix dataset and tends to score slightly better than vanilla
+  quant at the same size.
 - **256K context with q8_0 KV cache and `--parallel 1`** gives a single in-flight request
-  the full Qwen3.6 trained context window (`n_ctx_train=262144`). Sub-agent calls from
-  OpenCode/Cline queue at the router instead of in llama.cpp (router can emit SSE
-  keepalives while waiting). Total chat VRAM is ~22 GB weights + KV; embed + rerank
-  pinned per-card add ~3 GB; ~25 GB headroom in the 64 GB pool.
-- **Speculative decoding is disabled by default** for the Qwen3.6 target. Qwen3.6-35B-A3B
-  has vocab 248,320 while Qwen3-0.6B has vocab 151,936 — llama.cpp refuses to load a
-  mismatched-vocab draft. The chat unit boot log shows
+  the full trained context window of the qwen3.8/qwen3.6 profiles (`n_ctx_train=262144`;
+  coder runs 128K, devstral-large 64K). Sub-agent calls from OpenCode/Cline queue at
+  the router instead of in llama.cpp (router can emit SSE keepalives while waiting).
+  Total chat VRAM is ~23.6 GB weights (qwen3.8 default) + KV; embed + rerank pinned
+  per-card add ~3 GB; per-profile VRAM distribution and peak headroom: see the table
+  in `day-2-ops.md` § 4.4.
+- **Speculative decoding is disabled by default on the MoE profiles** (qwen3.6,
+  qwen3.6-fast, coder) — the A3B architecture incurs per-token expert-loading overhead
+  during draft verification that exceeds any acceptance-rate speedup (benchmarks measure
+  a 3-12% regression with a vocab-matched draft). It is **enabled on `qwen3.8`** via
+  in-GGUF MTP heads (`--spec-type draft-mtp`, n-max 3; +63.8% measured 2026-08-19 on the
+  UD-Q4_K_XL sibling, no draft model). On the MoE profiles the chat unit boot log shows
   `common_speculative_init: no implementations specified for speculative decoding`, which
-  is the expected/normal state. No vocab-compatible small variant exists in the Qwen3.6
-  family yet; the ~1.5-2× throughput hit is accepted because 35B-A3B is MoE with ~3 B
-  active params per token and already fast. Re-enable via `LLAMA_DRAFT_REPO` in `config.env`
-  when a compatible draft ships.
+  is the expected/normal state. History: the original blocker was a vocab mismatch
+  (Qwen3.6-35B-A3B 248,320 vs Qwen3-0.6B 151,936); Qwen3.5-0.8B later matched the vocab,
+  but the MoE regression kept spec-decode off. Re-enable via `LLAMA_DRAFT_REPO` in
+  `config.env` if benchmarks ever flip.
 - **Embedder pooling: `--pooling last` is CRITICAL.** Qwen3-Embedding uses the final
   `<|endoftext|>` token. Using `cls` produces semantically wrong embeddings and silently
   invalidates AnythingLLM's vector DB.
@@ -162,7 +180,7 @@ already pointing at the router for both LLM and embedder. Specifically:
 | `LLM_PROVIDER` | `generic-openai` | Use OpenAI-compatible upstream |
 | `GENERIC_OPEN_AI_BASE_PATH` | `http://<router>:8000/v1` | All chat requests via router |
 | `GENERIC_OPEN_AI_MODEL_PREF` | `rag-qwen3.8` | Picks the V620 main model. MUST be an alias of the **currently loaded** profile — the router returns 409 for a cross-profile alias. The `rag-` prefix is required: it strips thinking, without which reasoning can consume the whole token budget and return empty content |
-| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `200000` | Conservative AnythingLLM-side cap. Chat unit's `LLAMA_CTX` is 256K (`--parallel 1` → full window per slot), but AnythingLLM stays at 128K as headroom against client misbehavior; bumping it is safe up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap |
+| `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` | `200000` | AnythingLLM-side input cap, set to the router's `MAX_CHAT_INPUT_TOKENS=200000`. The chat unit's `LLAMA_CTX` is 262144, so 200K leaves ~56K for output + thinking. Raised from 131072 (which was sized for the 128K Coder-Next window) during the qwen3.8 pivot; verified live 2026-08-22 |
 | `EMBEDDING_ENGINE` | `generic-openai` | Same provider style for embedder |
 | `EMBEDDING_BASE_PATH` | `http://<router>:8000/v1` | Embeddings via router |
 | `EMBEDDING_MODEL_PREF` | `qwen3-embed` | 1024-dim Qwen3-Embedding (matches `EMBED_ALIAS` in 51-lxc-amd.sh) |

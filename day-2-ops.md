@@ -198,7 +198,7 @@ pct exec 151 -- journalctl -u llamacpp-chat -n 100 --no-pager
 
 Common causes:
 
-- **First-start model download stalled.** The chat unit's `--hf-repo` downloads ~29 GB on first start (Q6_K default; ~22 GB on the qwen3.6-fast Q4 profile). `TimeoutStartSec=1800` (30 min) allows for this. If slower, the `warm-chat.sh` ExecStartPost will eventually time out but the model download continues in the background; restart the unit once download visible in `/opt/models/.cache/`.
+- **First-start model download stalled.** The chat unit's `--hf-repo` downloads ~23.6 GB on first start (qwen3.8 UD-Q6_K_XL default; ~29 GB on qwen3.6 Q6_K; ~22 GB on qwen3.6-fast). `TimeoutStartSec=1800` (30 min) allows for this. If slower, the `warm-chat.sh` ExecStartPost will eventually time out but the model download continues in the background; restart the unit once download visible in `/opt/models/.cache/`.
 - **VRAM OOM at weight load.** Most often when someone tries to swap to a larger model. `journalctl` shows `hipMalloc failed` or `out of memory`. Recovery: edit [`scripts/config.env`](./scripts/config.env.example) to revert `LLAMA_HF_REPO` / `LLAMA_HF_QUANT`, re-run `scripts/51-lxc-amd.sh`. Then do a VRAM budget exercise per [§ 4.4](#-44-vram-budget-template) before retrying.
 - **KFD ioctl rejected** (`HSA_STATUS_ERROR_OUT_OF_RESOURCES`). Usually means the LXC's AppArmor profile got reset. Confirm `/etc/pve/lxc/151.conf` still contains `lxc.apparmor.profile: unconfined`. Restart the LXC: `pct restart 151`.
 
@@ -313,6 +313,50 @@ Do not try to "fix" this. See [§ 4.5](#-45-enabling-spec-decode-when-a-compatib
 
 ---
 
+### § 3.10 MCP server silently down (`activating`, never `failed`)
+
+**Symptom:** an MCP tool disappears from OpenCode / Claude Code; nothing listens on the
+port; `systemctl is-failed` reports nothing wrong.
+
+**What happened on 2026-08-21:** `mcp-sdg` (LXC 155, port 3004) crash-looped **8,677 times**
+between 13:53 UTC on 2026-08-21 and its repair on 2026-08-22:
+
+```
+ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+  /opt/mcp-sdg/server.py line 53
+```
+
+**Cause:** the venv installed `'mcp>=1.2'` with no upper bound and picked up **mcp 2.0.0**,
+which removed `mcp.server.fastmcp`. Both `58-mcp-sdg.sh` and `62-memory-vault-bridge.sh`
+now pin `'mcp>=1.2,<2'`.
+
+**Why monitoring missed it:** with `Restart=on-failure` the unit sits in
+`activating (auto-restart)` forever and never reaches `failed`, so `systemctl is-failed`
+is not a valid liveness check. Probe the port instead.
+
+**Diagnose:**
+
+```bash
+pct exec 155 -- systemctl is-active mcp-sdg          # "activating" == broken, not healthy
+pct exec 155 -- journalctl -u mcp-sdg -n 20 --no-pager
+pct exec 155 -- ss -ltn | grep :3004                 # empty means it is not serving
+pct exec 155 -- /opt/mcp-sdg/venv/bin/pip show mcp | grep Version
+```
+
+**Repair:**
+
+```bash
+pct exec 155 -- systemctl stop mcp-sdg
+pct exec 155 -- /opt/mcp-sdg/venv/bin/pip install --quiet 'mcp>=1.2,<2' httpx
+pct exec 155 -- systemctl start mcp-sdg
+curl -s -o /dev/null -w "%{http_code}
+" http://192.168.6.155:3004/sse   # expect 200
+```
+
+The same check applies to the Memory Vault bridge on `192.168.6.223:3005/mcp` (expect a
+`307`). That bridge uses the low-level SDK API rather than FastMCP, so mcp 2.0.0 would not
+have hit it the same way — but the pin protects it regardless.
+
 ## § 4. Model management
 
 > **When to read this:** you need to add, swap, or clean up a model on the running cluster.
@@ -330,18 +374,33 @@ Models are downloaded by `llama-server`'s `--hf-repo` flag into `LLAMA_CACHE=/op
     └── blobs/<sha256>               ← actual file
 ```
 
-Currently cached on the host (verified live 2026-06-08):
+Currently cached on the host — **verified live 2026-08-22** by `find -L /tank/models -name '*.gguf'`.
+Sizes are decimal GB (bytes / 1e9), matching `ls`/HF reporting. Total `/tank/models` = 201 GB
+of a 928 GB pool (619 GB free).
 
 | Repo | File | Size | Used by |
 |---|---|---|---|
-| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q6_K.gguf` | ~29 GB | **chat (default — `qwen3.6` profile)** |
-| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | ~22 GB | **chat (`qwen3.6-fast` throughput profile)** |
-| `unsloth/Qwen3.6-35B-A3B-GGUF` | `mmproj-BF16.gguf` | several GB | unused (chat has `--no-mmproj`) |
-| `Qwen/Qwen3-Embedding-0.6B-GGUF` | `Qwen3-Embedding-0.6B-Q8_0.gguf` | ~1 GB | embed |
-| `gpustack/bge-reranker-v2-m3-GGUF` | `bge-reranker-v2-m3-Q4_K_M.gguf` | ~1.5 GB | rerank |
-| `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | ~400 MB | unused (historical draft attempt — vocab 151,936 mismatch; safe to delete) |
-| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` | ~50 GB | unused (leftover from a failed swap) |
-| `unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF` | `Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf` | ~25 GB | **chat (`devstral` profile) — active 2026-06-08** |
+| `unsloth/Qwen3.8-27B-GGUF` | `Qwen3.8-27B-UD-Q6_K_XL.gguf` | 25.30 GB | **chat (default — `qwen3.8` profile)** |
+| `unsloth/Qwen3.8-27B-GGUF` | `Qwen3.8-27B-Q8_0.gguf` | 29.05 GB | unused (quant-sweep artifact — see `swap-chat-model.sh:225`; safe to delete) |
+| `unsloth/Qwen3.8-27B-GGUF` | `Qwen3.8-27B-UD-Q4_K_XL.gguf` | 17.56 GB | unused, but **this is the quant the tensor-split (+42.8%) and MTP (+63.8%) benchmarks were measured on** — keep if you want to reproduce them |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q6_K.gguf` | 29.31 GB | **chat (`qwen3.6` profile)** |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | 22.13 GB | **chat (`qwen3.6-fast` throughput profile)** |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `Qwen3.6-35B-A3B-UD-Q5_K_M.gguf` | 26.46 GB | unused (retired `qwen3.6-hi` profile — see § 4.4; safe to delete) |
+| `unsloth/Qwen3.6-35B-A3B-GGUF` | `mmproj-BF16.gguf` | 0.90 GB | unused (chat has `--no-mmproj`) |
+| `unsloth/Qwen3-Coder-Next-GGUF` | `Qwen3-Coder-Next-UD-IQ4_XS.gguf` | 38.43 GB | **chat (`coder` profile)** |
+| `unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF` | `Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf` | 25.06 GB | **chat (`devstral` profile)** |
+| `Qwen/Qwen3-Embedding-0.6B-GGUF` | `Qwen3-Embedding-0.6B-Q8_0.gguf` | 0.64 GB | embed |
+| `gpustack/bge-reranker-v2-m3-GGUF` | `bge-reranker-v2-m3-Q4_K_M.gguf` | 0.44 GB | rerank |
+| `unsloth/Qwen3-0.6B-GGUF` | `Qwen3-0.6B-Q4_K_M.gguf` | 0.40 GB | unused (historical draft attempt — vocab 151,936 mismatch; safe to delete) |
+
+**Not on disk** (documented profiles whose weights have never been fetched):
+
+- `unsloth/Devstral-2-123B-Instruct-2512-GGUF` / `…UD-IQ2_M.gguf` (~40.6 GB) — the
+  `devstral-large` profile exists in `swap-chat-model.sh` but the GGUF has never been
+  downloaded, which is why its VRAM is still unmeasured (§ 4.4). First swap to it will
+  pull ~40.6 GB.
+- `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` (~50 GB) — previously listed here as a leftover;
+  already deleted from the host.
 
 ### § 4.2 Pre-fetching a model
 
@@ -378,7 +437,31 @@ To pin to a static path instead of `--hf-repo` (e.g., for air-gapped deployments
 
 ### § 4.3 Swapping the chat model ✅
 
-**The fast path: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh)** automates the swap as a single atomic operation for the three pre-defined profiles (`qwen3.6` / `qwen3.6-fast` / `coder`). See [§ 4.4](#-44-vram-budget-template) for the full workflow, per-profile tuning rationale, and measured VRAM distribution. Use the swap script unless you're introducing a brand-new model not covered by an existing profile.
+**The fast path: [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh)** automates the swap as a single atomic operation for the six pre-defined profiles (`qwen3.8` / `qwen3.6` / `qwen3.6-fast` / `coder` / `devstral` / `devstral-large`). See [§ 4.4](#-44-vram-budget-template) for the full workflow, per-profile tuning rationale, and measured VRAM distribution. Use the swap script unless you're introducing a brand-new model not covered by an existing profile.
+
+**The automatic path: router-triggered auto-swap.** With `scripts/52-swap-webhook.sh`
+installed on the host (port 9100) and `SWAP_WEBHOOK_URL` set in `/etc/router.env`, a request
+for an alias belonging to a *different* profile makes the router call the webhook, hold the
+connection open with SSE keepalives while the chat unit restarts, and then forward the
+original request. No SSH, no manual swap.
+
+**Validated end-to-end 2026-08-22** (warm cache, 4 swaps, qwen3.8 ↔ coder):
+
+| Behaviour | Result |
+|---|---|
+| Non-streaming cross-profile request (`qwen3-coder` while qwen3.8 loaded) | **HTTP 200 in 32.5 s**; response `model: qwen3-coder` |
+| Streaming cross-profile request (`rag-qwen3.8` while coder loaded) | **HTTP 200 in 27 s**; immediate `: ping`, then keepalives at exactly 12 s intervals (`KEEPALIVE_INTERVAL=12`) until the first token |
+| Repeat swaps | 31.7 s and 27.6 s — so budget **27–33 s** per auto-swap |
+| `/healthz` `active_chat_profile` after swap | tracks the new profile (`qwen3-coder`, then back to `qwen3.8`) |
+| `/v1/models` after swap | re-advertises only the new profile's aliases (`qwen3-coder`, `qwen3-coder-next`) |
+| Cross-profile request with `SWAP_WEBHOOK_URL` unset | **409 in 13 ms**, before the chat slot is acquired, with an error naming both the requested and loaded profile |
+| Unknown model string | passes through to llama-server unchanged (HTTP 200, served by whatever is loaded) — the documented one-line A/B path |
+
+⚠️ A caveat the unknown-model test surfaced: an unrecognised model id gets **no** alias
+treatment, so `enable_thinking` is never injected and Qwen3.8's template defaults
+`reasoning_effort` to `xhigh`. With a small `max_tokens` the reasoning consumes the entire
+budget and you get `finish_reason: "length"` with empty `content`. Use a real alias
+(`rag-*` for thinking-off) for anything other than a throwaway A/B probe.
 
 **The manual path** (for adding a new model that doesn't have a profile yet): edit `config.env` + re-run `51-lxc-amd.sh`. Do not hand-edit the unit file or wget into `/tank/models`.
 
@@ -412,13 +495,13 @@ If you intend to keep the new model around, **add it to [`get_profile()`](./scri
 
 From the Qwen3-Coder-Next OOM incident (May 2026): a 49.6 GB GGUF was downloaded and tried before checking VRAM math; it failed at weight allocation. Always run this before downloading anything > 30 GB.
 
-| Component | Formula | Current values (Q6_K default) |
+| Component | Formula | Current values (qwen3.6-profile examples — qwen3.8 default measured per-card in the table below) |
 |---|---|---|
-| Chat weights (Q6_K default) | ~0.65 × file size | ~29 GB (Q6_K) / ~22 GB (qwen3.6-fast Q4) |
+| Chat weights (qwen3.6 profiles) | ~0.65 × file size | ~29 GB (Q6_K) / ~22 GB (qwen3.6-fast Q4) |
 | Chat KV cache (Q8) | `--ctx-size × 2 × hidden_size × n_layers × bytes_per_token / 8` ≈ **~11 GB at 256K × Q8** | ~11 GB |
 | Embed weights + KV (Q8) | ~1.2 GB | 1.2 GB |
 | Rerank weights + KV | ~1.5 GB | 1.5 GB |
-| **Pool total (Q6_K default)** | | **~43 GB of 64 GB pool, ~21 GB headroom** |
+| **Pool total (qwen3.6 Q6_K profile)** | | **~43 GB of 64 GB pool, ~21 GB headroom** |
 | **Pool total (Q4 fast profile)** | | ~36 GB of 64 GB pool, ~28 GB headroom |
 
 Rules of thumb:
@@ -500,10 +583,10 @@ curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/js
 
 If `rocm-smi` shows ≥3 GB free on each card and the unit is stable for ~10 min, the budget is right. If it OOMs at first start (single-allocation failure), drop one rank — try `UD-Q3_K_XL` (36.3 GB).
 
-**Caveat — chat-model exclusivity:** Coder-Next at any of these quants replaces (doesn't coexist with) `rag-qwen3.6` in the chat slot. Three operational patterns:
+**Caveat — chat-model exclusivity:** Coder-Next at any of these quants replaces (doesn't coexist with) the active chat profile (default `qwen3.8`) in the chat slot. Three operational patterns:
 
-- **Coding workstation** — Coder-Next is the chat model; all clients (OpenCode, AnythingLLM RAG, browser artifact) use it. RAG quality may degrade vs Qwen3.6 (different model strengths).
-- **RAG workstation** — Keep Qwen3.6-35B-A3B; Coder-Next not deployed.
+- **Coding workstation** — Coder-Next is the chat model; all clients (OpenCode, AnythingLLM RAG, browser artifact) use it. RAG quality may degrade vs the Qwen RAG profiles (default `qwen3.8`; different model strengths).
+- **RAG workstation** — Keep the Qwen RAG profile (default `qwen3.8`); Coder-Next not deployed.
 - **Switch on demand** — Keep both downloaded; use [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) to flip between profiles. **~45-120s on a warm cache** (measured 2026-05-26: qwen3.6→coder 61s, coder→qwen3.6 45s); ~7-15 min on first use of a new model (HF download).
 
 The router's [`ALIAS_MAP`](./scripts/files/router-app.py) already maps `qwen3-coder` and `qwen3-coder-next` to the chat unit so clients can address the active model by either alias after a swap.
@@ -520,13 +603,13 @@ The swap script automates the four-step manual procedure above as a single atomi
 ./scripts/swap-chat-model.sh coder
 
 # Swap back to the RAG model
-./scripts/swap-chat-model.sh qwen3.6
+./scripts/swap-chat-model.sh qwen3.8
 
 # Force a re-run even if already on the target (e.g., to pick up a config tweak)
-./scripts/swap-chat-model.sh --force qwen3.6
+./scripts/swap-chat-model.sh --force qwen3.8
 ```
 
-Profiles are defined in the `get_profile()` case statement at the top of the script. To add a third profile (e.g., a fine-tune, a different quant), extend that case and add the name to `PROFILE_NAMES`.
+Profiles are defined in the `get_profile()` case statement at the top of the script. To add an additional profile beyond the current six (e.g., a fine-tune, a different quant), extend that case and add the name to `PROFILE_NAMES`.
 
 **Pre-warm the coder cache** the first time, ideally in a quiet window — the chat unit's `TimeoutStartSec=1800s` covers the 38 GB download but the chat endpoint is offline for the duration. Once cached, subsequent swaps land in 45-120s.
 
@@ -539,24 +622,26 @@ Profiles are defined in the `get_profile()` case statement at the top of the scr
 
 **Why per-profile ctx:** Coder-Next's larger prefill activation buffers concentrate on GPU 0 and aren't released after the request completes. Stability testing at 256K showed GPU 0 climbing from 90% → 98% during an 82K-token prefill **and staying there** (real fragmentation, not transient). Dropping `LLAMA_CTX` from 262144 → 131072 halves the KV reservation, freeing ~5-7 GB of activation headroom. 128K is well above typical coding-session usage.
 
-**Why per-profile cache-reuse:** llama.cpp's `--cache-reuse` (prompt-prefix reuse) has a logic bug that aborts the unit when a 100%-similar cached prompt replays. The crash signature is `common.cpp:1489: failed to remove sequence ... p1=-1` followed by `status=6/ABRT`. We hit this on Coder-Next during stability testing; Qwen3.6 hasn't tripped it. Coder profile sets `LLAMA_CACHE_REUSE=0` to disable it entirely; Qwen3.6 keeps `1024` for the RAG prompt-prefix speedup. Trade-off for coder: identical-prefix replays pay full prefill cost instead of skipping cached tokens.
+**Why per-profile cache-reuse:** llama.cpp's `--cache-reuse` (prompt-prefix reuse) had a bug (llama.cpp #19908, ROCm GPU stall on cached DeltaNet prompt replay) that aborted the unit when a 100%-similar cached prompt replayed. The crash signature was `common.cpp:1489: failed to remove sequence ... p1=-1` followed by `status=6/ABRT`. We hit this on Coder-Next during stability testing; Qwen3.6 hadn't tripped it. Coder was set to `LLAMA_CACHE_REUSE=0` as a workaround, but the regression (introduced in b9582) is fixed and coder now also uses `1024` for the prompt-prefix speedup — confirmed safe on b9584, re-validated 2026-06-09: 99K-token repeat in 61s vs 157s first pass, 2.56× speedup (`swap-chat-model.sh:159-163`). Only the Mistral profiles (`devstral`, `devstral-large`) keep `0`, as a conservative default for the new architecture (`swap-chat-model.sh:179, :201`).
 
-Measured distribution under each profile (2026-05-26, 2× V620 32 GB each):
+Measured distribution under each profile (2× V620 32 GB each; per-row dates, 2026-05-26 through 2026-08-19):
 
 | Profile | Split | Ctx | Cache-reuse | GPU 0 idle / peak | GPU 1 idle / peak | Free GPU 0 at peak | Notes |
 |---|---|---|---|---|---|---|---|
-| `qwen3.6` (UD-Q6_K, 29 GB) **default — 2026-05-27 pivot** | `1,1.5` | 256K | 1024† | **PENDING (predicted ~76% / ~85%)** | **PENDING (predicted ~63% / ~73%)** | **PENDING (predicted ~3-4 GB at peak)** | RE-MEASURE after first redeploy via `swap-chat-model.sh qwen3.6` and update this row. Predicted via interpolation between Q4@1,1 and Q5@1,1.5 measurements below. †Expect `cache_reuse` auto-disable (same Q*_K_M behavior). |
+| `qwen3.8` (UD-Q6_K_XL, ~23.6 GB) **default** | `1,1` | 256K | 1024 (auto-disabled for this arch) | **89% / 89%** | **62% / 63%** | **~3.5 GB at peak** (derived from the 89% peak) | validated 2026-08-19 (b10509): idle 26.65 + 18.69 GB; flat under 122K-token prefill stress, 0.2 GB drift, no OOM; decode 49.5 t/s short / 32.6 @122K; prefill 553 t/s @22K. `--split-mode tensor` + `draft-mtp` n-3. |
+| `qwen3.6` (UD-Q6_K, 29 GB) | `1,1.5` | 256K | 1024† | **PENDING (predicted ~76% / ~85%)** | **PENDING (predicted ~63% / ~73%)** | **PENDING (predicted ~3-4 GB at peak)** | RE-MEASURE after first redeploy via `swap-chat-model.sh qwen3.6` and update this row. Predicted via interpolation between Q4@1,1 and Q5@1,1.5 measurements below. †Expect `cache_reuse` auto-disable (same Q*_K_M behavior). |
 | `qwen3.6-fast` (UD-Q4_K_M, 22 GB) — renamed from prior default 2026-05-27 | `1,1` | 256K | 1024† | **75% / 84%** | **44% / 52%** | **~5.1 GB at peak** | validated 2026-05-26 as previous `qwen3.6` default: T3a→T3b delta +0pp/+0pp, no errors, ✅ PASS. Same GGUF, so measurements carry over verbatim. 31pp idle asymmetry: ~10 GB non-split tensor mass lands on GPU 0. †`cache_reuse` auto-disables (Q*_K_M + q8_0 KV) |
 | ~~`qwen3.6-hi` (UD-Q5_K_M, 26.5 GB)~~ retired 2026-05-27 | ~~`1,1.5`~~ | ~~256K~~ | ~~1024~~ | ~~73% / 81%~~ | ~~60% / 68%~~ | ~~~6.1 GB~~ | **Retired:** Q5 is strictly dominated by the new Q6 default going up and by Q4 (qwen3.6-fast) going down for throughput. Historical measurement preserved here for reference. |
 | `coder` initial | `1,1` | 256K | 1024 | 98% / 98% ⚠️ | 66% / 90% | 0.6 GB | OOM-adjacent at idle |
 | `coder` split-only fix | `1,1.5` | 256K | 1024 | 90% / 98% ⚠️ | 82% / 90% | 0.6 GB | drifts to 98% under 82K prefill, **stays there** |
 | `coder` ctx fix | `1,1.5` | 128K | 1024 | 84% / 92% | 77% / 85% | ~2.6 GB | bounded peak, but cache-reuse aborts on duplicate prompts |
-| `coder` **final** | `1,1.5` | **128K** | **0** | **84% / 92%** | **77% / 85%** | **~2.6 GB at peak** | re-validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS. Cache-reuse abort is now structurally impossible (set to 0) |
+| `coder` **final** | `1,1.5` | **128K** | **0 → 1024** | **84% / 92%** | **77% / 85%** | **~2.6 GB at peak** | validated 2026-05-26 (T3a/T3b methodology): T3b vs T3a delta +0pp/+0pp, ✅ PASS, with cache-reuse 0 (workaround for llama.cpp #19908). Re-validated 2026-06-09 on b9584 with cache-reuse **1024** re-enabled after the b9582 regression fix: zero drift at 99K ctx + 1600 tok gen, peak 83% / 77%, 2.56× speedup on repeat (`swap-chat-model.sh:159-163, :279`) |
 | `devstral` (Devstral Small 2 24B Q8_0, ~25 GB, **q4_0 KV**) | `1,1.5` | 256K | 0 | **83% / PENDING** | **75% / PENDING** | **~5.1 GB idle; peak not yet measured** | validated 2026-06-08: idle 26.7 GB / 23.1 GB. q4_0 KV required (q8_0 at 256K needs 11.4 GB on GPU 0, exceeds headroom). n_ctx_train=393216 (384K). Peak under heavy prefill — run stability test and update. |
+| `devstral-large` (Devstral 2 123B UD-IQ2_M, ~40.6 GB, **q4_0 KV**) | `1,1.5` | 64K | 0 | **PENDING** | **PENDING** | **PENDING** | VRAM not yet measured (predicted ~25.9 GB GPU 0 / ~26.5 GB GPU 1 — `swap-chat-model.sh:281`). q4_0 KV. Run stability test and update. |
 
 **Universal pattern across all profiles:** a one-time +8pp activation-buffer allocation on the first heavy prefill (~80K+ tokens), then bounded — repeat heavy requests stay at the same VRAM level. This is intrinsic to the current llama.cpp build on V620 + ROCm, not a per-profile issue. The post-settle drift is real (buffer is held, not released), but it's a one-shot allocation, not compounding fragmentation. Safe to ignore on any profile that meets the ≥3 GB free at peak target.
 
-The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms appeared. The split balances *idle* VRAM; the ctx caps the *post-prefill* allocation peak; the cache-reuse disable eliminates a llama.cpp abort on duplicate-prompt replays. All three together are needed for sustained operation.
+The three-step tuning (split → ctx → cache-reuse) reflects how the symptoms appeared. The split balances *idle* VRAM; the ctx caps the *post-prefill* allocation peak; the cache-reuse knob was the #19908 workaround (set to 0, since re-enabled at 1024 after the fix). All three together are needed for sustained operation.
 
 Verified 2026-05-26 with two consecutive 82K-token requests: VRAM held at 92%/85% on both, no drift between requests, no journal errors.
 
@@ -568,11 +653,11 @@ Re-validate after any profile change with [`scripts/tools/stability-test-coder.s
 
 ```powershell
 function Swap-ClusterChatModel {
-  param([Parameter(Mandatory)][ValidateSet("coder","qwen3.6","qwen3.6-fast","--status")][string]$Target)
+  param([Parameter(Mandatory)][ValidateSet("qwen3.8","coder","qwen3.6","qwen3.6-fast","devstral","devstral-large","--status")][string]$Target)
   ssh root@<pve-host> "/root/local-gpu-cluster/scripts/swap-chat-model.sh $Target"
 }
 Set-Alias swap Swap-ClusterChatModel
-# Usage:  swap --status    swap coder    swap qwen3.6    swap qwen3.6-fast
+# Usage:  swap --status    swap qwen3.8    swap coder    swap qwen3.6    swap qwen3.6-fast    swap devstral    swap devstral-large
 ```
 
 Bash equivalent:
@@ -581,9 +666,11 @@ Bash equivalent:
 alias swap='ssh root@<pve-host> /root/local-gpu-cluster/scripts/swap-chat-model.sh'
 ```
 
-To add an additional profile beyond the current three, extend the `get_profile()` case statement and `PROFILE_NAMES` array in [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh), then add corresponding entries to the router's [`ALIAS_MAP`](./scripts/files/router-app.py) (matching `backend` field). Dynamic `/v1/models` will pick them up automatically after the next `53-lxc-router.sh` redeploy.
+To add an additional profile beyond the current six, extend the `get_profile()` case statement and `PROFILE_NAMES` array in [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh), then add corresponding entries to the router's [`ALIAS_MAP`](./scripts/files/router-app.py) (matching `backend` field). Dynamic `/v1/models` will pick them up automatically after the next `53-lxc-router.sh` redeploy.
 
 ### § 4.5 Spec-decode status and re-evaluation triggers
+
+The **default profile (`qwen3.8`) uses in-GGUF MTP speculative decoding** (`--spec-type draft-mtp`, n-max 3; +63.8% measured 2026-08-19 on the UD-Q4_K_XL sibling — the deployed UD-Q6_K_XL benches 43.13 t/s at the same config, `swap-chat-model.sh:225`) — no draft model. The disabled-by-default statement below applies to the **MoE profiles** (qwen3.6, qwen3.6-fast, coder) and the Mistral profiles (devstral, devstral-large), whose GGUFs carry no nextn tensors.
 
 **Currently disabled** (see [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding)). The blocker is **not** vocab mismatch — Qwen3.5-0.8B (vocab 248,320) is a vocab match for Qwen3.6 and llama.cpp [PR #19493](https://github.com/ggml-org/llama.cpp/pull/19493) accepts it as a draft via `--hf-repo-draft`. Spec-decode stays off because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that **exceeds** any acceptance-rate speedup. Two independent benchmarks measured the regression:
 
@@ -673,7 +760,7 @@ curl -sf -H "Authorization: Bearer $ROUTER_KEY" http://192.168.6.153:8000/v1/mod
 
 # A trivial completion
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"in one word: hi"}],"max_tokens":5}' \
+    -d '{"model":"rag-qwen3.8","messages":[{"role":"user","content":"in one word: hi"}],"max_tokens":5}' \
     http://192.168.6.153:8000/v1/chat/completions | jq '.choices[0].message.content'
 ```
 
@@ -689,9 +776,9 @@ If the model output looks degraded compared to before (worse coherence, weird to
 
 | Layer | Setting | Default | Source |
 |---|---|---|---|
-| llama.cpp chat unit | `--ctx-size` | **262 144** (256K, Qwen3.6 full trained window) | [`scripts/51-lxc-amd.sh:43`](./scripts/51-lxc-amd.sh) `LLAMA_CTX` |
-| Router | `MAX_CHAT_INPUT_TOKENS` | **200 000** (200K input cap, ~56K reserved for output) | [`scripts/53-lxc-router.sh:50`](./scripts/53-lxc-router.sh) |
-| AnythingLLM | `ALLM_LLM_TOKEN_LIMIT` | **131 072** (128K conservative client-side cap) | [`scripts/54-lxc-anythingllm.sh:42`](./scripts/54-lxc-anythingllm.sh) |
+| llama.cpp chat unit | `--ctx-size` | **262 144** (256K; full trained window for Qwen3.6 and the native window for Qwen3.8 as well — both profiles spec 262144) | [`scripts/51-lxc-amd.sh:49`](./scripts/51-lxc-amd.sh) `LLAMA_CTX` |
+| Router | `MAX_CHAT_INPUT_TOKENS` | **200 000** (200K input cap, ~56K reserved for output) | [`scripts/53-lxc-router.sh:59`](./scripts/53-lxc-router.sh) |
+| AnythingLLM | `ALLM_LLM_TOKEN_LIMIT` | **200 000** (matches the router cap; verified live 2026-08-22 as `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=200000` in the running container) | [`scripts/54-lxc-anythingllm.sh:54`](./scripts/54-lxc-anythingllm.sh) |
 
 These are three *different* limits guarding different layers. They are intentionally not equal.
 
@@ -705,7 +792,7 @@ These are three *different* limits guarding different layers. They are intention
 
 | Scenario | What to change |
 |---|---|
-| AnythingLLM truncates retrieved chunks too aggressively | Bump `ALLM_LLM_TOKEN_LIMIT` in [`scripts/54-lxc-anythingllm.sh`](./scripts/54-lxc-anythingllm.sh), re-run, restart container. Safe up to 200 000 (router cap). |
+| AnythingLLM truncates retrieved chunks too aggressively | `ALLM_LLM_TOKEN_LIMIT` is already at the router cap (200 000) — there is no headroom left to bump. Raise `MAX_CHAT_INPUT_TOKENS` on the router first, and only within the chat unit's `--ctx-size`. |
 | Direct API client (OpenCode, Cline) hits 413 from the router | Bump `MAX_CHAT_INPUT_TOKENS` in [`scripts/53-lxc-router.sh`](./scripts/53-lxc-router.sh), re-run, restart router. Safe up to ~256 000 minus headroom for output. |
 | You want more KV-cache headroom (e.g., to run multi-slot) | Lower `LLAMA_CTX` in [`scripts/51-lxc-amd.sh`](./scripts/51-lxc-amd.sh) — but you'll then also lower the router + AnythingLLM caps to match. |
 | You want to *reduce* AnythingLLM's input to limit cost / hallucination on long prompts | Just lower `ALLM_LLM_TOKEN_LIMIT`. Doesn't affect anything else. |
@@ -741,13 +828,19 @@ Edit pattern: change values in [`scripts/config.env`](./scripts/config.env.examp
 
 ### § 6.2 Adding or editing router aliases
 
-`ALIAS_MAP` is **Python source** in [`scripts/files/router-app.py:336-340`](./scripts/files/router-app.py), not an env var. Procedure:
+`ALIAS_MAP` is **Python source** in [`scripts/files/router-app.py:409-473`](./scripts/files/router-app.py), not an env var. Procedure:
 
 ```bash
 # 1. Edit the source
 $EDITOR /root/local-gpu-cluster/scripts/files/router-app.py
 # Add to ALIAS_MAP, e.g.:
 #   "qwen3.6-rag":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True},
+# The current qwen3.8 entries (router-app.py:462-472) show the full schema,
+# including reasoning_effort (injected for qwen3.8 aliases only):
+#   "rag-qwen3.8":   {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
+#   "qwen3.8-think": {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False, "reasoning_effort": "medium"},
+#   "qwen3.8":       {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False, "reasoning_effort": "medium"},
+#   "qwen3.8-xhigh": {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False, "reasoning_effort": "xhigh"},
 
 # 2. Re-run the router provisioning (deploys updated app.py + restarts unit)
 ./scripts/53-lxc-router.sh
@@ -784,7 +877,7 @@ CHAT_CONCURRENCY=1
 EMBED_CONCURRENCY=4
 ```
 
-`CHAT_CONCURRENCY=1` is intentional and matches the chat unit's `--parallel 1` — see [`scripts/53-lxc-router.sh:39-43`](./scripts/53-lxc-router.sh) for the full rationale. Don't bump this above 1 unless you also bump the chat unit's `--parallel` (and reduce per-slot context proportionally).
+`CHAT_CONCURRENCY=1` is intentional and matches the chat unit's `--parallel 1` — see [`scripts/53-lxc-router.sh:47-53`](./scripts/53-lxc-router.sh) for the full rationale. Don't bump this above 1 unless you also bump the chat unit's `--parallel` (and reduce per-slot context proportionally).
 
 `EMBED_CONCURRENCY=4` matches the embed unit's `--parallel 4`. If you bump embed concurrency at the router without also bumping the upstream, you'll get queueing inside llama.cpp instead of at the router (where keepalives can be emitted).
 
@@ -838,7 +931,7 @@ ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.
 
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3.6-think",
+    "model": "qwen3.8-think",
     "messages": [{"role":"user","content":"What was announced about TrueNAS Scale in the last 7 days?"}],
     "tool_execution": "server",
     "stream": false
@@ -933,7 +1026,7 @@ ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.
 # Non-streaming, simple Tavily search question
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen3.6-think",
+    "model": "qwen3.8-think",
     "messages": [{"role":"user","content":"What is the current TrueNAS Scale stable release?"}],
     "tool_execution": "server",
     "stream": false
@@ -964,7 +1057,7 @@ curl -sf http://192.168.6.153:8000/healthz | jq
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" http://192.168.6.153:8000/v1/models | jq '.data | length'
 # Trivial chat probe
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
+    -d '{"model":"rag-qwen3.8","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
     http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content'
 ```
 
@@ -1254,7 +1347,7 @@ $PY /root/local-gpu-cluster/scripts/rag/cleanup_interrupted_refresh.py --source 
 | Embedder pooling (`last` → `cls`, or vice versa) | ✅ **Yes — full re-embed** | Different pooling = different embeddings for the same input |
 | `EMBED_CTX` / `EMBED_PARALLEL` ratio changes per-slot ctx | ⚠ Probably — anything previously truncated needs re-embed | Existing chunks may have been silently truncated at old per-slot ctx |
 | Reranker model | ❌ No | Rerank is applied at query time, not embedded into vectors |
-| Chat model (`rag-qwen3.6` → different) | ❌ No | Chat synthesis is independent of vector DB |
+| Chat model (`rag-qwen3.8` → different) | ❌ No | Chat synthesis is independent of vector DB |
 | Workspace tuning (`topN`, `similarityThreshold`) | ❌ No | Applied at retrieval time |
 
 ### § 9.2 Pre-change checklist
@@ -1704,7 +1797,7 @@ After any update, run the full [§ 2](#-2-cluster-health--observability) probe, 
 # Smoke-test a chat request and an embed
 ROUTER_KEY=$(pct exec 153 -- awk -F= '/^ROUTER_API_KEY=/{print $2}' /etc/router.env)
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+    -d '{"model":"rag-qwen3.8","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
     http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content'
 curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
     -d '{"input":"ping"}' http://192.168.6.153:8000/v1/embeddings | jq '.data[0].embedding | length'
@@ -1724,7 +1817,7 @@ These are rough baselines measured at the deployed config (256K chat ctx, `--par
 |---|---|---|
 | Chat: first-token latency (short prompt, warm) | < 1s | > 3s |
 | Chat: tokens/sec (steady-state, thinking-on) | 15-30 t/s | < 10 t/s |
-| Chat: tokens/sec (steady-state, thinking-off via `rag-qwen3.6`) | 25-40 t/s | < 15 t/s |
+| Chat: tokens/sec (steady-state, thinking-off via `rag-qwen3.6`, qwen3.6 profile) | 25-40 t/s | < 15 t/s |
 | Chat: full 128K-input first-token | 30-90s prompt-processing | > 180s |
 | Embed: single 16K-token chunk | 200-500ms | > 2s |
 | Embed: 100-chunk batch | 5-15s | > 60s |
@@ -1744,12 +1837,12 @@ LOG=/tank/perf-baseline-$(date +%Y%m%d).log
 # 1. Cold chat (first request after a 5-min idle)
 sleep 300
 time curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"write a sentence"}],"max_tokens":50}' \
+    -d '{"model":"rag-qwen3.8","messages":[{"role":"user","content":"write a sentence"}],"max_tokens":50}' \
     http://192.168.6.153:8000/v1/chat/completions | jq -r '.choices[0].message.content' | tee -a $LOG
 
 # 2. Sustained throughput
 time curl -sf -H "Authorization: Bearer $ROUTER_KEY" -H "Content-Type: application/json" \
-    -d '{"model":"rag-qwen3.6","messages":[{"role":"user","content":"explain TCP slow start in 500 words"}],"max_tokens":600}' \
+    -d '{"model":"rag-qwen3.8","messages":[{"role":"user","content":"explain TCP slow start in 500 words"}],"max_tokens":600}' \
     http://192.168.6.153:8000/v1/chat/completions | jq '{tokens:.usage.completion_tokens, ms:0}' | tee -a $LOG
 
 # 3. Embed throughput
