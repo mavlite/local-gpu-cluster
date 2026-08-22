@@ -7,7 +7,7 @@
 #   - Clone memory-vault, generate DB password, deploy via docker compose
 #     with scripts/files/memory-vault-compose.override.yml
 #
-# The MCP-over-SSE bridge is deployed separately by 62-memory-vault-bridge.sh.
+# The MCP Streamable HTTP bridge is deployed separately by 62-memory-vault-bridge.sh.
 set -Eeuo pipefail
 LGC_DIR="${LGC_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 # shellcheck source=lib/common.sh
