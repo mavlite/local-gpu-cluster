@@ -12,10 +12,29 @@ same doc again via update-embeddings(adds=...). Measured in vcf-reference
 before the fix: 934 of 6,637 documents double-attached, and a top-12
 vector-search returned only 9 distinct chunks.
 
-This script repairs corpora ingested before that fix. It detaches every
-duplicated docpath and re-attaches it exactly once, which also rebuilds the
-chunk set cleanly. The underlying document files are never deleted -- only the
-workspace attachment is rewritten.
+This script repairs corpora ingested before that fix.
+
+Mechanics, established empirically against the live API -- do not "improve"
+this without re-checking. update-embeddings `deletes` removes exactly ONE
+attachment row for a docpath, not all of them. Traced on a 2-row document:
+
+    before        : 2
+    after delete  : 1
+    after re-add  : 2
+
+So the repair is a single delete per surplus attachment and nothing else. An
+earlier version of this script detached then re-attached, which is a
+2 -> 1 -> 2 no-op; it churned the vector store for ~30 minutes while the
+duplicate count oscillated between 739 and 934, and was stopped. The surviving
+attachment keeps its chunks, so no re-embedding is needed.
+
+The underlying document files are never deleted -- only the surplus workspace
+attachment is dropped.
+
+RUN THIS SUPERVISED. It mutates a live corpus, and the first two versions of
+it both misbehaved (see above). Watch the distinct-docpath count: it must stay
+CONSTANT. If it falls, stop and re-attach -- every tracked path is recoverable
+from the source state's allm_doc_path.
 
 Usage:
     python3 scripts/tools/dedupe-workspace.py --workspace vcf-reference --dry-run
@@ -92,26 +111,55 @@ def main() -> int:
         print(f"    {counts[p]}x {p[:88]}")
 
     if args.dry_run:
-        print(f"\n  DRY RUN: would detach and re-attach {len(dupes)} docpaths "
-              f"in batches of {args.batch_size}.")
+        surplus = sum(n - 1 for n in counts.values() if n > 1)
+        print(f"\n  DRY RUN: would drop {surplus} surplus attachment(s) across "
+              f"{len(dupes)} docpaths, in batches of {args.batch_size}. "
+              f"No re-embedding — the surviving attachment keeps its chunks.")
         return 0
 
     def batched(seq):
         for i in range(0, len(seq), args.batch_size):
             yield seq[i:i + args.batch_size]
 
-    # Detach every duplicated path (removes all of its rows), then re-attach
-    # once. Done per batch so a failure leaves the rest of the corpus intact.
-    for i, chunk in enumerate(batched(dupes), start=1):
-        t0 = time.time()
-        api(args.allm, args.api_key, "POST",
-            f"/workspace/{args.workspace}/update-embeddings",
-            {"adds": [], "deletes": chunk})
-        api(args.allm, args.api_key, "POST",
-            f"/workspace/{args.workspace}/update-embeddings",
-            {"adds": chunk, "deletes": []})
-        print(f"    batch {i}: {len(chunk)} paths re-attached "
-              f"({time.time() - t0:.0f}s)", flush=True)
+    # One delete per surplus attachment, RE-SNAPSHOTTING between batches.
+    #
+    # The re-snapshot is not optional. A run using counts cached from the start
+    # detached 75 documents entirely: paths that had already dropped to a
+    # single row were still in the stale duplicate list, so deleting them took
+    # them to zero. They were recoverable (the files stay on disk and the
+    # source state keeps allm_doc_path, so re-adding restored them), but the
+    # corpus was short 75 documents until it was noticed.
+    #
+    # Guard: before every batch, re-read the workspace and keep only paths that
+    # STILL have more than one row. Never delete a path at count 1.
+    remaining_rounds = 0
+    while True:
+        remaining_rounds += 1
+        if remaining_rounds > 10:
+            print("  giving up after 10 rounds; investigate before re-running")
+            break
+        live = collections.Counter(
+            p for p in workspace_docpaths(args.allm, args.api_key, args.workspace) if p)
+        targets = sorted(p for p, n in live.items() if n > 1)
+        if not targets:
+            break
+        print(f"  round {remaining_rounds}: {len(targets)} paths still duplicated")
+        for i, chunk in enumerate(batched(targets), start=1):
+            t0 = time.time()
+            # Re-verify this batch against a fresh read; the previous batch may
+            # have changed things.
+            live2 = collections.Counter(
+                p for p in workspace_docpaths(args.allm, args.api_key, args.workspace) if p)
+            safe = [p for p in chunk if live2.get(p, 0) > 1]
+            skipped = len(chunk) - len(safe)
+            if not safe:
+                continue
+            api(args.allm, args.api_key, "POST",
+                f"/workspace/{args.workspace}/update-embeddings",
+                {"adds": [], "deletes": safe})
+            print(f"    batch {i}: dropped {len(safe)} surplus"
+                  + (f", skipped {skipped} no longer duplicated" if skipped else "")
+                  + f" ({time.time() - t0:.0f}s)", flush=True)
 
     after = workspace_docpaths(args.allm, args.api_key, args.workspace)
     ac = collections.Counter(p for p in after if p)
