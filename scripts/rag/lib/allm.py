@@ -49,7 +49,7 @@ class AnythingLLMClient:
     # ─── upload ───────────────────────────────────────────────────────────
     def upload_raw_text(
         self,
-        workspace: str,
+        workspace: str,  # retained for call-site compatibility; see docstring
         text_content: str,
         title: str,
         doc_source: str,
@@ -58,7 +58,24 @@ class AnythingLLMClient:
     ) -> dict[str, Any]:
         """POST /document/raw-text. Returns the API response JSON which
         includes documents[0].location — the doc_id we persist for later
-        update/delete operations."""
+        update/delete operations.
+
+        Deliberately does NOT pass `addToWorkspaces`. That parameter attaches
+        the document to the workspace as a side effect of upload, and
+        refresh.py then attaches it AGAIN via update-embeddings(adds=...) --
+        producing two workspace_documents rows for one file, i.e. two copies
+        of every chunk in the vector store.
+
+        Measured 2026-08-23 before this fix: 934 of 6,637 documents in
+        vcf-reference were double-attached, and a top-12 vector search
+        returned only 9 distinct chunks because three were duplicates. A
+        quarter of the retrieval budget was being spent re-reading the same
+        text.
+
+        Attachment belongs to the embedding pass alone: state is persisted
+        before that call, so a failure there is retried on the next run
+        without re-uploading.
+        """
         payload = {
             "textContent": text_content,
             "metadata": {
@@ -67,7 +84,6 @@ class AnythingLLMClient:
                 # Embed url + published into the visible text so they survive
                 # AnythingLLM's metadata stripping on chunk write.
             },
-            "addToWorkspaces": workspace,
         }
         if url:
             payload["metadata"]["sourceURL"] = url
