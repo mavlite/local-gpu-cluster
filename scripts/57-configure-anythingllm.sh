@@ -27,13 +27,85 @@ ANYTHINGLLM_IP="${ANYTHINGLLM_IP:-192.168.6.154}"
 ALLM_API_BASE="http://${ANYTHINGLLM_IP}:3001/api/v1"
 ALLM_API_KEY="${ALLM_API_KEY:-}"
 
+# Retrieval tuning. These match what the live cluster runs -- an earlier version
+# of this script shipped topN=10 / similarityThreshold=0.0 and would silently
+# have regressed the hand-tuned workspaces on any re-run.
+ALLM_SIMILARITY_THRESHOLD="${ALLM_SIMILARITY_THRESHOLD:-0.4}"
+ALLM_TEMP="${ALLM_TEMP:-0.3}"
+
+# Canonical system prompts, kept as heredocs because they are multi-line, which
+# the slug|prompt|topN|refusal array cannot carry (`read` stops at the first
+# newline).
+#
+# The VCF prompt's Currency footer is load-bearing: the vcf-reference corpus is
+# refreshed unevenly (release notes weekly via the vcf-release-notes source;
+# everything else is the 2026-05-19 bulk ingest), and without the footer a stale
+# answer is indistinguishable from a fresh one. It is phrased as an
+# unconditional two-way branch on purpose -- an earlier "add this note when X"
+# conditional was verified NOT to fire on the topical-doc case it existed for.
+# If you re-ingest the topical docs, update the date in the footer.
+read -r -d '' VCF_PROMPT <<'VCF_PROMPT_EOF' || true
+You are a technical reference assistant for VMware Cloud Foundation (VCF).
+
+# Answering rules
+
+1. Answer using ONLY the content retrieved from the attached VCF documentation. Do not invent facts.
+2. If the retrieved context does not contain the answer, respond exactly: "Not in the provided VCF documents."
+3. **Be comprehensive.** When the retrieved context covers multiple sub-topics, addresses both VCF 9.0 and 9.1 differences, or contains step-by-step procedures, include all relevant material. Prefer structured responses with headings and numbered steps over short summaries.
+4. Cite source URLs directly. NEVER include the literal strings "[CONTEXT N]", "[Context 0]", "(Context 0, 1)" or any chunk-number reference in your answer.
+
+WRONG: Click Apply to save [CONTEXT 1] [CONTEXT 3].
+RIGHT: Click Apply to save (source: https://techdocs.broadcom.com/.../some-page.html).
+
+# Currency footer (MANDATORY)
+
+This corpus is refreshed unevenly, so every substantive answer MUST end with a
+`Currency:` line. This is not optional and applies even when you are confident.
+
+Look at the source paths you actually used:
+
+- If EVERY source contains `/release-notes/`, write exactly:
+  `Currency: release notes, refreshed weekly.`
+- Otherwise (any source outside `/release-notes/`), write exactly:
+  `Currency: general VCF docs captured 2026-05-19; later 9.1 patch releases may have changed this.`
+
+Write the line once, as the final line, with no other text after it. Omit it
+only when your entire reply is the refusal sentence from rule 2.
+VCF_PROMPT_EOF
+
+read -r -d '' SDG_PROMPT <<'SDG_PROMPT_EOF' || true
+You are a technical reference assistant for SDG self-hosted infrastructure (currently: OPNsense firewall/routing, OpenZFS, TrueNAS; future: Keycloak and other tools).
+
+# Answering rules
+
+1. Answer using ONLY the content retrieved from the attached documentation. Do not invent facts.
+2. If the retrieved context does not contain the answer, respond exactly: "Not in the provided SDG documents." Do not summarize what topics the context covers; just refuse.
+3. Identify which tool a citation belongs to (OPNsense, OpenZFS, TrueNAS, Keycloak, etc.) when relevant.
+
+# Citation format
+
+Cite source URLs directly. NEVER include the literal strings "[CONTEXT N]", "[Context 0]", "(Context 0, 1)" or any chunk-number reference in your answer.
+SDG_PROMPT_EOF
+
+# Default prompt for a slug when its WORKSPACES entry leaves the field empty.
+default_prompt() {
+  case "$1" in
+    vcf-reference)     printf '%s' "$VCF_PROMPT" ;;
+    sdg-documentation) printf '%s' "$SDG_PROMPT" ;;
+    *)                 printf '%s' "" ;;
+  esac
+}
+
 # Workspaces to create/configure. Each line: slug|prompt|topN|refusal
-# Override with WORKSPACES=("slug1|prompt1|10|refusal1" ...) in config.env.
+# An EMPTY prompt field means "use default_prompt for this slug" -- that is how
+# the multi-line canonical prompts above get applied. Override via
+# WORKSPACES=("slug|inline prompt|10|refusal" ...) in config.env; an inline
+# override must be single-line.
 # (${#arr[@]:-0} is invalid bash — :- can't be combined with array-length syntax.)
 if [[ -z "${WORKSPACES+x}" ]] || (( ${#WORKSPACES[@]} == 0 )); then
   WORKSPACES=(
-    "vcf-reference|You are a technical reference assistant for VMware Cloud Foundation (VCF). Answer questions using ONLY the content retrieved from the attached VCF documentation. If the answer is not in the retrieved context, say so — do not fall back on general VMware knowledge. Cite which document each claim comes from when possible.|10|Not in the provided VCF documents."
-    "sdg-documentation|You are a technical reference assistant for SDG infrastructure (Keycloak and related self-hosted tools). Answer questions using ONLY the content retrieved from the attached documentation. Each document has a source: <tool-name> field — name the originating tool when citing.|12|Not in the provided SDG documents."
+    "vcf-reference||12|Not in the provided VCF documents."
+    "sdg-documentation||12|Not in the provided SDG documents."
   )
 fi
 
@@ -123,14 +195,14 @@ tune_workspace() {
   # Use python's json.dumps for robust escaping of multi-line prompt content.
   payload="$(python3 -c "import json,sys
 print(json.dumps({
-    'similarityThreshold': 0.0,
+    'similarityThreshold': float(sys.argv[4]),
     'topN': int(sys.argv[1]),
     'chatMode': 'query',
     'vectorSearchMode': 'rerank',
-    'openAiTemp': 0.3,
+    'openAiTemp': float(sys.argv[5]),
     'queryRefusalResponse': sys.argv[2],
     'openAiPrompt': sys.argv[3]
-}))" "$top_n" "$refusal" "$prompt")"
+}))" "$top_n" "$refusal" "$prompt" "$ALLM_SIMILARITY_THRESHOLD" "$ALLM_TEMP")"
 
   allm_curl POST "/workspace/$slug/update" -d "$payload" >/dev/null
   ok "Tuned $slug"
@@ -146,6 +218,7 @@ main() {
   step "Configure workspaces"
   for ws in "${WORKSPACES[@]}"; do
     IFS='|' read -r slug prompt top_n refusal <<<"$ws"
+    [[ -z "$prompt" ]] && prompt="$(default_prompt "$slug")"
     if workspace_exists "$slug"; then
       skip "Workspace '$slug' already exists."
     else

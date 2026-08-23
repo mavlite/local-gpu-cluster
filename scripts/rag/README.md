@@ -166,6 +166,7 @@ Inspect the proposal. Three options:
 | `fallback_index_pages` | List of section index page names to scrape if sitemap unavailable |
 | `include_patterns` | List of regex-ish substrings; URL must match at least one |
 | `exclude_patterns` | URL must NOT match any |
+| `max_urls_per_run` | Optional fetch budget. The handler still ENUMERATES every URL (cheap — the sitemap shards list 13,494 techdocs URLs in ~3 min) but fetches only this many per run, prioritising never-fetched URLs first, then least-recently-fetched. Omit or `0` for no budget. See **Budgeted refresh** below. |
 
 ### `rss` — RSS / Atom feed for vendor blogs and news
 
@@ -215,6 +216,64 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 | `removal_policy` | `full` | When `additive_only`, URLs in state but missing from current collection are LEFT IN STATE rather than added to the removes list. Required for `rss` handler; harmless on other handlers but rarely useful. |
 | `crawl_delay_seconds` | from `defaults` (3) | Per-source politeness override. Set it when a host's robots.txt demands more than the global default — `vcf-release-notes` uses `10` because techdocs.broadcom.com mandates `Crawl-delay: 10`. Setting that globally would needlessly slow every other source. |
 | `request_timeout_seconds` | from `defaults` (30) | Per-source override; raise it for hosts serving multi-MB sitemap shards. |
+
+## Budgeted refresh (large corpora)
+
+Some sources are too big to refresh in one pass. The us/en VCF 9.x tree is
+~13,500 URLs; at the 10s crawl delay Broadcom's robots.txt mandates, a full
+content pass is ~37 hours. Refreshing nothing is not an acceptable answer, so
+the pipeline separates two operations with very different costs:
+
+| Operation | Cost for techdocs | Completeness |
+|---|---|---|
+| Enumerate URLs (fetch sitemap shards) | ~3 min | complete, authoritative |
+| Fetch + extract page content | 10s per URL | budgetable |
+
+Set `max_urls_per_run` and a run fetches only a slice, but still enumerates
+everything. The handler reports the full set via `context.discovered_urls`, and
+`refresh.py` passes it to `plan.compute(known_urls=...)`, so:
+
+- **adds** and **removes** are computed against the full upstream set — exact, every run
+- **updates** come only from the slice actually fetched — they trickle in over the cycle
+
+That matters because it means structural change (a new doc tree, a pruned
+section, a whole new VCF version appearing) is caught within one run at near-zero
+cost, while in-place content edits converge over the cycle.
+
+**Why this needed a code change.** `plan.compute()` derives removals from
+`persisted - collected`. Without `known_urls`, fetching 300 of 13,494 URLs reads
+as "13,194 documents disappeared upstream" and the plan proposes deleting them.
+The 10% safety threshold would halt it, so the corpus was never at risk — but the
+source could never make progress either. `scripts/rag/tests/test_plan_budget.py`
+pins this invariant, including that a genuinely-removed URL is still detected.
+
+Prioritisation is never-fetched-first, then oldest `last_fetched`. It cycles
+rather than starving a tail: a URL that loses one run rises to the front as
+others get refreshed.
+
+## Corpus currency and disclosure
+
+A RAG corpus that is refreshed unevenly will confidently answer from stale
+documents, and nothing in the answer says so. `vcf-reference` is the worst case:
+its release-notes subtree refreshes weekly via `vcf-release-notes`, while ~10,800
+topical docs are the one-time 2026-05-19 bulk ingest.
+
+The mitigation is a mandatory `Currency:` footer in the workspace system prompt
+(`scripts/57-configure-anythingllm.sh`, `VCF_PROMPT`), which branches on whether
+the sources used were release notes or not.
+
+Two things learned wiring this up, both worth keeping:
+
+1. **Phrase it as an unconditional branch, not a conditional addition.** The
+   first version said "add this note when the answer concerns version-specific
+   behaviour". Verified against the live workspace, it did **not** fire on the
+   topical-doc case it existed for. Rewritten as "every answer ends with one of
+   these two lines", it fires correctly on both branches and correctly stays
+   silent on the refusal sentinel.
+2. **Verify it, do not assume it.** Prompt rules are not code; the only evidence
+   they work is a live query. Re-test after any prompt edit.
+
+If you re-ingest the topical docs, update the date in the footer.
 
 ## Roadmap
 

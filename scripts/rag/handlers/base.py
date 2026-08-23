@@ -43,6 +43,19 @@ class HandlerContext:
     crawl_delay_seconds: int = 3
     request_timeout_seconds: int = 30
 
+    # --- budgeted-refresh plumbing -------------------------------------
+    # prior_state (IN): the source's persisted documents.json, so a handler
+    # that fetches only a slice per run can prioritise -- never-fetched URLs
+    # first, then oldest last_fetched. Empty on a first run.
+    prior_state: dict[str, dict] = field(default_factory=dict)
+
+    # discovered_urls (OUT): every URL the handler ENUMERATED this run, even
+    # ones it chose not to fetch. refresh.py passes this to plan.compute() as
+    # known_urls so removals are computed against the full upstream set rather
+    # than the fetched slice. A handler that fetches everything it enumerates
+    # can leave this alone.
+    discovered_urls: set[str] = field(default_factory=set)
+
 
 class Handler(abc.ABC):
     """Subclasses implement collect() to yield Documents for one source."""

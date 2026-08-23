@@ -57,6 +57,17 @@ class SphinxSitemapHandler(Handler):
                 f"and fallback pages. Refusing to overwrite state with empty set."
             )
 
+        # Report the FULL enumerated set before any budgeting, so refresh.py
+        # can diff removals against what actually exists upstream rather than
+        # against the slice we fetch below.
+        context.discovered_urls.update(urls)
+
+        budget = int(config.get("max_urls_per_run") or 0)
+        if budget and budget < len(urls):
+            urls = self._prioritise(urls, context.prior_state, budget)
+            print(f"  budgeted: fetching {len(urls)} of "
+                  f"{len(context.discovered_urls)} enumerated URLs this run")
+
         for url in urls:
             try:
                 doc = self._fetch_and_clean(url, context.request_timeout_seconds)
@@ -68,6 +79,27 @@ class SphinxSitemapHandler(Handler):
                 continue
             yield doc
             time.sleep(context.crawl_delay_seconds)
+
+
+    @staticmethod
+    def _prioritise(urls: list[str], prior_state: dict, budget: int) -> list[str]:
+        """Pick which URLs to spend this run's fetch budget on.
+
+        Never-fetched URLs first (a URL absent from state has no content at
+        all, so it is strictly more valuable than re-checking one we already
+        have), then the least-recently-fetched. last_fetched is an ISO-8601
+        UTC string, so lexical sort is chronological.
+
+        Deterministic: a URL that loses the draw this run rises to the front
+        as others get refreshed, so the whole set cycles rather than starving
+        a tail.
+        """
+        def key(u: str):
+            rec = prior_state.get(u)
+            if not rec:
+                return (0, "")           # never fetched -> highest priority
+            return (1, str(rec.get("last_fetched") or ""))
+        return sorted(urls, key=key)[:budget]
 
     # ─── URL discovery ────────────────────────────────────────────────────
     def _collect_urls(

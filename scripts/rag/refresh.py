@@ -124,6 +124,9 @@ def refresh_one(
     src_state = state_mod.SourceState(state_dir, source_id)
 
     handler = get_handler(source["handler"])
+    # Loaded before collect() so a budgeted handler can prioritise which URLs
+    # to fetch this run (never-fetched first, then oldest last_fetched).
+    persisted = src_state.load_documents()
     # Per-source overrides win over globals. Needed because polite-crawl
     # requirements are per-host: techdocs.broadcom.com robots.txt mandates
     # Crawl-delay: 10, which would needlessly slow every other source if it
@@ -136,6 +139,7 @@ def refresh_one(
         request_timeout_seconds=source.get(
             "request_timeout_seconds", defaults.get("request_timeout_seconds", 30)
         ),
+        prior_state=persisted,
     )
 
     print(f"[{source_id}]  handler={source['handler']}  workspace={source['workspace']}")
@@ -157,11 +161,18 @@ def refresh_one(
     # RSS-backed sources whose collection is a sliding recent-window; any
     # other value (or absence) uses the default "full" behavior where
     # missing URLs ARE removed (correct for github_repo, sphinx_sitemap).
-    persisted = src_state.load_documents()
     removal_policy = source.get("removal_policy", "full")
     remove_missing = removal_policy != "additive_only"
+    # A handler that enumerated more than it fetched reports the full set via
+    # context.discovered_urls; removals are computed against that instead of
+    # the fetched slice. See plan.compute(known_urls=...).
+    known_urls = context.discovered_urls or None
+    if known_urls and len(known_urls) > len(collected):
+        print(f"  enumerated {len(known_urls)} URLs, fetched {len(collected)} "
+              f"this run (budgeted); removals diffed against the full set")
     the_plan = plan_mod.compute(
         collected, persisted, remove_missing=remove_missing,
+        known_urls=known_urls,
     )
 
     if not remove_missing:
