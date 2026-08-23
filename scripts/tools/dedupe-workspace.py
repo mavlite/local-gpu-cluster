@@ -9,8 +9,19 @@ embedded, so the duplicate chunks compete for the same top-N retrieval slots.
 Cause (fixed 2026-08-23 in lib/allm.py): `upload_raw_text` passed
 `addToWorkspaces`, which attaches on upload, and refresh.py then attached the
 same doc again via update-embeddings(adds=...). Measured in vcf-reference
-before the fix: 934 of 6,637 documents double-attached, and a top-12
-vector-search returned only 9 distinct chunks.
+before the fix: 934 of 6,637 documents were double-attached -- 7,571 workspace
+rows for 6,637 files, confirmed by distinct workspace_documents ids.
+
+CORRECTION on the retrieval impact. An earlier version of this docstring
+claimed a top-12 search returned "only 9 distinct chunks", i.e. that a quarter
+of the retrieval budget was wasted. That was a MEASUREMENT ARTIFACT: the check
+keyed on the first 150 characters of each chunk, and these chunks open with a
+long `<document_metadata>` header, so different chunks collided on the prefix.
+Hashing the FULL chunk text shows 12 distinct of 12 on the same queries.
+
+So the duplicate attachments were real and worth removing -- they inflate the
+workspace, the document counts, and any per-document accounting -- but there is
+no evidence they were polluting retrieval. Do not repeat the stronger claim.
 
 This script repairs corpora ingested before that fix.
 
@@ -85,6 +96,11 @@ def main() -> int:
     ap.add_argument("--api-key", default=os.environ.get("ALLM_API_KEY", ""))
     ap.add_argument("--batch-size", type=int, default=200,
                     help="update-embeddings degrades on large payloads")
+    ap.add_argument("--limit", type=int, default=0,
+                    help=("Process at most this many duplicated docpaths, then "
+                          "stop. Use it to trial a change on a small slice and "
+                          "confirm the distinct-docpath count holds before "
+                          "turning it loose on the whole corpus."))
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true")
     g.add_argument("--apply", action="store_true")
@@ -141,9 +157,12 @@ def main() -> int:
         live = collections.Counter(
             p for p in workspace_docpaths(args.allm, args.api_key, args.workspace) if p)
         targets = sorted(p for p, n in live.items() if n > 1)
+        if args.limit:
+            targets = targets[:args.limit]
         if not targets:
             break
-        print(f"  round {remaining_rounds}: {len(targets)} paths still duplicated")
+        print(f"  round {remaining_rounds}: {len(targets)} paths still duplicated"
+              + (f" (limited to {args.limit})" if args.limit else ""))
         for i, chunk in enumerate(batched(targets), start=1):
             t0 = time.time()
             # Re-verify this batch against a fresh read; the previous batch may
@@ -160,6 +179,9 @@ def main() -> int:
             print(f"    batch {i}: dropped {len(safe)} surplus"
                   + (f", skipped {skipped} no longer duplicated" if skipped else "")
                   + f" ({time.time() - t0:.0f}s)", flush=True)
+        if args.limit:
+            print("  --limit set: stopping after one pass")
+            break
 
     after = workspace_docpaths(args.allm, args.api_key, args.workspace)
     ac = collections.Counter(p for p in after if p)
