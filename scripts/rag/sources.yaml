@@ -263,12 +263,17 @@ sources:
     enabled: true
     workspace: vcf-reference
     doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x operations"
-    # 1d WHILE BACKFILLING. At 900 URLs/run the 4,425-URL scope converges in
-    # ~5 runs; at the 30d interval this source will eventually want, the first
-    # full pass would take SEVEN MONTHS. Raise to 30d once
-    #   /tank/rag-state/vcf-core-docs/manifest.json shows document_count ~4425
-    # and every entry has a real sha256 hash (no "migrated" placeholders).
-    refresh_interval: 1d
+    # Steady-state cadence. These docs are operational reference, not release
+    # notes -- they change slowly, and content-hash comparison means an
+    # unchanged page costs a fetch but no re-embed.
+    #
+    # NOTE ON BACKFILL: 30d governs the nightly TIMER only. While the initial
+    # coverage backfill is still running, drive it with
+    #   refresh.py --source vcf-core-docs --force
+    # which bypasses the interval. The backfill is done when
+    # /tank/rag-state/vcf-core-docs/manifest.json shows ~4425 documents and
+    # documents.json has no "migrated" placeholder hashes left.
+    refresh_interval: 30d
     crawl_delay_seconds: 10
     request_timeout_seconds: 60
     config:
