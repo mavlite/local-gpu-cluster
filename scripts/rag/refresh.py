@@ -374,13 +374,24 @@ def refresh_one(
     # URLs as removed — next run won't try to re-process them.
     src_state.save_documents(new_state)
 
-    # Single update-embeddings call applies adds + removes atomically
-    # from the workspace's perspective. This is the long-running step.
+    # Embedding pass. BATCHED: AnythingLLM's /update-embeddings degrades badly
+    # on large single payloads (the 2026-05 bulk ingest had to be split into
+    # batches of 500, and >~200 is where it starts to hurt). A single call with
+    # a few thousand adds either times out or wedges the container, which is
+    # exactly the failure you do not want on an unattended backfill.
+    #
+    # Batching is safe here because state was already persisted above: if a
+    # batch fails, the uploads are still tracked and re-running the source
+    # re-attempts the embedding pass without re-uploading anything.
     if adds_docpaths or removes_docpaths:
         embed_timeout = defaults.get("embed_timeout_seconds", 1800)
+        batch_size = max(1, int(defaults.get("embed_batch_size", 200)))
+        batches = [adds_docpaths[i:i + batch_size]
+                   for i in range(0, len(adds_docpaths), batch_size)] or [[]]
         print(
             f"  embedding pass: +{len(adds_docpaths)} adds / "
-            f"-{len(removes_docpaths)} removes (timeout {embed_timeout}s)"
+            f"-{len(removes_docpaths)} removes "
+            f"({len(batches)} batch(es) of <={batch_size}, timeout {embed_timeout}s each)"
         )
         print(
             "  NOTE: AnythingLLM continues processing server-side even if you "
@@ -388,16 +399,22 @@ def refresh_one(
             "heartbeat below tells you the request is in-flight."
         )
         try:
-            _call_with_heartbeat(
-                lambda: client.update_embeddings(
-                    workspace=source["workspace"],
-                    adds=adds_docpaths,
-                    removes=removes_docpaths,
-                    timeout=embed_timeout,
-                ),
-                label="embedding pass",
-                interval_seconds=30,
-            )
+            for i, chunk in enumerate(batches, start=1):
+                # Removals ride along with the first call so they still happen
+                # even if a later add-batch fails.
+                rm = removes_docpaths if i == 1 else []
+                _call_with_heartbeat(
+                    (lambda c=chunk, r=rm: client.update_embeddings(
+                        workspace=source["workspace"],
+                        adds=c,
+                        removes=r,
+                        timeout=embed_timeout,
+                    )),
+                    label=f"embedding batch {i}/{len(batches)} (+{len(chunk)})",
+                    interval_seconds=30,
+                )
+                if len(batches) > 1:
+                    print(f"    batch {i}/{len(batches)} complete")
             print("  embedding pass complete")
         except KeyboardInterrupt:
             msg = (

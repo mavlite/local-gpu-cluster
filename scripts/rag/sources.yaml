@@ -237,6 +237,48 @@ sources:
         # localizations).
         - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/release-notes'
 
+  # ── Official: VCF core operational docs (coverage backfill) ─────────────
+  # The other half of the vcf-reference corpus. Upstream has ~13,500 us/en
+  # VCF 9.x URLs; only ~5,000 were ever ingested (the 2026-05 bulk run stopped
+  # partway), so this is a COVERAGE gap, not just a currency one.
+  #
+  # Scope: the two largest operational subtrees, ~4,425 URLs.
+  #   infrastructure-operations      3,215
+  #   advanced-network-management    1,210
+  # Deliberately excludes administration-sdks-cli-and-tools (3,010) -- that is
+  # auto-generated API/CLI reference whose near-identical pages dilute
+  # retrieval; ingest it as its own source if it turns out to be wanted.
+  #
+  # max_urls_per_run keeps any single run bounded so an unattended backfill
+  # cannot run away; the source resumes where it left off because the handler
+  # prioritises never-fetched URLs first, then oldest last_fetched. Expect
+  # several runs to reach full coverage.
+  #
+  # parallel_workers=4 at crawl_delay 10 is ~2.5s effective between requests.
+  # That is a looser reading of Broadcom's "Crawl-delay: 10" than strict
+  # serial, chosen deliberately: the 2026-05 ingest ran at exactly this ratio
+  # for ~30 hours without Cloudflare throttling. Drop to 1 to be strict.
+  - id: vcf-core-docs
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x operations"
+    # 1d WHILE BACKFILLING. At 900 URLs/run the 4,425-URL scope converges in
+    # ~5 runs; at the 30d interval this source will eventually want, the first
+    # full pass would take SEVEN MONTHS. Raise to 30d once
+    #   /tank/rag-state/vcf-core-docs/manifest.json shows document_count ~4425
+    # and every entry has a real sha256 hash (no "migrated" placeholders).
+    refresh_interval: 1d
+    crawl_delay_seconds: 10
+    request_timeout_seconds: 60
+    config:
+      sitemap_url: https://techdocs.broadcom.com/techdocs2-sitemap.xml
+      base_url: https://techdocs.broadcom.com
+      parallel_workers: 4
+      max_urls_per_run: 900
+      include_patterns:
+        - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/(infrastructure-operations|advanced-network-management)'
+
 # ── Global defaults ────────────────────────────────────────────────────────
 defaults:
   # Halt a refresh that would delete more than this fraction of a source's

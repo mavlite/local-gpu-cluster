@@ -15,6 +15,7 @@ import re
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -68,17 +69,54 @@ class SphinxSitemapHandler(Handler):
             print(f"  budgeted: fetching {len(urls)} of "
                   f"{len(context.discovered_urls)} enumerated URLs this run")
 
-        for url in urls:
+        workers = max(1, int(config.get("parallel_workers") or 1))
+        timeout = context.request_timeout_seconds
+        delay = context.crawl_delay_seconds
+        total = len(urls)
+
+        def fetch_one(url: str):
+            """Fetch one URL, then hold the worker slot for the crawl delay.
+
+            Sleeping inside the worker (rather than between yields) is what
+            makes N workers approximate N requests per delay window: with
+            workers=4 and delay=10 the effective rate is ~2.5s between
+            requests, which is the ratio the 2026-05 bulk ingest ran at
+            without Cloudflare throttling.
+            """
             try:
-                doc = self._fetch_and_clean(url, context.request_timeout_seconds)
-            except Exception as e:
-                # Yield nothing for this URL; refresh.py records it as a
-                # plan-level error and decides what to do.
-                continue
-            if doc is None:
-                continue
-            yield doc
-            time.sleep(context.crawl_delay_seconds)
+                doc = self._fetch_and_clean(url, timeout)
+            except Exception:
+                # Swallow per-URL failures; refresh.py records the shortfall as
+                # a plan-level error. One bad page must not abort a run that
+                # may be several thousand URLs long.
+                doc = None
+            time.sleep(delay)
+            return doc
+
+        done = 0
+        if workers == 1:
+            for url in urls:
+                doc = fetch_one(url)
+                done += 1
+                if doc is not None:
+                    yield doc
+        else:
+            print(f"  fetching {total} URLs with {workers} workers "
+                  f"(~{delay / workers:.1f}s effective between requests)")
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(fetch_one, u) for u in urls]
+                for fut in as_completed(futures):
+                    try:
+                        doc = fut.result()
+                    except Exception:
+                        doc = None
+                    done += 1
+                    # Long unattended runs need a pulse; without it a
+                    # multi-hour fetch looks indistinguishable from a hang.
+                    if done % 100 == 0 or done == total:
+                        print(f"    fetched {done}/{total}", flush=True)
+                    if doc is not None:
+                        yield doc
 
 
     @staticmethod

@@ -167,6 +167,7 @@ Inspect the proposal. Three options:
 | `include_patterns` | List of regex-ish substrings; URL must match at least one |
 | `exclude_patterns` | URL must NOT match any |
 | `max_urls_per_run` | Optional fetch budget. The handler still ENUMERATES every URL (cheap — the sitemap shards list 13,494 techdocs URLs in ~3 min) but fetches only this many per run, prioritising never-fetched URLs first, then least-recently-fetched. Omit or `0` for no budget. See **Budgeted refresh** below. |
+| `parallel_workers` | Fetch concurrency (default 1 = serial). Each worker observes the full `crawl_delay_seconds` after its own request, so N workers approximate N requests per delay window — `4` at delay `10` is ~2.5s effective. This is a LOOSER reading of `Crawl-delay: 10` than strict serial; it is what the 2026-05 bulk ingest ran at for ~30 h without Cloudflare throttling. Set `1` to be strict. |
 
 ### `rss` — RSS / Atom feed for vendor blogs and news
 
@@ -216,6 +217,15 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 | `removal_policy` | `full` | When `additive_only`, URLs in state but missing from current collection are LEFT IN STATE rather than added to the removes list. Required for `rss` handler; harmless on other handlers but rarely useful. |
 | `crawl_delay_seconds` | from `defaults` (3) | Per-source politeness override. Set it when a host's robots.txt demands more than the global default — `vcf-release-notes` uses `10` because techdocs.broadcom.com mandates `Crawl-delay: 10`. Setting that globally would needlessly slow every other source. |
 | `request_timeout_seconds` | from `defaults` (30) | Per-source override; raise it for hosts serving multi-MB sitemap shards. |
+
+### Global defaults worth knowing
+
+| Default | Value | Why |
+|---|---|---|
+| `max_delete_pct` | 0.10 | Halt a refresh that would delete more than this fraction of a source's documents; the plan is written to `_proposals/` for review. |
+| `embed_batch_size` | 200 | AnythingLLM's `/update-embeddings` degrades badly on large single payloads — the 2026-05 bulk ingest had to be split into batches of 500, and a few thousand adds in one call either times out or wedges the container. `refresh.py` chunks the embedding pass to this size. Safe to batch because state is persisted *before* the call: a failed batch re-attempts on the next run with no re-upload. |
+| `embed_timeout_seconds` | 1800 | Per-batch timeout. |
+| `crawl_delay_seconds` | 3 | Per-source overridable. |
 
 ## Budgeted refresh (large corpora)
 
@@ -307,6 +317,15 @@ Useful alerts to set up once node_exporter is deployed:
 - `rag_refresh_run_total{status="error"} > 0` — handler crashed
 
 ## Notes on `migrate_backfill.py`
+
+**Use `--source` when other sources in the workspace already have state.**
+The script REPLACES a source's `documents.json` with whatever it can re-match
+from the workspace, and matching is imperfect — docs ingested by other tooling
+carry a different `docSource`. Running it workspace-wide against `vcf-reference`
+re-matched only 150 of `vcf-release-notes`' 191 tracked URLs, which would have
+silently shrunk a healthy source's state by 41 entries. `--source` scopes the
+rewrite to one source and leaves everything else untouched.
+
 
 The migration script tries to match every existing workspace document
 to a source declared in `sources.yaml`. Match strategy is:

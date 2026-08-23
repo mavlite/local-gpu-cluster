@@ -55,6 +55,18 @@ def parse_args() -> argparse.Namespace:
         help="Limit to one workspace slug (default: all in sources.yaml)",
     )
     p.add_argument(
+        "--source",
+        help=(
+            "Limit to one source id. STRONGLY RECOMMENDED when other sources "
+            "in the same workspace already have good state: this script "
+            "REPLACES a source's documents.json with whatever it can match "
+            "from the workspace, so running it workspace-wide can shrink a "
+            "healthy source's state (e.g. vcf-release-notes tracked 191 URLs "
+            "but only 150 were re-matchable, because docs ingested by other "
+            "tooling carry a different docSource)."
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be written but don't touch state files",
@@ -215,6 +227,12 @@ def main() -> int:
 
     for ws in workspaces:
         ws_sources = [s for s in all_sources if s["workspace"] == ws]
+        if args.source:
+            # Only rewrite the named source's state. Everything else in the
+            # workspace is left strictly alone -- see the --source help text.
+            ws_sources = [s for s in ws_sources if s["id"] == args.source]
+            if not ws_sources:
+                continue
         print(f"[{ws}]  fetching workspace documents...")
         docs = client.list_workspace_documents(ws)
         print(f"  {len(docs)} documents in workspace")
