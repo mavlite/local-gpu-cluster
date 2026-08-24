@@ -262,6 +262,38 @@ Prioritisation is never-fetched-first, then oldest `last_fetched`. It cycles
 rather than starving a tail: a URL that loses one run rises to the front as
 others get refreshed.
 
+## When a refresh fails at the EMBEDDING step
+
+State is persisted *before* `/update-embeddings` is called, deliberately: a
+failed embedding then retries on the next run without re-uploading anything.
+The cost of that ordering is a silent failure mode.
+
+If the embedding call dies partway, the documents are uploaded to AnythingLLM
+storage and recorded in `documents.json` as complete — but never attached to
+the workspace. They are invisible twice over: retrieval cannot see them, and no
+future refresh re-adds them, because their content hash still matches.
+
+Observed 2026-08-24: a 200-document batch against a ~7,600-document workspace
+ran past the 1800s client timeout. AnythingLLM finished it server-side, but the
+client had aborted, so batches 2-5 were never sent. **698 documents ended up
+uploaded, tracked, and unattached.** Nothing in the logs said so.
+
+After any refresh that fails at the embedding step:
+
+```
+python3 scripts/tools/reconcile-workspace.py --workspace vcf-reference
+python3 scripts/tools/reconcile-workspace.py --workspace vcf-reference --fix
+```
+
+`defaults.embed_batch_size` is 50 for this reason. 200 was too large; 50
+measures at ~0.8s/doc, ~40s per batch, with room for the workspace to grow.
+
+**A small residue is expected and is not a gap.** AnythingLLM content-dedupes
+on embed: a document whose extracted text matches one already attached returns
+HTTP 200 and is silently not attached. The 9.0 and 9.1 copies of the same VCF
+page do exactly this (88,301 vs 88,289 bytes, same content). Those cannot be
+re-attached and should not be chased.
+
 ## When a refresh halts on the deletion threshold
 
 `refresh.py` halts and writes the plan to `_proposals/` when it would delete

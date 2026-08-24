@@ -347,6 +347,20 @@ defaults:
   # existing documents. Write the plan to _proposals/ for operator review.
   max_delete_pct: 0.10
 
+  # Documents per /update-embeddings call.
+  #
+  # 200 was too large. On 2026-08-24 a 200-document batch against a ~7,600-doc
+  # workspace ran past the 1800s client timeout; AnythingLLM finished it
+  # server-side, but the client had already aborted, so batches 2-5 were never
+  # sent. State had already been persisted (by design, so a failure retries
+  # without re-uploading) which left 698 documents uploaded, tracked as done,
+  # and NOT attached to the workspace -- invisible to retrieval and invisible
+  # to the next refresh, because their hashes matched.
+  #
+  # Measured at 50: ~40s per batch, ~0.8s/doc. Well inside the timeout with
+  # room for the workspace to keep growing.
+  embed_batch_size: 50
+
   # Where per-source state files live. Survives ingest LXC re-creation if on
   # the ZFS pool.
   state_dir: /tank/rag-state
