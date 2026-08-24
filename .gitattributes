@@ -1,2 +1,15 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Files that are executed on the Proxmox host must keep LF endings.
+#
+# CRLF in a shell script is not cosmetic: bash makes the \r part of the token,
+# so `set -u` becomes `set -u\r` ("invalid option"), `do` becomes `do\r`
+# ("syntax error near unexpected token"), and paths gain a trailing \r. A
+# driver script deployed with CRLF on 2026-08-24 died instantly on every
+# launch while reporting a valid PID.
+#
+# Python and YAML tolerate CRLF, which is why this only ever bites the shell
+# scripts — and why it is easy to miss when the same edit "works" for .py.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
