@@ -284,6 +284,46 @@ sources:
       include_patterns:
         - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/(infrastructure-operations|advanced-network-management)'
 
+  # ── Official: VCF remaining operational docs (coverage completion) ──────
+  # Everything in the us/en VCF 9.x tree that the other two sources do not
+  # already own: 5,868 URLs across 24 subtrees -- organization-management 872,
+  # design 785, vsan 750, fleet-management 749, orchestrator 494,
+  # vsphere-supervisor 394, workload-mobility 355, and the long tail.
+  #
+  # EXCLUDES administration-sdks-cli-and-tools (3,010 URLs, 34% of the
+  # remaining work). That tree is auto-generated API/CLI reference: the pages
+  # are near-identical in structure, so they match many queries weakly and
+  # crowd out prose that actually answers the question. Add it as its OWN
+  # source if API lookup from RAG turns out to be wanted, so it can be dropped
+  # independently if it hurts retrieval.
+  #
+  # The exclude list must stay in sync with the include_patterns of
+  # vcf-release-notes and vcf-core-docs; overlapping sources would fight over
+  # the same documents. Verified 2026-08-24: 0 overlap.
+  #
+  # 30d is the steady-state cadence. The initial coverage backfill (~5,868
+  # fetches, ~4.9 h at 4 workers) is driven with
+  #   refresh.py --source vcf-remaining-docs --force
+  # which bypasses the interval. Done when documents.json has no "migrated"
+  # placeholder hashes and tracked is ~5,868.
+  - id: vcf-remaining-docs
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x reference"
+    refresh_interval: 30d
+    crawl_delay_seconds: 10
+    request_timeout_seconds: 60
+    config:
+      sitemap_url: https://techdocs.broadcom.com/techdocs2-sitemap.xml
+      base_url: https://techdocs.broadcom.com
+      parallel_workers: 4
+      max_urls_per_run: 900
+      include_patterns:
+        - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/'
+      exclude_patterns:
+        - '/(release-notes|infrastructure-operations|advanced-network-management|administration-sdks-cli-and-tools)'
+
 # ── Global defaults ────────────────────────────────────────────────────────
 defaults:
   # Halt a refresh that would delete more than this fraction of a source's
