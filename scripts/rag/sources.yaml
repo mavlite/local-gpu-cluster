@@ -191,6 +191,99 @@ sources:
       url_ext_to: ".html"
       url_encode_spaces: true
 
+  # ── Official: VMware Cloud Foundation 9.x release notes ─────────────────
+  # SCOPE IS DELIBERATELY NARROW. The us/en VCF 9.x corpus is ~13,500 URLs;
+  # at the 10s crawl-delay Broadcom's robots.txt mandates, a full pass would
+  # take ~37 hours. This source covers only the release-notes subtree
+  # (191 URLs, ~31 min/pass) — release notes, patch releases, BOM, product
+  # support notes, changelogs. That is the high-churn, currency-critical part:
+  # patch releases ship continuously between major versions, and a stale
+  # answer there is the one most likely to mislead.
+  #
+  # The remaining ~10,800 topical docs (infrastructure-operations, design,
+  # advanced-network-management, ...) are the one-time 2026-05-18/19 bulk
+  # ingest and stay manual. Re-run scripts/tools/recover-long-urls.sh against
+  # a filtered URL list to top those up.
+  #
+  # HANDLER CHOICE IS LOAD-BEARING. sphinx_sitemap uses trafilatura, which
+  # strips nav chrome. Do NOT switch this to an upload-link based path:
+  # verified 2026-08-22, Broadcom now renders the entire VCF nav tree into
+  # server-side HTML, so AnythingLLM's built-in scraper yields ~992 KB /
+  # ~122k-token documents that are ~97% navigation. Pages then hash as
+  # near-identical and get content-deduped — a 59-doc ingest silently
+  # collapsed to 22 and dropped every NSX page. See the banner in
+  # scripts/tools/ingest-urls.sh.
+  #
+  # NOTE: Broadcom stamps <lastmod> on essentially every URL at each site
+  # rebuild (13,484 of 13,494 read as 2026-08), so lastmod is useless as a
+  # change signal here. refresh.py's content-hash comparison is what actually
+  # detects real changes.
+  - id: vcf-release-notes
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x release notes"
+    refresh_interval: 7d
+    crawl_delay_seconds: 10       # techdocs.broadcom.com robots.txt: Crawl-delay: 10
+    request_timeout_seconds: 60   # sitemap shards are ~12 MB each
+    config:
+      # This is a <sitemapindex> of 17 shards; the handler follows it one
+      # level down to the <urlset>s.
+      sitemap_url: https://techdocs.broadcom.com/techdocs2-sitemap.xml
+      base_url: https://techdocs.broadcom.com
+      include_patterns:
+        # us/en only — the same tree also ships fr/fr, es/es and jp/ja, which
+        # would pollute an English-only corpus (180 of 239 patch URLs were
+        # localizations).
+        - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/release-notes'
+
+  # ── Official: VCF core operational docs (coverage backfill) ─────────────
+  # The other half of the vcf-reference corpus. Upstream has ~13,500 us/en
+  # VCF 9.x URLs; only ~5,000 were ever ingested (the 2026-05 bulk run stopped
+  # partway), so this is a COVERAGE gap, not just a currency one.
+  #
+  # Scope: the two largest operational subtrees, ~4,425 URLs.
+  #   infrastructure-operations      3,215
+  #   advanced-network-management    1,210
+  # Deliberately excludes administration-sdks-cli-and-tools (3,010) -- that is
+  # auto-generated API/CLI reference whose near-identical pages dilute
+  # retrieval; ingest it as its own source if it turns out to be wanted.
+  #
+  # max_urls_per_run keeps any single run bounded so an unattended backfill
+  # cannot run away; the source resumes where it left off because the handler
+  # prioritises never-fetched URLs first, then oldest last_fetched. Expect
+  # several runs to reach full coverage.
+  #
+  # parallel_workers=4 at crawl_delay 10 is ~2.5s effective between requests.
+  # That is a looser reading of Broadcom's "Crawl-delay: 10" than strict
+  # serial, chosen deliberately: the 2026-05 ingest ran at exactly this ratio
+  # for ~30 hours without Cloudflare throttling. Drop to 1 to be strict.
+  - id: vcf-core-docs
+    handler: sphinx_sitemap
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x operations"
+    # Steady-state cadence. These docs are operational reference, not release
+    # notes -- they change slowly, and content-hash comparison means an
+    # unchanged page costs a fetch but no re-embed.
+    #
+    # NOTE ON BACKFILL: 30d governs the nightly TIMER only. While the initial
+    # coverage backfill is still running, drive it with
+    #   refresh.py --source vcf-core-docs --force
+    # which bypasses the interval. The backfill is done when
+    # /tank/rag-state/vcf-core-docs/manifest.json shows ~4425 documents and
+    # documents.json has no "migrated" placeholder hashes left.
+    refresh_interval: 30d
+    crawl_delay_seconds: 10
+    request_timeout_seconds: 60
+    config:
+      sitemap_url: https://techdocs.broadcom.com/techdocs2-sitemap.xml
+      base_url: https://techdocs.broadcom.com
+      parallel_workers: 4
+      max_urls_per_run: 900
+      include_patterns:
+        - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/(infrastructure-operations|advanced-network-management)'
+
 # ── Global defaults ────────────────────────────────────────────────────────
 defaults:
   # Halt a refresh that would delete more than this fraction of a source's

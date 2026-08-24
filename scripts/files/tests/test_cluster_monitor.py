@@ -246,12 +246,22 @@ class TestHealthChecks(unittest.TestCase):
         self.assertEqual(out["loaded_chat_profile"].detail, "qwen3-coder")
         self.assertEqual(out["last_chat_completion"].value, 42.0)
 
-    def test_router_healthz_unreachable_one_fail_tile(self):
+    def test_router_healthz_unreachable_fans_out_to_upstream_ids(self):
+        """A failure must use the SAME check IDs a success would.
+
+        This previously collapsed to a single "router_up" row. Because the
+        store is keyed by check ID and success emits router_<name>_upstream,
+        that aggregate row could never be overwritten by a later success and
+        stayed FAIL on the dashboard permanently.
+        """
         fp = FakeProbes()
-        out = cm.check_router_healthz(fp, self.CFG)
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].id, "router_up")
-        self.assertEqual(out[0].status, cm.STATUS_FAIL)
+        out = {r.id: r for r in cm.check_router_healthz(fp, self.CFG)}
+        self.assertEqual(
+            set(out),
+            {"router_chat_upstream", "router_embed_upstream",
+             "router_rerank_upstream"})
+        self.assertTrue(all(r.status == cm.STATUS_FAIL for r in out.values()))
+        self.assertNotIn("router_up", out)
 
     def test_anythingllm_ok(self):
         fp = FakeProbes(http_map={("GET", "http://a:3001/"): cm.HttpResult(200, "")})
@@ -409,6 +419,14 @@ class TestMetricsChecks(unittest.TestCase):
         self.assertEqual(tres["gpu_temp_0"].status, cm.STATUS_OK)
 
 
+    def test_gpu_checks_fan_out_on_failure(self):
+        """Same invariant for the per-card GPU checks."""
+        fp = FakeProbes()  # rocm-smi not in cmd_map -> rc != 0
+        vram = {r.id for r in cm.check_gpu_vram(fp, self.CFG)}
+        temp = {r.id for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(vram, {"gpu_vram_0", "gpu_vram_1"})
+        self.assertEqual(temp, {"gpu_temp_0", "gpu_temp_1"})
+
 class TestPromParser(unittest.TestCase):
     def test_parse_prom_labels_and_values(self):
         text = (
@@ -431,7 +449,7 @@ class TestFreshnessChecks(unittest.TestCase):
         "rag_timer_name": "rag-refresh.timer",
         "backup_timer_name": "memory-vault-backup.timer",
         "memvault_vmid": 156,
-        "lxc_ram_ceilings": {"151": 32768},
+        "lxc_ram_ceilings": {"151": 65536},
         "router_url": "http://r:8000",
         "router_vmid": 153,
         "router_env_path": "/etc/router.env",
@@ -475,12 +493,12 @@ class TestFreshnessChecks(unittest.TestCase):
             "pct config 151": cm.CmdResult(0, "memory: 12288\n", "")})
         out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
         self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_FAIL)
-        self.assertIn("pct_set_mem(151, 32768)",
+        self.assertIn("pct_set_mem(151, 65536)",
                       out["lxc_ram_ceiling_151"].suggested_action)
 
     def test_lxc_ram_ceilings_match_ok(self):
         fp = FakeProbes(cmd_map={
-            "pct config 151": cm.CmdResult(0, "memory: 32768\n", "")})
+            "pct config 151": cm.CmdResult(0, "memory: 65536\n", "")})
         out = {r.id: r for r in cm.check_lxc_ram_ceilings(fp, self.CFG)}
         self.assertEqual(out["lxc_ram_ceiling_151"].status, cm.STATUS_OK)
 
@@ -663,7 +681,7 @@ class TestConfigAndCli(unittest.TestCase):
         for k in ("router_url", "bind_host", "bind_port", "intervals",
                   "sample_window_s", "lxc_ram_ceilings", "rag_metrics_path"):
             self.assertIn(k, cfg)
-        self.assertEqual(cfg["lxc_ram_ceilings"]["151"], 32768)
+        self.assertEqual(cfg["lxc_ram_ceilings"]["151"], 65536)
 
     def test_load_config_missing_returns_defaults(self):
         cfg = cm.load_config("/nonexistent/path.json")

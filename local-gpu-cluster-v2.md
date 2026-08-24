@@ -128,11 +128,11 @@ The V620 is AMD's professional inference card based on the same Navi 21 silicon 
 
 **Why no NVIDIA tier.** Earlier revisions of this document described a "2× V620 + 1× RTX 3060" hybrid where the 3060 ran the embedder + reranker + a small fast-chat model as a workload-isolation tier. **That tier has been removed.** All embedding, reranking, and chat now run as separate `llama-server` processes inside a single V620 LXC, with per-card pinning via `--main-gpu`:
 
-- **Chat** (Qwen3.6-35B-A3B UD-Q6_K, single in-flight request at full 256K ctx; spec-decode disabled — see note below): tensor-split across both V620s (`--tensor-split 1,1`).
+- **Chat** (default Qwen3.8-27B UD-Q6_K_XL, single in-flight request at full 256K ctx; MTP spec-decode on, MoE profiles spec-decode disabled — see note below): tensor-split across both V620s (`--tensor-split 1,1` / `--split-mode tensor`).
 - **Embedder** (Qwen3-Embedding-0.6B Q8_0): pinned to V620 #1 via `--main-gpu 0` and `HIP_VISIBLE_DEVICES=0`. Uses `--pooling last` (Qwen3-Embedding uses the final `<|endoftext|>` token; `cls` produces wrong embeddings).
 - **Reranker** (BGE Reranker v2-m3 OR Qwen3-Reranker-0.6B): pinned to V620 #2 via `--main-gpu 1` and `HIP_VISIBLE_DEVICES=1`. Uses `--embeddings --pooling rank --reranking`.
 
-VRAM budget (steady state, 256K chat context, q8_0 KV, `--parallel 1` on chat, `--parallel 4` on embed): chat 29 GB weights + ~11 GB single-slot KV split across cards + embedder 1.2 GB on card #1 + reranker 1.5 GB on card #2 ≈ **~43 GB used of the 64 GB pool**. Per-card ≈ 21-22 GB. ~21 GB headroom. No draft model: spec-decoding is disabled — see the note below.
+VRAM budget (steady state, 256K chat context, q8_0 KV, `--parallel 1` on chat, `--parallel 4` on embed; qwen3.8 default, measured 2026-08-19): **~45 GB used of the 64 GB pool** — 26.65 GB on card #0 / 18.69 GB on card #1 at idle (asymmetric; peak 89% / 63%), including the embedder (1.2 GB, card #1) and reranker (1.5 GB, card #2). ~15 GB headroom at peak; GPU 0 is the binding card. No draft model: MTP spec-decode is on for the qwen3.8 default, disabled on the MoE/Mistral profiles — see the note below.
 
 **Trade-off accepted.** The 3060 used to isolate bulk RAG ingest from interactive chat at the hardware level. With the V620-only topology, that isolation moves up the stack to the router (LXC 153): `asyncio.Semaphore`-based admission control, per-IP rate limiting via `slowapi`, fail-open SSE on upstream 5xx, and a priority lane that throttles bulk embed when chat has in-flight requests. A 5K-document re-embed will briefly contend with chat for compute (~15–25 minutes total wall-clock on V620 with `--parallel 8`, vs the prior 30–60 minutes on the 3060). For typical workloads where bulk ingest is rare, this is the right trade.
 
@@ -287,7 +287,8 @@ Resulting layout:
 ├── anythingllm/                 # AnythingLLM persistent storage
 │   └── storage/
 └── mcp/                         # MCP container working state
-    └── vcf-doc-updater/
+    └── vcf-doc-updater/         # RETIRED — legacy state from the old
+                                 # auto-updater container; safe to remove
 ```
 
 Bind-mounting into LXCs is configured per-container in `/etc/pve/lxc/<vmid>.conf`:
@@ -319,7 +320,7 @@ Reserve static DHCP leases on your router for each LXC IP so MCP/AnythingLLM end
 | Router (auth + admission + Prometheus) | `llm-router` | 192.168.6.153 |
 | AnythingLLM | `anythingllm` | 192.168.6.154 |
 | MCP stack | `mcp-stack` | 192.168.6.155 |
-| SearXNG (optional) | `searxng` | 192.168.6.156 |
+| Memory Vault (shared memory) | `memory-vault` | 192.168.6.223 (DHCP) |
 
 Note: LXC 152 (`llamacpp-nv`, the old 3060 LXC) was destroyed in the V620-only pivot. Pre-pivot builds had a separate NVIDIA LXC at `192.168.6.152` for embedder + reranker — that role is now served by additional `llama-server` instances inside LXC 151 (ports 8082 and 8083).
 
@@ -401,7 +402,7 @@ These workloads either need direct GPU device access (the llama.cpp stacks) or a
 **Docker-in-LXC:**
 - `anythingllm` — Docker is how AnythingLLM is officially distributed
 - `mcp-stack` — the three custom MCP containers benefit from Docker's reproducibility
-- `searxng` — official Docker image
+- `memory-vault` — upstream docker compose (app + Postgres 16/pgvector) in LXC 156; the `searxng` image is retired. **Verified live 2026-08-22:** `pct list` returns exactly five containers (151, 153, 154, 155, 156) — there is no SearXNG LXC and no monitoring LXC on this host. `192.168.6.156` answers ping but its MAC is not a Proxmox `bc:24:11:*` address and ports 3000/8888/80/443/9090 are all closed, so the address is held by an unrelated LAN device. That is the only reason `config.env.example` says not to reuse it.
 
 These services have no GPU dependency, so the nesting overhead is negligible, and Docker buys real value for image distribution and reproducible rebuilds. Inside the LXC, install Docker as you would on bare-metal Ubuntu.
 
@@ -576,20 +577,20 @@ The V620 stack runs **three `llama-server` processes** inside LXC 151, all shari
 
 | Service | Model | Size | Notes |
 | --- | --- | --- | --- |
-| `llamacpp-chat.service` (port 8080) | **Profile-switchable** (default Qwen3.6-35B-A3B UD-Q6_K from `unsloth/Qwen3.6-35B-A3B-GGUF`) | ~29 GB default | Primary chat / RAG / coding target. The chat slot holds ONE model at a time; alternative profiles (`qwen3.6-fast` UD-Q4_K_M for throughput, `coder` Qwen3-Coder-Next) are swapped in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) — see [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template). MoE with ~3 B active params/token. Tensor-split across both V620s, single in-flight request at full trained ctx (`--ctx-size 262144 --parallel 1`) for the default profile. |
+| `llamacpp-chat.service` (port 8080) | **Profile-switchable** (default Qwen3.8-27B UD-Q6_K_XL from `unsloth/Qwen3.8-27B-GGUF`) | ~23.6 GB default | Primary chat / RAG / coding target. The chat slot holds ONE model at a time; alternative profiles (`qwen3.6` UD-Q6_K, `qwen3.6-fast` UD-Q4_K_M for throughput, `coder` Qwen3-Coder-Next UD-IQ4_XS, `devstral` 24B Q8_0, `devstral-large` 123B UD-IQ2_M) are swapped in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) — see [day-2-ops § 4.4](./day-2-ops.md#-44-vram-budget-template). Dense 27B default with `--split-mode tensor` + MTP spec-decode; MoE profiles have ~3 B active params/token. Tensor-split across both V620s, single in-flight request at full trained ctx (`--ctx-size 262144 --parallel 1`) for the default profile. |
 | `llamacpp-embed.service` (port 8082) | Qwen3-Embedding-0.6B Q8_0 (`Qwen/Qwen3-Embedding-0.6B-GGUF`) | ~1 GB | Embedding generation (1024-dim). Pinned to V620 #1 via `--main-gpu 0`. **`--pooling last`** is critical — `cls` produces semantically wrong embeddings and silently invalidates the vector DB. |
 | `llamacpp-rerank.service` (port 8083) | BGE Reranker v2-m3 Q4_K_M (`gpustack/bge-reranker-v2-m3-GGUF`) | ~1.5 GB | Cross-encoder reranking for vector-search results. Pinned to V620 #2 via `--main-gpu 1`. Alt: `Qwen/Qwen3-Reranker-0.6B-GGUF` (gated on HF — requires `HF_TOKEN`). |
 
-**VRAM budget at deployed config** (chat: 256K ctx, q8_0 KV, `--parallel 1`):
+**VRAM budget at deployed config** (chat: 256K ctx, q8_0 KV, `--parallel 1`; qwen3.8 default, measured 2026-08-19):
 
 | Component | VRAM |
 | --- | --- |
-| Chat weights + KV split across both V620s | ~40 GB total (~20 GB per card) |
-| Embedder pinned to V620 #1 | ~1.2 GB |
-| Reranker pinned to V620 #2 | ~1.5 GB |
-| **Total** | **~43 GB of 64 GB pool, ~21 GB headroom** |
+| Chat weights + KV split across both V620s | ~45 GB total (26.65 GB GPU 0 / 18.69 GB GPU 1 at idle — asymmetric; peak 89% / 63%) |
+| Embedder pinned to V620 #1 | ~1.2 GB (within the GPU 0 total above) |
+| Reranker pinned to V620 #2 | ~1.5 GB (within the GPU 1 total above) |
+| **Total** | **~45 GB of 64 GB pool at idle, ~15 GB headroom at peak; GPU 0 is the binding card — per-profile detail in `day-2-ops.md` § 4.4** |
 
-**Speculative decoding is disabled by default** — see §1.3 note. A vocab-matched draft (Qwen3.5-0.8B, vocab 248,320) is loadable via `LLAMA_DRAFT_REPO=Qwen/Qwen3.5-0.8B-GGUF` in `scripts/config.env`, but third-party benchmarks show 3-12% throughput regression on non-datacenter GPUs due to per-token MoE expert-loading overhead — enable only for testing.
+**Speculative decoding: enabled by default on `qwen3.8`** (in-GGUF MTP, `--spec-type draft-mtp` n-3 — no draft model); **disabled on the MoE and Mistral profiles** — see §1.3 note. A vocab-matched draft (Qwen3.5-0.8B, vocab 248,320) is loadable via `LLAMA_DRAFT_REPO=Qwen/Qwen3.5-0.8B-GGUF` in `scripts/config.env`, but third-party benchmarks show 3-12% throughput regression on non-datacenter GPUs due to per-token MoE expert-loading overhead — enable only for testing.
 
 Models are downloaded on demand by llama-server's `--hf-repo` flag into `/tank/models/.cache/` (HuggingFace cache layout: `models--<org>--<repo>/snapshots/<rev>/<file>.gguf`). The `/tank/models/` directory is RW bind-mounted into LXC 151 at `/opt/models/` so the cache survives container recreation. **All deployed models live in this cache** — there is no parallel flat directory layout in operational use.
 
@@ -735,8 +736,8 @@ The router decides whether to strip `<think>...</think>` from responses based on
 
 This means:
 
-- **AnythingLLM** uses model `rag-qwen3.6` (router alias) → thinking disabled via `chat_template_kwargs.enable_thinking=false` and any leaked `<think>` blocks regex-stripped from the response, lower latency to first answer token.
-- **OpenCode** uses model `qwen3.6-think` → thinking enabled, multi-turn reasoning continuity works.
+- **AnythingLLM** uses model `rag-qwen3.8` (router alias) → thinking disabled via `chat_template_kwargs.enable_thinking=false` and any leaked `<think>` blocks regex-stripped from the response, lower latency to first answer token.
+- **OpenCode** uses model `qwen3.8-think` → thinking enabled, multi-turn reasoning continuity works.
 - **`curl` testing** can pass either header explicitly.
 
 ### 7.4 SSE keepalive
@@ -1065,7 +1066,7 @@ curl http://192.168.6.153:8000/v1/models
 curl -N http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-Strip-Thinking: true" \
-  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"think briefly, then say hi"}]}'
+  -d '{"model":"rag-qwen3.8","stream":true,"messages":[{"role":"user","content":"think briefly, then say hi"}]}'
 # Expect <think> blocks absent from data: payloads
 ```
 
@@ -1156,8 +1157,8 @@ In AnythingLLM Settings:
 **Chat LLM**
 - Provider: **Generic OpenAI**
 - Base URL: `http://192.168.6.153:8000/v1`
-- Model: `rag-qwen3.6` (the router alias for thinking-off RAG synthesis; use `qwen3.6-think` for thinking-on coding agents — both resolve to the same backend, see [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP`)
-- Token context window: `131072`
+- Model: `rag-qwen3.8` (the router alias for thinking-off RAG synthesis; use `qwen3.8-think` for thinking-on coding agents — both resolve to the same backend, see [`scripts/files/router-app.py`](./scripts/files/router-app.py) `ALIAS_MAP`)
+- Token context window: `200000` (matches `ALLM_LLM_TOKEN_LIMIT` and the router's `MAX_CHAT_INPUT_TOKENS`; verified live 2026-08-22)
 - API key: `sk-anything` (llama.cpp doesn't validate, AnythingLLM requires a non-empty value)
 
 **Embedder**
@@ -1189,7 +1190,7 @@ curl -X POST "$ALLM_URL/api/v1/workspace/$WS/update" \
     "chatMode": "query",
     "vectorSearchMode": "rerank",
     "openAiTemp": 0.3,
-    "chatModel": "rag-qwen3.6",
+    "chatModel": "rag-qwen3.8",
     "queryRefusalResponse": "Not in the provided VCF documents.",
     "openAiPrompt": "You are a technical reference assistant for VMware Cloud Foundation (VCF). Answer questions using ONLY the content retrieved from the attached VCF documentation. If the answer is not in the retrieved context, say so — do not fall back on general VMware knowledge. Cite which document each claim comes from when possible."
   }'
@@ -1327,7 +1328,15 @@ The tool docstrings, `format_source()` helper, and routing-aware tool naming fro
 
 ---
 
-## 10. VCF Documentation Auto-Updater (Migrated)
+## 10. VCF Documentation Auto-Updater (RETIRED — historical record)
+
+> **This service is retired and is not deployed.** Verified live 2026-08-22: LXC 154 has no
+> `/opt/vcf-doc-updater`, and no container or timer runs it. The section below is kept as the
+> record of the v1→v2 migration.
+>
+> Corpus refresh is now `rag-refresh.timer` on the host, driving `scripts/rag/refresh.py`
+> declaratively from `scripts/rag/sources.yaml`. The VCF side is the `vcf-release-notes`
+> source (release-notes subtree, 7-day interval). See `scripts/rag/README.md`.
 
 The auto-updater service from v1 §9 also moves over with minimal change. It lives in the `mcp-stack` LXC alongside the MCP containers (same Docker host).
 
@@ -1376,16 +1385,16 @@ sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
 
 | LXC | IP | Port | Service | Notes |
 | --- | --- | --- | --- | --- |
-| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | `llamacpp-chat.service` (V620 tensor-split, Qwen3.6-35B-A3B UD-Q6_K, 256K ctx, `--parallel 1`) | Speculative decoding disabled by default — MoE expert-load overhead regresses throughput even with vocab-matched draft, see §1.3 note; Bearer auth via `LLAMACPP_API_KEY` |
+| `llamacpp-amd` (151) | 192.168.6.151 | 8080 | `llamacpp-chat.service` (V620 tensor-split, Qwen3.8-27B UD-Q6_K_XL (default; profile-switchable), 256K ctx, `--parallel 1`, `--split-mode tensor`, MTP spec-decode n-3) | MoE profiles keep spec-decode disabled (expert-load overhead), see §1.3 note; Bearer auth via `LLAMACPP_API_KEY` |
 | `llamacpp-amd` (151) | 192.168.6.151 | 8082 | `llamacpp-embed.service` (V620 #1 via `--main-gpu 0`) | Qwen3-Embedding-0.6B Q8_0, `--pooling last`, dim 1024 |
 | `llamacpp-amd` (151) | 192.168.6.151 | 8083 | `llamacpp-rerank.service` (V620 #2 via `--main-gpu 1`) | BGE-Reranker-v2-m3 or Qwen3-Reranker-0.6B fallback |
 | `llm-router` (153) | 192.168.6.153 | 8000 | FastAPI router | per-request strip + keepalive |
 | `anythingllm` (154) | 192.168.6.154 | 3001 | AnythingLLM | Docker |
-| `anythingllm` (154) | 192.168.6.154 | (n/a) | vcf-doc-updater | internal cron, no port |
-| `mcp-stack` (155) | 192.168.6.155 | 3002 | anythingllm-search-mcp (VCF) | SSE |
-| `mcp-stack` (155) | 192.168.6.155 | 3003 | broadcom-techdocs-mcp | SSE |
-| `mcp-stack` (155) | 192.168.6.155 | 3004 | sdg-docs-mcp | SSE |
-| `searxng` (156) | 192.168.6.156 | 8888 | SearXNG | Docker |
+| host | 192.168.6.175 | (n/a) | `rag-refresh.timer` → `scripts/rag/refresh.py` | Declarative corpus refresh for both workspaces. Replaced the old `vcf-doc-updater` container, which is **retired and not deployed** — verified live 2026-08-22, LXC 154 has no `/opt/vcf-doc-updater`. The VCF side is the `vcf-release-notes` source; see `scripts/rag/README.md` |
+| `mcp-stack` (155) | 192.168.6.155 | 3004 | mcp-sdg.service — sdg-documentation + vcf-reference (query_*/search_* tool pairs) | SSE |
+| `memory-vault` (156) | 192.168.6.223 (DHCP) | 8000 / 3005 | dashboard+REST (LAN) / MCP bridge (`/mcp`) | Docker + systemd |
+
+Retired from this table: 3002 `anythingllm-search-mcp` and 3003 `broadcom-techdocs-mcp` (broadcom-techdocs retired during the V620 migration — see the 2026-05-19 update in `LESSONS.md`). `55-lxc-mcp.sh` and `60-verify.sh` still probe 3002/3003 as optional (skip if the listener is absent) until a scripts follow-up drops them.
 
 Client-facing endpoint: **`http://192.168.6.153:8000/v1`** (the router). All clients (AnythingLLM, OpenCode, curl) use this single base URL.
 
@@ -1438,7 +1447,7 @@ Client-facing endpoint: **`http://192.168.6.153:8000/v1`** (the router). All cli
 │   └── .env
 ├── anythingllm-data/                        # bind-mounted from /tank/anythingllm
 │   └── storage/
-└── vcf-doc-updater/
+└── vcf-doc-updater/                       # RETIRED — not deployed; see § 10
     ├── docker-compose.yml
     └── state/state.sqlite
 ```
@@ -1481,7 +1490,7 @@ pct exec 151 -- rocm-smi --showtemp
 # === 5. V620 chat llama-server is responding ===
 LLAMACPP_KEY=$(pct exec 151 -- awk -F= '/^LLAMACPP_API_KEY=/{print $2}' /etc/llamacpp.env)
 curl -sf -H "Authorization: Bearer $LLAMACPP_KEY" http://192.168.6.151:8080/v1/models | jq '.data[].id'
-# Expect: "rag-qwen3.6"
+# Expect: "rag-qwen3.8" (default profile; other profiles advertise their own aliases)
 
 # === 6. V620 embed + rerank services are responding ===
 for port in 8082 8083; do
@@ -1490,12 +1499,14 @@ for port in 8082 8083; do
 done
 # Expect: "qwen3-embed" on 8082, "bge-rerank" on 8083
 
-# === 7. Speculative decoding state (expected: DISABLED for Qwen3.6) ===
-pct exec 151 -- journalctl -u llamacpp-chat --since "30 min ago" | grep -i "no implementations specified for speculative decoding"
-# Expect: a line confirming spec-decode is off (MoE expert-load overhead — see §1.3).
-# A vocab-matched draft (Qwen/Qwen3.5-0.8B-GGUF) is loadable via LLAMA_DRAFT_REPO
-# in config.env, but third-party benchmarks show 3-12% throughput regression on
-# non-datacenter GPUs. Enable only for testing.
+# === 7. Speculative decoding state (expected: MTP ACTIVE for the qwen3.8 default; DISABLED for MoE profiles) ===
+pct exec 151 -- journalctl -u llamacpp-chat --since "30 min ago" | grep -iE "speculative|draft-mtp"
+# qwen3.8: expect MTP/draft-mtp active lines (in-GGUF MTP heads, no draft model).
+# MoE profiles (qwen3.6, qwen3.6-fast, coder): expect "no implementations specified for
+# speculative decoding" (MoE expert-load overhead — see §1.3). A vocab-matched draft
+# (Qwen/Qwen3.5-0.8B-GGUF) is loadable via LLAMA_DRAFT_REPO in config.env, but
+# third-party benchmarks show 3-12% throughput regression on non-datacenter GPUs.
+# Enable only for testing.
 
 # === 8. Router is healthy and aggregates models ===
 curl -s http://192.168.6.153:8000/healthz
@@ -1506,24 +1517,24 @@ curl -s http://192.168.6.153:8000/v1/models | jq '.data[].id'
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-Strip-Thinking: true" \
-  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
+  -d '{"model":"rag-qwen3.8","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
   | grep -c '<think>'
-# Expect: 0 (rag-qwen3.6 alias disables thinking via chat_template_kwargs.enable_thinking=false
+# Expect: 0 (rag-qwen3.8 alias disables thinking via chat_template_kwargs.enable_thinking=false
 # AND the router regex-strips any leaked <think> blocks as a belt-and-suspenders backup)
 
 # === 10. Router preserves thinking by default ===
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ROUTER_KEY" \
-  -d '{"model":"qwen3.6-think","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
+  -d '{"model":"qwen3.8-think","stream":true,"messages":[{"role":"user","content":"think then say hi"}]}' \
   | grep -c '<think>'
-# Expect: > 0 (thinking blocks present — qwen3.6-think alias enables thinking)
+# Expect: > 0 (thinking blocks present — qwen3.8-think alias enables thinking)
 
 # === 11. Router keepalive works during long generation ===
 curl -sN http://192.168.6.153:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $ROUTER_KEY" \
-  -d '{"model":"rag-qwen3.6","stream":true,"messages":[{"role":"user","content":"Write a 2000-word essay on ZFS internals."}]}' \
+  -d '{"model":"rag-qwen3.8","stream":true,"messages":[{"role":"user","content":"Write a 2000-word essay on ZFS internals."}]}' \
   | grep -E "^: ping" | head -3
 # Expect: at least one ": ping" line during slow generation. The first ": ping" is
 # emitted immediately, before upstream connect, so clients see a byte right away
@@ -1567,12 +1578,14 @@ for port in 3002 3003 3004; do
 done
 # Expect each: "event: endpoint" line
 
-# === 17. Auto-updater health ===
-pct exec 154 -- sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
-  "SELECT id, datetime(started_at,'unixepoch','localtime') AS started,
-          discovered, unchanged, updated, new, deleted, errors, aborted
-   FROM runs ORDER BY id DESC LIMIT 3;"
-# Expect: discovered ~4900, errors=0, aborted=0
+# === 17. RAG corpus refresh health ===
+# (The old vcf-doc-updater container is retired — LXC 154 has no
+#  /opt/vcf-doc-updater. Corpus refresh is now rag-refresh.timer on the host.)
+systemctl list-timers rag-refresh.timer --no-pager
+grep -E 'rag_refresh_(document_count|errors_this_run)' /var/lib/rag-refresh/metrics.prom
+# Expect: timer active; errors_this_run 0 for every source. A source reporting
+# "halted_safety" has a plan awaiting review in /tank/rag-state/_proposals/ —
+# see scripts/rag/README.md.
 ```
 
 ---

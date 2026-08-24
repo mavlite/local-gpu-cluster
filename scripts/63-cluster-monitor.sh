@@ -53,7 +53,7 @@ else
   "bind_host": "$MON_BIND_HOST",
   "bind_port": $MON_BIND_PORT,
   "bearer_token": "",
-  "lxc_ram_ceilings": {"151": 32768}
+  "lxc_ram_ceilings": {"151": 65536}
 }
 EOF
   chmod 0644 "$CONFIG_PATH"

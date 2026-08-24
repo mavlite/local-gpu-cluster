@@ -15,9 +15,11 @@ Once deployment is complete, see [`day-2-ops.md`](./day-2-ops.md) for steady-sta
 >
 > 2. The "Qwen3.6 35B" model is technically **Qwen3.6-35B-A3B** — a Mixture-of-Experts model with 3 B active parameters per token out of 35 B total. Inference speed is closer to a 3 B model while VRAM cost matches the full 35 B weight set. Default quant is **UD-Q6_K** (~29 GB; pivoted from UD-Q4_K_M on 2026-05-27); the prior Q4 default lives on as the `qwen3.6-fast` profile for throughput-prioritized workloads. **Speculative decoding is disabled by default on Qwen3.6** — NOT because of a vocab mismatch (Qwen3.5-0.8B shipped 2026-03-02 with vocab 248,320 matching Qwen3.6, and llama.cpp PR #19493 accepts it as a draft) but because the A3B MoE architecture incurs per-token expert-loading overhead during draft verification that exceeds any acceptance-rate speedup. Benchmarks measure 3-12% throughput regression with the vocab-matched draft. The chat unit boot log shows `common_speculative_init: no implementations specified for speculative decoding` — this is the expected/normal state. See Step 5.11.3 for details and citations.
 >
-> 3. Proxmox VE 9.1 (released Nov 2025) defaults to Linux kernel 6.17. With NVIDIA removed, no kernel pinning is required — AMDGPU is in-tree and stable on 6.17.
+> 3. Proxmox VE 9.1 (released Nov 2025) shipped Linux kernel 6.17. With NVIDIA removed, no kernel pinning is required — AMDGPU is in-tree and stable. **The reference host has since moved on: verified live 2026-08-22 it runs `pve-manager/9.2.11` on kernel `7.0.14-12-pve`, still with no pinning.**
 >
 > 4. Modern Proxmox LXC GPU passthrough uses the `dev0:` configuration syntax (or `pct set ... -dev0`), which is more robust to host restarts than raw `lxc.cgroup2.devices.allow` + `lxc.mount.entry` directives. This runbook uses `dev0:` syntax throughout.
+
+> **Current-state note (2026-08-20):** The default chat profile is now **`qwen3.8`** (Qwen3.8-27B UD-Q6_K_XL) and six profiles exist (`qwen3.8`, `qwen3.6`, `qwen3.6-fast`, `coder`, `devstral`, `devstral-large`). This runbook's Phase 5 narrative describes the original qwen3.6 deployment and is kept as the historical deployment record. The provisioning scripts (`scripts/51-lxc-amd.sh`, `scripts/swap-chat-model.sh`, `scripts/files/router-app.py`) are the executable source of truth for current defaults — see `day-2-ops.md` § 4.3-4.5 for current model operations.
 
 ---
 
@@ -1425,16 +1427,19 @@ curl -sf -X POST -H "Authorization: Bearer $LLAMACPP_KEY" -H "Content-Type: appl
     http://$LLAMACPP_AMD_IP:8083/v1/rerank | jq '.results[0].document'
 # Expect: "Paris is in France"
 
-# Auth-gate test: request without Bearer should 403
-curl -s -o /dev/null -w "%{http_code}\n" http://$LLAMACPP_AMD_IP:8080/v1/models
-# Expect: 401 (llama-server returns 401 for missing auth, not 403)
+# Auth-gate test. NOTE: llama.cpp leaves /health and /v1/models UNGATED by design —
+# probing those returns 200 even with --api-key set. Probe a gated route instead.
+curl -s -o /dev/null -w "%{http_code}\n" http://$LLAMACPP_AMD_IP:8080/props
+# Expect: 401 (llama-server returns 401, not 403). Verified live 2026-08-22:
+#   /health -> 200 and /v1/models -> 200 (both ungated); /props, /metrics and
+#   POST /v1/chat/completions -> 401 unauthed and 401 with a wrong key.
 ```
 
 **Stop and verify before proceeding:**
 - [ ] `rocminfo` shows two `gfx1030` agents
 - [ ] All three systemd units active: `pct exec 151 -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank` prints "active" three times
 - [ ] Chat (8080), embed (8082), rerank (8083) all respond with valid `Authorization: Bearer` headers
-- [ ] Unauthed request to any of the three returns 401 (auth gate works)
+- [ ] Unauthed POST to `/v1/chat/completions` returns 401 (auth gate works). `/health` and `/v1/models` are intentionally ungated by llama.cpp and return 200 — do not treat that as a failure
 - [ ] Embedding dim returned is 1024 (confirms `--pooling last` is correct)
 - [ ] Reranker scores "Paris is in France" higher than "Berlin is in Germany"
 - [ ] Both GPUs split work during chat generation (`rocm-smi --showuse` shows activity on both)
@@ -1812,9 +1817,11 @@ pct exec 153 -- systemctl restart llm-router
 pct exec 151 -- systemctl restart llamacpp-chat
 
 # G. AnythingLLM (LXC 154): fix the ALLM_LLM_TOKEN_LIMIT mismatch
-#    Previously 262144 (256K) which exceeds llama-server's --ctx-size 131072 (128K).
-#    Result: silent chat failure mid-conversation at overflow.
-pct exec 154 -- sed -i 's/^ALLM_LLM_TOKEN_LIMIT=.*/ALLM_LLM_TOKEN_LIMIT=131072/' /opt/anythingllm/.env
+#    HISTORICAL (2026-era cutover): at the time the chat unit ran --ctx-size 131072,
+#    so 262144 overflowed and caused silent mid-conversation failure.
+#    DO NOT RUN AS-IS TODAY: the current default is 200000 (router cap) against a
+#    262144 chat window — setting 131072 now is a downgrade. Verified live 2026-08-22.
+pct exec 154 -- sed -i 's/^ALLM_LLM_TOKEN_LIMIT=.*/ALLM_LLM_TOKEN_LIMIT=200000/' /opt/anythingllm/.env
 # Update embedder URL if previously direct-to-152 (Step 6.1.7 informed which).
 pct exec 154 -- sed -i 's|http://192\.168\.6\.152:8082|http://192.168.6.151:8082|g' /opt/anythingllm/.env
 pct exec 154 -- bash -c 'cd /opt/anythingllm && docker compose restart'
@@ -2447,17 +2454,17 @@ In AnythingLLM UI: **Settings → AI Providers → LLM Preference**
 
 - Provider: **Generic OpenAI**
 - Base URL: `http://192.168.6.153:8000/v1` (the router on LXC 153)
-- API Key: the value of `ROUTER_API_KEY` from `/etc/router.env` on LXC 153 — required (the rewritten V620-only router enforces Bearer auth; a placeholder like `sk-anything` returns 403). AnythingLLM's Generic OpenAI provider accepts the raw hex key as-is; no `sk-` prefix needed.
+- API Key: the value of `ROUTER_API_KEY` from `/etc/router.env` on LXC 153 — required (the rewritten V620-only router enforces Bearer auth; a placeholder like `sk-anything` returns 403 — the router answers 403, not 401, for both a missing and an invalid Bearer token; verified live 2026-08-22). AnythingLLM's Generic OpenAI provider accepts the raw hex key as-is; no `sk-` prefix needed.
 - Chat Model Name: query the actual model id. Two equivalent ways:
    - Via router (matches AnythingLLM's traffic path): `curl -H "Authorization: Bearer $ROUTER_API_KEY" http://192.168.6.153:8000/v1/models | jq -r .data[0].id`
    - Direct to llama-server (verification only — bypasses router): `curl -H "Authorization: Bearer $LLAMACPP_API_KEY" http://192.168.6.151:8080/v1/models | jq -r .data[0].id` using the LLAMACPP_API_KEY from `/etc/llamacpp.env` inside LXC 151
-- Token context window: `131072` (128K). This is AnythingLLM's input cap, **not** the llama.cpp backend's context window — the chat unit actually runs at `--ctx-size 262144` (256K) per Step 5.11.3. The 128K AnythingLLM cap is a conservative safety margin; safe to bump up to the router's `MAX_CHAT_INPUT_TOKENS=200000` cap (which leaves ~56K for output + thinking inside the 256K chat unit window). Values *higher than 200K* cause silent chat failure mid-conversation when the router rejects the request with 413.
+- Token context window: `200000` (verified live 2026-08-22). This is AnythingLLM's input cap, **not** the llama.cpp backend's context window — the chat unit runs at `--ctx-size 262144` (256K) per Step 5.11.3. 200K is the router's `MAX_CHAT_INPUT_TOKENS` cap and leaves ~56K for output + thinking inside the 256K window. Values *higher than 200K* cause silent chat failure mid-conversation when the router rejects the request with 413. (This was `131072` while the 128K Coder-Next profile was the chat target.)
 - Max Tokens: `8192`
 
 > ℹ️ **Three-tier token-limit layering** — kept consistent across the stack:
 > - llama.cpp chat unit: `--ctx-size 262144` (256K, full Qwen3.6 trained window)
 > - Router: `MAX_CHAT_INPUT_TOKENS=200000` (200K input cap, ~56K reserved for output)
-> - AnythingLLM: `ALLM_LLM_TOKEN_LIMIT=131072` (128K, conservative client-side cap; `scripts/54-lxc-anythingllm.sh:42` default)
+> - AnythingLLM: `ALLM_LLM_TOKEN_LIMIT=200000` (matches the router cap; `scripts/54-lxc-anythingllm.sh:54` default. Was 131072 when the 128K Coder-Next profile was the target — raised for qwen3.8's 262144 window)
 >
 > Bumping AnythingLLM's limit up to 200K is safe (still under the router cap). When the AnythingLLM container is recreated (e.g., `docker compose down && up`), it re-bootstraps from `/opt/anythingllm/.env` — re-applying any UI changes requires either editing the `.env` directly or re-running `scripts/54-lxc-anythingllm.sh` with the desired override in `config.env`.
 
@@ -2995,10 +3002,11 @@ for port in 8080 8082 8083; do
   echo "151:${port} -> ${http_code}"   # Expect: 200
 done
 
-# 2.3 Auth gate works (unauthed request returns 401)
+# 2.3 Auth gate works. /health is ungated (it is the 2.2 probe above and returns 200),
+#     so test a GATED route. Verified live 2026-08-22.
 for port in 8080 8082 8083; do
-  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://192.168.6.151:${port}/health)
-  echo "151:${port} unauthed -> ${http_code}"   # Expect: 401
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://192.168.6.151:${port}/props)
+  echo "151:${port} unauthed /props -> ${http_code}"   # Expect: 401
 done
 
 # 2.4 Router refuses unauthed requests

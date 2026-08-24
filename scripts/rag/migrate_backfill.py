@@ -55,6 +55,18 @@ def parse_args() -> argparse.Namespace:
         help="Limit to one workspace slug (default: all in sources.yaml)",
     )
     p.add_argument(
+        "--source",
+        help=(
+            "Limit to one source id. STRONGLY RECOMMENDED when other sources "
+            "in the same workspace already have good state: this script "
+            "REPLACES a source's documents.json with whatever it can match "
+            "from the workspace, so running it workspace-wide can shrink a "
+            "healthy source's state (e.g. vcf-release-notes tracked 191 URLs "
+            "but only 150 were re-matchable, because docs ingested by other "
+            "tooling carry a different docSource)."
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be written but don't touch state files",
@@ -148,16 +160,42 @@ def pick_source_for_url(
             if md_source.startswith(sp) or sp.startswith(md_source):
                 return src
 
-    # 3. domain match
+    # 3. domain match, honouring the source's own URL scope.
+    #
+    # A source whose config declares include_patterns owns only the URLs it
+    # would actually collect. Matching on bare domain would let a narrowly
+    # scoped source adopt every document from that host — e.g. the
+    # release-notes-only vcf-release-notes source claiming all ~5,700
+    # techdocs.broadcom.com docs, after which the next refresh would see
+    # ~96% of its "own" documents missing upstream and plan to delete them.
     url_domain = domain_of(url)
     for src in sources:
         cfg = src.get("config", {})
-        for field in ("rendered_base", "base_url", "sitemap_url"):
-            base = cfg.get(field)
-            if base and domain_of(base) == url_domain:
-                return src
+        if not any(
+            cfg.get(f) and domain_of(cfg[f]) == url_domain
+            for f in ("rendered_base", "base_url", "sitemap_url")
+        ):
+            continue
+        if not _url_in_scope(url, cfg):
+            continue
+        return src
 
     return None
+
+
+def _url_in_scope(url: str, cfg: dict) -> bool:
+    """True if url passes the source's include/exclude patterns.
+
+    A source with no include_patterns is unscoped and matches everything on
+    its domain, preserving the original behaviour.
+    """
+    includes = cfg.get("include_patterns") or []
+    excludes = cfg.get("exclude_patterns") or []
+    if includes and not re.search("|".join(includes), url):
+        return False
+    if excludes and re.search("|".join(excludes), url):
+        return False
+    return True
 
 
 def main() -> int:
@@ -189,6 +227,12 @@ def main() -> int:
 
     for ws in workspaces:
         ws_sources = [s for s in all_sources if s["workspace"] == ws]
+        if args.source:
+            # Only rewrite the named source's state. Everything else in the
+            # workspace is left strictly alone -- see the --source help text.
+            ws_sources = [s for s in ws_sources if s["id"] == args.source]
+            if not ws_sources:
+                continue
         print(f"[{ws}]  fetching workspace documents...")
         docs = client.list_workspace_documents(ws)
         print(f"  {len(docs)} documents in workspace")

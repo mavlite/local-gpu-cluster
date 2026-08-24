@@ -5,7 +5,7 @@
 ![Platform](https://img.shields.io/badge/platform-Proxmox%20VE%209-informational)
 ![GPU](https://img.shields.io/badge/GPU-2%C3%97%20V620%2032GB-red)
 ![Runtime](https://img.shields.io/badge/runtime-llama.cpp%20ROCm-000000)
-![Model](https://img.shields.io/badge/chat-Qwen3.6--35B--A3B-blue)
+![Model](https://img.shields.io/badge/chat-Qwen3.8--27B-blue)
 ![RAG](https://img.shields.io/badge/RAG-AnythingLLM%20%2B%20LanceDB-0a6cf5)
 
 Single-workstation LLM serving stack with all inference (chat + embedding + reranking) on two AMD Radeon Pro V620 cards running ROCm under Proxmox VE 9. Five LXCs separate the inference engine, an auth/admission router, the AnythingLLM RAG UI, an MCP Docker host, and the Memory Vault shared-memory service.
@@ -22,17 +22,23 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 | 153 `llm-router` | FastAPI router (auth, admission, FIM, metrics) | `llm-router` (8000) | 192.168.6.153 |
 | 154 `anythingllm` | Docker host running AnythingLLM | `anythingllm` (3001) | 192.168.6.154 |
 | 155 `mcp-stack` | Docker host for MCP servers + Python MCP bridge | `mcp-sdg.service` (port 3004) exposes `sdg-documentation` + `vcf-reference` workspaces via SSE; Docker compose stack optional | 192.168.6.155 |
-| host | Fan-control bridge driving V620 shroud fans by GPU temp | `v620-fan-bridge.service` | — |
+| 156 `memory-vault` | Shared persistent memory (Postgres 16/pgvector + dashboard) | `memory-vault` (8000, LAN) + `memory-vault-bridge` (3005, MCP Streamable HTTP at `/mcp`) | 192.168.6.223 (DHCP) |
+| host | Host services: fan-control bridge (V620 shroud fans by GPU temp), cluster-monitor (dashboard + health checks, 8888), swap-webhook (router-triggered profile swaps, 9100), RAG refresh + memvault backup timers | `v620-fan-bridge.service`, `cluster-monitor.service`, `swap-webhook.service`, RAG refresh timer, memvault backup timer | 192.168.6.175 |
 
 ### Models
 
 | Service | Model | Port | Notes |
 |---|---|---|---|
-| chat (default profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q6_K, ~29 GB) | 8080 | both V620s tensor-split 1,1.5; 256K ctx; `--reasoning-format deepseek`, `--jinja`, `--api-key`, thinking-mode-off auto-injected by router for `rag-*` aliases. Pivoted from UD-Q4_K_M on 2026-05-27 — Q6_K captures ~99% of Q8 quality |
-| chat (alt profile `qwen3.6-fast`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | throughput-prioritized alternative; same arch, ~7 GB less weight; tensor-split 1,1; 256K ctx; cache-reuse 1024. Use when raw t/s matters more than precision (bulk batch workloads, low-stakes drafting). Replaces the prior `qwen3.6-hi` Q5 profile |
-| chat (alt profile `coder`) | Qwen3-Coder-Next 80B/3B-A (UD-IQ4_XS, ~38 GB) | 8080 | swaps in via [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh); tensor-split 1,1.5; 128K ctx; cache-reuse disabled (llama.cpp bug workaround). Only ONE chat profile occupies the chat slot at a time |
+| chat (default profile `qwen3.8`) | Qwen3.8-27B (UD-Q6_K_XL, ~23.6 GB) | 8080 | DENSE 27.78B, hybrid Gated DeltaNet + Gated Attention; tensor-split `1,1` with `--split-mode tensor` (+42.8%, measured on the UD-Q4_K_XL sibling); in-GGUF MTP spec-decode `--spec-type draft-mtp` n-3 (+63.8%, measured on the UD-Q4_K_XL sibling — deployed UD-Q6_K_XL benches 43.13 t/s at the same config, `swap-chat-model.sh:225`); 256K ctx (262144); q8_0 KV; cache-reuse 1024 (auto-disabled for this arch). Decode 49.5 t/s short / 32.6 @122K; prefill 553 t/s @22K (2026-08-19, b10509, UD-Q6_K_XL). Only ONE chat profile occupies the chat slot at a time |
+| chat (alt profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q6_K, ~29 GB) | 8080 | MoE 3B active; tensor-split 1,1.5; 256K ctx; spec-decode disabled (MoE expert-load overhead). Pivoted to Q6_K on 2026-05-27 — Q6_K captures ~99% of Q8 quality |
+| chat (alt profile `qwen3.6-fast`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | throughput-prioritized; tensor-split 1,1; 256K ctx |
+| chat (alt profile `coder`) | Qwen3-Coder-Next 80B/3B-A (UD-IQ4_XS, ~38 GB) | 8080 | 128K ctx; cache-reuse 1024 (was 0 as a llama.cpp #19908 workaround; re-enabled after the b9582 regression fix — `swap-chat-model.sh:159-164`) |
+| chat (alt profile `devstral`) | Devstral Small 2 24B (Q8_0, ~25 GB) | 8080 | Mistral arch; 256K ctx; q4_0 KV (required); cache-reuse 0 |
+| chat (alt profile `devstral-large`) | Devstral 2 123B (UD-IQ2_M, ~40.6 GB) | 8080 | 64K ctx; q4_0 KV; cache-reuse 0 |
 | embed | Qwen3-Embedding-0.6B (Q8_0, 1024-dim) | 8082 | V620 #1 pinned; `--pooling last` (CRITICAL — `cls` produces wrong embeddings) |
 | rerank | BGE Reranker v2-m3 (Q4_K_M) | 8083 | V620 #2 pinned; `--reranking --pooling rank` |
+
+Common chat flags (all profiles): `--reasoning-format deepseek`, `--jinja`, `--api-key`; thinking-mode-off auto-injected by router for `rag-*` aliases.
 
 Swap between chat profiles in 30–60 s with [`scripts/swap-chat-model.sh`](./scripts/swap-chat-model.sh) — see [`day-2-ops.md § 4.4`](./day-2-ops.md#-44-vram-budget-template) for the workflow, tuning rationale, and measured VRAM distribution per profile. [`scripts/tools/stability-test-coder.sh`](./scripts/tools/stability-test-coder.sh) provides reproducible load testing.
 
@@ -46,9 +52,11 @@ Swap between chat profiles in 30–60 s with [`scripts/swap-chat-model.sh`](./sc
 - CORS middleware (`CORS_ALLOW_ORIGINS=*` by default) — required for browser-side clients loaded from `file://` (e.g. the local HTML artifact) to call the router via `fetch()`; OPTIONS preflight bypasses Bearer auth so the preflight succeeds
 - SSE keepalive frames every 12 s, plus an immediate `: ping` flushed before upstream connect so clients' read timers don't fire during prompt-processing latency; `MAX_STREAM_SECONDS=900` wall-clock cap prevents a wedged upstream from holding a chat slot forever
 - Fail-open degraded mode on upstream 5xx (emits a `service_degraded` SSE frame so AnythingLLM can fall back without breaking the stream)
-- Eight client-facing chat aliases — three each for `qwen3.6` (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`) and `qwen3.6-fast` (`rag-qwen3.6-fast`, `qwen3.6-fast-think`, `qwen3.6-fast`), plus two for `coder` (`qwen3-coder`, `qwen3-coder-next`). Alias controls `chat_template_kwargs.enable_thinking` and `<think>...</think>` regex-stripping. `/v1/models` advertises only the aliases matching the currently-loaded chat profile (verified against the chat unit's reported model id); mismatched-profile requests still pass through to llama-server unchanged (useful for one-line A/B testing)
+- Fourteen client-facing chat aliases across six profiles — `qwen3.8` (`rag-qwen3.8`, `qwen3.8-think`, `qwen3.8`, `qwen3.8-xhigh`), `qwen3.6` (`rag-qwen3.6`, `qwen3.6-think`, `qwen3.6`), `qwen3.6-fast` (`rag-qwen3.6-fast`, `qwen3.6-fast-think`, `qwen3.6-fast`), `coder` (`qwen3-coder`, `qwen3-coder-next`), `devstral` (`devstral`), `devstral-large` (`devstral-large`). Alias controls `chat_template_kwargs.enable_thinking` (plus `reasoning_effort` for qwen3.8: `medium` on `qwen3.8` and `qwen3.8-think`, `xhigh` on `qwen3.8-xhigh`, none on `rag-qwen3.8`) and `think...` regex-stripping. `/v1/models` advertises only the aliases matching the currently-loaded chat profile (verified against the chat unit's reported model id). A known alias for a different profile gets a 409 (`STRICT_PROFILE_MATCH` on by default) or triggers auto-swap when the swap-webhook is installed; unknown model strings still pass through to llama-server unchanged (one-line A/B testing)
 - Strips `[CONTEXT N]` / `(Context 0, 1)` chunk-reference markers from chat output (Qwen3.6 training-prior leak)
 - `/v1/completions` passthrough for FIM-style code completion (Continue.dev, Cody)
+- `POST /v1/messages` + `/v1/messages/count_tokens` — Anthropic Messages API gated passthrough (llama-server speaks it natively, llama.cpp PR #17570); lets Claude Code point `ANTHROPIC_BASE_URL` at the router
+- Auto profile swap — with the host `swap-webhook` installed (`scripts/52-swap-webhook.sh`, port 9100), a request for a cross-profile alias triggers a swap, waits with SSE keepalives, then forwards; profile allowlist parsed from `swap-chat-model.sh` `PROFILE_NAMES` (never executed). **End-to-end measured 2026-08-22: 27–33 s** (4 swaps, warm cache, qwen3.8↔coder). With the webhook removed the same request instead gets a 409 in ~13 ms, before the chat slot is taken
 - `POST /v1/tavily/search` proxy — holds the Tavily API key server-side so browser clients (e.g. the external HTML reporting artifact) can do live web search without ever seeing the key; whitelisted body fields, separate rate limit
 - **Server-side tool execution** — when a chat completion request includes `"tool_execution": "server"`, the router runs the OpenAI tools/tool_calls multi-turn loop internally instead of returning `tool_calls` to the client. The model can call any of the registered tools (`tavily_search`, `tavily_extract`, `tavily_crawl`, `tavily_map`, `web_fetch`), the router executes them, feeds results back into the conversation, and returns only the final answer. Browser-side clients get tool-augmented chat without implementing the dispatcher themselves. Default mode is `"client"` (legacy pass-through) so OpenCode/Cline/Continue work unchanged. `MAX_TOOL_ITERATIONS=10` caps the loop; see [`day-2-ops.md` § 6.8](./day-2-ops.md#-68-server-side-tool-execution) for usage and extension
 - Qwen3 Embedding compliance: appends `<|endoftext|>` to embedding inputs if missing
@@ -126,11 +134,14 @@ Pick the model alias that matches your use case (alias must match the currently-
 
 | Use case | Model alias | Active profile required |
 |---|---|---|
-| AnythingLLM RAG (general) | `rag-qwen3.6` | `qwen3.6` |
-| OpenCode / Cline (reasoning on) | `qwen3.6-think` or `qwen3.6` | `qwen3.6` |
+| AnythingLLM RAG (general, default profile) | `rag-qwen3.8` | `qwen3.8` |
+| OpenCode / Cline (reasoning on) | `qwen3.8-think` or `qwen3.8` | `qwen3.8` |
 | Throughput-prioritized RAG / bulk batch | `rag-qwen3.6-fast` | `qwen3.6-fast` |
 | Throughput-prioritized reasoning agent | `qwen3.6-fast-think` or `qwen3.6-fast` | `qwen3.6-fast` |
 | Coding agent (Coder-Next) | `qwen3-coder` or `qwen3-coder-next` | `coder` |
+| Deep one-off reasoning (escape hatch, ~73 s/answer) | `qwen3.8-xhigh` | `qwen3.8` |
+| Coding agent (Mistral 24B) | `devstral` | `devstral` |
+| Coding agent (Mistral 123B) | `devstral-large` | `devstral-large` |
 | Embeddings | `qwen3-embed` | any (separate unit) |
 | Reranking | `bge-rerank` | any (separate unit) |
 

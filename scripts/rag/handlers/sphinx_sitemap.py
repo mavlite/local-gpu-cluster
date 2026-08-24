@@ -15,6 +15,7 @@ import re
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -48,6 +49,7 @@ class SphinxSitemapHandler(Handler):
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             timeout=context.request_timeout_seconds,
+            crawl_delay=context.crawl_delay_seconds,
         )
 
         if not urls:
@@ -56,17 +58,86 @@ class SphinxSitemapHandler(Handler):
                 f"and fallback pages. Refusing to overwrite state with empty set."
             )
 
-        for url in urls:
+        # Report the FULL enumerated set before any budgeting, so refresh.py
+        # can diff removals against what actually exists upstream rather than
+        # against the slice we fetch below.
+        context.discovered_urls.update(urls)
+
+        budget = int(config.get("max_urls_per_run") or 0)
+        if budget and budget < len(urls):
+            urls = self._prioritise(urls, context.prior_state, budget)
+            print(f"  budgeted: fetching {len(urls)} of "
+                  f"{len(context.discovered_urls)} enumerated URLs this run")
+
+        workers = max(1, int(config.get("parallel_workers") or 1))
+        timeout = context.request_timeout_seconds
+        delay = context.crawl_delay_seconds
+        total = len(urls)
+
+        def fetch_one(url: str):
+            """Fetch one URL, then hold the worker slot for the crawl delay.
+
+            Sleeping inside the worker (rather than between yields) is what
+            makes N workers approximate N requests per delay window: with
+            workers=4 and delay=10 the effective rate is ~2.5s between
+            requests, which is the ratio the 2026-05 bulk ingest ran at
+            without Cloudflare throttling.
+            """
             try:
-                doc = self._fetch_and_clean(url, context.request_timeout_seconds)
-            except Exception as e:
-                # Yield nothing for this URL; refresh.py records it as a
-                # plan-level error and decides what to do.
-                continue
-            if doc is None:
-                continue
-            yield doc
-            time.sleep(context.crawl_delay_seconds)
+                doc = self._fetch_and_clean(url, timeout)
+            except Exception:
+                # Swallow per-URL failures; refresh.py records the shortfall as
+                # a plan-level error. One bad page must not abort a run that
+                # may be several thousand URLs long.
+                doc = None
+            time.sleep(delay)
+            return doc
+
+        done = 0
+        if workers == 1:
+            for url in urls:
+                doc = fetch_one(url)
+                done += 1
+                if doc is not None:
+                    yield doc
+        else:
+            print(f"  fetching {total} URLs with {workers} workers "
+                  f"(~{delay / workers:.1f}s effective between requests)")
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(fetch_one, u) for u in urls]
+                for fut in as_completed(futures):
+                    try:
+                        doc = fut.result()
+                    except Exception:
+                        doc = None
+                    done += 1
+                    # Long unattended runs need a pulse; without it a
+                    # multi-hour fetch looks indistinguishable from a hang.
+                    if done % 100 == 0 or done == total:
+                        print(f"    fetched {done}/{total}", flush=True)
+                    if doc is not None:
+                        yield doc
+
+
+    @staticmethod
+    def _prioritise(urls: list[str], prior_state: dict, budget: int) -> list[str]:
+        """Pick which URLs to spend this run's fetch budget on.
+
+        Never-fetched URLs first (a URL absent from state has no content at
+        all, so it is strictly more valuable than re-checking one we already
+        have), then the least-recently-fetched. last_fetched is an ISO-8601
+        UTC string, so lexical sort is chronological.
+
+        Deterministic: a URL that loses the draw this run rises to the front
+        as others get refreshed, so the whole set cycles rather than starving
+        a tail.
+        """
+        def key(u: str):
+            rec = prior_state.get(u)
+            if not rec:
+                return (0, "")           # never fetched -> highest priority
+            return (1, str(rec.get("last_fetched") or ""))
+        return sorted(urls, key=key)[:budget]
 
     # ─── URL discovery ────────────────────────────────────────────────────
     def _collect_urls(
@@ -77,8 +148,9 @@ class SphinxSitemapHandler(Handler):
         include_patterns: list[str],
         exclude_patterns: list[str],
         timeout: int,
+        crawl_delay: int = 0,
     ) -> list[str]:
-        urls = self._try_sitemap(sitemap_url, timeout)
+        urls = self._try_sitemap(sitemap_url, timeout, crawl_delay)
         if not urls:
             urls = self._try_fallback_index(base_url, fallback_pages, timeout)
 
@@ -98,23 +170,58 @@ class SphinxSitemapHandler(Handler):
             out.append(u)
         return sorted(set(out))
 
-    def _try_sitemap(self, sitemap_url: str, timeout: int) -> list[str]:
+    def _try_sitemap(
+        self, sitemap_url: str, timeout: int, crawl_delay: int = 0
+    ) -> list[str]:
+        """Fetch a sitemap and return its page URLs.
+
+        Handles BOTH shapes of the sitemaps protocol:
+          <urlset>       -> the <loc>s ARE page URLs, return them.
+          <sitemapindex> -> the <loc>s are CHILD SITEMAPS; fetch each and
+                            return the union of their page URLs.
+
+        Large doc sites (techdocs.broadcom.com ships 17 sub-sitemaps) use the
+        index form. Without this, the handler would "succeed" and return a
+        handful of sitemap URLs instead of pages — which then fail extraction
+        and look like an empty source.
+        """
+        locs, is_index = self._fetch_sitemap_locs(sitemap_url, timeout)
+        if not is_index:
+            return locs
+
+        urls: list[str] = []
+        for child in locs:
+            if crawl_delay:
+                time.sleep(crawl_delay)
+            child_locs, child_is_index = self._fetch_sitemap_locs(child, timeout)
+            # One level of nesting only. Nested indexes are vanishingly rare
+            # and recursing risks an unbounded fetch loop on a malformed feed.
+            if child_is_index:
+                continue
+            urls.extend(child_locs)
+        return urls
+
+    def _fetch_sitemap_locs(
+        self, sitemap_url: str, timeout: int
+    ) -> tuple[list[str], bool]:
+        """Return (locs, is_sitemap_index) for one sitemap document."""
         try:
             r = requests.get(sitemap_url, timeout=timeout, allow_redirects=True)
             r.raise_for_status()
         except requests.RequestException:
-            return []
+            return [], False
         try:
             root = ET.fromstring(r.content)
         except ET.ParseError:
-            return []
+            return [], False
+        is_index = SITEMAP_NS_RE.sub("", root.tag) == "sitemapindex"
         # Sitemap XML uses xmlns; strip namespace prefixes to query <loc>.
-        urls: list[str] = []
+        locs: list[str] = []
         for elem in root.iter():
             tag = SITEMAP_NS_RE.sub("", elem.tag)
             if tag == "loc" and elem.text:
-                urls.append(elem.text.strip())
-        return urls
+                locs.append(elem.text.strip())
+        return locs, is_index
 
     def _try_fallback_index(
         self, base_url: str, pages: list[str], timeout: int

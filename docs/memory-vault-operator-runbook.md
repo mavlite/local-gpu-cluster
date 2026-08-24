@@ -54,11 +54,13 @@ says "No memories found", re-confirm the `/api/search` field names (step 2) and
 ## 4. Router Anthropic passthrough
 ```bash
 LGC_DIR=scripts bash scripts/53-lxc-router.sh        # redeploys updated app.py
-curl -s http://192.168.6.153:8000/openapi.json | grep -q /v1/messages && echo OK
+curl -s -H "Authorization: Bearer <ROUTER_API_KEY>" http://192.168.6.153:8000/openapi.json | grep -q /v1/messages && echo OK
+# NOTE: /openapi.json and /docs are Bearer-gated (403 without a key), so the
+# unauthenticated form of this check always fails even when the route is healthy.
 # Functional check (substitute ROUTER_API_KEY from /etc/router.env on LXC 153, and a loaded alias):
 curl -s http://192.168.6.153:8000/v1/messages -H "Authorization: Bearer <ROUTER_API_KEY>" \
   -H 'content-type: application/json' \
-  -d '{"model":"rag-qwen3.6","max_tokens":64,"messages":[{"role":"user","content":"Reply with one word: pong"}]}'
+  -d '{"model":"rag-qwen3.8","max_tokens":64,"messages":[{"role":"user","content":"Reply with one word: pong"}]}'
 ```
 A 502 means the loaded llama-server build lacks `/v1/messages` (need ≥ b9584).
 

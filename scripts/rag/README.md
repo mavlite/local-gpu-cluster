@@ -161,11 +161,13 @@ Inspect the proposal. Three options:
 
 | Config key | Purpose |
 |---|---|
-| `sitemap_url` | sitemap.xml URL |
+| `sitemap_url` | sitemap.xml URL. May be a `<urlset>` **or a `<sitemapindex>`** — the handler follows an index one level down and unions the child `<urlset>`s (techdocs.broadcom.com ships 17 shards). Nested indexes are not followed. |
 | `base_url` | Doc root URL |
 | `fallback_index_pages` | List of section index page names to scrape if sitemap unavailable |
 | `include_patterns` | List of regex-ish substrings; URL must match at least one |
 | `exclude_patterns` | URL must NOT match any |
+| `max_urls_per_run` | Optional fetch budget. The handler still ENUMERATES every URL (cheap — the sitemap shards list 13,494 techdocs URLs in ~3 min) but fetches only this many per run, prioritising never-fetched URLs first, then least-recently-fetched. Omit or `0` for no budget. See **Budgeted refresh** below. |
+| `parallel_workers` | Fetch concurrency (default 1 = serial). Each worker observes the full `crawl_delay_seconds` after its own request, so N workers approximate N requests per delay window — `4` at delay `10` is ~2.5s effective. This is a LOOSER reading of `Crawl-delay: 10` than strict serial; it is what the 2026-05 bulk ingest ran at for ~30 h without Cloudflare throttling. Set `1` to be strict. |
 
 ### `rss` — RSS / Atom feed for vendor blogs and news
 
@@ -178,6 +180,27 @@ Inspect the proposal. Three options:
 **Required source-level field:** `removal_policy: additive_only` (at the same level as `enabled` / `workspace`, not nested under `config`). RSS feeds expose only a sliding recent-window — usually the last 10-50 posts — not the full history. Without `additive_only`, the diff layer treats the current window as the universe of URLs and marks every historical entry for deletion on each refresh.
 
 Content extraction strategy: if the feed includes full content in `content:encoded` / `atom:content` (>1 KB heuristic), use it directly. Otherwise fetch the permalink and trafilatura-extract. On fetch failure, fall back to the feed's `summary` / `description` (even if short) rather than dropping the entry. Crawl delay applies only when an HTTP fetch happens.
+
+### Scraping techdocs.broadcom.com (VCF)
+
+`vcf-release-notes` targets the `vcf-reference` workspace and is **deliberately scoped to
+the release-notes subtree only** — 191 URLs, ~31 min/pass at the mandated 10s delay. The
+full us/en VCF 9.x tree is ~13,500 URLs, which would take ~37 hours per pass and is not
+viable on a timer. The remaining topical docs are the one-time 2026-05 bulk ingest and stay
+manual.
+
+Three things to know before touching this source:
+
+1. **Use a trafilatura handler, never AnythingLLM's upload-link scraper.** Broadcom renders
+   the whole VCF nav tree into server-side HTML. Measured 2026-08-22 on the same 59 URLs:
+   upload-link produced 992 KB / ~122k-token documents (~97% navigation), trafilatura
+   produced 368–4,424 chars. The bloated pages hash as near-identical and get
+   content-deduped — 59 uploads collapsed to 22 stored docs and every NSX page vanished.
+2. **Filter to `/us/en/`.** The same tree ships fr/fr, es/es and jp/ja; 180 of the 239
+   9.1 patch URLs were localizations.
+3. **`<lastmod>` is not a change signal here.** Broadcom restamps essentially every URL on
+   each site rebuild (13,484 of 13,494 read as `2026-08`). Only refresh.py's content-hash
+   comparison detects real changes.
 
 ## Source-level fields (shared across handlers)
 
@@ -192,6 +215,75 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 | `doc_prefix` | required | `metadata.docSource` used for upload (also the dedup key in migrate / cleanup tools) |
 | `refresh_interval` | required | Used by `refresh.py` to skip sources not yet due (`30d`, `12h`, `90m`) |
 | `removal_policy` | `full` | When `additive_only`, URLs in state but missing from current collection are LEFT IN STATE rather than added to the removes list. Required for `rss` handler; harmless on other handlers but rarely useful. |
+| `crawl_delay_seconds` | from `defaults` (3) | Per-source politeness override. Set it when a host's robots.txt demands more than the global default — `vcf-release-notes` uses `10` because techdocs.broadcom.com mandates `Crawl-delay: 10`. Setting that globally would needlessly slow every other source. |
+| `request_timeout_seconds` | from `defaults` (30) | Per-source override; raise it for hosts serving multi-MB sitemap shards. |
+
+### Global defaults worth knowing
+
+| Default | Value | Why |
+|---|---|---|
+| `max_delete_pct` | 0.10 | Halt a refresh that would delete more than this fraction of a source's documents; the plan is written to `_proposals/` for review. |
+| `embed_batch_size` | 200 | AnythingLLM's `/update-embeddings` degrades badly on large single payloads — the 2026-05 bulk ingest had to be split into batches of 500, and a few thousand adds in one call either times out or wedges the container. `refresh.py` chunks the embedding pass to this size. Safe to batch because state is persisted *before* the call: a failed batch re-attempts on the next run with no re-upload. |
+| `embed_timeout_seconds` | 1800 | Per-batch timeout. |
+| `crawl_delay_seconds` | 3 | Per-source overridable. |
+
+## Budgeted refresh (large corpora)
+
+Some sources are too big to refresh in one pass. The us/en VCF 9.x tree is
+~13,500 URLs; at the 10s crawl delay Broadcom's robots.txt mandates, a full
+content pass is ~37 hours. Refreshing nothing is not an acceptable answer, so
+the pipeline separates two operations with very different costs:
+
+| Operation | Cost for techdocs | Completeness |
+|---|---|---|
+| Enumerate URLs (fetch sitemap shards) | ~3 min | complete, authoritative |
+| Fetch + extract page content | 10s per URL | budgetable |
+
+Set `max_urls_per_run` and a run fetches only a slice, but still enumerates
+everything. The handler reports the full set via `context.discovered_urls`, and
+`refresh.py` passes it to `plan.compute(known_urls=...)`, so:
+
+- **adds** and **removes** are computed against the full upstream set — exact, every run
+- **updates** come only from the slice actually fetched — they trickle in over the cycle
+
+That matters because it means structural change (a new doc tree, a pruned
+section, a whole new VCF version appearing) is caught within one run at near-zero
+cost, while in-place content edits converge over the cycle.
+
+**Why this needed a code change.** `plan.compute()` derives removals from
+`persisted - collected`. Without `known_urls`, fetching 300 of 13,494 URLs reads
+as "13,194 documents disappeared upstream" and the plan proposes deleting them.
+The 10% safety threshold would halt it, so the corpus was never at risk — but the
+source could never make progress either. `scripts/rag/tests/test_plan_budget.py`
+pins this invariant, including that a genuinely-removed URL is still detected.
+
+Prioritisation is never-fetched-first, then oldest `last_fetched`. It cycles
+rather than starving a tail: a URL that loses one run rises to the front as
+others get refreshed.
+
+## Corpus currency and disclosure
+
+A RAG corpus that is refreshed unevenly will confidently answer from stale
+documents, and nothing in the answer says so. `vcf-reference` is the worst case:
+its release-notes subtree refreshes weekly via `vcf-release-notes`, while ~10,800
+topical docs are the one-time 2026-05-19 bulk ingest.
+
+The mitigation is a mandatory `Currency:` footer in the workspace system prompt
+(`scripts/57-configure-anythingllm.sh`, `VCF_PROMPT`), which branches on whether
+the sources used were release notes or not.
+
+Two things learned wiring this up, both worth keeping:
+
+1. **Phrase it as an unconditional branch, not a conditional addition.** The
+   first version said "add this note when the answer concerns version-specific
+   behaviour". Verified against the live workspace, it did **not** fire on the
+   topical-doc case it existed for. Rewritten as "every answer ends with one of
+   these two lines", it fires correctly on both branches and correctly stays
+   silent on the refusal sentinel.
+2. **Verify it, do not assume it.** Prompt rules are not code; the only evidence
+   they work is a live query. Re-test after any prompt edit.
+
+If you re-ingest the topical docs, update the date in the footer.
 
 ## Roadmap
 
@@ -225,6 +317,15 @@ Useful alerts to set up once node_exporter is deployed:
 - `rag_refresh_run_total{status="error"} > 0` — handler crashed
 
 ## Notes on `migrate_backfill.py`
+
+**Use `--source` when other sources in the workspace already have state.**
+The script REPLACES a source's `documents.json` with whatever it can re-match
+from the workspace, and matching is imperfect — docs ingested by other tooling
+carry a different `docSource`. Running it workspace-wide against `vcf-reference`
+re-matched only 150 of `vcf-release-notes`' 191 tracked URLs, which would have
+silently shrunk a healthy source's state by 41 entries. `--source` scopes the
+rewrite to one source and leaves everything else untouched.
+
 
 The migration script tries to match every existing workspace document
 to a source declared in `sources.yaml`. Match strategy is:

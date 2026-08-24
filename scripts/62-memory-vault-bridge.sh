@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 62-memory-vault-bridge.sh — deploy the MCP-over-SSE bridge in LXC 156.
+# 62-memory-vault-bridge.sh — deploy the MCP Streamable HTTP bridge in LXC 156 (mounted at /mcp).
 #
 # Prereqs: scripts/61-lxc-memory-vault.sh created LXC 156 and the stack is up,
 # and /etc/memory-vault-bridge.env exists (Task 3 Step 2).
@@ -32,7 +32,7 @@ phase_install_python() {
     mkdir -p /opt/memory-vault-bridge
     [[ -x /opt/memory-vault-bridge/venv/bin/python ]] || python3 -m venv /opt/memory-vault-bridge/venv
     /opt/memory-vault-bridge/venv/bin/pip install --quiet --upgrade pip wheel
-    /opt/memory-vault-bridge/venv/bin/pip install --quiet 'mcp>=1.2' httpx uvicorn starlette
+    /opt/memory-vault-bridge/venv/bin/pip install --quiet 'mcp>=1.2,<2' httpx uvicorn starlette
 GUEST
 }
 
@@ -47,7 +47,7 @@ phase_systemd() {
     set -Eeuo pipefail
     cat > /etc/systemd/system/memory-vault-bridge.service <<'EOF'
 [Unit]
-Description=MCP-over-SSE bridge to Memory Vault REST (port 3005)
+Description=MCP Streamable HTTP bridge to Memory Vault REST (port 3005, /mcp)
 After=network-online.target docker.service
 Wants=network-online.target
 

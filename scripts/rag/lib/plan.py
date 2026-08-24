@@ -77,6 +77,7 @@ def compute(
     collected: list[Document],
     persisted: dict[str, dict[str, Any]],
     remove_missing: bool = True,
+    known_urls: set[str] | None = None,
 ) -> Plan:
     """Diff collected documents against persisted state.
 
@@ -95,6 +96,23 @@ def compute(
 
     refresh.py sets this based on the source's `removal_policy` field
     (`"additive_only"` → remove_missing=False; anything else → True).
+
+    `known_urls` decouples URL discovery from content fetching. Normally a
+    handler fetches every URL it enumerates, so "collected" IS the current
+    universe and removes fall out of it. But discovery and fetching have very
+    different costs: for techdocs.broadcom.com the 17 sitemap shards enumerate
+    13,494 URLs in ~3 minutes, while fetching their content at the mandated
+    10s crawl delay takes ~37 hours.
+
+    When a handler enumerates the full set but deliberately fetches only a
+    slice of it (a budgeted rolling refresh), pass the full enumerated set as
+    `known_urls`. Removes are then computed against that authoritative set
+    instead of the fetched slice — so a 300-of-13,494 run plans 0 removes
+    rather than 13,194. Adds and updates still come only from what was
+    actually fetched.
+
+    Without this, a partial collection is indistinguishable from mass upstream
+    deletion, which is why budgeted refreshes were previously unsafe.
     """
     plan = Plan(existing_count=len(persisted))
     collected_urls: set[str] = set()
@@ -112,8 +130,11 @@ def compute(
         # else: unchanged — no plan entry needed
 
     if remove_missing:
+        # The authoritative "still exists upstream" set. Defaults to what was
+        # fetched; a budgeted handler overrides it with everything it saw.
+        present = known_urls if known_urls is not None else collected_urls
         for url in persisted:
-            if url not in collected_urls:
+            if url not in present:
                 plan.removes.append(url)
 
     return plan

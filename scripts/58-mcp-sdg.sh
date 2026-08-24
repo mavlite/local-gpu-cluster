@@ -86,7 +86,7 @@ phase_install_python() {
     /opt/mcp-sdg/venv/bin/pip install --quiet --upgrade pip wheel
     # `mcp` is the official Python SDK from Anthropic. FastMCP API is exposed
     # at mcp.server.fastmcp. httpx is our HTTP client to AnythingLLM.
-    /opt/mcp-sdg/venv/bin/pip install --quiet 'mcp>=1.2' httpx
+    /opt/mcp-sdg/venv/bin/pip install --quiet 'mcp>=1.2,<2' httpx
 GUEST
   ok "Python + mcp SDK ready in LXC $MCP_VMID."
 }

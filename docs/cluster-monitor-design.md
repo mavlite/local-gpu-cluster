@@ -103,7 +103,7 @@ text on the tile; not executable) — the seam for §7.
 - `last_chat_completion` — from `seconds_since_chat` and/or the router access log.
 - `restart_policies` — `docker inspect` Memory Vault containers; **fail if any is
   not `unless-stopped`** (would have caught the db).
-- `lxc_ram_ceilings` — `pct config` vs an expected table (e.g. 151 must be 32768);
+- `lxc_ram_ceilings` — `pct config` vs an expected table (151 must be **65536**; raised from 32768 when the host went to 128 GB — verified live 2026-08-22);
   warn on drift.
 - `loaded_chat_profile` — `active_chat_profile`; informational tile so the operator
   always knows which model is loaded.
@@ -138,7 +138,7 @@ Follows the repo's existing pattern:
 
 - Each check's `suggested_action` descriptor names a parameterized remediation
   (`restart_unit(151, llamacpp-chat)`, `compose_up(156)`, `swap_profile(coder)`,
-  `pct_set_mem(151, 32768)`). v1 renders these as suggested text only.
+  `pct_set_mem(151, 65536)`). v1 renders these as suggested text only. **The expected value must track `AMD_MEMORY` in `51-lxc-amd.sh` (currently 65536).** Never let this table suggest lowering 151 below 32 GB — the chat unit's `mlock` + `cache-ram` working set needs the full allocation, and starving it surfaces as an SDMA load fault that looks like a GPU error.
 - v2 adds `POST /api/action/<id>` behind: bearer auth **+ explicit per-action
   confirmation + an append-only audit log**. The HTTP layer is structured (GET-only
   router today) so adding a guarded POST route + an executor is additive.

@@ -23,8 +23,9 @@ cluster's 16384-token RAG embedding pipeline — fine for short memories, unsuit
 
 ### The integration problem
 
-The cluster's entire MCP architecture is **remote SSE-over-HTTP** (e.g. `mcp-sdg` on
-`http://<LXC-155>:3004/sse`, consumed remotely by OpenCode). Memory Vault's MCP server is
+The cluster's MCP architecture is **mostly remote SSE-over-HTTP** (e.g. `mcp-sdg` on
+`http://<LXC-155>:3004/sse`, consumed remotely by OpenCode) plus the Memory Vault bridge on
+Streamable HTTP. Memory Vault's MCP server is
 **stdio-only** — designed for a client and server co-located on one machine. Bridging that mismatch
 is the central design decision.
 
@@ -32,7 +33,7 @@ is the central design decision.
 
 | Decision | Choice |
 | --- | --- |
-| Transport bridging | **Approach A** — shared LXC service + systemd FastMCP SSE bridge |
+| Transport bridging | **Approach A** — shared LXC service + systemd MCP Streamable HTTP bridge |
 | v1 automation scope | **Service first**; manual `remember`/`recall` from both clients. Auto-hooks designed, deferred to phase 2 |
 | Memory partitioning | **Per-project namespaces** — one memory space per repo, shared by both clients on that repo |
 | Local-llama Claude Code | **First-class deliverable** in this spec |
@@ -41,8 +42,9 @@ is the central design decision.
 ### Approaches considered
 
 - **A (chosen):** Shared LXC 156 running Memory Vault via `docker compose`, plus a separate systemd
-  FastMCP SSE bridge that translates MCP↔REST. Both clients connect as a remote SSE MCP. Smallest
-  delta from the proven `mcp-sdg` pattern; embeddings server-side; clients need no local Python/repo.
+  MCP Streamable HTTP bridge that translates MCP↔REST. Both clients connect as a remote
+  Streamable HTTP MCP. Smallest delta from the proven `mcp-sdg` pattern; embeddings server-side;
+  clients need no local Python/repo.
 - **B (rejected):** REST-only with bespoke slash commands — loses the native `remember`/`recall` MCP
   tools and is off-pattern.
 - **C (rejected):** Run the upstream stdio MCP on each client machine against a shared Postgres —
@@ -52,9 +54,9 @@ is the central design decision.
 ## 3. System overview
 
 ```
- OpenCode  ─┐                                  ┌─ remote SSE MCP (:3005, ?space=<repo>)
-            ├─ memory-vault-bridge (LXC 156) ──┤
- Claude Code┘   FastMCP SSE → REST (bearer)    └─ POST /remember /recall /forget /memory_status
+ OpenCode  ─┐                                           ┌─ remote MCP (Streamable HTTP, :3005/mcp, ?space=<repo>)
+            ├─ memory-vault-bridge (LXC 156) ───────────┤
+ Claude Code┘   MCP Streamable HTTP → REST (bearer)     └─ POST /remember /recall /forget /memory_status
                           │
                           ▼
               Memory Vault app + Postgres16/pgvector  (docker compose, LXC 156)
@@ -66,7 +68,7 @@ is the central design decision.
 
 ## 4. Components
 
-### 4.1 LXC 156 (`memory-vault`, `192.168.6.156`)
+### 4.1 LXC 156 (`memory-vault`, `192.168.6.223` — DHCP lease, see `memory-vault-clients.md` for the reservation note)
 - Unprivileged container, `features=nesting=1,keyctl=1`, Docker CE — same provisioning shape as
   `55-lxc-mcp.sh`.
 - Sizing: **4 cores / 8192 MB / 32 GB rootfs**. Justification: Postgres HNSW index builds
@@ -82,12 +84,15 @@ is the central design decision.
   `/etc/memory-vault.env` (mode 600). Never committed to git.
 - DB credentials set via env; Postgres listens only on the container's internal network.
 
-### 4.3 `memory-vault-bridge` (systemd FastMCP SSE service)
-- `/opt/memory-vault-bridge/server.py`, listening on **port 3005**, FastMCP over SSE.
+### 4.3 `memory-vault-bridge` (systemd MCP Streamable HTTP service)
+- `/opt/memory-vault-bridge/server.py`, listening on **port 3005**, Streamable HTTP mounted at `/mcp`.
+  Implemented on the MCP SDK's **low-level** API (`mcp.server.lowlevel.Server` +
+  `StreamableHTTPSessionManager`) — **not** FastMCP. This is why it survived the `mcp` 2.0.0
+  release that removed `mcp.server.fastmcp` and took `mcp-sdg` down (see § 8).
 - Modeled almost verbatim on `scripts/files/mcp-sdg-server.py` + `scripts/58-mcp-sdg.sh`
   (venv + `mcp>=1.2` + `httpx`, `/etc/...env` mode 600, systemd unit with `Restart=on-failure`).
 - **Tools exposed:** `remember(text)`, `recall(query, top_n)`, `forget(chunk_id)`, `memory_status()`.
-- **Memory space is scoped per SSE connection** via the `?space=<slug>` query param on the SSE URL.
+- **Memory space is scoped per connection** via the `?space=<slug>` query param on the MCP URL.
   The bridge reads the space at connection time, so the tool signatures carry no space argument — the
   connection *is* the scope. A configurable `MEMVAULT_DEFAULT_SPACE` covers connections that omit it.
 - Calls the Memory Vault REST API using the bearer token from its env file.
@@ -105,7 +110,7 @@ is the central design decision.
 ### OpenCode (`opencode.json`)
 ```jsonc
 "mcp": {
-  "memory": { "type": "remote", "url": "http://192.168.6.156:3005/mcp?space=local-gpu-cluster" }
+  "memory": { "type": "remote", "url": "http://192.168.6.223:3005/mcp?space=local-gpu-cluster" }
 }
 ```
 
@@ -115,7 +120,7 @@ is the central design decision.
 ```bash
 ANTHROPIC_BASE_URL=http://192.168.6.153:8000   # router listens on :8000 (uvicorn, LXC 153)
 ANTHROPIC_AUTH_TOKEN=<ROUTER_API_KEY>
-ANTHROPIC_MODEL=<llama alias, e.g. rag-qwen3.6>
+ANTHROPIC_MODEL=<llama alias, e.g. rag-qwen3.8>
 ```
 (Router `:8000` is on LXC 153; Memory Vault's dashboard `:8000` is on LXC 156 — different hosts, no conflict.)
 
@@ -138,7 +143,7 @@ URL. Both clients on the same repo share its space; different repos stay isolate
 | --- | --- |
 | `scripts/61-lxc-memory-vault.sh` | Create LXC 156, `tank/memory-vault` dataset + bind mount, Docker CE, clone repo, generate bearer token, `docker compose up -d` |
 | `scripts/62-memory-vault-bridge.sh` | venv + `mcp`/`httpx`, push `server.py`, write `/etc/memory-vault-bridge.env`, install + enable systemd unit (mirrors `58-mcp-sdg.sh`) |
-| `scripts/files/memory-vault-bridge.py` | The FastMCP SSE bridge |
+| `scripts/files/memory-vault-bridge.py` | The MCP Streamable HTTP bridge (low-level SDK API, not FastMCP) |
 | `scripts/files/router-app.py` | Add `/v1/messages` + `/v1/messages/count_tokens` gated passthrough |
 | `scripts/config.env.example` | `MEMVAULT_VMID=156`, `MEMVAULT_IP`, sizing vars, `MEMVAULT_BRIDGE_PORT=3005`, `MEMVAULT_DEFAULT_SPACE` |
 | Client config templates + `docs` section | OpenCode + Claude Code wiring, local-LLM `.env` |
@@ -149,14 +154,23 @@ URL. Both clients on the same repo share its space; different repos stay isolate
 
 - **LAN-only** across the board (`192.168.6.0/24`). Postgres reachable only inside LXC 156.
 - REST bearer token in `/etc/memory-vault.env`, mode 600, generated at provision time, never committed.
-- The SSE bridge is **unauthenticated on the LAN** — consistent with the existing `mcp-sdg` service.
+- The MCP bridge is **unauthenticated on the LAN** — consistent with the existing `mcp-sdg` service.
   Accepted posture for a single-user trusted LAN, not a new gap; revisit if the LAN trust boundary changes.
 - **Backups:** nightly `pg_dump` to `tank/backups` via systemd timer; ZFS snapshots cover
   `tank/memory-vault`.
+- **MCP SDK version constraint (load-bearing):** both MCP venvs must install
+  `'mcp>=1.2,<2'`. **mcp 2.0.0 removed `mcp.server.fastmcp`.** LXC 155's `mcp-sdg` used
+  FastMCP, picked up 2.0.0, and crash-looped from 2026-08-21 13:53 UTC until it was
+  repaired on 2026-08-22 (8,677 restarts; nothing served on 3004). The bridge here was
+  unaffected because it targets the low-level SDK API, but an unbounded `mcp>=1.2` would
+  still have upgraded it on the next provisioning run. The `<2` bound is now pinned in
+  both `scripts/58-mcp-sdg.sh` and `scripts/62-memory-vault-bridge.sh`. Note the failure
+  mode: systemd reports the unit as `activating`, never `failed`, so `systemctl is-failed`
+  does not catch it — check `is-active` plus a port probe.
 
 ## 9. Verification
 
-- SSE handshake on `:3005` returns the `event: endpoint` line.
+- POST `/mcp` initialize on `:3005` returns a 307 session redirect (Streamable HTTP).
 - REST `/memory_status` returns healthy stats.
 - Full `remember` → `recall` round-trip: store a known chunk, recall it by paraphrase, confirm it
   returns with a sensible score.

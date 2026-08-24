@@ -16,6 +16,19 @@
 # Linux NAME_MAX (255 bytes): URL length must be <= 217 chars. Longer URLs
 # are logged to errors and skipped; use recover-long-urls.sh for those.
 #
+# ============================ DO NOT USE FOR techdocs.broadcom.com ==========
+# Verified 2026-08-22: Broadcom now renders the FULL VCF navigation tree into
+# server-side HTML, and AnythingLLM's built-in scraper swallows all of it.
+# Same URL set, measured:
+#     May 2026 via this script : 2-5 KB/doc   (~200-400 tokens)  <- fine
+#     Aug 2026 via this script : 992 KB/doc   (~122,000 tokens)  <- ~97% nav
+#     Aug 2026 via trafilatura : 368-4,424 chars                 <- correct
+# The bloat makes pages near-identical, so AnythingLLM content-dedupes them:
+# a 59-URL ingest collapsed to 22 stored docs and silently dropped every NSX
+# page. Use recover-long-urls.sh (trafilatura) for this host instead. Sanity
+# check any bulk ingest: a >100 KB document means nav chrome leaked in.
+# ===========================================================================
+#
 # Usage:
 #   ALLM=http://192.168.6.154:3001/api/v1 \
 #     ./ingest-urls.sh <url-list> <workspace-slug> [--embed]
