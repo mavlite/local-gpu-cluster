@@ -33,7 +33,13 @@ load_config
 
 SX_VMID="${SEARXNG_VMID:-${MCP_VMID:-155}}"
 SX_PORT="${SEARXNG_PORT:-8888}"
-SX_IMAGE="${SEARXNG_IMAGE:-docker.io/searxng/searxng:latest}"
+# PINNED BY DIGEST, deliberately. :latest would let a re-run of this script pull
+# a breaking upstream change with no warning -- the same failure mode that took
+# mcp-sdg down for 26 hours when an unbounded `mcp>=1.2` picked up mcp 2.0.0 and
+# lost mcp.server.fastmcp. To upgrade: pull the new tag, verify the JSON API
+# still answers (step 5 does this), then update this digest.
+# Digest below verified working 2026-08-24 (searxng/searxng:latest at that date).
+SX_IMAGE="${SEARXNG_IMAGE:-docker.io/searxng/searxng@sha256:11a9b34cdc0b1ec2b991470a2762ecb5a1a531898289fb51dcd015260450729e}"
 SX_DIR="${SEARXNG_DIR:-/opt/searxng}"
 SX_BIND="${SEARXNG_BIND:-0.0.0.0}"
 # LAN-only service, same posture as mcp-sdg: no auth, trusted single-user LAN.
