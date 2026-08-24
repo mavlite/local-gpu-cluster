@@ -215,6 +215,7 @@ These fields live at the top level of each source entry in `sources.yaml`, not i
 | `doc_prefix` | required | `metadata.docSource` used for upload (also the dedup key in migrate / cleanup tools) |
 | `refresh_interval` | required | Used by `refresh.py` to skip sources not yet due (`30d`, `12h`, `90m`) |
 | `removal_policy` | `full` | When `additive_only`, URLs in state but missing from current collection are LEFT IN STATE rather than added to the removes list. Required for `rss` handler; harmless on other handlers but rarely useful. |
+| `max_delete_pct` | from `defaults` (0.10) | Per-source override of the deletion safety threshold. The global 10% suits a source whose state this pipeline built; it is too tight for one whose state was ADOPTED from an older ad-hoc ingest, where a genuine upstream restructure can legitimately orphan more than that. Raise it deliberately, with a note saying when to restore — and verify the removals first with `tools/verify-removals.py`. |
 | `crawl_delay_seconds` | from `defaults` (3) | Per-source politeness override. Set it when a host's robots.txt demands more than the global default — `vcf-release-notes` uses `10` because techdocs.broadcom.com mandates `Crawl-delay: 10`. Setting that globally would needlessly slow every other source. |
 | `request_timeout_seconds` | from `defaults` (30) | Per-source override; raise it for hosts serving multi-MB sitemap shards. |
 
@@ -260,6 +261,36 @@ pins this invariant, including that a genuinely-removed URL is still detected.
 Prioritisation is never-fetched-first, then oldest `last_fetched`. It cycles
 rather than starving a tail: a URL that loses one run rises to the front as
 others get refreshed.
+
+## When a refresh halts on the deletion threshold
+
+`refresh.py` halts and writes the plan to `_proposals/` when it would delete
+more than `max_delete_pct` of a source's documents. The halt exists so a human
+looks — so "approve it and see" defeats the purpose.
+
+`scripts/tools/verify-removals.py` does the looking: it samples the proposed
+removals and asks the origin server whether those URLs still exist.
+
+| Result | Meaning |
+|---|---|
+| 404 / 410 | genuinely gone — removal is correct |
+| 200 | **still live** — approving would delete real content. Almost always the source's include/exclude patterns stopped matching the current URL shape, which looks identical to upstream deletion from the pipeline's side |
+| 3xx | moved — fine *if* the same plan adds the new location; check |
+
+Two worked examples, both real:
+
+- **openzfs-docs, 2026-08-22** — looked like 8 deletions, was actually an
+  upstream path move (`Basic Concepts/X` → `Basic Concepts/Data Storage/X`)
+  with the new paths already among the plan's adds. Approving was right, but
+  for a different reason than the plan suggested.
+- **vcf-remaining-docs, 2026-08-24** — 438 removals (15.7%). Sampling returned
+  404 on every probe across two independently generated proposals: Broadcom
+  had retired old GUID-style and flat URLs in favour of the current hierarchy.
+  Genuinely gone; keeping them would have the RAG cite dead links.
+
+If a source halts repeatedly on the *same* established cause, raise its
+`max_delete_pct` rather than approving each tranche by hand — but verify
+first, and record when to put it back.
 
 ## Corpus currency and disclosure
 

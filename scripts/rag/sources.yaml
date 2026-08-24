@@ -312,6 +312,23 @@ sources:
     workspace: vcf-reference
     doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.x reference"
     refresh_interval: 30d
+    # TEMPORARY, FOR THE BACKFILL ONLY. Restore to the 10% default once
+    # documents.json has no "migrated" placeholders left.
+    #
+    # This source's state was ADOPTED from the 2026-05 bulk ingest, and
+    # Broadcom restructured in the interim: old GUID-style and flat URLs were
+    # replaced by the current hierarchy, so ~438 of the 2,796 inherited URLs
+    # (15.7%) now 404. The 10% guard halted every tranche on that same stale
+    # set, which meant zero progress overnight.
+    #
+    # Verified before relaxing, twice, with scripts/tools/verify-removals.py:
+    # 30/30 and 25/25 sampled removals returned 404 upstream (plus an earlier
+    # independent 8/8), across two separately generated proposals. Those pages
+    # are genuinely gone -- keeping them would have the RAG cite dead links.
+    #
+    # 25% still catches a runaway: a pattern change that orphaned the whole
+    # source would propose ~100% and halt.
+    max_delete_pct: 0.25
     crawl_delay_seconds: 10
     request_timeout_seconds: 60
     config:

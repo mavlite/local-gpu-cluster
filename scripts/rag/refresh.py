@@ -180,7 +180,22 @@ def refresh_one(
     print(f"  plan: {the_plan.summary()}")
 
     # Safety check OR approval-mode drift check.
-    max_delete_pct = float(defaults.get("max_delete_pct", 0.10))
+    # Per-source override, same precedence as crawl_delay_seconds. The global
+    # 10% is right for a source whose state this pipeline built itself, where a
+    # double-digit deletion really is suspicious. It is too tight for a source
+    # whose state was ADOPTED from an older ad-hoc ingest: vcf-remaining-docs
+    # inherited 2,796 documents from the 2026-05 bulk run, and Broadcom has
+    # since restructured, so ~438 of those URLs (15.7%) legitimately 404. The
+    # halt was correct to demand review; it should not have to demand it every
+    # single tranche once the cause is established.
+    #
+    # Raise it deliberately, per source, with a note saying when to restore.
+    # Verify first with scripts/tools/verify-removals.py -- a high deletion
+    # count from a pattern that stopped matching looks identical to one from a
+    # genuine upstream purge, and only the origin server can tell you which.
+    max_delete_pct = float(
+        source.get("max_delete_pct", defaults.get("max_delete_pct", 0.10))
+    )
     if approved_removes is not None:
         # --approve mode: skip the percent threshold, but verify the new
         # plan's removes are a subset of what the operator already approved.
