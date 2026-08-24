@@ -27,6 +27,7 @@ retuning, updates, hardware changes).
 | 12    | `62-memory-vault-bridge.sh` | MCP **Streamable HTTP** bridge in LXC 156, mounted at `/mcp` on port 3005. Python venv + mcp SDK (`mcp>=1.2,<2` — see note below) + uvicorn + starlette, systemd unit. Uses the SDK's low-level `Server` + `StreamableHTTPSessionManager`, **not** FastMCP |
 | 12.5  | `63-cluster-monitor.sh` | Read-only cluster health + metrics dashboard (host systemd service, port 8888), SQLite state, Python 3 stdlib only |
 | 12.6  | `64-memory-vault-backup-timer.sh` | Host systemd timer (daily 02:30) running pg_dump backup inside LXC 156 via `pct exec`; dumps to tank-backed dir, retains 14 |
+| 12.7  | `65-searxng.sh`         | SearXNG metasearch container in LXC 155 (port 8888). Unmetered web search; the alternative to Tavily's metered API. Writes `settings.yml` with `search.formats: [html, json]` — the JSON format is REQUIRED by `mcp-searxng` and is off by default, so omitting it yields 403 on every API query |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.

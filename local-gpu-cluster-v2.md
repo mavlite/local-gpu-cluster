@@ -402,7 +402,8 @@ These workloads either need direct GPU device access (the llama.cpp stacks) or a
 **Docker-in-LXC:**
 - `anythingllm` — Docker is how AnythingLLM is officially distributed
 - `mcp-stack` — the three custom MCP containers benefit from Docker's reproducibility
-- `memory-vault` — upstream docker compose (app + Postgres 16/pgvector) in LXC 156; the `searxng` image is retired. **Verified live 2026-08-22:** `pct list` returns exactly five containers (151, 153, 154, 155, 156) — there is no SearXNG LXC and no monitoring LXC on this host. `192.168.6.156` answers ping but its MAC is not a Proxmox `bc:24:11:*` address and ports 3000/8888/80/443/9090 are all closed, so the address is held by an unrelated LAN device. That is the only reason `config.env.example` says not to reuse it.
+- `memory-vault` — upstream docker compose (app + Postgres 16/pgvector) in LXC 156.
+- `searxng` — **redeployed 2026-08-24 into LXC 155** (`mcp-stack`) at `192.168.6.155:8888`, provisioned by `scripts/65-searxng.sh`. Self-hosted metasearch; the unmetered alternative to Tavily, which matters because the Tavily account hit its plan limit on 2026-08-23. It is NOT part of the VCF documentation path — VCF answers come from the `vcf-reference` workspace via `mcp-sdg`. An earlier instance lived at `192.168.6.109`, a host that no longer exists, which is why client configs pointed at a dead address. Note there is still no SearXNG or monitoring LXC at `192.168.6.156` — that address belongs to an unrelated LAN device.
 
 These services have no GPU dependency, so the nesting overhead is negligible, and Docker buys real value for image distribution and reproducible rebuilds. Inside the LXC, install Docker as you would on bare-metal Ubuntu.
 
@@ -1393,6 +1394,7 @@ sqlite3 /opt/vcf-doc-updater/state/state.sqlite \
 | host | 192.168.6.175 | (n/a) | `rag-refresh.timer` → `scripts/rag/refresh.py` | Declarative corpus refresh for both workspaces. Replaced the old `vcf-doc-updater` container, which is **retired and not deployed** — verified live 2026-08-22, LXC 154 has no `/opt/vcf-doc-updater`. The VCF side is the `vcf-release-notes` source; see `scripts/rag/README.md` |
 | `mcp-stack` (155) | 192.168.6.155 | 3004 | mcp-sdg.service — sdg-documentation + vcf-reference (query_*/search_* tool pairs) | SSE |
 | `memory-vault` (156) | 192.168.6.223 (DHCP) | 8000 / 3005 | dashboard+REST (LAN) / MCP bridge (`/mcp`) | Docker + systemd |
+| `mcp-stack` (155) | 192.168.6.155 | 8888 | SearXNG metasearch (JSON API at `/search?...&format=json`) | Docker |
 
 Retired from this table: 3002 `anythingllm-search-mcp` and 3003 `broadcom-techdocs-mcp` (broadcom-techdocs retired during the V620 migration — see the 2026-05-19 update in `LESSONS.md`). `55-lxc-mcp.sh` and `60-verify.sh` still probe 3002/3003 as optional (skip if the listener is absent) until a scripts follow-up drops them.
 
