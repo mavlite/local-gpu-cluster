@@ -401,8 +401,8 @@ def refresh_one(
     if adds_docpaths or removes_docpaths:
         embed_timeout = defaults.get("embed_timeout_seconds", 1800)
         batch_size = max(1, int(defaults.get("embed_batch_size", 200)))
-        batches = [adds_docpaths[i:i + batch_size]
-                   for i in range(0, len(adds_docpaths), batch_size)] or [[]]
+        batches = plan_embed_batches(
+            adds_docpaths, removes_docpaths, batch_size)
         print(
             f"  embedding pass: +{len(adds_docpaths)} adds / "
             f"-{len(removes_docpaths)} removes "
@@ -414,10 +414,7 @@ def refresh_one(
             "heartbeat below tells you the request is in-flight."
         )
         try:
-            for i, chunk in enumerate(batches, start=1):
-                # Removals ride along with the first call so they still happen
-                # even if a later add-batch fails.
-                rm = removes_docpaths if i == 1 else []
+            for i, (chunk, rm) in enumerate(batches, start=1):
                 _call_with_heartbeat(
                     (lambda c=chunk, r=rm: client.update_embeddings(
                         workspace=source["workspace"],
@@ -425,7 +422,8 @@ def refresh_one(
                         removes=r,
                         timeout=embed_timeout,
                     )),
-                    label=f"embedding batch {i}/{len(batches)} (+{len(chunk)})",
+                    label=(f"embedding batch {i}/{len(batches)} "
+                           f"(+{len(chunk)}/-{len(rm)})"),
                     interval_seconds=30,
                 )
                 if len(batches) > 1:
@@ -478,6 +476,32 @@ def refresh_one(
         **({"approved_from": archived_to} if archived_to else {}),
     }
 
+
+
+def plan_embed_batches(adds, removes, batch_size):
+    """Pair add-chunks with remove-chunks of the same index.
+
+    Both sides must be bounded. Removes used to all ride in call 1 so they would
+    still happen if a later add-batch failed -- correct for a BACKFILL (mostly
+    adds, few removes), but a RE-INGEST makes every document an update, so
+    removes equal adds. On 2026-08-25 a tranche with 610 removes ran past the
+    1800s client timeout and killed the run; a 118-remove pass had taken 1140s.
+    The cost tracks the remove count, not batch_size, so capping only the adds
+    does not bound the call.
+
+    Trade-off accepted: a mid-pass failure now leaves some old documents still
+    attached (duplicates) instead of removing them up front. That is self-healing
+    on re-run and strictly better than a guaranteed timeout.
+
+    Returns a list of (adds_chunk, removes_chunk). Always at least one batch when
+    either side is non-empty, so a removes-only pass still issues its call.
+    """
+    size = max(1, int(batch_size))
+    a = [adds[i:i + size] for i in range(0, len(adds), size)]
+    r = [removes[i:i + size] for i in range(0, len(removes), size)]
+    n = max(len(a), len(r), 1)
+    return [(a[i] if i < len(a) else [], r[i] if i < len(r) else [])
+            for i in range(n)]
 
 def _call_with_heartbeat(fn, label: str, interval_seconds: int = 30):
     """Run `fn()` in the foreground but print a heartbeat from a daemon
