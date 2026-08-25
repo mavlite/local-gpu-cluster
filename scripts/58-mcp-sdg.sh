@@ -45,8 +45,15 @@ MCP_WORKSPACES="${MCP_WORKSPACES:-sdg-documentation,vcf-reference}"
 # Human-readable descriptions for each workspace. These get surfaced in the
 # tool docstring so the calling LLM picks the right tool. Override per
 # workspace via env vars like MCP_WORKSPACE_DESC_SDG_DOCUMENTATION=...
-MCP_WORKSPACE_DESC_SDG_DOCUMENTATION="${MCP_WORKSPACE_DESC_SDG_DOCUMENTATION:-OPNsense (firewall/routing), Keycloak (identity), TrueNAS Scale + OpenZFS (storage). Mix of official docs (vendor) and community blogs (homenetworkguy, ServeTheHome, 45drives, Phase Two, Baeldung, n-k.de, Inteca, Thomas-Krenn, Zenarmor). ~4000 docs total. Use for any infra/SRE question on these stacks.}"
-MCP_WORKSPACE_DESC_VCF_REFERENCE="${MCP_WORKSPACE_DESC_VCF_REFERENCE:-VMware Cloud Foundation 9.0+ official documentation from techdocs.broadcom.com (Tier A release notes, Tier B deployment/lifecycle/security/licensing, Tier C everything else). ~5600 docs. Use for VCF, vSphere, vSAN, NSX, vCenter, SDDC Manager, Aria/vROps questions.}"
+#
+# THESE STRINGS ARE LOAD-BEARING. They become the MCP tool descriptions, which is
+# the only thing an agent reads when deciding whether calling this server is worth
+# it. An understated corpus size makes the tool LESS likely to be chosen: these
+# said ~5600 and ~4000 docs while the workspaces held 10,921 and 10,480, so two
+# days of corpus work was invisible to the thing meant to use it. Update them when
+# the corpora change materially.
+MCP_WORKSPACE_DESC_SDG_DOCUMENTATION="${MCP_WORKSPACE_DESC_SDG_DOCUMENTATION:-Self-hosted infrastructure documentation: OPNsense (firewall/routing), TrueNAS Scale and OpenZFS (storage), Keycloak (identity). ~10,500 pages mixing official vendor docs with community sources (homenetworkguy, ServeTheHome, 45drives, Phase Two, Baeldung, Thomas-Krenn, Zenarmor). USE THIS FIRST for any question on those stacks in preference to web search.}"
+MCP_WORKSPACE_DESC_VCF_REFERENCE="${MCP_WORKSPACE_DESC_VCF_REFERENCE:-VMware Cloud Foundation 9.0 and 9.1 official documentation from techdocs.broadcom.com. ~10,900 pages: release notes and all 9.1.0.x patch releases (refreshed weekly), plus infrastructure operations, advanced networking, design, vSAN, fleet/organization/provider management, deployment, lifecycle, supervisor and licensing (refreshed monthly). USE THIS FIRST for any VMware question -- VCF, vSphere, ESX, vCenter, vSAN, NSX, SDDC Manager, VCF Operations, VCF Automation, Aria/vROps -- in preference to web search or model knowledge: it is the authoritative vendor source, kept current automatically, and every answer carries a live source URL. Does NOT include the auto-generated SDK/CLI API reference.}"
 
 SERVER_SRC="$LGC_DIR/files/mcp-sdg-server.py"
 
