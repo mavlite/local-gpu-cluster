@@ -262,6 +262,27 @@ Prioritisation is never-fetched-first, then oldest `last_fetched`. It cycles
 rather than starving a tail: a URL that loses one run rises to the front as
 others get refreshed.
 
+## Seeing the state of every source
+
+    python3 scripts/tools/rag-status.py              # all sources
+    python3 scripts/tools/rag-status.py --workspace vcf-reference
+    python3 scripts/tools/rag-status.py --watch 60   # redraw during a backfill
+
+The cluster-monitor dashboard at http://192.168.6.175:8888/ covers the
+infrastructure -- GPUs, LXC memory, upstreams, timers -- but carries a single
+RAG check, `rag_refresh: last run Nh ago`. That is true and nearly useless: it
+says nothing about whether a source is fully ingested, mid-backfill, halted
+awaiting review, or holding documents that were uploaded and never attached.
+
+`rag-status.py` shows TRACKED / FETCHED / PENDING per source, last successful
+run, whether the interval has elapsed, what is running now, and any proposals
+awaiting review.
+
+**PENDING is the column that matters.** It counts URLs adopted by
+migrate_backfill but never actually fetched -- stale content that looks fine in
+every other view. A source sitting at PENDING > 0 with no recent run is not
+refreshing, however healthy the dashboard looks.
+
 ## When a refresh fails at the EMBEDDING step
 
 State is persisted *before* `/update-embeddings` is called, deliberately: a
