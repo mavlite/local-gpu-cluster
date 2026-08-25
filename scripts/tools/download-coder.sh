@@ -98,11 +98,17 @@ pct exec "$AMD_VMID" -- env \
   set -Eeuo pipefail
   export HF_HUB_ENABLE_HF_TRANSFER=1
   export PATH="/usr/local/bin:$PATH"
+    # `huggingface-cli` is DEPRECATED and no longer works: it prints a warning
+    # and exits non-zero. That is how this failed on 2026-08-24 -- the log showed
+    # `hf` help text and "Failed at line 92", with no hint that the CLI itself was
+    # the problem. Same class of break as the unbounded `mcp>=1.2` that took
+    # mcp-sdg down: an upstream tool changed its interface under a pinned-looking
+    # call site.
 
-  huggingface-cli download "$HF_REPO" "$HF_FILENAME" \
+  hf download "$HF_REPO" "$HF_FILENAME" \
     --cache-dir "$CACHE_DIR" \
     --quiet \
-    && echo "huggingface-cli: download complete"
+    && echo "hf: download complete"
 GUEST
 
 echo

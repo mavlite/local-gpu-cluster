@@ -28,6 +28,71 @@ from .base import Document, Handler, HandlerContext
 SITEMAP_NS_RE = re.compile(r"^\{[^}]+\}")  # strip {namespace} prefix from tags
 
 
+# Chunks observed in production run 2,700-8,200 characters. The marker must
+# repeat more often than the SMALLEST chunk for every chunk to carry one.
+#
+# 900, not 1200: the interval counts INPUT characters, but each inserted marker
+# also lengthens the output, so the spacing seen by the chunker is the interval
+# plus roughly one marker (~85 chars). 1200 measured fine at 2,700+ but left
+# gaps at 1,500. 900 guarantees coverage down to 2,000-character chunks, which
+# is margin against AnythingLLM changing its chunking, at ~7% text overhead.
+SOURCE_MARKER_EVERY = 900
+
+
+def _interleave_source(text: str, url: str) -> str:
+    """Repeat a `Source:` line through the body, not just at the top.
+
+    AnythingLLM chunks a document without preserving per-document metadata, so
+    a URL written once in a header reaches only the FIRST chunk. Retrieval that
+    surfaces a middle chunk of a long page then hands the model no citable
+    link, and it either omits the citation or reconstructs one from a filename.
+    Measured before this change: 8/10 chunks carried a URL on typical queries,
+    and a 4,165-character answer cited nothing at all.
+
+    Inserting at paragraph boundaries keeps the marker out of the middle of a
+    sentence, so it does not corrupt the prose the chunk is embedded on. Costs
+    roughly 8% text overhead on a long page, which buys a citable URL in every
+    chunk.
+    """
+    if len(text) <= SOURCE_MARKER_EVERY:
+        return text
+    sep = "\n\n"
+    marker = "[Source: " + url + "]"
+    out: list[str] = []
+    since = 0
+    for para in text.split(sep):
+        # A paragraph longer than the interval cannot be covered by inserting
+        # only at paragraph boundaries -- a chunk landing wholly inside it gets
+        # no marker. Technical docs hit this with long tables and code blocks.
+        # Break the oversized paragraph at whitespace instead.
+        if len(para) > SOURCE_MARKER_EVERY:
+            words = para.split(" ")
+            piece: list[str] = []
+            plen = 0
+            for w in words:
+                piece.append(w)
+                plen += len(w) + 1
+                if plen >= SOURCE_MARKER_EVERY:
+                    out.append(" ".join(piece))
+                    out.append(marker)
+                    piece, plen = [], 0
+            if piece:
+                out.append(" ".join(piece))
+            since = plen
+            continue
+        out.append(para)
+        since += len(para) + len(sep)
+        if since >= SOURCE_MARKER_EVERY:
+            out.append(marker)
+            since = 0
+    # Always close with a marker. Without it the tail after the last insertion
+    # carries none, and that tail is exactly what becomes the final chunk --
+    # which is how the first version of this still left a gap in testing.
+    if out and out[-1] != marker:
+        out.append(marker)
+    return sep.join(out)
+
+
 class SphinxSitemapHandler(Handler):
     name = "sphinx_sitemap"
 
@@ -278,7 +343,7 @@ class SphinxSitemapHandler(Handler):
 
         return Document(
             url=url,
-            content=header + text,
+            content=header + _interleave_source(text, url),
             title=title,
             metadata=meta,
         )

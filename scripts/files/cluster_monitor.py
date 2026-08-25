@@ -959,7 +959,14 @@ DEFAULT_CONFIG: dict = {
     "lxc_ram_ceilings": {"151": 65536},
     "chat_idle_warn_s": 3600,
     "chat_idle_fail_s": 86400,
-    "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
+    # warn 93, not 90. The default chat profile (qwen3.8, tensor-split 1,1)
+    # idles at 89-91% on GPU 0 -- that is its validated steady state, flat under
+    # a 122K-token prefill with 0.2 GB drift. A 90% warn therefore fires on
+    # normal operation and never clears, which trains the operator to ignore
+    # the colour. 93% still leaves 5pp before the 98% fail and catches genuine
+    # growth toward OOM. Revisit if the default profile changes: `coder` sits
+    # at 83%, so this is specifically sized for the dense qwen3.8 footprint.
+    "gpu_vram_warn_pct": 93, "gpu_vram_fail_pct": 98,
     "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
     "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
     "rag_metrics_path": "/var/lib/rag-refresh/metrics.prom",
