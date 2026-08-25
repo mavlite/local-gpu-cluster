@@ -395,10 +395,11 @@ of a 928 GB pool (619 GB free).
 
 **Not on disk** (documented profiles whose weights have never been fetched):
 
-- `unsloth/Devstral-2-123B-Instruct-2512-GGUF` / `…UD-IQ2_M.gguf` (~40.6 GB) — the
-  `devstral-large` profile exists in `swap-chat-model.sh` but the GGUF has never been
-  downloaded, which is why its VRAM is still unmeasured (§ 4.4). First swap to it will
-  pull ~40.6 GB.
+- ~~`unsloth/Devstral-2-123B-Instruct-2512-GGUF`~~ — **downloaded 2026-08-24**, now
+  cached. Actual size on disk is **43.54 GB** (43,543,404,768 bytes), not the ~40.6 GB
+  the HF API reported; the `swap-chat-model.sh:50` comment's "~43.5 GB" was right and
+  this table was wrong. VRAM is still unmeasured — run a stability test after the first
+  swap (§ 4.4).
 - `Qwen3-Coder-Next-UD-Q4_K_XL.gguf` (~50 GB) — previously listed here as a leftover;
   already deleted from the host.
 

@@ -331,6 +331,67 @@ sources:
       exclude_patterns:
         - '/(release-notes|infrastructure-operations|advanced-network-management|administration-sdks-cli-and-tools)'
 
+  # ── Community + vendor content with no sitemap or feed ──────────────────
+  # 2,657 URLs across 8 hosts (zenarmor 797, servethehome 668, truenas.com 431,
+  # 45drives 204, phasetwo 174, homenetworkguy 120, inteca 86, n-k.de 62).
+  #
+  # These documents were in the sdg-documentation workspace with NO owning
+  # source -- ad-hoc ingests predating refresh.py. They were served to users
+  # while nothing re-validated them, the same failure the VCF corpus had.
+  #
+  # url_list_hashed rather than a sitemap handler: the content spans eight
+  # unrelated hosts with no common sitemap. The list was extracted from the
+  # workspace itself (/tank/rag-state/_urllists/, rebuild with
+  # tools/build-sdg-list.py) with hosts INTERLEAVED, so consecutive requests
+  # hit different sites -- a host-sorted list would aim every concurrent worker
+  # at one small blog.
+  #
+  # removal_policy MUST stay additive_only. For a sitemap source, absence means
+  # the page is gone; for a curated list, absence means nobody added it -- so
+  # full removal semantics would delete good documents whenever the list
+  # shrank.
+  #
+  # 2 workers at 5s (~2.5s effective) rather than the 4 used on Broadcom:
+  # these are small independent sites, several of them personal blogs, and
+  # politeness matters more than throughput.
+  - id: sdg-community
+    handler: url_list_hashed
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[COMMUNITY] self-hosted infrastructure"
+    refresh_interval: 30d
+    removal_policy: additive_only
+    crawl_delay_seconds: 5
+    request_timeout_seconds: 45
+    config:
+      url_list_file: /tank/rag-state/_urllists/sdg-community.txt
+      parallel_workers: 2
+      max_urls_per_run: 900
+
+  # ── TrueNAS blog ────────────────────────────────────────────────────────
+  # 595 posts. The `truenas-blog` rss source above is enabled:false because no
+  # working feed was ever found (truenas.com/blog/feed/ 404s), which left its
+  # 595 adopted documents frozen with no refresh path at all -- tracked, but
+  # never fetched, since 2026-05.
+  #
+  # Re-homed onto url_list_hashed against the URLs already in that source's
+  # state. This gives the posts a real refresh path without needing a feed.
+  # Keep the rss source disabled rather than deleting it: if TrueNAS ships a
+  # working feed again, rss is the better handler for new posts.
+  - id: truenas-blog-urls
+    handler: url_list_hashed
+    enabled: true
+    workspace: sdg-documentation
+    doc_prefix: "[OFFICIAL] truenas.com blog"
+    refresh_interval: 30d
+    removal_policy: additive_only
+    crawl_delay_seconds: 5
+    request_timeout_seconds: 45
+    config:
+      url_list_file: /tank/rag-state/_urllists/truenas-blog.txt
+      parallel_workers: 2
+      max_urls_per_run: 900
+
 # ── Global defaults ────────────────────────────────────────────────────────
 defaults:
   # Halt a refresh that would delete more than this fraction of a source's

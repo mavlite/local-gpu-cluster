@@ -108,6 +108,21 @@ def extract_url(doc: dict) -> str | None:
 
     for key in ("sourceURL", "source_url", "url", "chunkSource", "docSource"):
         v = md.get(key)
+        if not isinstance(v, str):
+            continue
+        # AnythingLLM wraps the citation URL depending on the ingest path:
+        # `web://https://...` for its link scraper and `file://<flattened>` for
+        # uploads. Requiring a bare "http" prefix silently skipped every
+        # web:// document -- 2,657 of them in sdg-documentation, which then
+        # looked untracked and would have been re-uploaded as duplicates.
+        if v.startswith("web://"):
+            v = v[len("web://"):]
+        # ...and it appends a ".website" suffix to the scraped URL. That is an
+        # AnythingLLM artifact, not part of the address: every one of the 2,657
+        # community URLs carried it, and fetching them as-is would have 404'd
+        # the entire source.
+        if v.endswith(".website"):
+            v = v[: -len(".website")]
         if isinstance(v, str) and v.startswith("http"):
             return v.strip()
 
@@ -131,6 +146,27 @@ def extract_url(doc: dict) -> str | None:
             return v.strip()
 
     return None
+
+
+
+_URL_LIST_CACHE: dict[str, set[str]] = {}
+
+
+def _url_list_of(src: dict) -> set[str]:
+    """URLs named by a source's url_list_file, cached per path."""
+    path = (src.get("config") or {}).get("url_list_file")
+    if not path:
+        return set()
+    if path not in _URL_LIST_CACHE:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                _URL_LIST_CACHE[path] = {
+                    ln.strip() for ln in fh
+                    if ln.strip() and not ln.startswith("#")
+                }
+        except OSError:
+            _URL_LIST_CACHE[path] = set()
+    return _URL_LIST_CACHE[path]
 
 
 def pick_source_for_url(
@@ -159,6 +195,18 @@ def pick_source_for_url(
                 continue
             if md_source.startswith(sp) or sp.startswith(md_source):
                 return src
+
+    # 2.5 exact membership of a curated URL list.
+    #
+    # A url_list_hashed source has no base_url/sitemap_url, so the domain
+    # heuristic below cannot see it at all -- it would match nothing and the
+    # source's first run would re-upload every document it already owns as a
+    # duplicate. The list IS the definitive membership, so check it directly
+    # and prefer it over any heuristic.
+    for src in sources:
+        lst = _url_list_of(src)
+        if lst and url in lst:
+            return src
 
     # 3. domain match, honouring the source's own URL scope.
     #
