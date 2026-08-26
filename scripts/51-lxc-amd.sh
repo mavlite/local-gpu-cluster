@@ -177,11 +177,28 @@ EMBED_ALIAS="${EMBED_ALIAS:-qwen3-embed}"
 #   - 8192/8=1024 per slot: ~58/103 docs failed (every chunk > 1024 tokens 400d)
 #   - 32768/4=8192 per slot: ~8/98 docs still 413'd (large overview pages)
 #   - 65536/4=16384 per slot: ~3/98 docs still 413 (pages > 16K tokens — rare)
-# 65536/4=16384 is the sweet spot: covers >97% of real-world chunks.
+# 16384 per slot is the sweet spot: covers >97% of real-world chunks.
 # Set the router's MAX_EMBED_INPUT_TOKENS and AnythingLLM's
 # EMBEDDING_MODEL_MAX_CHUNK_LENGTH to match (both 16384).
-EMBED_CTX="${EMBED_CTX:-65536}"
-EMBED_PARALLEL="${EMBED_PARALLEL:-4}"
+#
+# SLOT COUNT is a separate lever from slot SIZE, and only the size is part of
+# that contract. 4 slots cost 9.78 GB of VRAM on GPU0 for a 0.6B model -- almost
+# all of it KV for 65536 tokens of unquantised f16 cache. Halving to 2 slots
+# (ctx 32768, still 16384 per slot) measured 2026-08-26:
+#   embed process 9.78 GB -> 5.24 GB; GPU0 free 2.77 GB -> 7.34 GB
+# Both values MUST move together -- dropping --parallel alone would double
+# per-slot ctx to 32768 and break the alignment above.
+#
+# Embeddings are unaffected. Cross-config cosine over full 1024-dim vectors was
+# 0.9998893627 / 0.9998820713 / 1.0 -- IDENTICAL to ten decimals to the
+# same-config run-to-run noise floor, so the change contributes nothing beyond
+# the model's own non-determinism (it alternates between two internal states at
+# any slot count). Harness: scripts/tools/embed-dump.py
+#
+# Raise back to 4 if bulk ingest throughput ever becomes the bottleneck; with
+# CHAT_CONCURRENCY=1 and a single user, 2 is ample.
+EMBED_CTX="${EMBED_CTX:-32768}"
+EMBED_PARALLEL="${EMBED_PARALLEL:-2}"
 EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
 
 # ---------- Reranker unit (V620 #2) ----------
