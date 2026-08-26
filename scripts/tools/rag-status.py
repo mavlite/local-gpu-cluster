@@ -64,16 +64,30 @@ def load_sources():
 
 
 def source_state(sid: str):
-    """(tracked, fetched, pending, last_success)"""
+    """(tracked, fetched, pending, archived, last_success)
+
+    PENDING and ARCHIVED are different states and were previously conflated as
+    "never fetched". sdg-community sat at "388 never fetched" for weeks, which
+    reads like a backlog; in fact 364 of those upstream pages are 404 and the
+    only surviving copy of their content is the document already attached in the
+    workspace. Reporting them as pending never cleared, so the warning became
+    noise -- and invited deleting irreplaceable documents as cleanup.
+
+    ARCHIVED = upstream confirmed gone (see tools/mark-unfetchable.py), content
+    retained. Nothing will ever refetch it, and that is correct, not a fault.
+    """
     docs = os.path.join(STATE_DIR, sid, "documents.json")
     man = os.path.join(STATE_DIR, sid, "manifest.json")
-    tracked = fetched = 0
+    tracked = fetched = archived = 0
     try:
         with open(docs, encoding="utf-8") as fh:
             d = json.load(fh)
         tracked = len(d)
         fetched = sum(1 for v in d.values()
                       if str(v.get("hash", "")).startswith("sha256:"))
+        archived = sum(1 for v in d.values()
+                       if v.get("upstream_gone")
+                       and not str(v.get("hash", "")).startswith("sha256:"))
     except Exception:
         pass
     last = None
@@ -85,7 +99,7 @@ def source_state(sid: str):
         last = m.get("last_success")
     except Exception:
         pass
-    return tracked, fetched, tracked - fetched, last
+    return tracked, fetched, tracked - fetched - archived, archived, last
 
 
 def age(iso: str | None):
@@ -130,16 +144,16 @@ def render(only_ws=None):
         props.setdefault(os.path.basename(f).rsplit("-", 2)[0], []).append(f)
 
     print(paint(f"\n  RAG sources — {datetime.now().strftime('%Y-%m-%d %H:%M')}", "b"))
-    hdr = ("  %-20s %-16s %-6s %8s %8s %8s  %-8s %s"
+    hdr = ("  %-20s %-16s %-6s %8s %8s %8s %8s  %-8s %s"
            % ("SOURCE", "HANDLER", "EVERY", "TRACKED", "FETCHED", "PENDING",
-              "LAST OK", "NOTE"))
+              "ARCHIVD", "LAST OK", "NOTE"))
     print(paint(hdr, "dim"))
 
     for s in srcs:
         sid, ws = s["id"], s.get("workspace", "?")
         if only_ws and ws != only_ws:
             continue
-        tracked, fetched, pending, last = source_state(sid)
+        tracked, fetched, pending, archived, last = source_state(sid)
         a = age(last)
         interval = parse_interval(s.get("refresh_interval"))
 
@@ -152,13 +166,16 @@ def render(only_ws=None):
             notes.append(paint(f"{len(props[sid])} proposal(s) awaiting review", "bad"))
         if pending:
             notes.append(paint(f"{pending} never fetched", "warn"))
+        if archived:
+            notes.append(paint(f"{archived} upstream gone (content kept)", "dim"))
         if a is not None and interval and a > interval and s.get("enabled", True):
             notes.append(paint("DUE", "warn"))
 
         pend_s = paint(f"{pending:8d}", "warn" if pending else "dim")
-        print("  %-20s %-16s %-6s %8d %8d %s  %-8s %s"
+        arch_s = paint(f"{archived:8d}", "dim")
+        print("  %-20s %-16s %-6s %8d %8d %s %s  %-8s %s"
               % (sid, s["handler"], s.get("refresh_interval", "-"),
-                 tracked, fetched, pend_s, human(a), " ".join(notes)))
+                 tracked, fetched, pend_s, arch_s, human(a), " ".join(notes)))
 
     stray = [f for k, v in props.items() for f in v
              if k not in {s["id"] for s in srcs}]

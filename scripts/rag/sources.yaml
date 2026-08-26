@@ -165,17 +165,13 @@ sources:
   # execution route (see day-2-ops.md § 6.8) supports live web search via
   # tavily_search — bypassing the need for RAG-indexed up-to-the-minute
   # blog content. RAG retains the historical corpus; Tavily handles fresh.
-  - id: truenas-blog
-    handler: rss
-    enabled: false   # no working feed found — see comment above
-    removal_policy: additive_only
-    workspace: sdg-documentation
-    doc_prefix: "[OFFICIAL] truenas/blog"
-    refresh_interval: 7d
-    config:
-      rss_url: https://www.truenas.com/blog/feed/   # 404 as of 2026-05-25
-      url_domain_filter: '^https?://www\.truenas\.com/blog/'
-      max_entries: 50
+  # REMOVED 2026-08-26: this rss entry was a disabled duplicate. It tracked the
+  # same 595 URLs as truenas-blog-urls and claimed the SAME 595 workspace
+  # documents (595 shared docpaths, 0 unique), while fetching none of them --
+  # so it contributed nothing but a permanent "595 never fetched" warning in
+  # rag-status. truenas-blog-urls (url_list_hashed, 592/595 fetched) is the
+  # live owner and keeps every document. State kept at
+  # /tank/rag-state/truenas-blog.REMOVED-2026-08-26 rather than deleted.
 
   # ── Official: OpenZFS documentation ─────────────────────────────────────
   # Some directories contain spaces (e.g., "Basic Concepts/") which must be
