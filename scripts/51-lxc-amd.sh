@@ -136,6 +136,34 @@ LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
 #
 # Speculative decoding is a SINGLE-STREAM optimization: the advantage is gone by
 # --parallel 4. It pairs correctly with our CHAT_CONCURRENCY=1 policy.
+# ngram-mod (draftless spec-decode) was evaluated 2026-08-26 on b10509 with
+# UD-Q6_K_XL and REJECTED for this workload. Four distinct RAG prompts;
+# COLD = fresh server, WARM = the same prompts repeated:
+#
+#   draft-mtp n-max 3 (this config)   COLD 43.34   WARM 43.35
+#   + ngram-mod  8/12                 COLD 41.27   WARM 42.32
+#   + ngram-mod 16/24                 COLD 40.66   WARM 44.00
+#   + ngram-mod 32/48                 COLD 40.66   WARM 43.74
+#   + ngram-mod 48/64                 COLD 40.57   WARM 54.22
+#   ngram-mod ONLY 48/64              COLD 22.07   WARM 64.36
+#   ngram-mod ONLY 16/24              COLD 22.10   WARM 35.99
+#
+# The cold penalty is FLAT (~-6.3%) at every draft length, and ngram-only is flat
+# at ~22 t/s likewise: it is fixed overhead from enabling the ngram machinery, not
+# from drafting too far. Shortening the draft therefore fixes nothing and gives up
+# the warm win — only 48/64 earns it. Our traffic is overwhelmingly cold (each RAG
+# question retrieves different chunks), so we would pay the 6% almost always and
+# collect the 25% almost never. Adopt --spec-type draft-mtp,ngram-mod ONLY for
+# genuinely repetitive work (bulk summarisation, regeneration over one context),
+# and then only at n-match 24 / n-min 48 / n-max 64.
+#
+# BENCHMARK TRAP: the ngram hash pool persists across requests and
+# cache_prompt:false does NOT clear it. Timing one prompt repeatedly measures the
+# model replaying its own previous output (~158 t/s of nothing). Use distinct
+# prompts and restart the server between configs. draft-mtp has no such memory,
+# so a config that stays flat cold-to-warm is the control proving the pool was
+# cleared. Harness: scripts/tools/spec-bench.sh
+#
 LLAMA_SPEC_TYPE="${LLAMA_SPEC_TYPE:-draft-mtp}"    # qwen3.8 ships MTP heads (+63.8%); MoE profiles override to none
 LLAMA_SPEC_PMIN="${LLAMA_SPEC_PMIN:-0}"
 
