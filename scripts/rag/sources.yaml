@@ -49,19 +49,34 @@ sources:
     doc_prefix: "[OFFICIAL] api.truenas.com"
     refresh_interval: 30d
     config:
+      # api.truenas.com publishes NO usable sitemap. The per-version URL
+      # below 404s to a 143-byte HTML stub, which parses as zero <loc>
+      # entries, and the root https://api.truenas.com/sitemap.xml lists
+      # exactly three URLs (archive, 404error, root). The handler was
+      # therefore silently falling back to index scraping while still
+      # reporting healthy.
+      #
+      # searchindex.js is Sphinx's own document inventory and is
+      # authoritative: 1,105 documents vs the 1,098 index scraping
+      # reached, and it needs no pattern maintenance as pages are added.
+      # sitemap_url is kept only as the second rung of the ladder.
+      searchindex_url: https://api.truenas.com/v27.0/searchindex.js
       sitemap_url: https://api.truenas.com/v27.0/sitemap.xml
       base_url: https://api.truenas.com/v27.0
       fallback_index_pages:
         - api_methods.html
         - api_objects.html
         - api_events.html
+      # The trailing underscores excluded the overview pages themselves
+      # (api_methods.html does not contain "api_methods_"), and five
+      # top-level pages matched nothing at all.
       include_patterns:
-        - "api_methods_"
-        - "api_objects_"
-        - "api_events_"
+        - "api_methods"
+        - "api_objects"
+        - "api_events"
         - "examples"
         - "using_"
-        - "/index.html$"
+        - '/(changelog|jobs|jsonrpc|query_methods|rbac|index)\.html$'
       exclude_patterns: []
 
   # ── Official: OPNsense user documentation ───────────────────────────────

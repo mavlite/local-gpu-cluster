@@ -11,6 +11,7 @@ one Python module that yields Document objects directly.
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
@@ -37,6 +38,16 @@ SITEMAP_NS_RE = re.compile(r"^\{[^}]+\}")  # strip {namespace} prefix from tags
 # gaps at 1,500. 900 guarantees coverage down to 2,000-character chunks, which
 # is margin against AnythingLLM changing its chunking, at ~7% text overhead.
 SOURCE_MARKER_EVERY = 900
+
+
+# Identify ourselves. requests defaults to "python-requests/x.y.z", which some
+# hosts block outright: measured 2026-08-26, www.baeldung.com returned 403 to the
+# default and 200 to this string, which accounted for a chunk of the 388
+# "permanently dead" URLs in sdg-community. An honest descriptive agent was
+# enough -- a browser UA was tested and gave no additional access, so there is no
+# reason to impersonate one.
+USER_AGENT = "local-gpu-cluster-rag/1.0 (personal documentation mirror)"
+HTTP_HEADERS = {"User-Agent": USER_AGENT}
 
 
 def _interleave_source(text: str, url: str) -> str:
@@ -106,8 +117,10 @@ class SphinxSitemapHandler(Handler):
         fallback_pages: list[str] = config.get("fallback_index_pages", [])
         include_patterns: list[str] = config.get("include_patterns", [])
         exclude_patterns: list[str] = config.get("exclude_patterns", [])
+        searchindex_url: str = config.get("searchindex_url", "")
 
         urls = self._collect_urls(
+            searchindex_url=searchindex_url,
             sitemap_url=sitemap_url,
             base_url=base_url,
             fallback_pages=fallback_pages,
@@ -214,10 +227,26 @@ class SphinxSitemapHandler(Handler):
         exclude_patterns: list[str],
         timeout: int,
         crawl_delay: int = 0,
+        searchindex_url: str = "",
     ) -> list[str]:
-        urls = self._try_sitemap(sitemap_url, timeout, crawl_delay)
+        # Discovery order: searchindex -> sitemap -> index scraping. Each step is
+        # announced, because a SILENT fallback is how truenas-api-v27 spent months
+        # looking healthy: its declared sitemap 404s to a 143-byte HTML stub, which
+        # parses as zero <loc> entries, so the handler quietly scraped index pages
+        # instead and nothing ever said so.
+        urls = []
+        if searchindex_url:
+            urls = self._try_searchindex(searchindex_url, base_url, timeout)
+            if urls:
+                print(f"  discovery: searchindex ({len(urls)} URLs)")
+        if not urls:
+            urls = self._try_sitemap(sitemap_url, timeout, crawl_delay)
+            if urls:
+                print(f"  discovery: sitemap ({len(urls)} URLs)")
         if not urls:
             urls = self._try_fallback_index(base_url, fallback_pages, timeout)
+            print(f"  discovery: FALLBACK index scraping ({len(urls)} URLs) — "
+                  f"sitemap {sitemap_url} yielded nothing")
 
         include_re = (
             re.compile("|".join(include_patterns)) if include_patterns else None
@@ -234,6 +263,39 @@ class SphinxSitemapHandler(Handler):
                 continue
             out.append(u)
         return sorted(set(out))
+
+    def _try_searchindex(
+        self, searchindex_url: str, base_url: str, timeout: int
+    ) -> list[str]:
+        """Enumerate a Sphinx site from its searchindex.js.
+
+        Sphinx ships `Search.setIndex({...})` containing a `docnames` array that
+        lists EVERY document in the build -- it is the authoritative inventory,
+        and unlike index-page scraping it needs no per-site include patterns and
+        picks up new pages automatically.
+
+        Used because api.truenas.com publishes no usable sitemap: the per-version
+        URL 404s and the root sitemap.xml lists three URLs (archive, 404error,
+        root). searchindex.js lists 1,105 documents; index scraping found 1,098.
+
+        Returns [] on any failure so the caller falls through to sitemap/index.
+        """
+        try:
+            r = requests.get(searchindex_url, timeout=timeout,
+                             allow_redirects=True, headers=HTTP_HEADERS)
+            r.raise_for_status()
+            raw = r.text
+        except Exception as exc:
+            print(f"  searchindex fetch failed ({exc}); falling through")
+            return []
+        m = re.search(r"Search\.setIndex\((\{.*\})\)\s*;?\s*$", raw, re.S)
+        body = m.group(1) if m else raw
+        try:
+            names = json.loads(body).get("docnames") or []
+        except Exception as exc:
+            print(f"  searchindex parse failed ({exc}); falling through")
+            return []
+        return sorted(f"{base_url}/{n}.html" for n in names)
 
     def _try_sitemap(
         self, sitemap_url: str, timeout: int, crawl_delay: int = 0
@@ -271,7 +333,8 @@ class SphinxSitemapHandler(Handler):
     ) -> tuple[list[str], bool]:
         """Return (locs, is_sitemap_index) for one sitemap document."""
         try:
-            r = requests.get(sitemap_url, timeout=timeout, allow_redirects=True)
+            r = requests.get(sitemap_url, timeout=timeout, allow_redirects=True,
+                             headers=HTTP_HEADERS)
             r.raise_for_status()
         except requests.RequestException:
             return [], False
@@ -299,7 +362,7 @@ class SphinxSitemapHandler(Handler):
         for page in pages:
             page_url = f"{base_url}/{page.lstrip('/')}"
             try:
-                r = requests.get(page_url, timeout=timeout)
+                r = requests.get(page_url, timeout=timeout, headers=HTTP_HEADERS)
                 r.raise_for_status()
             except requests.RequestException:
                 continue
@@ -315,7 +378,7 @@ class SphinxSitemapHandler(Handler):
     # ─── page fetch + clean ───────────────────────────────────────────────
     def _fetch_and_clean(self, url: str, timeout: int) -> Document | None:
         try:
-            r = requests.get(url, timeout=timeout)
+            r = requests.get(url, timeout=timeout, headers=HTTP_HEADERS)
             r.raise_for_status()
         except requests.RequestException as e:
             raise RuntimeError(f"fetch failed: {e}") from e
