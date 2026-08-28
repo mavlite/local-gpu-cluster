@@ -77,18 +77,26 @@ def _interleave_source(text: str, url: str) -> str:
         # no marker. Technical docs hit this with long tables and code blocks.
         # Break the oversized paragraph at whitespace instead.
         if len(para) > SOURCE_MARKER_EVERY:
-            words = para.split(" ")
+            # Split on ANY whitespace, keeping it, so the original text is
+            # reconstructed byte-for-byte. Splitting on " " alone silently fails
+            # on newline-separated content: keycloak's server_admin AsciiDoc is a
+            # 5,000-character run of "include::...[]" lines with no spaces, which
+            # split(" ") returns as ONE token, so the marker landed only after
+            # the whole block -- a 5,124-character stretch with no citable URL
+            # (measured 2026-08-28).
+            tokens = re.split(r"(\s+)", para)
             piece: list[str] = []
             plen = 0
-            for w in words:
-                piece.append(w)
-                plen += len(w) + 1
-                if plen >= SOURCE_MARKER_EVERY:
-                    out.append(" ".join(piece))
+            for tok in tokens:
+                piece.append(tok)
+                plen += len(tok)
+                if plen >= SOURCE_MARKER_EVERY and tok.strip() == "":
+                    # Break on the whitespace token itself, never mid-word.
+                    out.append("".join(piece))
                     out.append(marker)
                     piece, plen = [], 0
             if piece:
-                out.append(" ".join(piece))
+                out.append("".join(piece))
             since = plen
             continue
         out.append(para)

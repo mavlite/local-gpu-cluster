@@ -303,6 +303,27 @@ def refresh_one(
     #      the embedding call (whether it succeeds or fails). A Ctrl-C or
     #      network glitch loses at most one doc's tracking, not the whole run.
     new_state = dict(persisted)
+
+    # Stamp last_fetched for EVERY url we actually fetched, including ones whose
+    # content was unchanged. plan.compute() puts unchanged docs in neither adds
+    # nor updates, so without this their timestamp never moves -- and
+    # _prioritise() orders by oldest last_fetched, so a budgeted source
+    # re-selects the same tranche every run and never advances.
+    #
+    # Measured 2026-08-28, after a 17-hour "full" re-ingest: vcf-core-docs had
+    # 2,525 of 4,421 urls still stamped 2026-08-23 and vcf-remaining-docs 3,874
+    # of 5,864 still on 2026-08-24 -- never fetched at all. The declining update
+    # counts per tranche (450, 303, 252, 160, 121) looked like convergence over
+    # the corpus; they were the same ~900 urls being re-fetched until nothing in
+    # that subset changed. Only 38% of the corpus was actually re-ingested.
+    _now = state_mod.utcnow_iso()
+    for _doc in collected:
+        _entry = new_state.get(_doc.url)
+        if _entry is not None:
+            _entry = dict(_entry)
+            _entry["last_fetched"] = _now
+            new_state[_doc.url] = _entry
+
     adds_docpaths: list[str] = []
     removes_docpaths: list[str] = []
 

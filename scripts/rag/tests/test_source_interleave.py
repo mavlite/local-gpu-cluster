@@ -20,6 +20,7 @@ Two shapes broke earlier attempts and are pinned explicitly:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import types
 import unittest
@@ -95,6 +96,47 @@ class TestSourceInterleave(unittest.TestCase):
     def test_marker_carries_the_real_url(self):
         out = _interleave_source(page(20, 400), URL)
         self.assertIn(URL, out)
+
+
+    def test_newline_separated_content_is_covered(self):
+        """Regression: split(" ") returned ONE token for newline-separated text.
+
+        keycloak's server_admin.adoc is a ~5,000-character run of
+        "include::topics/x.adoc[]" lines containing no spaces at all. Splitting
+        the oversized paragraph on " " yielded a single token, so the marker
+        landed only AFTER the whole block -- measured 2026-08-28 on the live
+        document as a 5,124-character stretch with no citable URL. Splitting on
+        any whitespace fixes it.
+        """
+        body = "\n".join("include::topics/section%03d.adoc[]" % i
+                           for i in range(200))
+        out = _interleave_source(body, URL)
+        pos = [m.start() for m in re.finditer(r"\[Source:", out)]
+        self.assertGreater(len(pos), 1, "newline-only body got no interleaving")
+        bounds = [0] + pos + [len(out)]
+        gaps = [bounds[i + 1] - bounds[i] for i in range(len(bounds) - 1)]
+        self.assertLess(max(gaps), 2000,
+                        "gap %d exceeds the smallest production chunk" % max(gaps))
+
+    def test_no_content_is_lost(self):
+        """Markers are additive: stripping them must leave the original text."""
+        cases = (
+            ("newline", "\n".join("include::a%03d.adoc[]" % i for i in range(200))),
+            ("prose", " ".join("word%03d" % i for i in range(1500))),
+        )
+        for name, body in cases:
+            out = _interleave_source(body, URL).replace("[Source: %s]" % URL, "")
+            self.assertEqual(re.sub(r"\s+", "", out),
+                             re.sub(r"\s+", "", body),
+                             "%s: content changed" % name)
+
+    def test_whitespace_free_run_is_a_known_limit(self):
+        """A long run with NO whitespace cannot be covered without splitting
+        mid-token, which would corrupt it -- think base64 or minified blobs.
+        Documented rather than fixed: such a chunk carries no prose worth
+        citing. Pinned so it stays a decision, not a surprise."""
+        out = _interleave_source("x" * 5000, URL)
+        self.assertEqual(out.count("[Source:"), 1)
 
 
 if __name__ == "__main__":
