@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .base import Document, Handler, HandlerContext
+# Shared with the sitemap handler so citations behave identically across
+# handlers; see its docstring for why per-chunk markers are needed.
+from .sphinx_sitemap import _interleave_source
 
 
 class GitHubRepoHandler(Handler):
@@ -119,11 +122,17 @@ class GitHubRepoHandler(Handler):
 
             # Prepend a small provenance header so the URL/date survive
             # AnythingLLM's metadata stripping at chunk write.
+            # The header alone only reaches the FIRST chunk of a long
+            # document. Measured 2026-08-28: 7 of 96 retrieved
+            # sdg-documentation chunks carried no citable URL, every one a
+            # middle chunk of a long github_repo page. Interleaving repeats
+            # the URL through the body so every chunk has one, exactly as
+            # sphinx_sitemap does.
             text = (
                 f"Source: {citation_url}\n"
                 f"URL: {citation_url}\n"
                 f"Last-modified: {last_modified}\n\n"
-                f"{body}"
+                f"{_interleave_source(body, citation_url)}"
             )
 
             title = entry["first_stripped"].rstrip("/").replace("/", " / ")
