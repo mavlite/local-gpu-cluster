@@ -327,27 +327,25 @@ def refresh_one(
     adds_docpaths: list[str] = []
     removes_docpaths: list[str] = []
 
-    # 1) Promote migrated-hash entries: their content was vetted at migration
-    #    time, no re-upload needed. Just stamp the real hash and move on.
-    migrated_promoted = 0
-    real_updates = []
-    for doc in the_plan.updates:
-        prev = persisted.get(doc.url, {})
-        if prev.get("hash") == "migrated":
-            entry = dict(prev)
-            entry["hash"] = doc.hash
-            entry["last_fetched"] = state_mod.utcnow_iso()
-            entry["allm_doc_name"] = (doc.title or doc.url)[:120]
-            entry["metadata"] = doc.metadata
-            new_state[doc.url] = entry
-            migrated_promoted += 1
-        else:
-            real_updates.append(doc)
+    # 1) Migrated-hash entries (adopted by migrate_backfill.py) are treated as
+    #    REAL UPDATES and re-uploaded.
+    #
+    #    This used to be a shortcut: stamp the real hash, skip the upload, on the
+    #    reasoning that adopted content was vetted at migration time. That is
+    #    false for anything adopted from the pre-refresh.py upload-link ingest --
+    #    those documents are raw page scrapes opening "TechDocs / Login /
+    #    Register", not the trafilatura extraction the handler produces now.
+    #    Promotion stamped the handler's hash onto stale content, and since the
+    #    stored hash then matched what the handler yields, NO later refresh could
+    #    ever notice. Measured 2026-08-29 after a verified-full-coverage
+    #    re-ingest: 1,346 of 10,482 VCF documents (12.8%) were frozen this way
+    #    while every state field looked healthy.
+    #
+    #    Re-uploading costs one upload per adopted URL on the first refresh after
+    #    a migration. That is a bounded, one-time price for the guarantee that
+    #    what the corpus serves is what the handler actually extracted.
+    real_updates = list(the_plan.updates)
 
-    if migrated_promoted:
-        print(f"  promoted {migrated_promoted} migrated-hash entries (no re-upload)")
-        # Persist immediately so the cheap part is durable even if upload phase fails.
-        src_state.save_documents(new_state)
 
     upload_queue = list(the_plan.adds) + real_updates
     total = len(upload_queue)
