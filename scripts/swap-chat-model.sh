@@ -247,13 +247,33 @@ get_profile() {
       # value is 0. Harmless; left at 1024 so it activates if upstream adds support.
       echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 1024 q8_0 tensor draft-mtp 3"
       ;;
+    qwen3.8-redteam)
+      # Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — the SAME base model as the
+      # qwen3.8 profile with refusal behaviour removed (abliterated). For
+      # AUTHORISED penetration testing of the operator's own lab environments:
+      # a censored model refuses to write exploit code even against your own
+      # boxes, which makes it useless as a red-team assistant.
+      #
+      # Architecture is identical to qwen3.8 (dense 27B, hybrid Gated DeltaNet +
+      # Attention), and the model card states "MTP has not been modified" — so
+      # the entire tuned qwen3.8 config carries over UNCHANGED: tensor split,
+      # draft-mtp n-max 3, q8_0 KV, 262K ctx. Expect the same ~43-49 t/s and the
+      # same VRAM (24.8 GB quant vs 24.0 GB, negligible). No re-tuning needed.
+      #
+      # DISTINCT ALIAS on purpose. This must NOT silently serve normal traffic:
+      # you swap to it deliberately for pentest work and swap back. Because the
+      # chat slot is single-tenant, whatever profile is loaded answers every
+      # chat request — so check /healthz active_chat_profile before assuming
+      # which model is live (the profile-swap vs client-pinning hazard).
+      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      ;;
     *)
       return 1
       ;;
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 qwen3.8-redteam)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -265,6 +285,7 @@ get_profile_description() {
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
     qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
+    qwen3.8-redteam) echo "Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — uncensored; AUTHORISED pentest of own lab only (same config/perf as qwen3.8)" ;;
     *)               echo "" ;;
   esac
 }
@@ -280,6 +301,7 @@ get_profile_vram_estimate() {
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
+    qwen3.8-redteam) echo "predicted same as qwen3.8 (identical arch, near-identical quant 24.8 vs 24.0 GB); idle ~89% / ~62%. RE-MEASURE on first swap and update this string." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
