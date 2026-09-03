@@ -108,7 +108,7 @@ default_prompt() {
 # (${#arr[@]:-0} is invalid bash — :- can't be combined with array-length syntax.)
 if [[ -z "${WORKSPACES+x}" ]] || (( ${#WORKSPACES[@]} == 0 )); then
   WORKSPACES=(
-    "vcf-reference||12|Not in the provided VCF documents."
+    "vcf-reference||6|Not in the provided VCF documents."
     "sdg-documentation||12|Not in the provided SDG documents."
   )
 fi
