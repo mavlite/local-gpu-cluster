@@ -248,6 +248,27 @@ sources:
         # localizations).
         - '^https://techdocs\.broadcom\.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/[^/]+/release-notes'
 
+  # ── Official: VCF 9.1.1 release notes (sitemap-lag stopgap) ─────────────
+  # Added 2026-09-03: VCF 9.1.1 shipped and its release-notes pages are LIVE
+  # (.../9-1/release-notes/vmware-cloud-foundation-9-1-1-0-release-notes*) but
+  # techdocs.broadcom.com's sitemap does NOT list them yet, so the sphinx
+  # vcf-release-notes source cannot discover them. This curated list ingests
+  # the 15 9.1.1 RN URLs now via trafilatura (same extraction path).
+  # RETIRE this source once the sitemap catches up and vcf-release-notes adopts
+  # these URLs (they match its include: .../vcf-9-0-and-later/[^/]+/release-notes).
+  - id: vcf-9-1-1-release-notes
+    handler: url_list_hashed
+    enabled: true
+    workspace: vcf-reference
+    doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.1.1 release notes"
+    refresh_interval: 7d
+    removal_policy: additive_only
+    crawl_delay_seconds: 10       # techdocs.broadcom.com robots.txt: Crawl-delay: 10
+    request_timeout_seconds: 60
+    config:
+      url_list_file: /tank/rag-state/_urllists/vcf-9-1-1-release-notes.txt
+      parallel_workers: 1
+
   # ── Official: VCF core operational docs (coverage backfill) ─────────────
   # The other half of the vcf-reference corpus. Upstream has ~13,500 us/en
   # VCF 9.x URLs; only ~5,000 were ever ingested (the 2026-05 bulk run stopped
