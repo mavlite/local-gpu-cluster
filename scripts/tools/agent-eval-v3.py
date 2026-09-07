@@ -62,8 +62,34 @@ OPTS = {
     "rag-qwen3.8": {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
                     "presence_penalty": 1.5},
     "qwen3-coder": {"temperature": 0.15, "top_p": 0.95},
+    "qwen3.8-nothink": {"temperature": 0.7, "top_p": 0.8, "top_k": 20},
 }
 opts = OPTS.get(MODEL, {})
+
+# System prompt variants. BASE_SYS is the Step-0 baseline. VERIFY_SYS adds an
+# explicit, procedural verify-before-finish discipline (Step 1). Gated by the
+# VERIFY_LOOP env var so both can be A/B'd against the same model without a
+# permanent change. The discipline is GENERAL engineering practice — it never
+# names the hidden tests, only the kinds of edge cases any solution implies.
+BASE_SYS = (
+    "You are a coding agent working in a small repo. Use the provided "
+    "tools to inspect and modify files, and run the tests. Keep going "
+    "until the work is correct, then call finish. Prefer a general, "
+    "correct solution over one that only satisfies the visible tests.")
+VERIFY_SYS = BASE_SYS + "\n\n" + (
+    "VERIFY BEFORE FINISHING. The visible tests cover only the obvious cases. "
+    "Before you call finish, explicitly list the edge cases and boundary "
+    "conditions the goal implies but the visible tests may not check - for "
+    "example: empty input, a single element, the first/last element, "
+    "duplicates, already-sorted vs reversed, zero / negative / very large "
+    "values, invalid or malformed input, unicode, and off-by-one boundaries. "
+    "For EACH one, re-read the relevant part of your implementation and "
+    "confirm it behaves correctly; if it does not, fix it and re-run "
+    "run_tests. Only call finish when the general solution is correct for "
+    "these implied cases too, not merely when the visible tests pass. A "
+    "solution that passes the visible tests but mishandles an implied edge "
+    "case is incomplete.")
+SYS = VERIFY_SYS if os.environ.get("VERIFY_LOOP") else BASE_SYS
 
 TOOLS = [
     {"type": "function", "function": {
@@ -146,11 +172,7 @@ def play(task):
         open(os.path.join(repo, fn), "w", encoding="utf-8").write(body)
     verify = task.get("verify")
     msgs = [
-        {"role": "system", "content":
-         "You are a coding agent working in a small repo. Use the provided "
-         "tools to inspect and modify files, and run the tests. Keep going "
-         "until the work is correct, then call finish. Prefer a general, "
-         "correct solution over one that only satisfies the visible tests."},
+        {"role": "system", "content": SYS},
         {"role": "user", "content": task["goal"]},
     ]
     turns = tool_calls = errs = 0
