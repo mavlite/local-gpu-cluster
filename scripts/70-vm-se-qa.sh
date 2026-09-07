@@ -26,6 +26,24 @@
 # about nested quoting applies doubly here -- pass scripts in via base64, never
 # inline heredocs.
 #
+# TWO NETWORK PHASES -- READ THIS BEFORE YOU BUILD. The isolated bridge is the
+# END state, not the build state. Windows Update, Steam, the game download and
+# the Torch/plugin fetch all need egress, and Steam needs a real login at least
+# once. So:
+#
+#   BUILD phase   -- run this script with SEQA_BRIDGE=vmbr0, install everything,
+#                    sign in to Steam once, then enable Steam's offline mode.
+#   TEST phase    -- move the guest to the isolated bridge (the "done" block
+#                    prints the exact qm set command) and keep it there.
+#
+# Whether the pair still works with zero egress is genuinely UNRESOLVED: the
+# client and the dedicated server authenticate through Steam, and Steam offline
+# mode is not proven to carry a local multiplayer join. If it does not, the
+# fallback is vmbr0 plus a PVE firewall rule that permits Steam and denies the
+# LAN and the 10.60.0.0/16 fleet VPN range -- weaker, but still a boundary.
+# Settle that question with a test, not an assumption, and record the answer in
+# docs/se-qa-vm-requirements.md.
+#
 # GPU: none by default, and that is not an oversight. The game validates
 # graphics adapters at startup and rejects output-less software adapters, so a
 # rendered client needs real hardware. We are first testing whether the client's
@@ -160,8 +178,13 @@ step "done"
 cat <<EOF
 
   VM ${SEQA_VMID} (${SEQA_NAME}) is defined but NOT started, and Windows is not
-  installed. It is deliberately on isolated bridge '${SEQA_BRIDGE}' with no
-  uplink, so it has no LAN, no internet and no path to the production fleet.
+  installed. Its NIC is on '${SEQA_BRIDGE}'.
+
+  If that is the isolated bridge you cannot install anything: no Windows
+  Update, no Steam, no game. Build on vmbr0 first, then isolate:
+
+    qm set ${SEQA_VMID} --net0 virtio,bridge=vmbr0,firewall=1      # BUILD
+    qm set ${SEQA_VMID} --net0 virtio,bridge=vmbrseqa,firewall=1   # TEST
 
   Next steps, in order:
 
@@ -182,9 +205,14 @@ cat <<EOF
     4. Verify the channel from the host:
          qm guest exec ${SEQA_VMID} -- cmd.exe /c echo ok
 
-  Getting software in with no network: attach an ISO you build on the host, or
-  use 'qm guest exec' with base64-encoded payloads. Do NOT reach for a bridge
-  change -- the isolation is the feature.
+    5. Install Steam, Space Engineers and Torch while still on vmbr0, sign in
+       to Steam once, then switch Steam to offline mode and move the NIC to
+       '${SEQA_BRIDGE}' with the command above.
+
+  Once isolated, get software in by attaching an ISO you build on the host, or
+  with 'qm guest exec' and base64-encoded payloads. Do not quietly leave it on
+  vmbr0 because that is easier -- if zero egress turns out to be impossible,
+  say so and add a firewall rule instead. See docs/se-qa-vm-requirements.md.
 
   Undo everything this script did:
     qm stop ${SEQA_VMID} ; qm destroy ${SEQA_VMID} --purge
