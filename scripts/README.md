@@ -28,6 +28,7 @@ retuning, updates, hardware changes).
 | 12.5  | `63-cluster-monitor.sh` | Read-only cluster health + metrics dashboard (host systemd service, port 8888), SQLite state, Python 3 stdlib only |
 | 12.6  | `64-memory-vault-backup-timer.sh` | Host systemd timer (daily 02:30) running pg_dump backup inside LXC 156 via `pct exec`; dumps to tank-backed dir, retains 14 |
 | 12.7  | `65-searxng.sh`         | SearXNG metasearch container in LXC 155 (port 8888). Unmetered web search; the alternative to Tavily's metered API. Writes `settings.yml` with `search.formats: [html, json]` — the JSON format is REQUIRED by `mcp-searxng` and is off by default, so omitting it yields 403 on every API query |
+| 13    | `70-vm-se-qa.sh`        | **The only qemu guest on this host** — a Windows VM (VMID 170) for Space Engineers QA, hosting both a Torch dedicated server and a game client so the pair talk over the guest's own loopback. Deliberately on an isolated bridge (`vmbrseqa`, no uplink, no address): no LAN, no internet, no path to the production fleet — drive it with `qm guest exec`, not ssh. Creates and configures only; the Windows install is manual. No GPU by default — `SEQA_HOSTPCI` exists but refuses a V620, since both carry live model weights for LXC 151 |
 
 Phases 1–3 (hardware, BIOS, PVE ISO install) are not automatable; follow the
 runbook for those.
