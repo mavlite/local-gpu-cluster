@@ -243,11 +243,12 @@ def _make_search_tool(workspace: str, description: str):
 
 for ws in WORKSPACES:
     desc = _workspace_description(ws)
-    qfn = _make_query_tool(ws, desc)
+    # query_ tools are intentionally NOT registered: query mode runs slow full-RAG
+    # synthesis (times out MCP clients) and agents are steered to search_ anyway.
+    # Omitting them trims their verbose schemas from every agent's context.
     sfn = _make_search_tool(ws, desc)
-    mcp.tool(name=qfn.__name__, description=qfn.__doc__)(qfn)
     mcp.tool(name=sfn.__name__, description=sfn.__doc__)(sfn)
-    log.info("registered tools for workspace=%s: %s, %s", ws, qfn.__name__, sfn.__name__)
+    log.info("registered tool for workspace=%s: %s (query_ disabled to trim context)", ws, sfn.__name__)
 
 
 if __name__ == "__main__":
