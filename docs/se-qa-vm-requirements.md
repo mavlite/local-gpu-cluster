@@ -119,6 +119,52 @@ policy that permits what Steam needs and denies the local network and the `10.60
 range. That is a weaker boundary but still a real one. What is **not** acceptable is quietly leaving
 the guest on `vmbr0` with no policy because it was easier, and not saying so.
 
+### Answer (recorded 2026-09-07)
+
+**Zero-egress gameplay is not yet proven, and could not be settled from the host side.** The
+server half is in place (Torch 1.3.1.347 at `C:\Torch`, SE installed, Steam signed in), but the
+*client-join* half cannot be exercised here: launching the SE **client** needs a rendering path,
+and no GPU is attached. The only ways to give it one are (a) the `ForceNullRender` / Pulsar
+preloader, which is **`SE-DX2.0Code`'s tooling and out of this repo's scope**, or (b) passing
+through the iGPU, which permanently removes the host's local console. So the definitive "does a
+local multiplayer join work with Steam offline" test belongs to the client-side team using this
+delivered machine.
+
+**Decision: the section-4 fallback — `vmbr0` + a PVE firewall policy — is what shipped**, so the
+guest is not left open while that question is open. Policy applied (deny outbound to the LAN and
+the fleet; allow the rest so Steam keeps working):
+
+- Datacenter firewall enabled (`/etc/pve/firewall/cluster.fw` → `enable: 1`); it was previously
+  fully disabled. Only VM 170's NIC has `firewall=1`, so **only VM 170 is filtered** — every LXC
+  has `firewall=0` and is untouched.
+- Host left open (`/etc/pve/nodes/gpu-cluster/host.fw` → `enable: 1` + `IN ACCEPT`) so host
+  services (cluster-monitor `:8888`, node metrics `:9100`, SSH, web UI) keep working exactly as
+  before. Verified `:8888` → HTTP 200 after the change.
+- `/etc/pve/firewall/170.fw` rules (outbound): `ACCEPT → 192.168.6.1 udp/67` (DHCP renew),
+  `DROP → 192.168.6.0/24` (LAN: PVE host + all inference LXCs), `DROP → 10.60.0.0/16` (fleet),
+  default `ACCEPT` (Steam/internet).
+- Verified from inside the guest: internet `1.1.1.1:443` REACHABLE; host `:8006`, anythingllm
+  `154:3001`, router `153:8000`, fleet `10.60.0.1` all **blocked**.
+
+Caveat: the drop rules are IPv4-only, matching the IPv4 LAN/fleet ranges in this document. When the
+client team proves (or disproves) the offline join, flip to the stronger end state by moving the NIC
+to `vmbrseqa` (`qm set 170 --net0 virtio,bridge=vmbrseqa,firewall=1`) — the isolated bridge already
+exists.
+
+**This policy is now reproducible from the repo.** It was applied by hand first and lived only on
+the host; `scripts/71-vm-se-qa-firewall.sh` codifies it. The script regenerates the three files
+byte for byte, so running it against the current host is a no-op. It is separate from
+`70-vm-se-qa.sh` deliberately: creating a guest affects one guest, whereas enabling the datacenter
+switch is cluster-wide. Before touching that switch it asserts that no other guest has opted into
+filtering, and afterwards it verifies which interfaces are actually filtered by looking for `fwbr*`
+bridges rather than trusting config flags.
+
+**Latent trap worth knowing.** Containment rests on the fact that only VM 170 opts in. Containers
+151 to 157 carry an explicit `firewall=0`, but **container 158 carries no firewall setting at
+all** and is unfiltered only because absent means off. Ticking the firewall box for it in the web
+UI would put it behind a default-deny inbound policy with no rules file, immediately. The guard in
+`71-vm-se-qa-firewall.sh` catches this on every run and refuses to proceed; do not weaken it.
+
 ---
 
 ## 6. Acceptance criteria
@@ -173,3 +219,8 @@ things stand.
 | Date | Who | What happened |
 |---|---|---|
 | 2026-09-07 | — | Provisioning script and this document written. Guest not yet created. |
+| 2026-09-07 | mavlite | Preflight re-verified against host (VM 170 free, both ISOs staged, V620s confirmed at `03:00.0`/`07:00.0` matching the script guard, iGPU `7e:00.0`, `local-lvm` 768 GB free, 97 GB RAM free, LXC 151 healthy). Ran `70-vm-se-qa.sh`: created isolated bridge `vmbrseqa` (backup `/etc/network/interfaces.bak.20260907-123540`) and VM 170 — q35/OVMF, 6c/16 GB, 200 GB virtio-scsi disk, agent on, `onboot 0`, no GPU; install ISO on ide2 + `virtio-win-0.1.266` on ide0, boot `ide2;scsi0`. NIC set to `vmbr0` for the **build phase**. Guest **not started**; Windows not yet installed. `vmbr0` and inference cluster untouched. |
+| 2026-09-07 | mavlite | Windows Server 2022 Standard **(Desktop Experience)** installed; qemu-ga + NetKVM in place; Steam + Space Engineers + **Torch 1.3.1.347** (`C:\Torch`) installed, Steam signed in once. Verified: guest agent echoes (exit 0); `InstallationType=Server` + explorer shell (not Core); SE `appmanifest_244850` + `Bin64\SpaceEngineers.exe`; 1 Steam account in `loginusers.vdf`; no `hostpci` on 170; LXC 151 running. Guest DHCP `192.168.6.103`, DNS is public (1.1.1.x/8.8.8.8). **Acceptance criteria 1, 2, 3, 5 met.** |
+| 2026-09-07 | mavlite | **Criterion 4 — network posture (fallback, per §5).** Zero-egress gameplay unproven (client can't render without a GPU / the out-of-scope null-renderer), so shipped `vmbr0` + PVE firewall instead of full isolation. Enabled the datacenter firewall (was off); host left fully open (`host.fw` `IN ACCEPT`) so cluster-monitor `:8888` (verified HTTP 200), `:9100`, SSH, web UI keep working; **only VM 170 filtered** (all LXCs `firewall=0`). `170.fw` OUT: allow DHCP→gw, **DROP `192.168.6.0/24` + `10.60.0.0/16`**, default allow. Guest-verified: internet REACHABLE; host/LXCs/fleet all blocked. Applied with a dead-man auto-revert (cancelled after access confirmed). See §5 for full details + how to switch to `vmbrseqa` later. |
+| | | **REMAINING (client-side team, `SE-DX2.0Code`):** launch the SE client (needs null-renderer or a GPU) and prove/disprove a local multiplayer join under Steam offline while isolated; then either move NIC to `vmbrseqa` for zero egress, or keep the current firewalled `vmbr0`. Also: guest is `onboot 0` (start only when testing); do **not** install the QA plugin on this repo's behalf. |
+| 2026-09-07 | se-dx2 session | Firewall policy codified as `scripts/71-vm-se-qa-firewall.sh` (verified byte-identical to the live files). Blast radius re-verified independently via `fwbr*` interfaces: only VM 170 is filtered. |
