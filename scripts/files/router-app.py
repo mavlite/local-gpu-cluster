@@ -6,7 +6,7 @@ All upstreams live on LXC 151:
   POST /v1/completions       -> V620 chat (legacy completions / FIM passthrough)
   POST /v1/embeddings        -> V620 embedder (port 8082, --main-gpu 0, --pooling last)
   POST /v1/rerank            -> V620 reranker (port 8083, --main-gpu 1, --reranking)
-  POST /v1/tavily/search     -> Tavily search proxy (key stays server-side)
+  POST /v1/tavily/search     -> Tavily search proxy (key stays server-side; 6h response cache)
   GET  /v1/tavily/usage      -> Tavily quota/liveness probe (NOT billed by Tavily)
   GET  /v1/models            -> aggregated list from chat + embed + rerank
   GET  /healthz              -> upstream availability probe (unauthed)
@@ -48,6 +48,8 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from prometheus_fastapi_instrumentator import Instrumentator
+
+import tavily_cache
 
 # ---------- Configuration (loaded from EnvironmentFile=/etc/router.env) ----------
 
@@ -108,6 +110,14 @@ TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
 # Usage/quota endpoint. Unlike /search this is NOT billed by Tavily, so it is
 # safe to poll on a timer — which is exactly what the cluster monitor does.
 TAVILY_USAGE_URL = os.environ.get("TAVILY_USAGE_URL", "https://api.tavily.com/usage")
+
+# Search-response cache. The reporting page runs an identical query set for
+# every customer, so without this an N-customer week bills N identical sets.
+# Keyed on the whitelisted request body; only 200s are stored.
+TAVILY_CACHE_TTL_S = float(os.environ.get("TAVILY_CACHE_TTL_S", tavily_cache.DEFAULT_TTL_S))
+TAVILY_CACHE_MAX = int(os.environ.get("TAVILY_CACHE_MAX", tavily_cache.DEFAULT_MAX_ENTRIES))
+_TAVILY_CACHE = tavily_cache.TTLCache(ttl_s=TAVILY_CACHE_TTL_S,
+                                      max_entries=TAVILY_CACHE_MAX)
 TAVILY_EXTRACT_URL = os.environ.get("TAVILY_EXTRACT_URL", "https://api.tavily.com/extract")
 TAVILY_CRAWL_URL = os.environ.get("TAVILY_CRAWL_URL", "https://api.tavily.com/crawl")
 TAVILY_MAP_URL = os.environ.get("TAVILY_MAP_URL", "https://api.tavily.com/map")
@@ -2077,7 +2087,17 @@ async def tavily_search(request: Request):
             status_code=400,
         )
 
+    # no_cache is a client-side directive, not a Tavily field; the whitelist
+    # below drops it either way, but read it before filtering.
+    bypass_cache = bool(body.get("no_cache"))
     forwarded = {k: v for k, v in body.items() if k in TAVILY_ALLOWED_FIELDS}
+
+    key = tavily_cache.cache_key(forwarded)
+    if not bypass_cache:
+        hit = _TAVILY_CACHE.get(key, time.time())
+        if hit is not None:
+            return JSONResponse(hit, status_code=200,
+                                headers={"X-Cache": "HIT"})
 
     async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
         try:
@@ -2109,12 +2129,19 @@ async def tavily_search(request: Request):
         )
 
     try:
-        return JSONResponse(r.json(), status_code=200)
+        payload = r.json()
     except ValueError:
         return JSONResponse(
             _error_body("tavily_invalid_json", r.text[:500]),
             status_code=502,
         )
+
+    # Only 200s reach here, but gate on should_cache() so the rule stays in one
+    # place: caching an error would pin a transient failure (e.g. Tavily's 432
+    # quota error) in place for a full TTL.
+    if tavily_cache.should_cache(r.status_code):
+        _TAVILY_CACHE.put(key, payload, time.time())
+    return JSONResponse(payload, status_code=200, headers={"X-Cache": "MISS"})
 
 
 @app.get("/v1/tavily/usage")

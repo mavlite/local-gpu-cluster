@@ -99,6 +99,10 @@ AMD_VMID="${AMD_VMID:-151}"
 APP_SRC="$LGC_DIR/files/router-app.py"
 [[ -r "$APP_SRC" ]] || die "router-app.py not found at $APP_SRC"
 
+# Sibling module imported by app.py at runtime (WorkingDirectory=/opt/llm-router).
+CACHE_SRC="$LGC_DIR/files/tavily_cache.py"
+[[ -r "$CACHE_SRC" ]] || die "tavily_cache.py not found at $CACHE_SRC"
+
 phase_7_1_create() {
   step "7.1 — Create LXC $ROUTER_VMID ($ROUTER_HOSTNAME)"
   if lxc_exists "$ROUTER_VMID"; then
@@ -194,6 +198,8 @@ phase_7_3_deploy_app() {
   step "7.3 — Deploy router app.py"
   pct push "$ROUTER_VMID" "$APP_SRC" /opt/llm-router/app.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/app.py
+  pct push "$ROUTER_VMID" "$CACHE_SRC" /opt/llm-router/tavily_cache.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/tavily_cache.py
 }
 
 phase_7_4_systemd() {
