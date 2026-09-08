@@ -22,6 +22,19 @@ class FakeProbes:
         return self._http.get((method, url), cm.HttpResult(0, "", "fake: no route"))
 
 
+class RecordingProbes(FakeProbes):
+    """FakeProbes that remembers HTTP calls, so a test can assert which
+    endpoint was hit (billable /search vs free /usage)."""
+    def __init__(self, cmd_map=None, http_map=None):
+        super().__init__(cmd_map, http_map)
+        self.http_calls = []
+
+    def http(self, method, url, *, headers=None, json_body=None, timeout=5.0):
+        self.http_calls.append((method, url, json_body))
+        return super().http(method, url, headers=headers,
+                            json_body=json_body, timeout=timeout)
+
+
 class TestProbes(unittest.TestCase):
     def test_real_cmd_runs_echo(self):
         p = cm.Probes()
@@ -453,7 +466,7 @@ class TestFreshnessChecks(unittest.TestCase):
         "router_url": "http://r:8000",
         "router_vmid": 153,
         "router_env_path": "/etc/router.env",
-        "tavily_query": "site reachability probe",
+        "tavily_quota_warn_pct": 80,
     }
 
     def test_rag_refresh_fresh_ok(self):
@@ -725,3 +738,77 @@ class TestConfigAndCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTavilyProbe(unittest.TestCase):
+    """The Tavily probe must stay on the non-billable /usage endpoint.
+
+    Regression cover for the incident where the probe POSTed /v1/tavily/search
+    every 300s, burning ~288 credits/day and exhausting the whole monthly plan.
+    """
+
+    CFG = {
+        "router_url": "http://r:8000",
+        "router_vmid": 153,
+        "router_env_path": "/etc/router.env",
+        "tavily_quota_warn_pct": 80,
+    }
+
+    KEYCMD = ("pct exec 153 -- bash -lc "
+              'set -a; . /etc/router.env 2>/dev/null; printf %s "$ROUTER_API_KEY"')
+
+    def _probes(self, status, body):
+        return RecordingProbes(
+            cmd_map={self.KEYCMD: cm.CmdResult(0, "routerkey", "")},
+            http_map={("GET", "http://r:8000/v1/tavily/usage"):
+                      cm.HttpResult(status, body)})
+
+    @staticmethod
+    def _usage(used, limit):
+        return _json.dumps({"account": {"plan_usage": used, "plan_limit": limit}})
+
+    def test_probes_usage_endpoint_never_search(self):
+        fp = self._probes(200, self._usage(120, 1000))
+        cm.check_tavily_proxy(fp, self.CFG)
+        self.assertEqual([c[:2] for c in fp.http_calls],
+                         [("GET", "http://r:8000/v1/tavily/usage")])
+        for _, url, _ in fp.http_calls:
+            self.assertNotIn("/tavily/search", url)
+
+    def test_low_usage_ok_and_reports_pct(self):
+        out = cm.check_tavily_proxy(self._probes(200, self._usage(120, 1000)), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_OK)
+        self.assertEqual(out.value, 12.0)
+        self.assertEqual(out.unit, "%")
+
+    def test_at_threshold_warns(self):
+        out = cm.check_tavily_proxy(self._probes(200, self._usage(800, 1000)), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_WARN)
+        self.assertIn("nearly exhausted", out.suggested_action)
+
+    def test_over_limit_fails(self):
+        out = cm.check_tavily_proxy(self._probes(200, self._usage(1049, 1000)), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_FAIL)
+        self.assertIn("1049/1000", out.detail)
+        self.assertIn("upgrade", out.suggested_action)
+
+    def test_503_fails_with_key_action(self):
+        out = cm.check_tavily_proxy(self._probes(503, ""), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_FAIL)
+        self.assertIn("TAVILY_API_KEY", out.suggested_action)
+
+    def test_unparseable_body_is_ok_not_crash(self):
+        out = cm.check_tavily_proxy(self._probes(200, "<html>nope"), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_OK)
+        self.assertIn("quota not reported", out.detail)
+
+    def test_null_plan_limit_does_not_divide_by_zero(self):
+        body = _json.dumps({"account": {"plan_usage": 5, "plan_limit": None}})
+        out = cm.check_tavily_proxy(self._probes(200, body), self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_OK)
+
+    def test_missing_router_key_warns_without_http_call(self):
+        fp = RecordingProbes()  # key read fails
+        out = cm.check_tavily_proxy(fp, self.CFG)[0]
+        self.assertEqual(out.status, cm.STATUS_WARN)
+        self.assertEqual(fp.http_calls, [])

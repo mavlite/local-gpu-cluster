@@ -6,6 +6,8 @@ All upstreams live on LXC 151:
   POST /v1/completions       -> V620 chat (legacy completions / FIM passthrough)
   POST /v1/embeddings        -> V620 embedder (port 8082, --main-gpu 0, --pooling last)
   POST /v1/rerank            -> V620 reranker (port 8083, --main-gpu 1, --reranking)
+  POST /v1/tavily/search     -> Tavily search proxy (key stays server-side)
+  GET  /v1/tavily/usage      -> Tavily quota/liveness probe (NOT billed by Tavily)
   GET  /v1/models            -> aggregated list from chat + embed + rerank
   GET  /healthz              -> upstream availability probe (unauthed)
   GET  /metrics              -> Prometheus instrumentation (IP-allowlist gated)
@@ -103,6 +105,9 @@ RATE_LIMIT_TAVILY = os.environ.get("RATE_LIMIT_TAVILY", "30/minute")
 # to enable; if empty, /v1/tavily/search returns 503.
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
+# Usage/quota endpoint. Unlike /search this is NOT billed by Tavily, so it is
+# safe to poll on a timer — which is exactly what the cluster monitor does.
+TAVILY_USAGE_URL = os.environ.get("TAVILY_USAGE_URL", "https://api.tavily.com/usage")
 TAVILY_EXTRACT_URL = os.environ.get("TAVILY_EXTRACT_URL", "https://api.tavily.com/extract")
 TAVILY_CRAWL_URL = os.environ.get("TAVILY_CRAWL_URL", "https://api.tavily.com/crawl")
 TAVILY_MAP_URL = os.environ.get("TAVILY_MAP_URL", "https://api.tavily.com/map")
@@ -2094,6 +2099,59 @@ async def tavily_search(request: Request):
         # Pass Tavily's error body through but normalize to our error envelope
         # so clients get a consistent shape. Truncate to avoid log spam from
         # accidentally massive HTML error pages.
+        upstream_text = (r.text or "")[:500]
+        return JSONResponse(
+            _error_body(
+                "tavily_error",
+                f"Tavily returned {r.status_code}: {upstream_text}",
+            ),
+            status_code=r.status_code if r.status_code in (401, 403, 429) else 502,
+        )
+
+    try:
+        return JSONResponse(r.json(), status_code=200)
+    except ValueError:
+        return JSONResponse(
+            _error_body("tavily_invalid_json", r.text[:500]),
+            status_code=502,
+        )
+
+
+@app.get("/v1/tavily/usage")
+@limiter.limit(RATE_LIMIT_TAVILY)
+async def tavily_usage(request: Request):
+    """Proxy to Tavily's usage endpoint — a NON-BILLABLE liveness + quota probe.
+
+    Exists so monitoring can answer "is the Tavily leg healthy, and how much
+    plan quota is left?" without spending a credit. The cluster monitor used to
+    probe /v1/tavily/search every 300s, which billed a real search each time
+    (~288 credits/day) and silently ate the whole monthly plan; the resulting
+    432s then surfaced in the reporting page as a generic "0 results" error.
+
+    Same ROUTER_API_KEY gate and rate-limit bucket as the search route.
+    """
+    if not TAVILY_API_KEY:
+        return JSONResponse(
+            _error_body(
+                "tavily_unconfigured",
+                "TAVILY_API_KEY not set in /etc/router.env — add it and restart llm-router",
+            ),
+            status_code=503,
+        )
+
+    async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
+        try:
+            r = await c.get(
+                TAVILY_USAGE_URL,
+                headers={"Authorization": f"Bearer {TAVILY_API_KEY}"},
+            )
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return JSONResponse(
+                _error_body("tavily_unreachable", f"upstream: {type(e).__name__}"),
+                status_code=502,
+            )
+
+    if r.status_code >= 400:
         upstream_text = (r.text or "")[:500]
         return JSONResponse(
             _error_body(

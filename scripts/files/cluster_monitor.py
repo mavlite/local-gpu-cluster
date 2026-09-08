@@ -674,6 +674,22 @@ def check_lxc_ram_ceilings(probes, cfg) -> list[CheckResult]:
     return out
 
 
+def _tavily_quota(body: str) -> tuple[float | None, float | None]:
+    """Pull (plan_usage, plan_limit) out of a Tavily /usage payload.
+
+    Returns (None, None) for anything unparseable — a probe must never raise
+    just because the upstream shape drifted.
+    """
+    try:
+        acct = json.loads(body).get("account") or {}
+    except (ValueError, AttributeError):
+        return None, None
+    used, limit = acct.get("plan_usage"), acct.get("plan_limit")
+    if not isinstance(used, (int, float)) or not isinstance(limit, (int, float)):
+        return None, None
+    return float(used), float(limit)
+
+
 def check_tavily_proxy(probes, cfg) -> list[CheckResult]:
     # Read ROUTER_API_KEY at runtime from the router LXC; never persist it.
     keyres = probes.cmd([
@@ -684,18 +700,40 @@ def check_tavily_proxy(probes, cfg) -> list[CheckResult]:
     if not key:
         return [CheckResult("tavily_proxy", "freshness", STATUS_WARN,
                             "ROUTER_API_KEY unreadable; skipping Tavily probe")]
+    # MUST stay on /v1/tavily/usage, which Tavily does not bill. This probe used
+    # to POST /v1/tavily/search, spending a real credit every 300s (~288/day) —
+    # that alone consumed the entire 1000/mo plan and made the reporting page
+    # fail with a misleading "0 results" error. Never point this at /search.
     res = probes.http(
-        "POST", f"{cfg['router_url']}/v1/tavily/search",
-        headers={"Authorization": f"Bearer {key}"},
-        json_body={"query": cfg["tavily_query"], "max_results": 1})
-    if res.status == 200:
-        return [CheckResult("tavily_proxy", "freshness", STATUS_OK, "Tavily proxy 200")]
+        "GET", f"{cfg['router_url']}/v1/tavily/usage",
+        headers={"Authorization": f"Bearer {key}"})
     if res.status == 503:
         return [CheckResult("tavily_proxy", "freshness", STATUS_FAIL,
                             "Tavily 503 (key invalid or upstream down)",
                             suggested_action="check TAVILY_API_KEY in /etc/router.env")]
-    return [CheckResult("tavily_proxy", "freshness", STATUS_WARN,
-                        f"Tavily proxy HTTP {res.status or 'unreachable'}")]
+    if res.status != 200:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_WARN,
+                            f"Tavily proxy HTTP {res.status or 'unreachable'}")]
+
+    used, limit = _tavily_quota(res.body)
+    if used is None or not limit:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_OK,
+                            "Tavily proxy 200 (quota not reported)")]
+
+    pct = round(used / limit * 100.0, 1)
+    detail = f"Tavily quota {used:.0f}/{limit:.0f} ({pct}%)"
+    if pct >= 100.0:
+        return [CheckResult("tavily_proxy", "freshness", STATUS_FAIL, detail,
+                            value=pct, unit="%",
+                            suggested_action="plan exhausted — searches return 432; "
+                                             "upgrade the Tavily plan or wait for reset")]
+    if pct >= float(cfg.get("tavily_quota_warn_pct", 80)):
+        return [CheckResult("tavily_proxy", "freshness", STATUS_WARN, detail,
+                            value=pct, unit="%",
+                            suggested_action="Tavily quota nearly exhausted — "
+                                             "searches will start failing with 432")]
+    return [CheckResult("tavily_proxy", "freshness", STATUS_OK, detail,
+                        value=pct, unit="%")]
 
 
 REGISTRY.extend([
@@ -941,7 +979,7 @@ DEFAULT_CONFIG: dict = {
     "router_vmid": 153,
     "gpu_vmid": 151,
     "router_env_path": "/etc/router.env",
-    "tavily_query": "cluster monitor reachability probe",
+    "tavily_quota_warn_pct": 80,
     # server
     "bind_host": "127.0.0.1",
     "bind_port": 8888,
