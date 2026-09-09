@@ -6,3 +6,9 @@ __pycache__/
 # Local-only operator notes — contain session state / customer data, not for publishing
 SESSION_HANDOFF.md
 weekly_customer_adoption_review.html
+
+# Operator config — holds live credentials (ALLM_API_KEY, TAVILY_API_KEY, ...).
+# Untracked but NOT ignored until now, so a single `git add -A` on the host
+# checkout would have published them. Generated per-host; never commit it.
+config.env
+scripts/config.env
