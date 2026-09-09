@@ -21,7 +21,7 @@ retuning, updates, hardware changes).
 | 10    | `57-configure-anythingllm.sh` | Create + tune RAG workspaces via REST API (needs `ALLM_API_KEY`) |
 | 10.5  | `58-rag-refresh-timer.sh` | Systemd timer (daily 03:15 UTC by default) running `scripts/rag/refresh.py` on the PVE host via `/opt/vcf-scraper-venv`. Emits Prometheus textfile metrics to `/var/lib/rag-refresh/metrics.prom` after each run. |
 | 10.7  | `58-mcp-sdg.sh`         | `mcp-sdg.service` in LXC 155 (port 3004, SSE) — exposes the `sdg-documentation` + `vcf-reference` AnythingLLM workspaces as `query_*`/`search_*` MCP tool pairs. Python venv + mcp SDK (`mcp>=1.2,<2` — see note below) |
-| 10.8  | `59-llamacpp-restart-timer.sh` | Systemd timer in LXC 151 that periodically restarts `llamacpp-chat` (keeps weights hot / recovers a wedged unit) |
+| 10.8  | `59-llamacpp-restart-timer.sh` | Idle-gated proactive restart of `llamacpp-chat` in LXC 151. Hourly timer + [`files/chat-restart-if-idle.sh`](./files/chat-restart-if-idle.sh), which restarts only in a genuine lull (never mid-generation) and at most once per 12 h. Also sets `TimeoutStopSec` on the chat unit. See [day-2-ops § 3.11](../day-2-ops.md#-311-chat-restarts-itself-proactive-restart-timer) |
 | 11    | `60-verify.sh`          | Appendix C smoke tests                                     |
 | 11.5  | `61-lxc-memory-vault.sh` | Memory Vault LXC 156, Docker, ZFS dataset, docker compose stack with override config |
 | 12    | `62-memory-vault-bridge.sh` | MCP **Streamable HTTP** bridge in LXC 156, mounted at `/mcp` on port 3005. Python venv + mcp SDK (`mcp>=1.2,<2` — see note below) + uvicorn + starlette, systemd unit. Uses the SDK's low-level `Server` + `StreamableHTTPSessionManager`, **not** FastMCP |
