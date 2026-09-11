@@ -189,6 +189,7 @@ A healthy cluster shows:
 | `403` from router | Bearer auth — wrong / missing key | [§ 3.8](#-38-client-bearer-auth-failures) |
 | Log says `no implementations specified for speculative decoding` | **Expected, not a bug** | [§ 3.9](#-39-no-implementations-specified-for-speculative-decoding) |
 | Chat restarted itself / `service_degraded` with no obvious cause | Check the proactive restart timer's last trigger | [§ 3.11](#-311-chat-restarts-itself-proactive-restart-timer) |
+| GPU vanished / `device lost from bus` / host wedged | Thermal — check junction, memory and junction-edge delta | [§ 3.12](#-312-gpu-drops-off-the-pcie-bus-thermal) |
 
 ### § 3.1 Chat unit won't start
 
@@ -454,6 +455,69 @@ cheap now that it is gated. Revisit if the profile changes.
 `/etc/systemd/system/llamacpp-chat.service.d/10-stop-timeout.conf` (a drop-in, so it
 survives the unit rewrites `swap-chat-model.sh` performs). Without it the unit inherits the
 90 s default that turned a 16 s restart into a 107 s outage.
+
+### § 3.12 GPU drops off the PCIe bus (thermal)
+
+**Symptom:** `amdgpu 0000:07:00.0: device lost from bus!` repeating in the host
+journal, followed minutes later by the host becoming unresponsive. Reads like a
+PCIe or power fault. It is thermal.
+
+**What happened on 2026-09-09:** sustained inference drove both V620s to their
+ceiling with fans already pinned at 255 (the bridge curve saturates at >= 72C, so
+it had no headroom left). GPU 0 shed heat when its share of work ended; **GPU 1
+held 99-100C junction for 17 minutes**, then dropped off the bus at 17:50:19.
+The host died at 17:57:27 and rebooted.
+
+**Why the kernel log is no help:** these cards are firmware-locked with no
+overdrive or thermal-reporting path, so `journalctl | grep -i thermal` comes back
+**empty**. The only temperature record is the cluster monitor's own sampling.
+
+```bash
+# Temperature history around an incident (ts is epoch UTC)
+sqlite3 /var/lib/cluster-monitor/state.db \
+  "SELECT id, datetime(ts,'unixepoch'), value FROM samples
+   WHERE id LIKE 'gpu_temp%' AND ts > strftime('%s','now','-2 hours') ORDER BY ts;"
+```
+
+`gpu_temp_N` simply **stops appearing** at the moment the card drops — that gap is
+the timestamp of the failure.
+
+**Note the die was in spec.** Navi 21 throttles at 110C; GPU 1 died at ~100C. A
+die within spec should not fall off the bus, which points at memory or VRM rather
+than the core — hence the memory sensor below.
+
+**The metrics, and what each one tells you** (added 2026-09-11):
+
+| Metric | Thresholds | Means |
+|---|---|---|
+| `gpu_temp_N` | warn 95, fail 100 | Junction (die). Fail was 105 and never fired for the failure above. |
+| `gpu_temp_mem_N` | warn 90, fail 98 | GDDR6. Limits **below** the die, so this alarms first if memory is the real constraint. |
+| `gpu_temp_edge_N` | — | Board edge. Recorded so the delta below can be computed. |
+| `gpu_temp_delta_N` | warn 30, fail 45 | Junction minus edge. **Thermal-interface health.** |
+
+**Reading the delta.** Airflow problems raise junction and edge *together*, so the
+delta stays flat. A *widening* delta under load means heat is not crossing from
+die to heatsink — the thermal-paste pump-out signature. That is the signal to
+repaste (PTM7950 is phase-change and does not pump out). Thresholds are
+**provisional**: there was no load baseline for this pair when they were set, so
+they are deliberately wide. Tighten them once `gpu_temp_delta_N` has history under
+sustained load.
+
+**Card asymmetry is the leading indicator.** Over 24 h under load GPU 1 ran a mean
++4.5C hotter than GPU 0 with a **+28C peak**, and the divergence opened ~17 minutes
+before the failure. A downstream card breathing the upstream card's exhaust
+normally runs 6-11C hotter; a delta far beyond that is a per-card problem
+(interface, blower, or blocked fins), not chassis airflow.
+
+**Do not use clock clamping as a thermal brake.**
+`power_dpm_force_performance_level=low` selects the 0 MHz sleep state, not the
+500 MHz DPM level. With the model tensor-split across both cards that stalls the
+pipeline, and llama.cpp does **not** recover when `auto` is restored — the unit
+still reports `active (running)` while every request logs `srv stop: cancel task`.
+Only `systemctl restart llamacpp-chat` clears it (confirmed 2026-09-11). Power and
+voltage are locked (`power1_cap_min == max == 250 W`, `pp_od_clk_voltage` absent),
+so there is no electrical lever either. Reduce heat by admission control — stop
+accepting new requests and let the in-flight one drain — not by touching clocks.
 
 ## § 4. Model management
 

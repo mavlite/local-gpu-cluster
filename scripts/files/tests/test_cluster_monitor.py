@@ -329,8 +329,25 @@ class TestMetricsParsers(unittest.TestCase):
             "card1": {"Temperature (Sensor junction) (C)": "60.0"},
         })
         rows = dict(cm.parse_rocm_temp_json(text))
-        self.assertEqual(rows[0], 95.0)
-        self.assertEqual(rows[1], 60.0)
+        self.assertEqual(rows[0]["junction"], 95.0)
+        self.assertEqual(rows[1]["junction"], 60.0)
+
+    def test_parse_rocm_temp_json_all_three_sensors(self):
+        text = _json.dumps({"card0": {
+            "Temperature (Sensor edge) (C)": "70.0",
+            "Temperature (Sensor junction) (C)": "88.0",
+            "Temperature (Sensor memory) (C)": "94.0"}})
+        rows = dict(cm.parse_rocm_temp_json(text))
+        self.assertEqual(rows[0], {"edge": 70.0, "junction": 88.0, "memory": 94.0})
+
+    def test_parse_rocm_temp_json_memory_not_confused_with_vram(self):
+        """'memory' must match the SENSOR, not a VRAM byte counter."""
+        text = _json.dumps({"card0": {
+            "VRAM Total Memory (B)": "34359738368",
+            "Temperature (Sensor junction) (C)": "50.0",
+            "Temperature (Sensor memory) (C)": "55.0"}})
+        rows = dict(cm.parse_rocm_temp_json(text))
+        self.assertEqual(rows[0]["memory"], 55.0)
 
     def test_parse_meminfo(self):
         text = "MemTotal:       65809920 kB\nMemAvailable:    6580992 kB\n"
@@ -353,7 +370,9 @@ class TestMetricsParsers(unittest.TestCase):
 class TestMetricsChecks(unittest.TestCase):
     CFG = {
         "gpu_vram_warn_pct": 90, "gpu_vram_fail_pct": 98,
-        "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
+        "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 100,
+        "gpu_mem_temp_warn_c": 90, "gpu_mem_temp_fail_c": 98,
+        "gpu_temp_delta_warn_c": 30, "gpu_temp_delta_fail_c": 45,
         "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
         "lxc_ids": [151],
         "gpu_vmid": 151,
@@ -430,6 +449,9 @@ class TestMetricsChecks(unittest.TestCase):
         self.assertEqual(tres["gpu_temp_0"].value, 32.0)   # junction, not edge(31) or memory(32 coincid.)
         self.assertEqual(tres["gpu_temp_1"].value, 29.0)   # junction, not edge(28)
         self.assertEqual(tres["gpu_temp_0"].status, cm.STATUS_OK)
+        self.assertEqual(tres["gpu_temp_edge_0"].value, 31.0)
+        self.assertEqual(tres["gpu_temp_mem_1"].value, 30.0)
+        self.assertEqual(tres["gpu_temp_delta_0"].value, 1.0)   # idle: contact looks fine
 
 
     def test_gpu_checks_fan_out_on_failure(self):
@@ -438,7 +460,72 @@ class TestMetricsChecks(unittest.TestCase):
         vram = {r.id for r in cm.check_gpu_vram(fp, self.CFG)}
         temp = {r.id for r in cm.check_gpu_temp(fp, self.CFG)}
         self.assertEqual(vram, {"gpu_vram_0", "gpu_vram_1"})
-        self.assertEqual(temp, {"gpu_temp_0", "gpu_temp_1"})
+        self.assertEqual(temp, {
+            "gpu_temp_0", "gpu_temp_1",
+            "gpu_temp_edge_0", "gpu_temp_edge_1",
+            "gpu_temp_mem_0", "gpu_temp_mem_1",
+            "gpu_temp_delta_0", "gpu_temp_delta_1"})
+
+    # --- sensors added after the 2026-09-09 thermal failure -----------------
+    # GPU1 sat at 99-102C junction and dropped off the PCIe bus BELOW Navi 21's
+    # 110C throttle point, so the die was not the limiting part. Record memory
+    # and edge too, and trend junction-edge as a thermal-interface health signal.
+
+    def test_gpu_temp_emits_edge_memory_and_delta(self):
+        text = _json.dumps({"card0": {
+            "Temperature (Sensor edge) (C)": "70.0",
+            "Temperature (Sensor junction) (C)": "88.0",
+            "Temperature (Sensor memory) (C)": "80.0"}})
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        res = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(res["gpu_temp_0"].value, 88.0)         # junction, id unchanged
+        self.assertEqual(res["gpu_temp_edge_0"].value, 70.0)
+        self.assertEqual(res["gpu_temp_mem_0"].value, 80.0)
+        self.assertEqual(res["gpu_temp_delta_0"].value, 18.0)   # junction - edge
+        for r in res.values():
+            self.assertEqual(r.unit, "C")
+
+    def test_gpu_temp_junction_fail_threshold_catches_real_failure(self):
+        """102C junction killed a card on 2026-09-09; the old 105C fail missed it."""
+        text = _json.dumps({"card0": {"Temperature (Sensor junction) (C)": "102"}})
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        res = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(res["gpu_temp_0"].status, cm.STATUS_FAIL)
+
+    def test_gpu_memory_sensor_fails_before_junction_would(self):
+        """GDDR6 limits below the die, so memory must alarm on its own scale."""
+        text = _json.dumps({"card0": {
+            "Temperature (Sensor edge) (C)": "70.0",
+            "Temperature (Sensor junction) (C)": "85.0",   # OK on its scale
+            "Temperature (Sensor memory) (C)": "99.0"}})   # not OK on its own
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        res = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(res["gpu_temp_0"].status, cm.STATUS_OK)
+        self.assertEqual(res["gpu_temp_mem_0"].status, cm.STATUS_FAIL)
+
+    def test_gpu_temp_delta_warns_on_thermal_interface_degradation(self):
+        """A widening junction-edge gap is the paste pump-out signature."""
+        text = _json.dumps({"card0": {
+            "Temperature (Sensor edge) (C)": "60.0",
+            "Temperature (Sensor junction) (C)": "95.0"}})   # delta 35
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        res = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertEqual(res["gpu_temp_delta_0"].value, 35.0)
+        self.assertEqual(res["gpu_temp_delta_0"].status, cm.STATUS_WARN)
+
+    def test_gpu_temp_delta_absent_when_edge_missing(self):
+        """Older rocm-smi may not report edge; emit junction only, no bogus delta."""
+        text = _json.dumps({"card0": {"Temperature (Sensor junction) (C)": "50.0"}})
+        fp = FakeProbes(cmd_map={
+            "pct exec 151 -- rocm-smi --showtemp --json": cm.CmdResult(0, text, "")})
+        res = {r.id: r for r in cm.check_gpu_temp(fp, self.CFG)}
+        self.assertIn("gpu_temp_0", res)
+        self.assertNotIn("gpu_temp_delta_0", res)
+        self.assertNotIn("gpu_temp_edge_0", res)
 
 class TestPromParser(unittest.TestCase):
     def test_parse_prom_labels_and_values(self):
