@@ -363,19 +363,43 @@ def parse_rocm_vram_json(text: str) -> list[tuple[int, float, float]]:
     return rows
 
 
-def parse_rocm_temp_json(text: str) -> list[tuple[int, float]]:
+def parse_rocm_temp_json(text: str) -> list[tuple[int, dict[str, float]]]:
+    """Return every temperature sensor rocm-smi reports, per card.
+
+    Was junction-only. In the 2026-09-09 failure GPU1 dropped off the PCIe bus at
+    99-102C junction -- BELOW Navi 21's 110C throttle point -- so the die was not
+    the limiting component. Memory (GDDR6 limits lower than the die) and edge are
+    now recorded too, and junction-edge is the thermal-interface health signal.
+
+    Needles are "Sensor edge"/"Sensor memory" rather than "edge"/"memory":
+    _rocm_find is a case-insensitive substring match, and a bare "memory" also
+    matches "VRAM Total Memory (B)" if a caller passes combined rocm-smi output.
+    """
     data = json.loads(text)
-    rows: list[tuple[int, float]] = []
+    rows: list[tuple[int, dict[str, float]]] = []
     for key, card in sorted(data.items()):
         if not key.startswith("card") or not isinstance(card, dict):
             continue
-        t = _rocm_find(card, "junction")
-        if t is None:
-            t = _rocm_find(card, "Temperature")
-        if t is None:
+        sensors: dict[str, float] = {}
+        junction = _rocm_find(card, "Sensor junction")
+        if junction is None:
+            junction = _rocm_find(card, "Temperature")
+        for name, needle in (("edge", "Sensor edge"), ("memory", "Sensor memory")):
+            raw = _rocm_find(card, needle)
+            if raw is not None:
+                try:
+                    sensors[name] = float(raw)
+                except (TypeError, ValueError):
+                    pass
+        if junction is not None:
+            try:
+                sensors["junction"] = float(junction)
+            except (TypeError, ValueError):
+                pass
+        if not sensors:
             continue
         idx = int(key.replace("card", "") or 0)
-        rows.append((idx, float(t)))
+        rows.append((idx, sensors))
     return rows
 
 
@@ -501,16 +525,46 @@ def check_gpu_vram(probes, cfg) -> list[CheckResult]:
 
 def check_gpu_temp(probes, cfg) -> list[CheckResult]:
     res = probes.cmd(["pct", "exec", str(cfg["gpu_vmid"]), "--", "rocm-smi", "--showtemp", "--json"])
-    card_ids = [f"gpu_temp_{i}" for i in range(cfg.get("gpu_card_count", 2))]
+    n = cfg.get("gpu_card_count", 2)
+    card_ids = [f"{base}{i}"
+                for base in ("gpu_temp_", "gpu_temp_edge_", "gpu_temp_mem_", "gpu_temp_delta_")
+                for i in range(n)]
     if res.rc != 0:
         return _fanout_failure("gpu_temp", "metrics", card_ids,
                                f"rocm-smi failed: {res.stderr.strip() or res.rc}")
     out: list[CheckResult] = []
-    for idx, temp in parse_rocm_temp_json(res.stdout):
-        out.append(CheckResult(
-            f"gpu_temp_{idx}", "metrics",
-            status_for(temp, cfg["gpu_temp_warn_c"], cfg["gpu_temp_fail_c"]),
-            f"card {idx} junction {temp:.0f}C", value=temp, unit="C"))
+    for idx, sensors in parse_rocm_temp_json(res.stdout):
+        junction = sensors.get("junction")
+        edge = sensors.get("edge")
+        memory = sensors.get("memory")
+        if junction is not None:
+            hot = junction >= cfg["gpu_temp_warn_c"]
+            out.append(CheckResult(
+                f"gpu_temp_{idx}", "metrics",
+                status_for(junction, cfg["gpu_temp_warn_c"], cfg["gpu_temp_fail_c"]),
+                f"card {idx} junction {junction:.0f}C", value=junction, unit="C",
+                suggested_action="check blower and airflow on this card" if hot else None))
+        if edge is not None:
+            out.append(CheckResult(
+                f"gpu_temp_edge_{idx}", "metrics", STATUS_OK,
+                f"card {idx} edge {edge:.0f}C", value=edge, unit="C"))
+        if memory is not None:
+            hot = memory >= cfg["gpu_mem_temp_warn_c"]
+            out.append(CheckResult(
+                f"gpu_temp_mem_{idx}", "metrics",
+                status_for(memory, cfg["gpu_mem_temp_warn_c"], cfg["gpu_mem_temp_fail_c"]),
+                f"card {idx} memory {memory:.0f}C", value=memory, unit="C",
+                suggested_action="GDDR6 limits below the die; memory may be what drops the card"
+                if hot else None))
+        if junction is not None and edge is not None:
+            delta = junction - edge
+            wide = delta >= cfg["gpu_temp_delta_warn_c"]
+            out.append(CheckResult(
+                f"gpu_temp_delta_{idx}", "metrics",
+                status_for(delta, cfg["gpu_temp_delta_warn_c"], cfg["gpu_temp_delta_fail_c"]),
+                f"card {idx} junction-edge {delta:.0f}C", value=delta, unit="C",
+                suggested_action="widening junction-edge gap is the paste pump-out signature"
+                if wide else None))
     return out or _fanout_failure("gpu_temp", "metrics", card_ids,
                                   "no temps parsed from rocm-smi")
 
@@ -1005,7 +1059,20 @@ DEFAULT_CONFIG: dict = {
     # growth toward OOM. Revisit if the default profile changes: `coder` sits
     # at 83%, so this is specifically sized for the dense qwen3.8 footprint.
     "gpu_vram_warn_pct": 93, "gpu_vram_fail_pct": 98,
-    "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 105,
+    # Junction fail lowered 105 -> 100 on 2026-09-11. On 2026-09-09 GPU1 held
+    # 99-102C junction for 17 minutes and then dropped off the PCIe bus; the old
+    # 105C fail never fired for a failure that took the whole host down. Navi 21
+    # throttles at 110C, so the die was still nominally in spec -- which is why
+    # memory gets its own, lower scale below.
+    "gpu_temp_warn_c": 95, "gpu_temp_fail_c": 100,
+    # GDDR6 limits below the die. Sized under the junction thresholds so this row
+    # alarms first if memory is the component actually hitting its limit.
+    "gpu_mem_temp_warn_c": 90, "gpu_mem_temp_fail_c": 98,
+    # junction-edge spread: thermal-interface health. A widening gap under load is
+    # thermal-paste pump-out. PROVISIONAL -- there is no load baseline for this
+    # pair yet, so they are set wide to avoid false alarms. Tighten once
+    # gpu_temp_delta_N has history under sustained load.
+    "gpu_temp_delta_warn_c": 30, "gpu_temp_delta_fail_c": 45,
     "host_mem_warn_pct": 10, "host_mem_fail_pct": 3,
     "rag_metrics_path": "/var/lib/rag-refresh/metrics.prom",
     "rag_stale_after_s": 93600,
