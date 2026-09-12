@@ -86,7 +86,31 @@ OUT DROP -dest ${TESTER_FLEET_CIDR} # production fleet VPN
 OUT DROP -dest 169.254.0.0/16 # link-local and cloud metadata
 EOF
 
-step "5 — install the DNAT unit"
+step "5 — reload the firewall and verify enforcement is genuinely live"
+# Confinement must be PROVEN before the guest is made reachable in step 6.
+# `compile` is syntax-only and `restart` succeeds even if the datacenter
+# switch (cluster.fw) is off — neither proves per-guest filtering is active.
+# Ground truth is the same pair 71-vm-se-qa-firewall.sh uses: the datacenter
+# firewall's own status, and the fwbr* filter bridge for this guest's NIC.
+pve-firewall compile >/dev/null || die "pve-firewall failed to compile the new policy"
+pve-firewall restart
+sleep 2
+pve-firewall status 2>&1 | grep -q "enabled/running" \
+  || die "pve-firewall is not enabled/running after restart — the datacenter switch (cluster.fw) is likely off, so VM $TESTER_VMID would be completely unconfined"
+ok "pve-firewall enabled/running"
+
+# The filter bridge only exists while the guest is running, and VM 172 may
+# legitimately be stopped (or not yet created) at this point — so absence is
+# a warning, never fatal. Mirrors 71-'s handling exactly.
+if ip -br link show type bridge 2>/dev/null | grep -q "fwbr${TESTER_VMID}i"; then
+  ok "fwbr${TESTER_VMID}i0 present — VM $TESTER_VMID is being filtered"
+else
+  warn "no fwbr${TESTER_VMID}i* interface — expected if VM $TESTER_VMID is stopped; re-check once it is running"
+fi
+stray="$(ip -br link show type bridge 2>/dev/null | awk '{print $1}' | grep -E '^fwbr' | grep -v "^fwbr${TESTER_VMID}i" | grep -v '^fwbr170i' || true)"
+[[ -z "$stray" ]] || die "unexpected filter bridges present: $stray — something other than VM 170 or VM $TESTER_VMID is being filtered"
+
+step "6 — install the DNAT unit (only now that confinement is confirmed)"
 install -m 0755 "$LGC_DIR/files/tester-vm-dnat.sh" /usr/local/sbin/tester-vm-dnat.sh
 write_file_if_changed /etc/systemd/system/tester-vm-dnat.service 0644 <<EOF
 [Unit]
@@ -107,14 +131,12 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now tester-vm-dnat.service
-ok "DNAT ${TESTER_SSH_PORT} -> ${TESTER_GUEST_IP}:22 installed and enabled"
-
-step "6 — reload the firewall and verify"
-pve-firewall compile >/dev/null || die "pve-firewall failed to compile the new policy"
-pve-firewall restart
 iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport "$TESTER_SSH_PORT" \
   -j DNAT --to-destination "${TESTER_GUEST_IP}:22" \
   || die "DNAT rule is not present after enabling the unit"
+ok "DNAT ${TESTER_SSH_PORT} -> ${TESTER_GUEST_IP}:22 installed and enabled"
+
+step "7 — final check: host services unaffected"
 curl -sf -o /dev/null --max-time 5 "$TESTER_HOST_PROBE_URL" \
   || die "host service at $TESTER_HOST_PROBE_URL stopped answering — back this out"
 ok "policy active, DNAT present, host services unaffected"
