@@ -105,13 +105,24 @@ step "4 — import and attach the disk"
 if qm config "$TESTER_VMID" | grep -q '^scsi0:'; then
   skip "scsi0 already attached"
 else
-  qm disk import "$TESTER_VMID" "$img" "$TESTER_STORAGE" >/dev/null \
-    || die "qm disk import failed"
-  # Read the volid back rather than assuming it is vm-<id>-disk-0. That holds
-  # for an empty VM, but if any volume already exists the guess silently
-  # attaches the wrong disk.
+  # Re-entrant: a prior run may have imported the disk (leaving it as an
+  # unused<N> volume) and then died before scsi0 was set -- on the attach,
+  # the resize, or the boot-order command below. Adopt that volume instead
+  # of importing a second time: tank-lxc zvols are thick (full
+  # refreservation), so a second import on every retry permanently leaks
+  # another 200 GB from a pool the inference cluster shares.
   volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^unused[0-9]+:/{print $2; exit}')"
-  [[ -n "$volid" ]] || die "imported disk did not appear as an unused volume on VM $TESTER_VMID"
+  if [[ -n "$volid" ]]; then
+    skip "adopting existing unused volume $volid instead of re-importing"
+  else
+    qm disk import "$TESTER_VMID" "$img" "$TESTER_STORAGE" >/dev/null \
+      || die "qm disk import failed"
+    # Read the volid back rather than assuming it is vm-<id>-disk-0. That holds
+    # for an empty VM, but if any volume already exists the guess silently
+    # attaches the wrong disk.
+    volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^unused[0-9]+:/{print $2; exit}')"
+    [[ -n "$volid" ]] || die "imported disk did not appear as an unused volume on VM $TESTER_VMID"
+  fi
   qm set "$TESTER_VMID" \
     --scsi0 "${volid},discard=on,iothread=1,ssd=1" >/dev/null \
     || die "failed to attach imported disk $volid"
