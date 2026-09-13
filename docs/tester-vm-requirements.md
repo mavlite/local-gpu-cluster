@@ -230,8 +230,9 @@ Stated rather than glossed, in the spirit of `71-vm-se-qa-firewall.sh`'s own IPv
 - **The policy is IPv4-only.** Acceptable only because host IPv6 forwarding is off; `73`
   asserts this. If IPv6 is ever enabled on the host, this policy is incomplete.
 - **`refreservation` on thick zvols is inferred** from `tank-lxc` lacking a `sparse` flag plus
-  documented PVE behaviour. There are no zvols on `tank` yet to confirm against, so `73`
-  verifies it at build time rather than trusting it.
+  documented PVE behaviour. There are no zvols on `tank` yet to confirm against, so `72`
+  verifies it at build time, immediately after the disk is attached and resized, rather than
+  trusting it.
 - **The 64 GB figure is a snapshot.** It assumes the current running set. Re-derive it if the
   cluster's composition changes.
 

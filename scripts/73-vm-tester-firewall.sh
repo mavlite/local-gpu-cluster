@@ -31,29 +31,69 @@ load_config
 
 TESTER_VMID="${TESTER_VMID:-172}"
 TESTER_SSH_PORT="${TESTER_SSH_PORT:-2222}"
-TESTER_GUEST_IP="${TESTER_GUEST_IP:-10.78.0.10}"
+# Same default as 72-vm-tester.sh's TESTER_IP, so an override there is picked
+# up here too instead of silently DNATing to a stale address.
+TESTER_IP="${TESTER_IP:-10.78.0.10/24}"
+TESTER_GUEST_IP="${TESTER_GUEST_IP:-${TESTER_IP%%/*}}"
 TESTER_LAN_CIDR="${TESTER_LAN_CIDR:-192.168.6.0/24}"
 TESTER_GW="${TESTER_GW:-10.78.0.254}"
 TESTER_SIBLING_CIDR="${TESTER_SIBLING_CIDR:-10.77.0.0/24}"
 TESTER_FLEET_CIDR="${TESTER_FLEET_CIDR:-10.60.0.0/16}"
+# Spec §8: the guest must not be L2-adjacent to the LAN. Same default as
+# 72-vm-tester.sh's TESTER_BRIDGE — asserted below, not just assumed.
+TESTER_BRIDGE="${TESTER_BRIDGE:-sdxguest}"
+# The host-side interface the DNAT and the IPv6-forwarding check apply to.
+TESTER_UPLINK="${TESTER_UPLINK:-vmbr0}"
 # Probed after the change to prove host services still answer.
 TESTER_HOST_PROBE_URL="${TESTER_HOST_PROBE_URL:-http://127.0.0.1:8888/}"
 
-require_cmd pve-firewall iptables systemctl
+require_cmd pve-firewall iptables systemctl qm
+
+# If we die after the DNAT is installed, the port stays forwarded with no
+# guidance -- print a rollback recipe instead of leaving a silent exposure.
+# ERR fires first (see lib/common.sh) and this fires on any exit, including
+# the explicit `exit 1` inside die().
+dnat_installed=0
+rollback_hint() {
+  local status=$?
+  if [[ $status -ne 0 && $dnat_installed -eq 1 ]]; then
+    cat >&2 <<EOF
+
+FAILED after the DNAT was already installed — port ${TESTER_SSH_PORT} may
+still be forwarded to ${TESTER_GUEST_IP}:22. Roll back with:
+  systemctl disable --now tester-vm-dnat.service
+  rm -f /etc/systemd/system/tester-vm-dnat.service /usr/local/sbin/tester-vm-dnat.sh
+  systemctl daemon-reload
+  rm -f /etc/pve/firewall/${TESTER_VMID}.fw
+  pve-firewall restart
+EOF
+  fi
+}
+trap rollback_hint EXIT
 
 step "1 — preflight"
 [[ -f "/etc/pve/qemu-server/${TESTER_VMID}.conf" ]] \
   || die "VM $TESTER_VMID does not exist — run 72-vm-tester.sh first."
-grep -qE '^net[0-9]+:.*firewall=1' "/etc/pve/qemu-server/${TESTER_VMID}.conf" \
+nic_line="$(grep -E '^net[0-9]+:.*firewall=1' "/etc/pve/qemu-server/${TESTER_VMID}.conf" | head -1)"
+[[ -n "$nic_line" ]] \
   || die "VM $TESTER_VMID has no NIC with firewall=1 — the policy below would never apply."
-ok "VM $TESTER_VMID exists and has a filtered NIC"
+echo "$nic_line" | grep -q "bridge=${TESTER_BRIDGE}" \
+  || die "VM $TESTER_VMID's filtered NIC is not on bridge=${TESTER_BRIDGE} (spec §8: 'do not move this guest to vmbr0' -- it must have no L2 path to the LAN): $nic_line"
+ok "VM $TESTER_VMID exists and has a filtered NIC on bridge=${TESTER_BRIDGE}"
 
 step "2 — assert IPv6 forwarding is off"
-# The policy is IPv4-only. If the host ever routes v6, this policy is incomplete
-# and the guest could reach the LAN over it.
-[[ "$(sysctl -n net.ipv6.conf.all.forwarding)" == "0" ]] \
-  || die "net.ipv6.conf.all.forwarding is not 0 — this IPv4-only policy is incomplete. Stop."
-ok "IPv6 forwarding is off"
+# The policy is IPv4-only. Checking net.ipv6.conf.all.forwarding alone is not
+# enough: Linux still honours a per-interface conf.<if>.forwarding=1 even when
+# the global knob is 0. Assert the "all" default plus the two interfaces that
+# actually carry this guest's traffic -- the SDN bridge it sits on and the
+# uplink the DNAT traverses.
+for ifc in all "$TESTER_BRIDGE" "$TESTER_UPLINK"; do
+  path="/proc/sys/net/ipv6/conf/${ifc}/forwarding"
+  [[ -r "$path" ]] || continue
+  [[ "$(cat "$path")" == "0" ]] \
+    || die "net.ipv6.conf.${ifc}.forwarding is not 0 — this IPv4-only policy is incomplete. Stop."
+done
+ok "IPv6 forwarding is off (all, ${TESTER_BRIDGE}, ${TESTER_UPLINK})"
 
 step "3 — blast-radius guard"
 # The datacenter switch filters only NICs that opt in with firewall=1. VM 170
@@ -99,11 +139,17 @@ pve-firewall status 2>&1 | grep -q "enabled/running" \
   || die "pve-firewall is not enabled/running after restart — the datacenter switch (cluster.fw) is likely off, so VM $TESTER_VMID would be completely unconfined"
 ok "pve-firewall enabled/running"
 
-# The filter bridge only exists while the guest is running, and VM 172 may
-# legitimately be stopped (or not yet created) at this point — so absence is
-# a warning, never fatal. Mirrors 71-'s handling exactly.
+# The filter bridge only exists while the guest is running. If VM 172 is
+# stopped (or not yet created), absence is expected and only a warning --
+# mirrors 71-'s handling exactly. But if the guest IS running, absence means
+# its NIC is genuinely unfiltered right now (the filter bridge is created at
+# NIC attach, not at config write -- e.g. `firewall=1` was added to a running
+# VM's NIC after the fact) and step 6 is about to make that unfiltered guest
+# reachable from the internet. That is never acceptable, so it is fatal.
 if ip -br link show type bridge 2>/dev/null | grep -q "fwbr${TESTER_VMID}i"; then
   ok "fwbr${TESTER_VMID}i0 present — VM $TESTER_VMID is being filtered"
+elif [[ "$(qm status "$TESTER_VMID" 2>/dev/null | awk '{print $2}')" == "running" ]]; then
+  die "VM $TESTER_VMID is running but no fwbr${TESTER_VMID}i* interface exists -- its NIC is NOT being filtered. Exposing it via the DNAT in step 6 would be unsafe. Restart the VM (or re-attach the NIC) so the filter bridge is created, then re-run this script."
 else
   warn "no fwbr${TESTER_VMID}i* interface — expected if VM $TESTER_VMID is stopped; re-check once it is running"
 fi
@@ -123,6 +169,7 @@ Type=oneshot
 RemainAfterExit=yes
 Environment=TESTER_SSH_PORT=${TESTER_SSH_PORT}
 Environment=TESTER_DEST=${TESTER_GUEST_IP}:22
+Environment=TESTER_UPLINK=${TESTER_UPLINK}
 ExecStart=/usr/local/sbin/tester-vm-dnat.sh add
 ExecStop=/usr/local/sbin/tester-vm-dnat.sh del
 
@@ -130,8 +177,14 @@ ExecStop=/usr/local/sbin/tester-vm-dnat.sh del
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now tester-vm-dnat.service
-iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport "$TESTER_SSH_PORT" \
+systemctl enable tester-vm-dnat.service
+# `enable --now` is a no-op if the unit is already active, so a changed port
+# or guest IP would update the unit file but leave the OLD rule installed.
+# `restart` re-runs ExecStop (del the old rule, if any) then ExecStart (add
+# the current one) every time, active or not.
+systemctl restart tester-vm-dnat.service
+dnat_installed=1
+iptables -t nat -C PREROUTING -i "$TESTER_UPLINK" -p tcp --dport "$TESTER_SSH_PORT" \
   -j DNAT --to-destination "${TESTER_GUEST_IP}:22" \
   || die "DNAT rule is not present after enabling the unit"
 ok "DNAT ${TESTER_SSH_PORT} -> ${TESTER_GUEST_IP}:22 installed and enabled"

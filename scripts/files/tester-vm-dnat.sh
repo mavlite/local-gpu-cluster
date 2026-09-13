@@ -17,6 +17,16 @@ rule=(PREROUTING -i "$UPLINK" -p tcp --dport "$PORT" -j DNAT --to-destination "$
 
 case "${1:-}" in
   add) iptables -t nat -C "${rule[@]}" 2>/dev/null || iptables -t nat -A "${rule[@]}" ;;
-  del) iptables -t nat -C "${rule[@]}" 2>/dev/null && iptables -t nat -D "${rule[@]}" || true ;;
+  del)
+    # This is the rollback path: a silent failure here means the exposure
+    # does not actually close. Only "the rule was already gone" is quiet --
+    # a real -D failure (lock contention, permissions, ...) must be loud.
+    if iptables -t nat -C "${rule[@]}" 2>/dev/null; then
+      iptables -t nat -D "${rule[@]}" || {
+        echo "tester-vm-dnat: FAILED to delete DNAT rule -- port ${PORT} may still be forwarded to ${DEST}" >&2
+        exit 1
+      }
+    fi
+    ;;
   *)   echo "usage: $0 add|del" >&2; exit 2 ;;
 esac

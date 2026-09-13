@@ -132,7 +132,32 @@ else
   ok "disk imported, resized to ${TESTER_DISK_GB}G, boot order set"
 fi
 
-step "5 — cloud-init"
+step "5 — verify the disk-starvation guarantee (zfs refreservation)"
+# Constraint 2 (spec §4): the guest must not be able to starve the cluster's
+# disks. The whole reason the disk is on tank-lxc instead of local-lvm is that
+# PVE gives a non-sparse pool's zvol a refreservation equal to its size, so
+# the space is committed up front and cannot overcommit the pool. That was
+# previously just inferred from tank-lxc lacking a 'sparse' flag (spec §9) --
+# assert it instead of trusting it.
+scsi0_volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^scsi0:/{print $2; exit}' | cut -d, -f1)"
+[[ -n "$scsi0_volid" ]] || die "VM $TESTER_VMID has no scsi0 volid — cannot verify refreservation"
+zvol_path="$(pvesm path "$scsi0_volid")" || die "pvesm path failed to resolve $scsi0_volid"
+zfs_dataset="${zvol_path#/dev/zvol/}"
+[[ "$zfs_dataset" != "$zvol_path" ]] \
+  || die "scsi0 volid $scsi0_volid resolved to '$zvol_path', which is not a ZFS zvol path — is $TESTER_STORAGE really a zfspool?"
+refres="$(zfs get -Hp -o value refreservation "$zfs_dataset")" \
+  || die "zfs get refreservation failed for $zfs_dataset"
+volsize="$(zfs get -Hp -o value volsize "$zfs_dataset")" \
+  || die "zfs get volsize failed for $zfs_dataset"
+[[ "$refres" =~ ^[0-9]+$ && "$refres" -gt 0 ]] \
+  || die "zvol $zfs_dataset has refreservation='$refres' — $TESTER_STORAGE is behaving as SPARSE storage. The capacity guarantee that keeps this tester from starving the cluster's disks (spec §4 constraint 2) does not hold. Fix the storage before handing this guest to a tester."
+# Thick provisioning means refreservation ~= volsize; allow a small slop for
+# the zvol's own metadata overhead rather than demanding exact equality.
+awk -v r="$refres" -v v="$volsize" 'BEGIN { d = (r>v)?r-v:v-r; exit !(v > 0 && d/v <= 0.05) }' \
+  || die "zvol $zfs_dataset refreservation ($refres bytes) is not close to volsize ($volsize bytes) — expected them roughly equal for thick-provisioned storage"
+ok "zvol $zfs_dataset: refreservation=$refres roughly equals volsize=$volsize (thick-provisioned, confirmed)"
+
+step "6 — cloud-init"
 keyfile="$(mktemp)"; trap 'rm -f "$keyfile"' EXIT
 printf '%s\n' "$TESTER_SSH_PUBKEY" > "$keyfile"
 qm set "$TESTER_VMID" \
@@ -146,7 +171,7 @@ qm set "$TESTER_VMID" \
   || die "cloud-init configuration failed"
 ok "cloud-init drive attached for user '$TESTER_USER'"
 
-step "6 — start and wait for the guest agent"
+step "7 — start and wait for the guest agent"
 qm start "$TESTER_VMID" >/dev/null 2>&1 || skip "already running"
 for _ in $(seq 1 60); do
   qm guest cmd "$TESTER_VMID" ping >/dev/null 2>&1 && break
