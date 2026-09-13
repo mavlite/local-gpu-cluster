@@ -44,10 +44,40 @@ TESTER_FLEET_CIDR="${TESTER_FLEET_CIDR:-10.60.0.0/16}"
 TESTER_BRIDGE="${TESTER_BRIDGE:-sdxguest}"
 # The host-side interface the DNAT and the IPv6-forwarding check apply to.
 TESTER_UPLINK="${TESTER_UPLINK:-vmbr0}"
-# Probed after the change to prove host services still answer.
-TESTER_HOST_PROBE_URL="${TESTER_HOST_PROBE_URL:-http://127.0.0.1:8888/}"
+# Probed after the change to prove host services still answer. Derived from
+# cluster-monitor's own config (/etc/cluster-monitor.json) rather than
+# hardcoded: cluster-monitor binds whatever "bind_host"/"bind_port" say --
+# on this host that is the LAN IP, not loopback -- so a hardcoded
+# 127.0.0.1 can never answer, and a hardcoded LAN IP would be wrong on any
+# other host. Same idiom 63-cluster-monitor.sh already uses to read this
+# file back. If the config is missing, there is nothing to derive a URL
+# from and the probe is skipped (with a warning) rather than treated as
+# fatal for a condition that was never checkable.
+TESTER_HOST_PROBE_URL="${TESTER_HOST_PROBE_URL:-}"
+TESTER_MONITOR_CONFIG="${TESTER_MONITOR_CONFIG:-/etc/cluster-monitor.json}"
 
-require_cmd pve-firewall iptables systemctl qm
+require_cmd pve-firewall iptables systemctl qm python3
+
+# Resolve the probe URL now (an explicit TESTER_HOST_PROBE_URL always wins).
+if [[ -z "$TESTER_HOST_PROBE_URL" ]]; then
+  if [[ -f "$TESTER_MONITOR_CONFIG" ]]; then
+    TESTER_HOST_PROBE_URL="$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open('$TESTER_MONITOR_CONFIG'))
+    print('http://%s:%s/' % (cfg.get('bind_host', '127.0.0.1'), cfg.get('bind_port', 8888)))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null)" || TESTER_HOST_PROBE_URL=""
+    if [[ -n "$TESTER_HOST_PROBE_URL" ]]; then
+      ok "Derived host probe URL from $TESTER_MONITOR_CONFIG: $TESTER_HOST_PROBE_URL"
+    else
+      warn "$TESTER_MONITOR_CONFIG exists but could not be parsed for bind_host/bind_port -- step 7's host-service canary will be skipped"
+    fi
+  else
+    warn "$TESTER_MONITOR_CONFIG not found -- cannot derive a host probe URL; step 7's host-service canary will be skipped"
+  fi
+fi
 
 # If we die after the DNAT is installed, the port stays forwarded with no
 # guidance -- print a rollback recipe instead of leaving a silent exposure.
@@ -190,9 +220,14 @@ iptables -t nat -C PREROUTING -i "$TESTER_UPLINK" -p tcp --dport "$TESTER_SSH_PO
 ok "DNAT ${TESTER_SSH_PORT} -> ${TESTER_GUEST_IP}:22 installed and enabled"
 
 step "7 — final check: host services unaffected"
-curl -sf -o /dev/null --max-time 5 "$TESTER_HOST_PROBE_URL" \
-  || die "host service at $TESTER_HOST_PROBE_URL stopped answering — back this out"
-ok "policy active, DNAT present, host services unaffected"
+if [[ -n "$TESTER_HOST_PROBE_URL" ]]; then
+  curl -sf -o /dev/null --max-time 5 "$TESTER_HOST_PROBE_URL" \
+    || die "host service at $TESTER_HOST_PROBE_URL stopped answering — back this out"
+  ok "policy active, DNAT present, host services unaffected ($TESTER_HOST_PROBE_URL)"
+else
+  warn "no host probe URL available -- skipping the host-service canary (see the warning above)"
+  ok "policy active, DNAT present"
+fi
 
 echo
 echo "Verify from the guest:  qm guest exec $TESTER_VMID -- /bin/bash -c 'curl -s -m5 https://deb.debian.org -o /dev/null; echo \$?'"

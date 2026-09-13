@@ -172,8 +172,28 @@ write_file_if_changed() {
     skip "$path unchanged."
     return 0
   fi
-  install -m "$mode" "$tmp" "$path"
-  ok "Wrote $path"
+  # `|| true`-free guard: under `set -e`, letting `install` fail as the last
+  # command of the function would abort the script via the ERR trap before we
+  # get a chance to fall back. Using it as the condition of `if` exempts it.
+  if install -m "$mode" "$tmp" "$path" 2>/dev/null; then
+    ok "Wrote $path"
+    return 0
+  fi
+  # pmxcfs (/etc/pve) is a FUSE filesystem that writes the file but then
+  # rejects the chmod/chown `install` does afterward -- it enforces its own
+  # ownership and mode and has no notion of Unix permission bits to set.
+  # `install` therefore exits non-zero even though the content already
+  # landed correctly. Fall back to a plain copy, which pmxcfs accepts, rather
+  # than switching unconditionally to `cp`: on a normal filesystem (e.g.
+  # 56-fan-control.sh's /usr/local/bin and systemd unit targets) the
+  # requested mode is load-bearing and must still go through `install` first.
+  if cp "$tmp" "$path"; then
+    warn "$path written via cp — 'install -m $mode' failed (read-only/managed filesystem such as pmxcfs?); mode was left to the filesystem"
+    ok "Wrote $path"
+    return 0
+  fi
+  err "Failed to write $path (both 'install -m $mode' and 'cp' failed)"
+  return 1
 }
 
 # ---------- LXC file push from host ----------

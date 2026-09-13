@@ -42,8 +42,15 @@ TESTER_DNS="${TESTER_DNS:-9.9.9.9 1.1.1.1}"
 TESTER_CPUUNITS="${TESTER_CPUUNITS:-50}"
 TESTER_IMAGE_URL="${TESTER_IMAGE_URL:-https://cloud.debian.org/images/cloud/trixie/20260518-2482/debian-13-genericcloud-amd64-20260518-2482.qcow2}"
 TESTER_IMAGE_SHA512="${TESTER_IMAGE_SHA512:-7752ad2adce1bc49dd964dae8300ed7a239d0bf3c13112f55953b111447fe642d2cc01afeead234aa6ebe3605513f2e7c0e7c56785d675c38ff40110d5c8332b}"
+# Storage that carries the cloud-init vendor-data snippet (spec §5: agent
+# survives losing SSH). `genericcloud` images do not ship qemu-guest-agent --
+# only the `generic` variant does -- and `--ciupgrade 1` only upgrades
+# packages already installed, so it cannot pull it in. A vendor-data snippet
+# is the only route that both installs the package and merges alongside
+# (rather than replacing) the `--ciuser`/`--sshkeys` user-data below.
+TESTER_SNIPPET_STORAGE="${TESTER_SNIPPET_STORAGE:-local}"
 
-require_cmd qm pvesm wget sha512sum zfs
+require_cmd qm pvesm wget sha512sum zfs pvesh python3
 
 # These have no defaults on purpose: no key belongs in this repo, and a guest
 # with no key is a guest nobody can use.
@@ -157,7 +164,53 @@ awk -v r="$refres" -v v="$volsize" 'BEGIN { d = (r>v)?r-v:v-r; exit !(v > 0 && d
   || die "zvol $zfs_dataset refreservation ($refres bytes) is not close to volsize ($volsize bytes) — expected them roughly equal for thick-provisioned storage"
 ok "zvol $zfs_dataset: refreservation=$refres roughly equals volsize=$volsize (thick-provisioned, confirmed)"
 
-step "6 — cloud-init"
+step "6 — enable snippets storage and write the vendor-data snippet"
+# Constraint (spec §5): qemu-guest-agent must be installed so the host keeps
+# out-of-band control if SSH is lost. genericcloud does not ship it, and
+# --ciupgrade only upgrades packages already present, so it cannot install
+# anything new. The only route that both installs the agent AND keeps the
+# --ciuser/--sshkeys user-data generated below is a cloud-init *vendor-data*
+# snippet: user= REPLACES the generated user-data outright (silently
+# discarding the login this script just configured), vendor= MERGES with it.
+#
+# Snippets need "content" type `snippets` enabled on the storage that holds
+# them, and no storage on this host has it enabled yet. `pvesm set` takes the
+# FULL content list, not a delta -- read the current list back and append
+# idempotently, so this never clobbers e.g. local's existing
+# backup,iso,vztmpl,import (VM 170 depends on the iso content type there).
+storage_info="$(pvesh get "/storage/${TESTER_SNIPPET_STORAGE}" --output-format json 2>/dev/null)" \
+  || die "pvesh get /storage/${TESTER_SNIPPET_STORAGE} failed — does storage '$TESTER_SNIPPET_STORAGE' exist?"
+current_content="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null)"
+[[ -n "$current_content" ]] || die "could not read the 'content' field for storage '$TESTER_SNIPPET_STORAGE'"
+storage_path="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)"
+[[ -n "$storage_path" ]] || die "storage '$TESTER_SNIPPET_STORAGE' has no 'path' — is it a directory-backed storage? snippets require one"
+
+has_snippets=0
+IFS=',' read -ra _content_types <<< "$current_content"
+for _ct in "${_content_types[@]}"; do
+  [[ "$_ct" == "snippets" ]] && has_snippets=1
+done
+if [[ $has_snippets -eq 1 ]]; then
+  skip "storage '$TESTER_SNIPPET_STORAGE' already has content=snippets ($current_content)"
+else
+  pvesm set "$TESTER_SNIPPET_STORAGE" --content "${current_content},snippets" \
+    || die "failed to add 'snippets' to storage '$TESTER_SNIPPET_STORAGE' content (was: $current_content) — content NOT changed, safe to retry"
+  ok "storage '$TESTER_SNIPPET_STORAGE' content set to ${current_content},snippets"
+fi
+mkdir -p "${storage_path}/snippets"
+
+TESTER_VENDOR_SNIPPET="tester-vm-vendor.yaml"
+write_file_if_changed "${storage_path}/snippets/${TESTER_VENDOR_SNIPPET}" 0644 <<'EOF'
+#cloud-config
+package_update: true
+packages:
+  - qemu-guest-agent
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+EOF
+ok "vendor-data snippet ready at ${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}"
+
+step "7 — cloud-init"
 keyfile="$(mktemp)"; trap 'rm -f "$keyfile"' EXIT
 printf '%s\n' "$TESTER_SSH_PUBKEY" > "$keyfile"
 qm set "$TESTER_VMID" \
@@ -167,18 +220,19 @@ qm set "$TESTER_VMID" \
   --sshkeys "$keyfile" \
   --ipconfig0 "ip=${TESTER_IP},gw=${TESTER_GW}" \
   --nameserver "$TESTER_DNS" \
-  --ciupgrade 1 >/dev/null \
+  --ciupgrade 1 \
+  --cicustom "vendor=${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}" >/dev/null \
   || die "cloud-init configuration failed"
-ok "cloud-init drive attached for user '$TESTER_USER'"
+ok "cloud-init drive attached for user '$TESTER_USER' (vendor snippet installs qemu-guest-agent)"
 
-step "7 — start and wait for the guest agent"
+step "8 — start and wait for the guest agent"
 qm start "$TESTER_VMID" >/dev/null 2>&1 || skip "already running"
 for _ in $(seq 1 60); do
   qm guest cmd "$TESTER_VMID" ping >/dev/null 2>&1 && break
   sleep 5
 done
 qm guest cmd "$TESTER_VMID" ping >/dev/null 2>&1 \
-  || die "guest agent never answered — check 'qm terminal $TESTER_VMID'"
+  || die "guest agent never answered after 300s. This is expected on a REBUILD from a genericcloud image without the vendor-data snippet from step 6 (qemu-guest-agent is not preinstalled) -- confirm step 6 ran and wrote ${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}, that qm config ${TESTER_VMID} shows --cicustom vendor=..., and that the guest had internet access to install the package on first boot. Check 'qm terminal $TESTER_VMID' for cloud-init's own log (/var/log/cloud-init-output.log)."
 ok "VM $TESTER_VMID is up and the agent answers"
 
 echo
