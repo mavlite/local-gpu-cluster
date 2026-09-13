@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# 72-vm-tester.sh — create the external tester guest (Debian 13.5, VMID 172).
+#
+# WHY IT EXISTS: an external tester (a person, and later an autonomous agent)
+# needs a machine to install software on and orchestrate workloads in. They get
+# SSH and root on that machine and nothing else. See
+# docs/tester-vm-requirements.md for the threat model and the two constraints
+# that produced this design.
+#
+# WHY sdxguest AND NOT vmbr0: a guest on vmbr0 is L2-adjacent to this host and
+# every inference container, so its isolation is only a firewall rule. This
+# guest lives on the SDN vnet instead and has no interface on 192.168.6.0/24 at
+# all. A rule failure degrades to "on a foreign subnet", not "on your network".
+#
+# WHY tank AND NOT local-lvm: local-lvm is thin and carries the root disks of
+# LXC 151 and 153. A tester filling a thin volume there would take those
+# filesystems read-only. tank is not sparse, so PVE gives the zvol a
+# refreservation it cannot overcommit.
+#
+# THIS SCRIPT ONLY CREATES THE GUEST. It is unreachable from outside until
+# 73-vm-tester-firewall.sh has run. That split is deliberate: see 71's header.
+set -Eeuo pipefail
+LGC_DIR="${LGC_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+# shellcheck source=lib/common.sh
+source "$LGC_DIR/lib/common.sh"
+
+require_root
+require_pve_host
+load_config
+
+TESTER_VMID="${TESTER_VMID:-172}"
+TESTER_NAME="${TESTER_NAME:-tester}"
+TESTER_MEM_MB="${TESTER_MEM_MB:-65536}"
+TESTER_CORES="${TESTER_CORES:-8}"
+TESTER_DISK_GB="${TESTER_DISK_GB:-200}"
+TESTER_STORAGE="${TESTER_STORAGE:-tank-lxc}"
+TESTER_BRIDGE="${TESTER_BRIDGE:-sdxguest}"
+TESTER_IP="${TESTER_IP:-10.78.0.10/24}"
+TESTER_GW="${TESTER_GW:-10.78.0.254}"
+TESTER_DNS="${TESTER_DNS:-9.9.9.9 1.1.1.1}"
+# Lower than the default 100 so the tester loses CPU contention to inference.
+TESTER_CPUUNITS="${TESTER_CPUUNITS:-50}"
+TESTER_IMAGE_URL="${TESTER_IMAGE_URL:-https://cloud.debian.org/images/cloud/trixie/20260518-2482/debian-13-genericcloud-amd64-20260518-2482.qcow2}"
+TESTER_IMAGE_SHA512="${TESTER_IMAGE_SHA512:-7752ad2adce1bc49dd964dae8300ed7a239d0bf3c13112f55953b111447fe642d2cc01afeead234aa6ebe3605513f2e7c0e7c56785d675c38ff40110d5c8332b}"
+# Storage that carries the cloud-init vendor-data snippet (spec §5: agent
+# survives losing SSH). `genericcloud` images do not ship qemu-guest-agent --
+# only the `generic` variant does -- and `--ciupgrade 1` only upgrades
+# packages already installed, so it cannot pull it in. A vendor-data snippet
+# is the only route that both installs the package and merges alongside
+# (rather than replacing) the `--ciuser`/`--sshkeys` user-data below.
+TESTER_SNIPPET_STORAGE="${TESTER_SNIPPET_STORAGE:-local}"
+
+require_cmd qm pvesm wget sha512sum zfs pvesh python3
+
+# These have no defaults on purpose: no key belongs in this repo, and a guest
+# with no key is a guest nobody can use.
+[[ -n "${TESTER_USER:-}" ]] \
+  || die "TESTER_USER is not set. Add it to scripts/config.env (the tester's login name)."
+[[ -n "${TESTER_SSH_PUBKEY:-}" ]] \
+  || die "TESTER_SSH_PUBKEY is not set. Add the tester's PUBLIC key to scripts/config.env."
+
+vm_exists() { qm status "$1" >/dev/null 2>&1; }
+
+step "1 — preflight"
+pvesm status | awk 'NR>1 {print $1}' | grep -qx "$TESTER_STORAGE" \
+  || die "storage '$TESTER_STORAGE' not found — check 'pvesm status'"
+ip -br link show "$TESTER_BRIDGE" >/dev/null 2>&1 \
+  || die "bridge '$TESTER_BRIDGE' not found — is the SDN zone applied?"
+ip -4 addr show "$TESTER_BRIDGE" | grep -q "${TESTER_GW}/" \
+  || die "gateway $TESTER_GW is not on $TESTER_BRIDGE — apply the SDN config first"
+ok "storage, bridge and gateway present"
+
+step "2 — fetch and verify the image"
+img="/var/lib/vz/template/$(basename "$TESTER_IMAGE_URL")"
+if [[ -f "$img" ]] && echo "${TESTER_IMAGE_SHA512}  ${img}" | sha512sum -c - >/dev/null 2>&1; then
+  skip "image already present and verified"
+else
+  wget -q -O "$img" "$TESTER_IMAGE_URL" || die "download failed: $TESTER_IMAGE_URL"
+  echo "${TESTER_IMAGE_SHA512}  ${img}" | sha512sum -c - >/dev/null 2>&1 \
+    || die "SHA512 MISMATCH on $img — refusing to use it. Delete it and retry."
+  ok "downloaded and verified $(basename "$img")"
+fi
+
+step "3 — create VM $TESTER_VMID ($TESTER_NAME)"
+if vm_exists "$TESTER_VMID"; then
+  skip "VM $TESTER_VMID already exists"
+else
+  # seabios, not ovmf: the genericcloud image boots BIOS without an efidisk,
+  # which removes a whole class of first-boot failure. serial0 gives console
+  # access, which matters for a guest with no other path in.
+  qm create "$TESTER_VMID" \
+    --name "$TESTER_NAME" \
+    --ostype l26 \
+    --machine q35 \
+    --memory "$TESTER_MEM_MB" \
+    --balloon 0 \
+    --cores "$TESTER_CORES" \
+    --sockets 1 \
+    --cpu host \
+    --cpuunits "$TESTER_CPUUNITS" \
+    --scsihw virtio-scsi-single \
+    --net0 "virtio,bridge=${TESTER_BRIDGE},firewall=1" \
+    --agent enabled=1 \
+    --serial0 socket \
+    --vga serial0 \
+    --onboot 0 \
+    || die "qm create failed"
+  ok "created VM $TESTER_VMID"
+fi
+
+step "4 — import and attach the disk"
+if qm config "$TESTER_VMID" | grep -q '^scsi0:'; then
+  skip "scsi0 already attached"
+else
+  # Re-entrant: a prior run may have imported the disk (leaving it as an
+  # unused<N> volume) and then died before scsi0 was set -- on the attach,
+  # the resize, or the boot-order command below. Adopt that volume instead
+  # of importing a second time: tank-lxc zvols are thick (full
+  # refreservation), so a second import on every retry permanently leaks
+  # another 200 GB from a pool the inference cluster shares.
+  volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^unused[0-9]+:/{print $2; exit}')"
+  if [[ -n "$volid" ]]; then
+    skip "adopting existing unused volume $volid instead of re-importing"
+  else
+    qm disk import "$TESTER_VMID" "$img" "$TESTER_STORAGE" >/dev/null \
+      || die "qm disk import failed"
+    # Read the volid back rather than assuming it is vm-<id>-disk-0. That holds
+    # for an empty VM, but if any volume already exists the guess silently
+    # attaches the wrong disk.
+    volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^unused[0-9]+:/{print $2; exit}')"
+    [[ -n "$volid" ]] || die "imported disk did not appear as an unused volume on VM $TESTER_VMID"
+  fi
+  qm set "$TESTER_VMID" \
+    --scsi0 "${volid},discard=on,iothread=1,ssd=1" >/dev/null \
+    || die "failed to attach imported disk $volid"
+  qm disk resize "$TESTER_VMID" scsi0 "${TESTER_DISK_GB}G" >/dev/null \
+    || die "failed to resize scsi0 to ${TESTER_DISK_GB}G"
+  qm set "$TESTER_VMID" --boot order=scsi0 >/dev/null || die "failed to set boot order"
+  ok "disk imported, resized to ${TESTER_DISK_GB}G, boot order set"
+fi
+
+step "5 — verify the disk-starvation guarantee (zfs refreservation)"
+# Constraint 2 (spec §4): the guest must not be able to starve the cluster's
+# disks. The whole reason the disk is on tank-lxc instead of local-lvm is that
+# PVE gives a non-sparse pool's zvol a refreservation equal to its size, so
+# the space is committed up front and cannot overcommit the pool. That was
+# previously just inferred from tank-lxc lacking a 'sparse' flag (spec §9) --
+# assert it instead of trusting it.
+scsi0_volid="$(qm config "$TESTER_VMID" | awk -F': ' '/^scsi0:/{print $2; exit}' | cut -d, -f1)"
+[[ -n "$scsi0_volid" ]] || die "VM $TESTER_VMID has no scsi0 volid — cannot verify refreservation"
+zvol_path="$(pvesm path "$scsi0_volid")" || die "pvesm path failed to resolve $scsi0_volid"
+zfs_dataset="${zvol_path#/dev/zvol/}"
+[[ "$zfs_dataset" != "$zvol_path" ]] \
+  || die "scsi0 volid $scsi0_volid resolved to '$zvol_path', which is not a ZFS zvol path — is $TESTER_STORAGE really a zfspool?"
+refres="$(zfs get -Hp -o value refreservation "$zfs_dataset")" \
+  || die "zfs get refreservation failed for $zfs_dataset"
+volsize="$(zfs get -Hp -o value volsize "$zfs_dataset")" \
+  || die "zfs get volsize failed for $zfs_dataset"
+[[ "$refres" =~ ^[0-9]+$ && "$refres" -gt 0 ]] \
+  || die "zvol $zfs_dataset has refreservation='$refres' — $TESTER_STORAGE is behaving as SPARSE storage. The capacity guarantee that keeps this tester from starving the cluster's disks (spec §4 constraint 2) does not hold. Fix the storage before handing this guest to a tester."
+# Thick provisioning means refreservation ~= volsize; allow a small slop for
+# the zvol's own metadata overhead rather than demanding exact equality.
+awk -v r="$refres" -v v="$volsize" 'BEGIN { d = (r>v)?r-v:v-r; exit !(v > 0 && d/v <= 0.05) }' \
+  || die "zvol $zfs_dataset refreservation ($refres bytes) is not close to volsize ($volsize bytes) — expected them roughly equal for thick-provisioned storage"
+ok "zvol $zfs_dataset: refreservation=$refres roughly equals volsize=$volsize (thick-provisioned, confirmed)"
+
+step "6 — enable snippets storage and write the vendor-data snippet"
+# Constraint (spec §5): qemu-guest-agent must be installed so the host keeps
+# out-of-band control if SSH is lost. genericcloud does not ship it, and
+# --ciupgrade only upgrades packages already present, so it cannot install
+# anything new. The only route that both installs the agent AND keeps the
+# --ciuser/--sshkeys user-data generated below is a cloud-init *vendor-data*
+# snippet: user= REPLACES the generated user-data outright (silently
+# discarding the login this script just configured), vendor= MERGES with it.
+#
+# Snippets need "content" type `snippets` enabled on the storage that holds
+# them, and no storage on this host has it enabled yet. `pvesm set` takes the
+# FULL content list, not a delta -- read the current list back and append
+# idempotently, so this never clobbers e.g. local's existing
+# backup,iso,vztmpl,import (VM 170 depends on the iso content type there).
+# stderr is left unsuppressed on the pvesh call (unlike below) so a genuine
+# failure -- bad storage name, pvesh/API error -- prints its real reason
+# alongside the die message rather than being silently swallowed.
+storage_info="$(pvesh get "/storage/${TESTER_SNIPPET_STORAGE}" --output-format json)" \
+  || die "pvesh get /storage/${TESTER_SNIPPET_STORAGE} failed — does storage '$TESTER_SNIPPET_STORAGE' exist?"
+# The `|| true` on each assignment matters under `set -Eeuo pipefail`: without
+# it, a python3 failure trips the generic ERR trap on the assignment itself
+# and the purpose-written `die` messages below never run.
+current_content="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null)" || true
+[[ -n "$current_content" ]] || die "could not read the 'content' field for storage '$TESTER_SNIPPET_STORAGE'"
+storage_path="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)" || true
+[[ -n "$storage_path" ]] || die "storage '$TESTER_SNIPPET_STORAGE' has no 'path' — is it a directory-backed storage? snippets require one"
+
+has_snippets=0
+IFS=',' read -ra _content_types <<< "$current_content"
+for _ct in "${_content_types[@]}"; do
+  [[ "$_ct" == "snippets" ]] && has_snippets=1
+done
+if [[ $has_snippets -eq 1 ]]; then
+  skip "storage '$TESTER_SNIPPET_STORAGE' already has content=snippets ($current_content)"
+else
+  pvesm set "$TESTER_SNIPPET_STORAGE" --content "${current_content},snippets" \
+    || die "failed to add 'snippets' to storage '$TESTER_SNIPPET_STORAGE' content (was: $current_content) — content NOT changed, safe to retry"
+  ok "storage '$TESTER_SNIPPET_STORAGE' content set to ${current_content},snippets"
+fi
+mkdir -p "${storage_path}/snippets"
+
+TESTER_VENDOR_SNIPPET="tester-vm-vendor.yaml"
+write_file_if_changed "${storage_path}/snippets/${TESTER_VENDOR_SNIPPET}" 0644 <<'EOF'
+#cloud-config
+package_update: true
+packages:
+  - qemu-guest-agent
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+EOF
+ok "vendor-data snippet ready at ${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}"
+
+step "7 — cloud-init"
+keyfile="$(mktemp)"; trap 'rm -f "$keyfile"' EXIT
+printf '%s\n' "$TESTER_SSH_PUBKEY" > "$keyfile"
+qm set "$TESTER_VMID" \
+  --ide2 "${TESTER_STORAGE}:cloudinit" \
+  --citype nocloud \
+  --ciuser "$TESTER_USER" \
+  --sshkeys "$keyfile" \
+  --ipconfig0 "ip=${TESTER_IP},gw=${TESTER_GW}" \
+  --nameserver "$TESTER_DNS" \
+  --ciupgrade 1 \
+  --cicustom "vendor=${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}" >/dev/null \
+  || die "cloud-init configuration failed"
+ok "cloud-init drive attached for user '$TESTER_USER' (vendor snippet installs qemu-guest-agent)"
+
+step "8 — start and wait for the guest agent"
+qm start "$TESTER_VMID" >/dev/null 2>&1 || skip "already running"
+for _ in $(seq 1 60); do
+  qm guest cmd "$TESTER_VMID" ping >/dev/null 2>&1 && break
+  sleep 5
+done
+qm guest cmd "$TESTER_VMID" ping >/dev/null 2>&1 \
+  || die "guest agent never answered after 300s. This is expected on a REBUILD from a genericcloud image without the vendor-data snippet from step 6 (qemu-guest-agent is not preinstalled) -- confirm step 6 ran and wrote ${TESTER_SNIPPET_STORAGE}:snippets/${TESTER_VENDOR_SNIPPET}, that qm config ${TESTER_VMID} shows --cicustom vendor=..., and that the guest had internet access to install the package on first boot. Check 'qm terminal $TESTER_VMID' for cloud-init's own log (/var/log/cloud-init-output.log)."
+ok "VM $TESTER_VMID is up and the agent answers"
+
+echo
+echo "The guest is NOT yet reachable from outside, and NOT yet confined."
+echo "Run next:  scripts/73-vm-tester-firewall.sh"
