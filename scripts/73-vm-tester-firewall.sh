@@ -65,7 +65,12 @@ if [[ -z "$TESTER_HOST_PROBE_URL" ]]; then
 import json, sys
 try:
     cfg = json.load(open('$TESTER_MONITOR_CONFIG'))
-    print('http://%s:%s/' % (cfg.get('bind_host', '127.0.0.1'), cfg.get('bind_port', 8888)))
+    bind_host = cfg['bind_host']  # no default: a missing key means the schema
+                                  # drifted, and defaulting to 127.0.0.1 here
+                                  # is exactly the D1 bug (a loopback URL that
+                                  # can never answer) -- treat it the same as
+                                  # an unparseable file, below.
+    print('http://%s:%s/' % (bind_host, cfg.get('bind_port', 8888)))
 except Exception:
     sys.exit(1)
 " 2>/dev/null)" || TESTER_HOST_PROBE_URL=""

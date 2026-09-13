@@ -1,6 +1,9 @@
 # Requirements: the external tester guest (VMID 172)
 
-**Status:** design, not yet built. Written 2026-09-12.
+**Status:** built. VM 172 is live and confined (see the build log in §11). The
+external-SSH path — a router port-forward reaching it from outside the
+network — is not yet proven; see §11's "Outstanding". Written 2026-09-12,
+updated 2026-09-13.
 
 This document is the contract for a Debian guest handed to a party outside this network.
 It assumes no knowledge of the conversation that produced it. Read section 8 before you
@@ -52,9 +55,10 @@ the ceiling causes SDMA faults — but it is not 32 GB of consumed RAM. Budget 1
 **SDN zone `sdx`** (type `simple`, IPAM `pve`) with vnet **`sdxguest`** carrying subnet
 `10.78.0.0/24`, gateway `10.78.0.254`, `snat 1`. The host already holds `10.78.0.254/24` on
 the `sdxguest` interface, `net.ipv4.ip_forward=1` is set, and the SNAT rule to `vmbr0` is
-live. **No guest currently uses this vnet.** IPAM holds only `.0` and `.254`, so `.10` is free.
+live. **At design time no guest used this vnet;** IPAM held only `.0` and `.254`, so `.10`
+was free. VM 172 now holds `10.78.0.10/24` on `sdxguest` (built per §11's log).
 
-This guest is built on that. Nothing new is created at the network layer except one DNAT.
+This guest is built on that. Nothing new was created at the network layer except one DNAT.
 
 **`70-vm-se-qa.sh` / `71-vm-se-qa-firewall.sh`** established the precedent this follows:
 creating a guest and changing firewall state are different blast radii and get separate
@@ -257,7 +261,9 @@ The SDN vnet, the datacenter firewall switch and the SNAT rules predate this gue
 genericcloud pinned to snapshot `20260518-2482`, which self-patched to 13.7 on first boot via
 `unattended-upgrades` (expected — see section 4, "13.5 is a base, not a freeze").
 
-All of section 7's acceptance criteria were verified: egress to `https://deb.debian.org`
+All of section 7's acceptance criteria were verified **except the first** — ssh in from
+outside the network on the forwarded port — which could not be tested because the router's
+port-forward does not exist yet (see "Outstanding," below). The rest: egress to `https://deb.debian.org`
 returned 200; the router, the PVE UI and the sibling vnet (VM 170) were all unreachable from
 the guest; LAN ping was blocked; `ip -6 addr` showed no global address. The zvol's
 `refreservation` (`218109313024`) closely matches its `volsize` (`214748364800`) — the

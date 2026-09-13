@@ -188,8 +188,18 @@ write_file_if_changed() {
   # 56-fan-control.sh's /usr/local/bin and systemd unit targets) the
   # requested mode is load-bearing and must still go through `install` first.
   if cp "$tmp" "$path"; then
-    warn "$path written via cp — 'install -m $mode' failed (read-only/managed filesystem such as pmxcfs?); mode was left to the filesystem"
-    ok "Wrote $path"
+    # cp copies content only -- it does not apply $mode, and the fallback's
+    # whole point is to work on filesystems where `install`'s post-write
+    # chmod is rejected (pmxcfs). So try the chmod ourselves: on an ordinary
+    # filesystem it succeeds and the requested mode is correct; on pmxcfs it
+    # fails the same way `install`'s did and the mode is genuinely left to
+    # the filesystem. Guard it as an `if` condition so a failure here can't
+    # trip the ERR trap under `set -Eeuo pipefail`.
+    if chmod "$mode" "$path" 2>/dev/null; then
+      ok "Wrote $path via cp fallback (mode $mode applied)"
+    else
+      warn "$path written via cp — 'install -m $mode' failed (read-only/managed filesystem such as pmxcfs?); mode was left to the filesystem"
+    fi
     return 0
   fi
   err "Failed to write $path (both 'install -m $mode' and 'cp' failed)"

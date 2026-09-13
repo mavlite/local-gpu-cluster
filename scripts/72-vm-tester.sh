@@ -178,11 +178,17 @@ step "6 — enable snippets storage and write the vendor-data snippet"
 # FULL content list, not a delta -- read the current list back and append
 # idempotently, so this never clobbers e.g. local's existing
 # backup,iso,vztmpl,import (VM 170 depends on the iso content type there).
-storage_info="$(pvesh get "/storage/${TESTER_SNIPPET_STORAGE}" --output-format json 2>/dev/null)" \
+# stderr is left unsuppressed on the pvesh call (unlike below) so a genuine
+# failure -- bad storage name, pvesh/API error -- prints its real reason
+# alongside the die message rather than being silently swallowed.
+storage_info="$(pvesh get "/storage/${TESTER_SNIPPET_STORAGE}" --output-format json)" \
   || die "pvesh get /storage/${TESTER_SNIPPET_STORAGE} failed — does storage '$TESTER_SNIPPET_STORAGE' exist?"
-current_content="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null)"
+# The `|| true` on each assignment matters under `set -Eeuo pipefail`: without
+# it, a python3 failure trips the generic ERR trap on the assignment itself
+# and the purpose-written `die` messages below never run.
+current_content="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null)" || true
 [[ -n "$current_content" ]] || die "could not read the 'content' field for storage '$TESTER_SNIPPET_STORAGE'"
-storage_path="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)"
+storage_path="$(echo "$storage_info" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)" || true
 [[ -n "$storage_path" ]] || die "storage '$TESTER_SNIPPET_STORAGE' has no 'path' — is it a directory-backed storage? snippets require one"
 
 has_snippets=0
