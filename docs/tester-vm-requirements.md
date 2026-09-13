@@ -252,4 +252,44 @@ The SDN vnet, the datacenter firewall switch and the SNAT rules predate this gue
 
 ## 11. Build log
 
-Nothing built yet. Record each run here: date, what was done, what was verified.
+**2026-09-12 — first build.** VM 172 created on `sdxguest` at `10.78.0.10/24`: 64 GB RAM
+(fixed, no balloon), 8 vCPU, 200 GB thick zvol on `tank-lxc`. Image was Debian 13.5
+genericcloud pinned to snapshot `20260518-2482`, which self-patched to 13.7 on first boot via
+`unattended-upgrades` (expected — see section 4, "13.5 is a base, not a freeze").
+
+All of section 7's acceptance criteria were verified: egress to `https://deb.debian.org`
+returned 200; the router, the PVE UI and the sibling vnet (VM 170) were all unreachable from
+the guest; LAN ping was blocked; `ip -6 addr` showed no global address. The zvol's
+`refreservation` (`218109313024`) closely matches its `volsize` (`214748364800`) — the
+capacity guarantee from section 4 constraint 2 holds. The inbound DNAT (`2222` →
+`10.78.0.10:22`) was proven from off-host — a client on the LAN, not `localhost`, reaching
+`192.168.6.175:2222` and landing on the guest's SSH.
+
+A rollback point was taken: `zfs snapshot tank/vm-172-disk-0@provisioned`.
+
+**Deviation from the plan (see D3 in the plan's "Corrections after review"):** the
+genericcloud image does not ship `qemu-guest-agent`, so `72-vm-tester.sh`'s step 7 (as run)
+hung waiting for an agent that was never installed. `qemu-guest-agent` was installed manually
+on the guest post-boot to unblock this run; the script itself did not yet carry the fix. It
+has since been corrected to install the agent via a cloud-init vendor-data snippet (`vendor=`,
+not `user=`, so the generated user-data is not discarded) and to enable the `snippets` content
+type on the `local` storage's existing content list rather than replacing it.
+
+**Also found and fixed post-run, not re-run against this live guest** (see D1/D2 in the
+plan's "Corrections after review"): `73-vm-tester-firewall.sh`'s host-service probe was
+hardcoded to `http://127.0.0.1:8888/`, but cluster-monitor binds `192.168.6.175:8888` (per
+`/etc/cluster-monitor.json`) and does not listen on loopback — the probe could never succeed
+on this host and nearly caused a healthy, correctly-confined firewall change to be rolled
+back. And `lib/common.sh`'s `write_file_if_changed` used `install -m`, which fails on
+`/etc/pve` (pmxcfs enforces its own `root:www-data 0640` and rejects the chmod step) even
+though the content is written correctly first — hit once by `73`'s single call and three times
+by `71-vm-se-qa-firewall.sh`'s.
+
+**Also found on the host, unrelated to this build, and corrected per operator directive:**
+IPv6 forwarding was enabled on `sdxguest`, `sdxmgmt` and `vmbr0` — a gap in the assumption
+section 3 documents (`net.ipv6.conf.all.forwarding = 0`) that would have made VM 172's
+IPv4-only firewall policy (section 5) incomplete. Disabled and pinned in
+`/etc/sysctl.d/99-no-ipv6-forwarding.conf` so it survives reboot.
+
+**Outstanding:** the router's port-forward to `192.168.6.175:2222` and the off-network SSH
+test (section 6, Task 3 step 2) have not yet been done.
