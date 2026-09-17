@@ -1223,7 +1223,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \
     --flash-attn auto \
     --reasoning-format deepseek \
     --jinja \
-    --mlock \
+    --load-mode mlock \
     --log-prefix \
     --metrics
 ExecStartPost=-/usr/local/bin/warm-chat.sh
@@ -1285,7 +1285,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \
     --parallel 4 \
     --batch-size 2048 --ubatch-size 512 \
     --flash-attn off \
-    --mlock \
+    --load-mode mlock \
     --metrics
 Restart=on-failure
 RestartSec=10
@@ -1331,7 +1331,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \
     --cont-batching \
     --parallel 4 \
     --flash-attn off \
-    --mlock \
+    --load-mode mlock \
     --metrics
 Restart=on-failure
 RestartSec=10
