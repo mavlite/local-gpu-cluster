@@ -40,7 +40,9 @@ FAN_MIN_PWM="${FAN_MIN_PWM:-64}"        # idle floor (64 = 25%)
 # FAN_BOOST_WINDOW seconds, drive the fans to FAN_BOOST_PWM regardless of temp.
 FAN_BOOST_URL="${FAN_BOOST_URL:-http://192.168.6.153:8000/healthz}"
 FAN_BOOST_WINDOW="${FAN_BOOST_WINDOW:-20}"   # seconds since last chat to keep boosting
-FAN_BOOST_PWM="${FAN_BOOST_PWM:-255}"        # PWM while boosting (255 = 100%)
+# 204 (80%) since the 180 W cap (66-v620-powercap.sh) cut the prefill spike: the boost
+# only needs a head start; the temperature curve above still takes the fans to 100%.
+FAN_BOOST_PWM="${FAN_BOOST_PWM:-204}"        # PWM while boosting (255 = 100%)
 for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM FAN_BOOST_WINDOW FAN_BOOST_PWM; do
   [[ "${!_v}" =~ ^[0-9]+$ ]] || die "$_v must be a non-negative integer (got '${!_v}')"
 done
