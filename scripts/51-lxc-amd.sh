@@ -22,7 +22,7 @@ load_config
 AMD_VMID="${AMD_VMID:-151}"
 AMD_HOSTNAME="${AMD_HOSTNAME:-llamacpp-amd}"
 AMD_CORES="${AMD_CORES:-8}"
-# 32 GB: load-bearing — do NOT shrink. The chat unit's --mlock + --cache-ram 16384
+# 32 GB: load-bearing — do NOT shrink. The chat unit's --load-mode mlock + --cache-ram 16384
 # + ~29 GB model mmap need this headroom; a smaller ceiling makes the cgroup reclaim
 # the mmap'd weight pages mid-DMA, causing SDMA host->device page faults on model
 # load (incident 2026-06-19, when this was 12288). See operator notes / day-2-ops.
@@ -553,7 +553,7 @@ ${DRAFT_LINES}    --no-mmproj \\
     --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
-    --mlock \\
+    --load-mode mlock \\
     --log-prefix \\
     --metrics
 ExecStartPost=-/usr/local/bin/warm-chat.sh
@@ -611,7 +611,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --parallel "${EMBED_PARALLEL}" \\
     --batch-size 2048 --ubatch-size 512 \\
     --flash-attn off \\
-    --mlock \\
+    --load-mode mlock \\
     --metrics
 Restart=on-failure
 RestartSec=10
@@ -664,7 +664,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --cont-batching \\
     --parallel "${RERANK_PARALLEL}" \\
     --flash-attn off \\
-    --mlock \\
+    --load-mode mlock \\
     --metrics
 Restart=on-failure
 RestartSec=10

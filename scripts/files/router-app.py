@@ -49,6 +49,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from prometheus_fastapi_instrumentator import Instrumentator
 
+import alias_defaults
 import tavily_cache
 
 # ---------- Configuration (loaded from EnvironmentFile=/etc/router.env) ----------
@@ -421,6 +422,9 @@ STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() 
 #                             the response. Belt-and-suspenders for
 #                             enable_thinking=False cases where the model
 #                             ignores the template kwarg.
+#   sampling         : dict|None — top-level sampling defaults (temperature,
+#                             top_p, top_k, min_p, presence_penalty) injected
+#                             with setdefault; see alias_defaults.py.
 ALIAS_MAP: dict[str, dict] = {
     "rag-qwen3.6":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True},
     "qwen3.6-think": {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
@@ -474,17 +478,29 @@ ALIAS_MAP: dict[str, dict] = {
     # lands in a separate reasoning_content field and never pollutes content
     # with inline <think>. strip_thinking stays True on the rag- alias purely
     # as belt-and-braces if that flag is ever dropped.
-    "rag-qwen3.8":     {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True},
+    #
+    # Sampling follows the Qwen3.8 model card per mode (alias_defaults.py). The
+    # non-thinking presence_penalty 1.5 is the one clients most often omit.
+    "rag-qwen3.8":     {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True,
+                        "sampling": alias_defaults.QWEN38_NOTHINK_SAMPLING},
+    # Thinking-OFF alias for agents (OpenCode's qwen3.8-nothink model). Lost in
+    # the 2026-09-08 router deploy, after which it fell through as an unknown
+    # model and ran with thinking ON at the template's xhigh default.
+    "qwen3.8-nothink": {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True,
+                        "sampling": alias_defaults.QWEN38_NOTHINK_SAMPLING},
     "qwen3.8-think":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
-                        "reasoning_effort": "medium"},
+                        "reasoning_effort": "medium",
+                        "sampling": alias_defaults.QWEN38_THINK_SAMPLING},
     "qwen3.8":         {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
-                        "reasoning_effort": "medium"},
+                        "reasoning_effort": "medium",
+                        "sampling": alias_defaults.QWEN38_THINK_SAMPLING},
     # Escape hatch: full-depth reasoning for hard one-off problems. Expect
     # ~73s and ~2700 tokens per answer, and a real risk of finish_reason=
     # "length" with empty content on constraint-heavy prompts. Do NOT point an
     # agent loop at this.
     "qwen3.8-xhigh":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
-                        "reasoning_effort": "xhigh"},
+                        "reasoning_effort": "xhigh",
+                        "sampling": alias_defaults.QWEN38_THINK_SAMPLING},
 }
 
 
@@ -1607,23 +1623,17 @@ async def chat(
     #      OFF for rag-qwen3.6 (RAG synthesis), ON for qwen3.6-think (agent
     #      reasoning). Client-supplied chat_template_kwargs takes precedence
     #      via setdefault so an explicit override always wins.
+    #   3. Qwen3.8's chat template defaults reasoning_effort to 'xhigh', which
+    #      tells the model to "consider plausible alternatives" and makes it
+    #      reason until it exhausts max_tokens on constraint-heavy prompts --
+    #      returning finish_reason="length" with EMPTY content. Measured
+    #      2026-08-19 on three such prompts x3 reps: xhigh 6/9 @ 73s/2709 tok,
+    #      medium 9/9 @ 10s/482 tok, low 9/9 @ 9s/384 tok. Sampling, MTP and
+    #      quantization were each ruled out first; this is the actual cause.
+    #   4. Per-mode sampling defaults (model card values).
+    # All injected with setdefault, so an explicit client value always wins.
     alias_info = resolve_alias(model)
-    if alias_info["backend"] != model:
-        body["model"] = alias_info["backend"]
-    if alias_info["enable_thinking"] is not None:
-        ctk = body.setdefault("chat_template_kwargs", {})
-        ctk.setdefault("enable_thinking", alias_info["enable_thinking"])
-
-    # Qwen3.8's chat template defaults reasoning_effort to 'xhigh', which tells
-    # the model to "consider plausible alternatives" and makes it reason until it
-    # exhausts max_tokens on constraint-heavy prompts -- returning
-    # finish_reason="length" with EMPTY content. Measured 2026-08-19 on three
-    # such prompts x3 reps: xhigh 6/9 @ 73s/2709 tok, medium 9/9 @ 10s/482 tok,
-    # low 9/9 @ 9s/384 tok. Sampling, MTP and quantization were each ruled out
-    # first; this is the actual cause. setdefault so a client override wins.
-    if alias_info.get("reasoning_effort"):
-        ctk = body.setdefault("chat_template_kwargs", {})
-        ctk.setdefault("reasoning_effort", alias_info["reasoning_effort"])
+    body = alias_defaults.apply_alias_defaults(body, alias_info)
 
     # Token-budget admission control. Use /tokenize on the chat upstream.
     # count_tokens returns -1 when /tokenize is unreachable (fail-open).
