@@ -514,10 +514,43 @@ normally runs 6-11C hotter; a delta far beyond that is a per-card problem
 500 MHz DPM level. With the model tensor-split across both cards that stalls the
 pipeline, and llama.cpp does **not** recover when `auto` is restored — the unit
 still reports `active (running)` while every request logs `srv stop: cancel task`.
-Only `systemctl restart llamacpp-chat` clears it (confirmed 2026-09-11). Power and
-voltage are locked (`power1_cap_min == max == 250 W`, `pp_od_clk_voltage` absent),
-so there is no electrical lever either. Reduce heat by admission control — stop
-accepting new requests and let the in-flight one drain — not by touching clocks.
+Only `systemctl restart llamacpp-chat` clears it (confirmed 2026-09-11). Reduce heat
+with the power cap below, or by admission control — stop accepting new requests and
+let the in-flight one drain — not by touching clocks.
+
+**Power cap (the electrical lever).** The VBIOS pins `power1_cap_min == max ==
+250 W` and there is no newer V620 VBIOS or SMC firmware that changes this (VBIOS
+`113-D6030500-100`, SMC 58.91.0 is the newest in linux-firmware as of 2026-09).
+`v620-powercap.service` (installed by `scripts/66-v620-powercap.sh`) writes a soft
+PowerPlay table at boot, before LXC 151 starts, that unlocks 150–250 W, then sets
+the cap (default 180 W). It changes two driver-side bytes only; the SMU firmware
+gets the stock table, nothing is flashed, and a reboot restores stock if the unit
+is disabled.
+
+| cap | prefill t/s | gen t/s | junction max card0/card1 | fan pwm avg |
+|---|---|---|---|---|
+| 250 W | 574 | 47 | 101 / 96 °C | 255 |
+| 200 W | 550 | 42* | 89 / 85 °C | 255 |
+| 180 W | 534 | 48 | 86 / 81 °C | 232 |
+| 160 W | 513 | 43* | 81 / 77 °C | 204 |
+
+Measured 2026-09-17, Qwen3.8-27B tensor-split, 6.9k-token prefill loop, both cards
+cooled to 50 °C before each cap. *Generation varies 34–58 t/s per request at every
+cap (MTP), so it is flat.
+
+- Change the cap live: edit `/etc/default/v620-powercap`, then
+  `systemctl restart v620-powercap` — safe under load, since the table is already in place.
+- Check: `cat /sys/class/drm/card{0,1}/device/hwmon/hwmon*/power1_cap{,_min}` and
+  `journalctl -u v620-powercap -b`.
+- If the unit fails, the cards stay on stock 250 W. It refuses to write while
+  LXC 151 holds the GPUs, if GFXOFF is on, or if the VBIOS/table does not match.
+- **The kernel option is required.** GRUB carries `amdgpu.ppfeaturemask=0xfff73fff`
+  (GFXOFF off). A `pp_table` write racing GFXOFF has hard-locked Navi 21 hosts
+  (drm/amd#2060), and Secure Boot lockdown blocks the runtime
+  `amdgpu_gfxoff` debugfs toggle. It costs ~5 W per card at idle.
+- **A hot card at a low cap is not a power problem.** On 2026-09-17 card1 sat at
+  100 °C drawing ~115 W at every cap: its shroud fan had come unplugged. Header
+  `pwm5` has no tach input, so that fan's speed is invisible to `sensors`.
 
 ## § 4. Model management
 
