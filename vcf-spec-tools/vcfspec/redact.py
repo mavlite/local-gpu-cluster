@@ -19,10 +19,34 @@ CREDENTIAL_KEY_RE = re.compile(
 
 REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
+# No length floor. An earlier {6,} bound let "'Ab3!x' is too short" through
+# verbatim -- a five-character ESXi root password is still a password, and
+# a masker cannot tell a secret from a non-secret by counting characters.
+# The cost is that a short non-secret ("'1610' is not of type 'integer'")
+# is masked too; the finding's JSON pointer is the actionable part and is
+# never masked.
 _QUOTED_SECRET_RE = re.compile(
-    r"'([^']{6,})'(?=\s+(?:is too short|is too long|does not match|is not of type))")
+    r"'([^']+)'(?=\s+(?:is too short|is too long|does not match|is not of type))")
+
+# The key may itself be quoted, because a Python repr of a containing dict
+# writes `'password': 'x'` -- the quote between the name and the colon
+# defeated the previous `password\s*[=:]` pattern. The value is matched in
+# quoted form as well as bare, so the mask replaces the value and not the
+# quotes around it.
 _INLINE_SECRET_RE = re.compile(
-    r"((?:password|passwd|secret|token)\s*[=:]\s*)(\S+)", re.IGNORECASE)
+    r"(?P<key>(?:password|passwd|secret|token|apikey|api_key)['\"]?\s*[=:]\s*)"
+    r"(?P<value>'[^']*'|\"[^\"]*\"|\S+)",
+    re.IGNORECASE,
+)
+
+
+def _mask_inline(match: "re.Match[str]") -> str:
+    value = match.group("value")
+    quote = value[:1] if value[:1] in ("'", '"') else ""
+    inner = value[1:-1] if quote else value
+    if REFERENCE_RE.match(inner):
+        return match.group(0)        # ${references} are not secrets
+    return f"{match.group('key')}{quote}{MASK}{quote}"
 
 
 def redact(value: object) -> object:
@@ -34,7 +58,7 @@ def redact(value: object) -> object:
         return [redact(v) for v in value]
     if isinstance(value, str):
         return _QUOTED_SECRET_RE.sub(f"'{MASK}'",
-                                     _INLINE_SECRET_RE.sub(r"\1" + MASK, value))
+                                     _INLINE_SECRET_RE.sub(_mask_inline, value))
     return value
 
 

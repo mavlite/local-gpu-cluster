@@ -2,6 +2,32 @@
 
 Password fields carry minLength 8-15, so a ${reference} is too short to validate.
 We validate a substituted copy: structure is checked, secrets are never present.
+
+jsonschema builds its own error text, and that text embeds the offending
+*instance* -- for a container it pretty-prints the whole dict as a Python
+repr, credentials and all. redact() can only mask shapes someone thought
+of in advance, and this codebase has now been bitten twice by exactly that
+(a repr writes 'password': 'x', which the inline pattern's `password\\s*[=:]`
+never saw coming; a five-character literal slipped under a {6,} length
+floor). So the instance is not passed through a masker here -- for the two
+cases where it could carry a secret it is not passed through at all:
+
+  * the instance is a container (dict/list), so its repr would carry every
+    leaf under it, or
+  * the error's JSON pointer sits at or under a credential-shaped
+    position,
+
+and the message is built instead from the error's *structural* facts --
+its JSON pointer, its failing validator, and that validator's value. All
+three come from the vendored schema or the pointer, never from operator
+data, so there is nothing to mask. This is the same conclusion
+mcp_server._change_entry reached independently: structural position is the
+only source of truth this codebase actually has.
+
+Scalar instances at non-credential positions keep jsonschema's own wording
+(still redacted), because "'1500' is not of type 'integer'" is the most
+useful thing an operator can be told and the value is, by construction,
+not in a credential position.
 """
 from __future__ import annotations
 
@@ -12,7 +38,7 @@ from jsonschema import Draft202012Validator
 
 from ..findings import Finding, Result, Severity
 from ..inventory import REFERENCE_RE
-from ..redact import redact
+from ..redact import CREDENTIAL_KEY_RE, redact
 from ..schema import DEFAULT_VERSION, load_schema
 
 # 16 chars: satisfies rootVcenterPassword (8-20), nsxt (>=12), sddcManager (>=15).
@@ -44,7 +70,7 @@ def validate_against_schema(spec: dict, version: str = DEFAULT_VERSION) -> Resul
         Finding(
             code="VCF-SCHEMA", severity=Severity.ERROR,
             path=_pointer(error.absolute_path),
-            message=str(redact(error.message)),
+            message=_message_for(error),
             fix="Correct the field to match the VCF Installer schema.",
             source="schema", source_url=SOURCE_URL)
         for error in sorted(validator.iter_errors(candidate),
@@ -56,6 +82,54 @@ def validate_against_schema(spec: dict, version: str = DEFAULT_VERSION) -> Resul
 def _pointer(path) -> str:
     parts = list(path)
     return "/" + "/".join(str(p) for p in parts) if parts else "/"
+
+
+# --- Message construction -------------------------------------------------
+
+def _is_credential_position(path) -> bool:
+    """True when any segment of the pointer names a credential container or
+    a credential-shaped field.
+
+    Whole-segment match on "credentials" covers a key CREDENTIAL_KEY_RE has
+    never heard of (credentials.myCustomKey); CREDENTIAL_KEY_RE covers a
+    credential-shaped field living outside any credentials block
+    (rootVcenterPassword, adminUserSsoPassword).
+    """
+    for part in path:
+        if not isinstance(part, str):
+            continue
+        if part.lower() == "credentials" or CREDENTIAL_KEY_RE.search(part):
+            return True
+    return False
+
+
+def _constraint_detail(value: object) -> str:
+    """Render a validator's value -- schema text, never operator data."""
+    if isinstance(value, (str, int, float, bool)):
+        return f" ({value!r})"
+    if isinstance(value, list) and all(
+            isinstance(v, (str, int, float, bool, type(None))) for v in value):
+        return f" (permitted: {', '.join(repr(v) for v in value)})"
+    return ""
+
+
+def _structural_message(error) -> str:
+    where = _pointer(error.absolute_path)
+    if error.validator == "required":
+        declared = error.validator_value or []
+        missing = (sorted(set(declared) - set(error.instance))
+                   if isinstance(error.instance, dict) else sorted(declared))
+        names = ", ".join(repr(m) for m in missing) or "a required property"
+        return f"{where} is missing required properties: {names}."
+    return (f"The value at {where} does not satisfy "
+            f"{error.validator!r}{_constraint_detail(error.validator_value)}.")
+
+
+def _message_for(error) -> str:
+    if isinstance(error.instance, (dict, list, tuple)) or \
+            _is_credential_position(error.absolute_path):
+        return _structural_message(error)
+    return str(redact(error.message))
 
 
 # --- Recursive $defs walk -------------------------------------------------

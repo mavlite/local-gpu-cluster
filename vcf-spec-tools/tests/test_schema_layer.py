@@ -47,13 +47,48 @@ def test_placeholder_satisfies_every_password_constraint():
     assert 15 <= len(PLACEHOLDER_SECRET) <= 20
 
 
-def test_a_pasted_secret_in_a_schema_error_is_redacted():
+def test_a_pasted_secret_at_a_credential_position_never_reaches_the_message():
+    """Stronger than "it is masked afterwards": at a credential position the
+    offending instance is not put into the message at all, so there is
+    nothing for a masker to miss. The message still has to be useful, so it
+    must name the position and the constraint that failed.
+    """
     doc = {**MINIMAL, "vcenterSpec": {"vcenterHostname": "vc01",
                                       "rootVcenterPassword": "hunter2"}}
     result = validate_against_schema(doc)
     rendered = " ".join(f.message for f in result.findings)
     assert "hunter2" not in rendered
-    assert "***REDACTED***" in rendered
+    assert "/vcenterSpec/rootVcenterPassword" in rendered
+    assert "minLength" in rendered
+
+
+def test_a_short_secret_at_a_credential_position_is_not_echoed_either():
+    """redact()'s quoted-value rule used to carry a {6,} length floor, so a
+    five-character literal ("'Ab3!x' is too short") was echoed verbatim.
+    Length is not a property that distinguishes a secret from a non-secret.
+    """
+    doc = {**MINIMAL, "vcenterSpec": {"vcenterHostname": "vc01",
+                                      "rootVcenterPassword": "Ab3!x"}}
+    result = validate_against_schema(doc)
+    assert "Ab3!x" not in " ".join(f.message for f in result.findings)
+
+
+def test_a_container_instance_is_replaced_by_a_pointer_not_reprinted():
+    """jsonschema pretty-prints the whole offending instance as a Python
+    repr, so a type error one level above a credentials block echoes every
+    leaf under it -- including the password -- in a shape ('password': 'x')
+    that no inline masker anticipated. A container instance must never be
+    put into the message; the pointer says where the problem is instead.
+    """
+    secret = "VMw@re123!Real"
+    doc = {**MINIMAL, "hostSpecs": {"hostname": "esx01",
+                                    "credentials": {"username": "root",
+                                                    "password": secret}}}
+    result = validate_against_schema(doc)
+    rendered = " ".join(f.message for f in result.findings)
+    assert secret not in rendered
+    assert "/hostSpecs" in rendered
+    assert "'array'" in rendered
 
 
 def test_declared_properties_reads_the_vendored_schema():

@@ -290,9 +290,17 @@ reaches a finding or the rendered spec.
   valid or not. This limitation is recorded in the docstring of
   `_change_entry` in `vcfspec/mcp_server.py`; read it there for the full
   reasoning, not just this summary.
-- No tool ever puts a raw exception message, or a raw `jsonschema`
-  validation message, in a finding — those can echo spec content
-  (including a secret) verbatim. Only an exception's class name is used.
+- **No raw exception text in a finding.** Only an exception's class name is
+  used; `str(exc)` can echo spec content (including a secret) verbatim.
+- **A `jsonschema` message is never used where it could carry a secret.**
+  `jsonschema` embeds the offending *instance* in the text it builds, and
+  for a container it pretty-prints the whole dict as a Python repr —
+  credentials included. So the schema layer builds its own message, from
+  the error's JSON pointer and failing validator alone, whenever the
+  instance is a container or the pointer sits at or under a
+  credential-shaped position. Nothing is echoed, so there is no pattern
+  for a masker to miss. Only a scalar at a non-credential position keeps
+  `jsonschema`'s own wording, and that still passes through `redact()`.
 
 ## The MCP server (optional)
 

@@ -67,3 +67,32 @@ def test_redact_is_idempotent():
     once = redact(doc)
     twice = redact(once)
     assert twice == once
+
+
+def test_masks_a_password_written_in_python_repr_form():
+    """jsonschema reprs the whole containing dict, which writes
+    'password': 'x' -- a quote sits between the key name and the colon, so
+    the inline pattern's "password, optional whitespace, then = or :" never
+    matched it. This is the shape that actually leaked, not the shape
+    someone imagined.
+    """
+    text = ("{'hostname': 'esx01', 'credentials': {'username': 'root', "
+            "'password': 'VMw@re123!Real'}} is not of type 'array'")
+    out = redact(text)
+    assert "VMw@re123!Real" not in out
+    assert MASK in out
+
+
+def test_masks_a_short_quoted_secret():
+    """A five-character root password is still a root password; the old
+    {6,} floor in the quoted-value rule let it through verbatim."""
+    assert "Ab3!x" not in redact("'Ab3!x' is too short")
+
+
+def test_repr_form_reference_placeholders_still_survive():
+    assert redact("'password': '${esx_root}'") == "'password': '${esx_root}'"
+
+
+def test_repr_form_masking_is_idempotent():
+    once = redact("{'credentials': {'password': 'VMw@re123!Real'}}")
+    assert redact(once) == once
