@@ -2,9 +2,11 @@ import json
 
 import yaml
 
+from vcfspec import api
 from vcfspec.api import render_document, subtree_blocked, validate_document
 from vcfspec.findings import Finding, Result, Severity
 from vcfspec.inventory import EXAMPLE_PATH
+from vcfspec.schema import DEFAULT_VERSION
 from vcfspec.validate import probes
 from vcfspec.validate.probes import ProbeConfig
 
@@ -246,7 +248,12 @@ def test_render_document_does_not_gate_rules_so_a_suppressed_warning_never_hides
     out = render_document(yaml.safe_dump(doc))
     codes = [f["code"] for f in out["findings"]]
     assert "VCF-VSP-POOL-CROSSES-SUBNET" in codes
-    assert out["layers_skipped"] == {}
+    # No layer was skipped: every one of detect/schema/rules/render/verify
+    # ran, and no rule finding was filtered. (The bad value also fails the
+    # rendered spec against the vendored schema, so the spec itself is
+    # withheld -- that is the verify layer doing its job, not gating.)
+    assert "rules" not in out["layers_skipped"]
+    assert out["layers_run"] == ["detect", "schema", "rules", "render", "verify"]
 
 
 # --- Subtree gating: pointer segments, not string prefixes -----------------
@@ -473,3 +480,105 @@ def test_probes_still_run_for_an_inventory(monkeypatch):
     out = validate_document(TEXT, probe_config=ProbeConfig())
     assert "probes" in out["layers_run"]
     assert "probes" not in out["layers_skipped"]
+
+
+# --- Finding 1: the rendered spec is validated, and a bad one is withheld ---
+
+def _render_with(**overrides):
+    doc = yaml.safe_load(TEXT)
+    for dotted, value in overrides.items():
+        node = doc
+        *parents, leaf = dotted.split(".")
+        for key in parents:
+            node = node[key]
+        node[leaf] = value
+    return render_document(yaml.safe_dump(doc))
+
+
+def test_the_happy_path_still_renders_and_records_the_verify_layer():
+    out = render_document(TEXT)
+    assert out["valid"] is True
+    assert out["layers_run"] == ["detect", "schema", "rules", "render", "verify"]
+    assert out["spec"]["sddcId"] == "lab01"
+
+
+def test_a_garbage_gateway_renders_into_a_schema_invalid_spec_and_is_caught():
+    """The review's reproduction. networks.management.gateway: "nope" passes
+    the inventory schema (which types gateway as a bare string), skips the
+    rule layer (_address() returns None for an unparseable address), and is
+    copied straight into networkSpecs[0].gateway -- which the vendored
+    VMware schema rejects. This used to exit 0 with valid: true and a
+    "spec" key holding it.
+    """
+    out = _render_with(**{"networks.management.gateway": "nope"})
+    assert out["valid"] is False
+    assert "verify" in out["layers_run"]
+    schema_paths = [f["path"] for f in out["findings"] if f["code"] == "VCF-SCHEMA"]
+    assert "/networkSpecs/0/gateway" in schema_paths
+
+
+def test_a_schema_invalid_render_does_not_return_a_spec():
+    """The entire purpose is preventing a bad spec reaching VCF, so a spec
+    that fails validation is not handed back with a warning attached -- an
+    operator or an agent pipes `.spec` into a file and never reads the
+    findings. Same shape as the insecure-credential path."""
+    out = _render_with(**{"networks.management.gateway": "nope"})
+    assert "spec" not in out
+    assert out["layers_skipped"]["spec"]
+
+
+def test_a_rule_finding_about_the_input_still_returns_a_spec():
+    """The line the withholding draws: the verify layer withholds, the rule
+    layer does not. A rule finding describes the *inventory*, and an
+    operator fixes it by iterating on the render, so the render is still
+    handed over."""
+    out = _render_with(**{"nsx.fabricMtu": 1500})
+    assert out["valid"] is False
+    assert "VCF-NSX-FABRIC-MTU-TOO-LOW" in {f["code"] for f in out["findings"]}
+    assert "spec" in out
+
+
+def test_the_vsp_pool_case_from_the_same_sweep_is_caught_too():
+    out = _render_with(**{"appliances.vsp.poolStart": "zzz"})
+    assert out["valid"] is False
+    assert "spec" not in out
+
+
+def test_walk_declared_properties_is_wired_in_not_just_tested(monkeypatch):
+    """walk_declared_properties existed, worked, was well tested, and had
+    zero production call sites -- it ran against one bundled fixture and
+    nothing else. No $def in the vendored schema sets
+    additionalProperties: false, so an invented key validates cleanly at
+    every level and jsonschema cannot catch it; this walk is the only thing
+    that can. Inject one at render time and confirm render_document
+    reports it, which is a claim about the *wiring*, not the walk.
+    """
+    real_render = api.render
+
+    def render_with_an_invented_key(inventory, version=DEFAULT_VERSION):
+        spec, result = real_render(inventory, version)
+        spec = {**spec, "hostSpecs": [{**spec["hostSpecs"][0],
+                                       "bogusInventedField": "x"}]}
+        return spec, result
+
+    monkeypatch.setattr(api, "render", render_with_an_invented_key)
+    out = api.render_document(TEXT)
+    assert out["valid"] is False
+    assert "spec" not in out
+    undeclared = [f for f in out["findings"]
+                  if f["code"] == "VCF-RENDER-UNDECLARED-FIELD"]
+    assert [f["path"] for f in undeclared] == ["/hostSpecs/0/bogusInventedField"]
+
+
+def test_verify_never_raises_for_a_version_with_defaults_but_no_schema(monkeypatch):
+    """api.py promises no exception reaches the caller. The verify layer
+    loads the vendored schema, which render() does not, so it has its own
+    way to fail."""
+    def missing(version=DEFAULT_VERSION):
+        raise FileNotFoundError(version)
+
+    monkeypatch.setattr(api, "load_schema", missing)
+    out = api.render_document(TEXT)
+    assert out["valid"] is False
+    assert "spec" not in out
+    assert "VCF-SCHEMA-VERSION-UNKNOWN" in {f["code"] for f in out["findings"]}

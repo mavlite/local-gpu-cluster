@@ -148,6 +148,30 @@ $ python -m vcfspec.cli render vcfspec/examples/lab-3-host.yaml | jq '.spec.host
 }
 ```
 
+**The rendered spec is itself validated before it is returned.** That is
+the point of the tool, so it is not left to the operator to run `validate`
+on the output afterwards: `render` finishes with a `verify` layer (visible
+in `layers_run`) that checks the spec it just built against the vendored
+VMware schema *and* walks it for any field name the schema does not
+declare — a check `jsonschema` cannot make here, because no `$def` in the
+vendored schema sets `additionalProperties: false`.
+
+This matters because the inventory schema is deliberately looser than
+VMware's. `networks.management.gateway: "nope"` is a plain string, so the
+inventory schema accepts it; the rule layer skips it (it is not a parseable
+address); and it is copied verbatim into `networkSpecs[0].gateway`, where
+the vendored schema rejects it. Without the `verify` layer that rendered,
+exited `0`, and reported `valid: true`.
+
+A spec that fails `verify` is **not returned**: there is no `spec` key,
+exactly as on the insecure-credential path below, because handing back a
+spec the Installer would refuse — with a finding attached that whoever
+pipes `.spec` into a file will never read — defeats the entire purpose.
+Note the line that draws: a *rule* finding about the inventory (an
+undersized TEP pool, a gateway outside its subnet) still returns the spec,
+because that describes the input and an operator fixes it by iterating on
+the render.
+
 The three `VCF-RENDER-DEFAULT-APPLIED` findings are `workflowType: VCF`,
 `ceipEnabled: false` and `skipEsxThumbprintValidation: true` — each one
 names exactly which field it defaulted and why (see "What it checks"

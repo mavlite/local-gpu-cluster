@@ -62,6 +62,12 @@ VCF-RENDER-WRONG-KIND:
   source_url: ""
   summary: "render() only accepts a lab inventory; this document was detected as '{kind}'."
   fix: "Use vcf_validate_spec to check an already-rendered SddcSpec document; render() only works on a LabInventory."
+VCF-RENDER-UNDECLARED-FIELD:
+  severity: error
+  source: schema
+  source_url: https://github.com/vmware/vcf-api-specs
+  summary: "The rendered spec has a field at {pointer} that the VCF Installer schema does not declare."
+  fix: "This is a renderer bug, not an input problem: no $def in the vendored schema sets additionalProperties:false, so jsonschema alone cannot catch an invented key. Report it with the inventory that produced it."
 VCF-RENDER-DEFAULT-APPLIED:
   severity: info
   source: table

@@ -41,9 +41,10 @@ from .render import InsecureCredentialError, render
 from .rules import finding_for
 from .rules.network import check_networks
 from .rules.platform import check_platform
-from .schema import DEFAULT_VERSION, SchemaIntegrityError
+from .schema import DEFAULT_VERSION, SchemaIntegrityError, load_schema
 from .validate.probes import ProbeConfig, run_probes
-from .validate.schema_layer import validate_against_schema
+from .validate.schema_layer import (validate_against_schema,
+                                    walk_declared_properties)
 
 # Codes that mean "this JSON pointer's subtree failed schema validation".
 _GATING_CODES = ("VCF-INV-SCHEMA", "VCF-SCHEMA")
@@ -273,9 +274,81 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
 
     combined = combined.merge(render_result)
     layers_run.append("render")
+
+    # The output is checked, not just the input. Without this,
+    # `valid: true` from render did not mean the rendered spec was valid:
+    # an inventory gateway of "nope" passed the inventory schema (which
+    # types it as a bare string), skipped the rule layer (_address()
+    # returns None for an unparseable address), and was copied straight
+    # into networkSpecs[0].gateway -- where the vendored VMware schema
+    # rejects it. Exit 0, valid: true, layers_run ending in "render", and
+    # a spec the Installer would refuse five hours into a bare-metal
+    # build, which is the exact failure this package exists to prevent.
+    verify_result, verify_ok = _verify_rendered(spec, version)
+    combined = combined.merge(verify_result)
+    layers_run.append("verify")
+
+    if not verify_ok:
+        # No spec key. The whole point is preventing a bad spec reaching
+        # VCF, so handing one back with a warning attached would defeat
+        # it -- an operator (or an agent) pipes `.spec` into a file and
+        # never reads the findings. This mirrors what the insecure-
+        # credential path above already does: emit the findings, withhold
+        # the output.
+        #
+        # Note the line this draws: only the *verify* layer withholds the
+        # spec. A rule finding about the inventory (a gateway outside its
+        # subnet, an undersized TEP pool) still returns one, because those
+        # describe the input and an operator fixes them by iterating on
+        # the render. A spec that the vendored schema rejects, or that
+        # carries a field the schema does not declare, is different in
+        # kind: it is not a spec, and there is nothing to iterate on.
+        return _envelope(combined, layers_run,
+                         {"spec": "the rendered spec failed schema validation"})
+
     envelope = _envelope(combined, layers_run, {})
     envelope["spec"] = redact(spec)
     return envelope
+
+
+def _verify_rendered(spec: dict, version: str) -> tuple[Result, bool]:
+    """Check the *rendered* spec against the vendored schema. Returns
+    (findings, ok) where ok is False when the spec must be withheld.
+
+    Two independent checks, because neither subsumes the other:
+
+    1. validate_against_schema() -- types, required fields, minLength,
+       patterns. This is what catches a value copied verbatim out of the
+       inventory that the inventory's own looser schema permitted.
+    2. walk_declared_properties() -- an invented key name at any depth.
+       jsonschema cannot catch that here: no $def in the vendored schema
+       sets additionalProperties: false, so an undeclared key validates
+       cleanly at every level. Before this, that walk existed, worked, was
+       well tested, and had zero production call sites -- it ran against
+       one bundled fixture in tests/test_render.py and nothing else.
+       Wiring it here makes it a runtime guard over every render branch,
+       including the ones no example exercises (storage.type != VSAN_ESA,
+       nsx absent, vsp absent).
+
+    Nothing here may raise: this module promises no exception reaches the
+    caller. load_schema() raises for a version nothing was vendored for,
+    and _resolve_ref() raises on a malformed schema; both become findings.
+    """
+    try:
+        findings = list(validate_against_schema(spec, version).findings)
+        walk = walk_declared_properties(load_schema(version), "SddcSpec", spec)
+    except (FileNotFoundError, SchemaIntegrityError):
+        return Result((finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
+                                   version=version),)), False
+    except Exception as exc:
+        return Result((finding_for("VCF-RENDER-FAILED", "/",
+                                   exc_type=type(exc).__name__),)), False
+
+    for pointer in sorted(walk.undeclared):
+        findings.append(finding_for("VCF-RENDER-UNDECLARED-FIELD", pointer,
+                                    pointer=pointer))
+    result = Result(tuple(findings))
+    return result, result.valid
 
 
 def _envelope(result: Result, layers_run: list[str], skipped: dict[str, str]) -> dict:
