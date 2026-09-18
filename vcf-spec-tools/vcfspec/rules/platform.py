@@ -139,10 +139,12 @@ def _capacity_rules(inventory: dict) -> list[Finding]:
             out.append(finding_for("VCF-CAP-N1-SHORTFALL", "/hosts",
                                    needed=STACK_RAM_GB, available=n1))
 
-    usable_storage = round(storage_gb / AUTO_RAID_OVERHEAD, 2)
-    if storage_gb and usable_storage < STACK_STORAGE_GB:
-        out.append(finding_for("VCF-CAP-STORAGE-SHORTFALL", "/hosts",
-                               needed=STACK_STORAGE_GB, available=usable_storage))
+    storage_type = str(_mapping(inventory.get("storage")).get("type", ""))
+    if storage_type.startswith("VSAN"):
+        usable_storage = round(storage_gb / AUTO_RAID_OVERHEAD, 2)
+        if usable_storage < STACK_STORAGE_GB:
+            out.append(finding_for("VCF-CAP-STORAGE-SHORTFALL", "/hosts",
+                                   needed=STACK_STORAGE_GB, available=usable_storage))
     return out
 
 

@@ -44,6 +44,19 @@ def test_missing_host_hardware_is_reported_not_skipped(inventory):
     assert "VCF-CAP-UNKNOWN-HARDWARE" in check_platform(inventory).codes
 
 
+def test_missing_vsan_capacity_is_a_shortfall_not_a_silent_pass(inventory):
+    for host in inventory["hosts"]:
+        host["hardware"].pop("vsanDeviceTb", None)
+    assert "VCF-CAP-STORAGE-SHORTFALL" in check_platform(inventory).codes
+
+
+def test_storage_is_not_checked_when_principal_storage_is_not_vsan(inventory):
+    inventory["storage"]["type"] = "NFS"
+    for host in inventory["hosts"]:
+        host["hardware"].pop("vsanDeviceTb", None)
+    assert "VCF-CAP-STORAGE-SHORTFALL" not in check_platform(inventory).codes
+
+
 def test_uppercase_host_name_is_an_error(inventory):
     inventory["hosts"][0]["name"] = "ESX01"
     assert "VCF-NAME-NOT-LOWERCASE" in check_platform(inventory).codes
