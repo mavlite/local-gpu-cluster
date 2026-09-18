@@ -22,6 +22,22 @@ running zero probes. An empty ProbeConfig.allowlist permits nothing, so
 that combination would otherwise look like a clean pass while checking
 nothing -- an operator who asked for probes and got none deserves an
 error, not misleading output.
+
+Note what that check can and cannot do. Non-emptiness is an argument
+property; "this allowlist matches something in this document" is not,
+because it depends on the document. A non-empty allowlist matching none of
+the hosts (`--allowlist 203.0.113.0/24` against a 10.50.10.0/24 lab) used
+to produce the identical misleading pass. That case is caught where it is
+actually knowable, in run_probes, as the blocking finding
+VCF-PROBE-NOTHING-PERMITTED -- which also covers every caller of
+run_probes, not only the one with argv.
+
+--allowlist-domain is the name-side equivalent of --allowlist, and it is
+not optional in effect: probes fail closed without it, issuing no forward
+DNS lookups at all. That is deliberate rather than a usage error, because
+the reverse lookup and the TCP check still run and are still useful, and
+the skipped forward lookups are each reported as VCF-PROBE-NAME-BLOCKED
+rather than silently omitted.
 """
 from __future__ import annotations
 
@@ -51,6 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allowlist", action="append", default=None, metavar="CIDR",
         help="CIDR probes are permitted to touch; repeatable. Required "
              "with --probe -- an empty allowlist permits nothing.")
+    validate.add_argument(
+        "--allowlist-domain", action="append", default=None, metavar="SUFFIX",
+        help="DNS suffix a forward lookup is permitted to resolve under; "
+             "repeatable. Without it no forward lookup is issued at all -- "
+             "an IP allowlist cannot gate a name, because the query is "
+             "itself the exfiltration channel.")
     validate.add_argument("--probe-timeout", type=float, default=2.0,
                           help="Per-probe socket timeout in seconds.")
 
@@ -132,8 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             probe_config = None
             if args.probe:
-                probe_config = ProbeConfig(allowlist=tuple(args.allowlist),
-                                           timeout_s=args.probe_timeout)
+                probe_config = ProbeConfig(
+                    allowlist=tuple(args.allowlist),
+                    timeout_s=args.probe_timeout,
+                    domain_allowlist=tuple(args.allowlist_domain or ()))
             result = validate_document(text, probe_config=probe_config,
                                        version=args.version)
         else:

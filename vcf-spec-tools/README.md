@@ -215,14 +215,17 @@ $ echo $?
    maintenance.
 3. **Probes** (opt-in, CLI only) — forward/reverse DNS and TCP-443
    reachability for each host, run only against CIDRs the operator
-   explicitly allowlists. Real output, run from a machine that is not on
-   the example's `10.50.10.0/24` lab network, so every host in it is
+   explicitly allowlists with `--allowlist`, and resolving only names
+   under a DNS suffix they explicitly allowlist with `--allowlist-domain`.
+   Real output, run from a machine that is not on the example's
+   `10.50.10.0/24` lab network, so every host in it is
    reachable-in-principle (inside the allowlist) but not actually
    resolvable from here:
 
    ```
    $ python -m vcfspec.cli validate vcfspec/examples/lab-3-host.yaml \
-       --probe --allowlist 10.50.10.0/24 --probe-timeout 0.5
+       --probe --allowlist 10.50.10.0/24 --allowlist-domain lab.local \
+       --probe-timeout 0.5
    ...
    {
      "code": "VCF-PROBE-UNKNOWN",
@@ -253,6 +256,28 @@ $ echo $?
    what an operator needs to know before bring-up, not a tool failure.
    Probes never run if a `critical` finding is already present.
 
+   Two containment rules are worth stating on their own, because both
+   close gaps an IP allowlist alone cannot:
+
+   - **Names are gated separately from addresses.** The forward lookup
+     resolves `<host.name>.<dns.subdomain>`, two strings taken straight
+     out of the document, and a DNS query for an attacker-chosen name
+     *is* the exfiltration channel — the label reaches whatever
+     nameserver is authoritative for it. An IP allowlist cannot gate
+     that, because you do not learn the IP until after the query. So
+     `--allowlist-domain` gates the name, and it fails closed: with no
+     suffix configured, **no forward lookup is issued at all** and each
+     one is reported as `VCF-PROBE-NAME-BLOCKED`. The reverse lookup
+     needs no gate — it takes the already-allowlisted IP. Suffix matching
+     is on whole labels, so `lab.local` does not permit `evil-lab.local`.
+   - **An allowlist that matches nothing is not a pass.** If probes were
+     asked for and the allowlist permitted none of the document's hosts
+     (`--allowlist 203.0.113.0/24` against a `10.50.10.0/24` lab), that is
+     `VCF-PROBE-NOTHING-PERMITTED` at `error` severity — exit `1`, not a
+     clean exit `0` with `probes` in `layers_run` and zero lookups made.
+     Partial blocking is legitimate and is *not* this case: the permitted
+     hosts are really probed and the verdict stands on their results.
+
 ## Credentials
 
 Credential fields hold references such as `${esx_root}`, never secrets.
@@ -276,10 +301,13 @@ reaches a finding or the rendered spec.
   position inside a `credentials` block *and* on credential-shaped key
   names, so a credential key no regex has been taught is still caught.
 - **Probes are opt-in and contained.** They exist only in the CLI, never
-  in the MCP server (see below), run only when `--probe` is passed, and
-  touch only addresses inside an explicit `--allowlist`. An unreachable or
-  disallowed target is reported, never silently skipped or silently
-  probed anyway.
+  in the MCP server (see below), run only when `--probe` is passed, touch
+  only addresses inside an explicit `--allowlist`, and resolve only names
+  under an explicit `--allowlist-domain`. Both gates fail closed. An
+  unreachable, disallowed or unresolvable target is reported, never
+  silently skipped or silently probed anyway — and if the allowlist
+  permitted *no* host in the document, that is a blocking finding rather
+  than a clean pass over nothing.
 - **The MCP server performs no network I/O at all.** None of its five
   tools accept a probe configuration. That's deliberate: the probe layer
   bounds a hung DNS lookup by abandoning a daemon thread rather than

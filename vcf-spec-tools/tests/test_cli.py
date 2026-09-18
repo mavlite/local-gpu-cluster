@@ -177,3 +177,52 @@ def test_stdout_is_pure_json_on_invalid_document(tmp_path, capsys):
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert payload["valid"] is False
+
+
+def test_allowlist_domain_is_threaded_through_to_probeconfig(monkeypatch, capsys):
+    """An option the CLI parses but drops is indistinguishable from one it
+    never had; probes.py fails closed without it, so a dropped
+    --allowlist-domain would silently mean "resolve nothing"."""
+    captured = {}
+
+    def fake_validate_document(text, input_kind=None, probe_config=None, version=None):
+        captured["probe_config"] = probe_config
+        return {"valid": True, "findings": [], "layers_run": ["detect", "probes"],
+               "layers_skipped": {}}
+
+    monkeypatch.setattr(cli, "validate_document", fake_validate_document)
+    exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
+                      "--allowlist", "10.50.10.0/24",
+                      "--allowlist-domain", "lab.local",
+                      "--allowlist-domain", "lab2.local"])
+    assert exit_code == 0
+    assert captured["probe_config"].domain_allowlist == ("lab.local", "lab2.local")
+
+
+def test_probe_with_no_allowlist_domain_defaults_to_resolving_nothing(
+        monkeypatch, capsys):
+    captured = {}
+
+    def fake_validate_document(text, input_kind=None, probe_config=None, version=None):
+        captured["probe_config"] = probe_config
+        return {"valid": True, "findings": [], "layers_run": ["detect", "probes"],
+               "layers_skipped": {}}
+
+    monkeypatch.setattr(cli, "validate_document", fake_validate_document)
+    main(["validate", str(EXAMPLE_PATH), "--probe", "--allowlist", "10.50.10.0/24"])
+    assert captured["probe_config"].domain_allowlist == ()
+
+
+def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(capsys):
+    """The exact reproduction: a valid, non-empty allowlist that matches
+    none of the example lab's hosts. The CLI refuses an *empty* allowlist
+    for precisely this reason, and this case used to exit 0 with
+    valid: true, layers_run including "probes", and zero lookups made.
+    """
+    exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
+                      "--allowlist", "203.0.113.0/24",
+                      "--allowlist-domain", "lab.local"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["valid"] is False
+    assert "VCF-PROBE-NOTHING-PERMITTED" in {f["code"] for f in payload["findings"]}

@@ -218,6 +218,18 @@ VCF-PROBE-TARGET-BLOCKED:
   source_url: ""
   summary: "Refused to probe {target}: outside the configured allowlist."
   fix: "Add the range to the probe allowlist if it really is yours."
+VCF-PROBE-NAME-BLOCKED:
+  severity: warning
+  source: docs
+  source_url: ""
+  summary: "Refused to resolve {name}: outside the configured DNS name allowlist."
+  fix: "Pass --allowlist-domain with the DNS suffix your lab really uses. With none configured no forward lookup is issued at all: an IP allowlist cannot gate a name, because the query that would reveal the IP is itself the exfiltration channel."
+VCF-PROBE-NOTHING-PERMITTED:
+  severity: error
+  source: docs
+  source_url: ""
+  summary: "Probes were requested, but the allowlist permitted none of the {count} host(s) in this document, so nothing was checked."
+  fix: "Correct --allowlist so it covers the management network these hosts are on, or drop --probe. A non-empty allowlist that matches no host checks exactly as much as no allowlist at all."
 VCF-PROBE-UNKNOWN:
   severity: info
   source: docs
