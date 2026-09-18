@@ -4,6 +4,14 @@ Every field name here was verified against components.schemas.SddcSpec in
 vcf-installer-openapi.json 9.1.1.0. Notable traps, all previously got wrong:
 hostSpecs[].hostname is the SHORT name; there is no ipAddressPrivate; the
 vCenter password field is rootVcenterPassword; vlanId and mtu are integers.
+
+Trust boundary: inventory.py's validate_inventory() is the layer that is
+*supposed* to run first and reject a literal (non-"${reference}") secret.
+render() does not assume that happened -- it is the last code that touches
+credential values before they leave the process, so every value it copies
+out of the inventory's `credentials` section is re-checked against the
+same ${reference} pattern here, and a non-conforming value raises rather
+than being copied into the rendered spec.
 """
 from __future__ import annotations
 
@@ -13,9 +21,29 @@ from pathlib import Path
 import yaml
 
 from .findings import Finding, Result, Severity
+from .inventory import REFERENCE_RE
 from .schema import DEFAULT_VERSION
 
 DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
+
+
+class InsecureCredentialError(ValueError):
+    """Raised when render() would emit a credential that is not a ${reference}.
+
+    These tools never hold or emit real secrets. The message intentionally
+    never includes the offending value.
+    """
+
+
+def _credential(creds: dict, name: str) -> str:
+    """Fetch credentials[name], refusing anything that is not a ${reference}."""
+    value = creds.get(name, "")
+    if not REFERENCE_RE.match(value):
+        raise InsecureCredentialError(
+            f"credential '{name}' must be a ${{reference}} (e.g. ${{{name}}}); "
+            "refusing to render a literal value.")
+    return value
+
 
 # Only these three are real VCF network types for this shape. TEP traffic is
 # configured through nsxtSpec, not as a networkSpec.
@@ -78,7 +106,7 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
         "vcenterSpec": _vcenter_spec(appliances, creds, default),
         "sddcManagerSpec": {
             "hostname": (appliances.get("sddcManager") or {}).get("hostname", ""),
-            "rootPassword": creds.get("sddcManagerRoot", ""),
+            "rootPassword": _credential(creds, "sddcManagerRoot"),
         },
         "hostSpecs": [_host_spec(host, creds)
                       for host in inventory.get("hosts") or []],
@@ -123,10 +151,10 @@ def _vcenter_spec(appliances: dict, creds: dict, default) -> dict:
     vcenter = appliances.get("vcenter") or {}
     return {
         "vcenterHostname": vcenter.get("hostname", ""),
-        "rootVcenterPassword": creds.get("vcenterRoot", ""),
+        "rootVcenterPassword": _credential(creds, "vcenterRoot"),
         "vmSize": vcenter.get("size") or default("vcenterSize"),
         "ssoDomain": vcenter.get("ssoDomain") or default("ssoDomain"),
-        "adminUserSsoPassword": creds.get("ssoAdmin", ""),
+        "adminUserSsoPassword": _credential(creds, "ssoAdmin"),
     }
 
 
@@ -136,8 +164,8 @@ def _nsxt_spec(nsx: dict, creds: dict, default) -> dict:
         "nsxtManagers": [{"hostname": name} for name in nsx.get("managers", [])],
         "vipFqdn": nsx.get("vipFqdn", ""),
         "nsxtManagerSize": nsx.get("size") or default("nsxSize"),
-        "rootNsxtManagerPassword": creds.get("nsxAdmin", ""),
-        "nsxtAdminPassword": creds.get("nsxAdmin", ""),
+        "rootNsxtManagerPassword": _credential(creds, "nsxAdmin"),
+        "nsxtAdminPassword": _credential(creds, "nsxAdmin"),
     }
     if "transportVlanId" in nsx:
         spec["transportVlanId"] = int(nsx["transportVlanId"])
@@ -158,5 +186,5 @@ def _host_spec(host: dict, creds: dict) -> dict:
     """hostname is the SHORT name: the Installer prefixes it to the subdomain."""
     return {
         "hostname": host.get("name", ""),
-        "credentials": {"username": "root", "password": creds.get("esxRoot", "")},
+        "credentials": {"username": "root", "password": _credential(creds, "esxRoot")},
     }
