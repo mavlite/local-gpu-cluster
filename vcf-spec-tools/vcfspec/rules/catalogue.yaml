@@ -18,7 +18,7 @@ VCF-INPUT-UNREADABLE:
   severity: critical
   source: schema
   source_url: ""
-  summary: "The document could not be read."
+  summary: "The document could not be read ({exc_type})."
   fix: "Provide a YAML or JSON mapping within the size, depth and alias limits."
 VCF-INV-SCHEMA:
   severity: error
@@ -50,6 +50,18 @@ VCF-RENDER-DEFAULT-APPLIED:
   source_url: ""
   summary: "A default was applied."
   fix: "Set the value explicitly in the inventory to override."
+VCF-RENDER-FAILED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render() raised {exc_type} while building the spec."
+  fix: "Run validate_document on the same input; its structured findings explain what is wrong. render() itself never describes the failure, so it cannot echo spec content."
+VCF-RENDER-INSECURE-CREDENTIAL:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render() refused to emit a credential that is not a ${reference}."
+  fix: "Use ${name} references for every credential, never a literal value. Run validate_document on the same input to see which credential field is affected."
 VCF-EXPLAIN-UNKNOWN-CODE:
   severity: error
   source: schema

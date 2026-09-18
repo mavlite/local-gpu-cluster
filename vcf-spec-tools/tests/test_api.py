@@ -202,6 +202,33 @@ def test_render_document_converts_any_unexpected_exception_to_a_finding(monkeypa
     assert "VCF-RENDER-FAILED" in [f["code"] for f in out["findings"]]
 
 
+def test_render_document_never_echoes_exception_text_redact_would_not_catch(monkeypatch):
+    """redact() is a pattern masker (jsonschema-echo shapes, key=/secret=
+    shapes), not a sanitizer: it cannot promise anything about text it has
+    never seen. An exception raised by arbitrary code operating on
+    operator data could contain anything, including a value redact()'s
+    patterns do not match at all. Prove the boundary never puts str(exc)
+    in output in the first place, rather than relying on redact() to
+    catch it: use a literal that is deliberately shaped so that NONE of
+    redact()'s patterns fire on it (no quotes, no 'password='-style
+    prefix, not under a credential-shaped key).
+    """
+    import vcfspec.api as api
+
+    unrecognised_secret = "TotallyUnrecognizedSecretPattern9000"
+    assert unrecognised_secret in str(unrecognised_secret)  # sanity: redact() is a no-op on it
+    from vcfspec.redact import redact as real_redact
+    assert real_redact(unrecognised_secret) == unrecognised_secret  # confirms redact() misses it
+
+    def boom(*_args, **_kwargs):
+        raise ValueError(f"bad value: {unrecognised_secret}")
+
+    monkeypatch.setattr(api, "render", boom)
+    out = api.render_document(TEXT)
+    assert out["valid"] is False
+    assert unrecognised_secret not in str(out)
+
+
 def test_render_document_does_not_gate_rules_so_a_suppressed_warning_never_hides_a_bad_spec():
     """A schema type-error at /appliances/vsp/poolStart must not suppress
     the VSP pool-crosses-subnet rule finding derived from that same bad

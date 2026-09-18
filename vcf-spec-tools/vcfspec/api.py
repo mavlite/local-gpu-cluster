@@ -33,10 +33,11 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from .documents import DocumentKind, detect_kind, load_document
-from .findings import Finding, Result, Severity
+from .findings import Result, Severity
 from .inventory import validate_inventory
 from .redact import redact
 from .render import InsecureCredentialError, render
+from .rules import finding_for
 from .rules.network import check_networks
 from .rules.platform import check_platform
 from .schema import DEFAULT_VERSION
@@ -101,11 +102,13 @@ def _filter_blocked(result: Result, blocked: set[str]) -> Result:
 
 
 def _unreadable_envelope(exc: Exception, skipped: dict[str, str]) -> dict:
-    finding = Finding(
-        code="VCF-INPUT-UNREADABLE", severity=Severity.CRITICAL, path="/",
-        message=str(redact(str(exc))),
-        fix="Provide a YAML mapping within the size, depth, and alias limits.",
-        source="schema")
+    # str(exc) is never used here: it is text from documents.py's parser
+    # and depth/size checks, built from operator-supplied YAML, and
+    # redact() only masks shapes it recognises -- it cannot promise
+    # anything about text it has never seen. The exception's class name
+    # is safe (it names a Python type, never spec content) and is enough
+    # to tell DocumentTooLarge apart from a plain yaml.YAMLError.
+    finding = finding_for("VCF-INPUT-UNREADABLE", "/", exc_type=type(exc).__name__)
     return _envelope(Result((finding,)), ["detect"], skipped)
 
 
@@ -184,22 +187,23 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
     # raise on malformed input (a bad int(), a missing key -- the set of
     # possible failures is not enumerable in advance), must never
     # propagate out of the orchestrator -- convert it to a finding instead.
+    #
+    # Neither branch below puts str(exc) in the finding: redact() only
+    # masks shapes it recognises (jsonschema-echo and key=/secret=-shaped
+    # text), and an exception raised by arbitrary code operating on
+    # operator data is not a recognised shape -- it could read anything,
+    # including a spec value verbatim. Only the exception's class name
+    # (never spec content) reaches the message. The detail is not lost:
+    # validate_document() on the same input reports the real, structured
+    # finding, which is where an operator should be looking anyway.
     try:
         spec, render_result = render(doc, version)
-    except InsecureCredentialError as exc:
-        finding = Finding(
-            code="VCF-RENDER-INSECURE-CREDENTIAL", severity=Severity.CRITICAL,
-            path="/credentials", message=str(redact(str(exc))),
-            fix="Use ${name} references for every credential; never a literal value.",
-            source="schema")
+    except InsecureCredentialError:
+        finding = finding_for("VCF-RENDER-INSECURE-CREDENTIAL", "/credentials")
         combined = combined.merge(Result((finding,)))
         return _envelope(combined, layers_run, {"render": "refused an insecure credential"})
     except Exception as exc:
-        finding = Finding(
-            code="VCF-RENDER-FAILED", severity=Severity.CRITICAL, path="/",
-            message=str(redact(str(exc))),
-            fix="Correct the inventory; it could not be rendered into a spec.",
-            source="schema")
+        finding = finding_for("VCF-RENDER-FAILED", "/", exc_type=type(exc).__name__)
         combined = combined.merge(Result((finding,)))
         return _envelope(combined, layers_run,
                          {"render": "render() raised an unexpected exception"})
