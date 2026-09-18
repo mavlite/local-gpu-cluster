@@ -77,9 +77,11 @@ class SchemaWalkResult:
     matching schema property anywhere in its $ref/combinator chain.
     `visited` holds the pointer of every object node the walk actually
     inspected, including free-form ones (no declared properties at all).
-    Recording free-form nodes too means a walk that silently stops
-    descending -- e.g. a $ref that fails to resolve -- shows up as lost
-    coverage in `visited` rather than as a quiet pass.
+    Recording free-form nodes too means a walk that stops descending for
+    a benign reason still shows up as lost coverage in `visited` rather
+    than as a quiet pass. A $ref that fails to resolve does not reach
+    that accounting at all: _resolve_ref raises, so a broken schema is a
+    loud crash, never a silent false negative.
     """
     undeclared: frozenset[str]
     visited: frozenset[str]
