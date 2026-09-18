@@ -29,7 +29,7 @@ from .documents import load_document
 from .findings import Finding
 from .inventory import EXAMPLE_PATH, REFERENCE_RE, load_inventory_schema
 from .redact import CREDENTIAL_KEY_RE, MASK, redact
-from .rules import load_catalogue
+from .rules import finding_for, load_catalogue
 from .schema import DEFAULT_VERSION
 
 _STRING = {"type": "string"}
@@ -119,25 +119,57 @@ def _list_key(items: list) -> str | None:
     return None
 
 
+_CREDENTIALS_PATH = "/credentials"
+
+
 def _change_entry(path: str, left: object, right: object) -> dict:
-    """Build one leaf diff entry, masking a credential-shaped value.
+    """Build one leaf diff entry, masking anything under /credentials.
 
     redact() only masks a value that sits next to a credential-named dict
-    key (findings text, a rendered spec) -- a diff entry instead stores the
-    changed value under "left"/"right", with the field name living only in
-    the JSON pointer. That means a changed password would slip straight
-    through redact()'s key-based check. The credential name is available
-    here as the pointer's last segment, so the masking has to happen at the
-    point the entry is built.
+    key -- a diff entry instead stores the changed value under
+    "left"/"right", with the field name living only in the JSON pointer, so
+    a changed credential would otherwise slip straight through redact()'s
+    key-based check.
+
+    Masking here is keyed off *structural position* (this value sits at or
+    under /credentials), not the key's own name. A name-based check was
+    tried first and missed credentials.vcenterRoot and
+    credentials.sddcManagerRoot: CREDENTIAL_KEY_RE has no entry for either
+    name, and the inventory schema declares no closed set of credential key
+    names to draw one from -- `credentials` is `{"type": "object",
+    "minProperties": 1}`, deliberately free-form (see inventory.py's
+    _credential_findings, which likewise checks every entry in that block
+    regardless of its name, never a fixed list). Structural position is the
+    only source of truth this codebase actually has, so it is what covers
+    every current and future credential name without needing to be taught
+    each one individually.
+
+    CREDENTIAL_KEY_RE is kept as a second, independent check for a
+    credential-shaped key living outside /credentials -- e.g. a stray
+    "password" field elsewhere in the document.
     """
     key = path.rsplit("/", 1)[-1]
-    if CREDENTIAL_KEY_RE.search(key):
-        return {"path": path or "/", "left": _mask_credential(left),
-                "right": _mask_credential(right)}
+    under_credentials = (path == _CREDENTIALS_PATH
+                         or path.startswith(_CREDENTIALS_PATH + "/"))
+    if under_credentials or CREDENTIAL_KEY_RE.search(key):
+        return {"path": path or "/", "left": _mask_credential_value(left),
+                "right": _mask_credential_value(right)}
     return {"path": path or "/", "left": left, "right": right}
 
 
-def _mask_credential(value: object) -> object:
+def _mask_credential_value(value: object) -> object:
+    """Mask every leaf of a value known to sit at or under /credentials.
+
+    Recurses through dicts and lists so a whole credentials block added or
+    removed on one side (left is None, right is the entire dict, or vice
+    versa) is masked entry by entry rather than emitted as one opaque
+    unmasked blob or, worse, left unmasked because it never reached a
+    dict-key check at all.
+    """
+    if isinstance(value, dict):
+        return {k: _mask_credential_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_credential_value(v) for v in value]
     if value is None:
         return value
     if isinstance(value, str) and REFERENCE_RE.match(value):
@@ -185,29 +217,52 @@ HANDLERS = {t.name: t.handler for t in _TOOL_DEFS}
 
 
 def _internal_finding(exc: Exception) -> dict:
-    meta = load_catalogue()["INTERNAL"]
-    finding = Finding(code=meta.code, severity=meta.severity, path="/",
-                      message=f"{meta.summary} ({type(exc).__name__}).",
-                      fix=meta.fix, source=meta.source, source_url=meta.source_url)
+    """The tool itself failed -- an agent should not blindly retry this.
+
+    Only the exception's class name reaches the message, never str(exc):
+    redact() only masks shapes it recognises (jsonschema echoes,
+    key=/secret= patterns), and arbitrary text raised by a handler body
+    operating on operator data could carry spec content straight through it.
+    """
+    finding = finding_for("INTERNAL", "/", detail=type(exc).__name__)
+    return redact({"valid": False, "findings": [asdict(finding)]})
+
+
+def _bad_args_finding(tool: str, detail: str) -> dict:
+    """The *call* was malformed -- an agent should fix its arguments and
+    retry, unlike an INTERNAL finding. Distinct from INTERNAL (severity
+    critical) so a caller can tell "you called this wrong" apart from "this
+    tool is broken"; both this and _internal_finding only ever pass a class
+    name or a tool name through, never exception text or instance data --
+    a jsonschema.ValidationError's own .message can echo the offending
+    value verbatim (that is the whole reason schema_layer.py redacts it
+    before use), and that is exactly the operator data this boundary must
+    never leak.
+    """
+    finding = finding_for("VCF-MCP-BAD-ARGS", "/", tool=tool, detail=detail)
     return redact({"valid": False, "findings": [asdict(finding)]})
 
 
 def call_handler(name: str, arguments: dict) -> dict:
     """Every tool call goes through here, so no traceback -- and no raw
-    exception text -- ever reaches the caller.
+    exception or validation-error text -- ever reaches the caller.
 
-    Unknown tool names, malformed arguments (including an unrecognised
-    property: every schema sets additionalProperties: False) and a missing
-    or wrong-typed value all land in the same except clause. That is a
-    deliberate simplification, not sloppiness: the INTERNAL catalogue entry
-    already covers "the tool failed", and inventing a second, uncatalogued
-    code for "the tool was called wrong" would need its own review.
+    Two failure classes are told apart deliberately: an unknown tool name
+    or arguments that don't match the advertised schema (missing required
+    field, wrong type, unrecognised property -- every schema sets
+    additionalProperties: False) are VCF-MCP-BAD-ARGS, a retryable usage
+    error. Anything a handler itself raises once called with schema-valid
+    arguments is INTERNAL, a non-retryable tool failure.
     """
+    if name not in HANDLERS:
+        return _bad_args_finding(name, "unknown tool name")
+    args = arguments or {}
     try:
-        handler = HANDLERS[name]
-        args = arguments or {}
         Draft202012Validator(TOOLS[name]["inputSchema"]).validate(args)
-        return handler(args)
+    except Exception as exc:
+        return _bad_args_finding(name, type(exc).__name__)
+    try:
+        return HANDLERS[name](args)
     except Exception as exc:
         return _internal_finding(exc)
 

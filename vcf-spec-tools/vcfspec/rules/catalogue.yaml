@@ -72,8 +72,14 @@ INTERNAL:
   severity: critical
   source: schema
   source_url: ""
-  summary: "The tool failed internally."
+  summary: "The tool failed internally ({detail})."
   fix: "Report this with the input that caused it."
+VCF-MCP-BAD-ARGS:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "The tool '{tool}' was called with invalid arguments ({detail})."
+  fix: "Check the tool's input schema (required fields, types, and that no unknown properties are set) and retry with corrected arguments."
 VCF-NET-GATEWAY-OUTSIDE-SUBNET:
   severity: error
   source: docs

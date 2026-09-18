@@ -1,12 +1,14 @@
 import json
 
 import jsonschema
+import pytest
 import yaml
 
 from vcfspec.inventory import EXAMPLE_PATH
 from vcfspec.mcp_server import (HANDLERS, TOOLS, call_handler, tool_diff_spec,
                                  tool_explain_finding, tool_render_spec,
                                  tool_spec_schema, tool_validate_spec)
+from vcfspec.rules import load_catalogue
 
 TEXT = EXAMPLE_PATH.read_text(encoding="utf-8")
 
@@ -61,14 +63,18 @@ def test_diff_ignores_host_reordering():
     assert out["changes"] == []
 
 
-def test_handler_exception_becomes_an_internal_finding():
+def test_missing_required_arg_becomes_a_bad_args_finding():
+    # Fix round 1, recommendation 2: a malformed call is a retryable usage
+    # error (VCF-MCP-BAD-ARGS), not INTERNAL -- INTERNAL is reserved for a
+    # handler that raised after being called with schema-valid arguments.
     out = call_handler("vcf_validate_spec", {})       # missing 'document'
-    assert out["findings"][0]["code"] == "INTERNAL"
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
     assert out["valid"] is False
 
 
-def test_unknown_tool_name_is_a_finding():
-    assert call_handler("nope", {})["findings"][0]["code"] == "INTERNAL"
+def test_unknown_tool_name_is_a_bad_args_finding():
+    out = call_handler("nope", {})
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
 
 
 # --- Directive 1: no probe path anywhere in this server ---------------------
@@ -117,7 +123,27 @@ def test_tool_schemas_are_valid_json_schema_and_closed():
 def test_unknown_argument_is_rejected_not_silently_ignored():
     out = call_handler("vcf_explain_finding",
                         {"code": "INTERNAL", "bogus_typo": "x"})
-    assert out["findings"][0]["code"] == "INTERNAL"
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+
+
+# --- Fix round 1, recommendation 2: a distinct, catalogued usage-error code -
+
+def test_bad_args_code_exists_in_the_catalogue_at_error_severity():
+    meta = load_catalogue()["VCF-MCP-BAD-ARGS"]
+    assert str(meta.severity) == "error"
+
+
+def test_bad_args_finding_never_leaks_the_offending_value():
+    # jsonschema.ValidationError.message can echo the instance value
+    # verbatim (schema_layer.py's own docstring calls this out) -- a wrong-
+    # typed 'document' carrying structured secret-shaped data must not
+    # leak through the bad-args path either.
+    secret = "TotallyLeakedSecretXYZ999"
+    out = call_handler("vcf_validate_spec",
+                       {"document": {"credentials": {"password": secret}}})
+    blob = json.dumps(out)
+    assert secret not in blob
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
 
 
 # --- Directive 6: a diff must never echo a changed credential value --------
@@ -133,3 +159,54 @@ def test_diff_never_echoes_a_changed_credential_value():
     assert "OldSuperSecret123!" not in blob
     assert "NewSuperSecret456!" not in blob
     assert any(entry["path"] == "/credentials/esxRoot" for entry in out["changes"])
+
+
+# --- Fix round 1, CRITICAL: every credential key is masked, by structural
+# position under /credentials -- not by matching its name against a list.
+# The inventory schema declares no closed set of credential key names
+# (`credentials` is `{"type": "object", "minProperties": 1}`), so a
+# name-list approach can never be complete; it previously missed
+# 'vcenterRoot' and 'sddcManagerRoot' specifically because CREDENTIAL_KEY_RE
+# has no entry for either. Parametrized over the real names render.py
+# reads (vcenterRoot, sddcManagerRoot, ssoAdmin, nsxAdmin, esxRoot) *and* an
+# invented name that matches no regex at all, to prove the property is
+# structural rather than a longer list with the same failure mode.
+
+@pytest.mark.parametrize("cred_name", [
+    "esxRoot", "vcenterRoot", "ssoAdmin", "nsxAdmin", "sddcManagerRoot",
+    "customBackupOperator",       # not in CREDENTIAL_KEY_RE at all
+])
+def test_diff_masks_every_credential_regardless_of_key_name(cred_name):
+    left = yaml.safe_load(TEXT)
+    right = yaml.safe_load(TEXT)
+    left["credentials"][cred_name] = f"OldSecretFor-{cred_name}"
+    right["credentials"][cred_name] = f"NewSecretFor-{cred_name}"
+    out = tool_diff_spec({"left": yaml.safe_dump(left),
+                          "right": yaml.safe_dump(right)})
+    blob = json.dumps(out)
+    assert f"OldSecretFor-{cred_name}" not in blob
+    assert f"NewSecretFor-{cred_name}" not in blob
+    assert any(entry["path"] == f"/credentials/{cred_name}"
+              for entry in out["changes"])
+
+
+def test_diff_masks_a_wholesale_added_credentials_block():
+    # The reviewer's own repro shape: one side has no 'credentials' key at
+    # all (an invalid document, but load_document/tool_diff_spec never
+    # validates -- it only diffs), so the whole dict arrives as a single
+    # leaf value rather than being recursed into key by key.
+    doc = yaml.safe_load(TEXT)
+    doc["credentials"] = {
+        "esxRoot": "PlainEsxSecret111",
+        "vcenterRoot": "PlainVcenterSecret222",
+        "sddcManagerRoot": "PlainSddcSecret333",
+    }
+    left = {k: v for k, v in doc.items() if k != "credentials"}
+    right = doc
+    out = tool_diff_spec({"left": yaml.safe_dump(left),
+                          "right": yaml.safe_dump(right)})
+    blob = json.dumps(out)
+    assert "PlainEsxSecret111" not in blob
+    assert "PlainVcenterSecret222" not in blob
+    assert "PlainSddcSecret333" not in blob
+    assert any(entry["path"] == "/credentials" for entry in out["changes"])
