@@ -51,3 +51,19 @@ def test_masks_secrets_while_sparing_thumbprints_in_one_payload():
 def test_redacts_a_secret_in_a_pattern_mismatch_message():
     text = "'hunter2pass' does not match '^[a-z]+$'"
     assert "hunter2pass" not in redact(text)
+
+
+def test_redact_is_idempotent():
+    """The orchestrator redacts assembled output at its boundary even though
+    schema_layer already redacts its own messages, so redacting twice must
+    be harmless: a second pass over already-redacted output must be a no-op.
+    """
+    doc = {"hosts": [{"credentials": {"username": "root", "password": "hunter2"},
+                      "hostname": "esx01"}],
+           "credentials": {"esxRoot": "hunter3", "ssoAdmin": "${sso_admin}"},
+           "sslThumbprint": "AA:BB:CC",
+           "message": "'hunter2pass' does not match '^[a-z]+$'",
+           "note": "password: hunter4 must be rotated"}
+    once = redact(doc)
+    twice = redact(once)
+    assert twice == once
