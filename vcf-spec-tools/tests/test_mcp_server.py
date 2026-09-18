@@ -210,3 +210,53 @@ def test_diff_masks_a_wholesale_added_credentials_block():
     assert "PlainVcenterSecret222" not in blob
     assert "PlainSddcSecret333" not in blob
     assert any(entry["path"] == "/credentials" for entry in out["changes"])
+
+
+# --- Fix round 2: a 'credentials' segment must mask at ANY depth, because
+# vcf_diff_spec never validates its input -- a schema-conformant document
+# can only have a free-form object at the root /credentials (every other
+# object in v1.schema.json sets additionalProperties: false), but this
+# tool's actual inputs are not guaranteed to be schema-conformant.
+
+def test_diff_masks_a_nested_credentials_segment_at_any_depth():
+    left = yaml.safe_load(TEXT)
+    right = yaml.safe_load(TEXT)
+    # Not schema-valid (hosts entries have no 'credentials' property), but
+    # tool_diff_spec never validates -- it diffs whatever it is handed,
+    # e.g. a mid-edit draft or a document a previous step mangled.
+    left["hosts"][0]["credentials"] = {"customBackupOperator": "OldNestedSecret"}
+    right["hosts"][0]["credentials"] = {"customBackupOperator": "NewNestedSecret"}
+    out = tool_diff_spec({"left": yaml.safe_dump(left),
+                          "right": yaml.safe_dump(right)})
+    blob = json.dumps(out)
+    assert "OldNestedSecret" not in blob
+    assert "NewNestedSecret" not in blob
+    assert any(entry["path"].endswith("/credentials/customBackupOperator")
+              for entry in out["changes"])
+
+
+def test_diff_masks_a_credentials_segment_case_insensitively():
+    left = yaml.safe_load(TEXT)
+    right = yaml.safe_load(TEXT)
+    left["hosts"][0]["Credentials"] = {"weird": "OldCasedSecret"}
+    right["hosts"][0]["Credentials"] = {"weird": "NewCasedSecret"}
+    out = tool_diff_spec({"left": yaml.safe_dump(left),
+                          "right": yaml.safe_dump(right)})
+    blob = json.dumps(out)
+    assert "OldCasedSecret" not in blob
+    assert "NewCasedSecret" not in blob
+
+
+def test_diff_does_not_mask_a_merely_similar_key_name():
+    # 'credentialsBackup' shares a prefix with 'credentials' but is a
+    # different segment entirely -- whole-segment comparison must not
+    # sweep it in.
+    left = yaml.safe_load(TEXT)
+    right = yaml.safe_load(TEXT)
+    left["credentialsBackup"] = "NotASecretValueLeft"
+    right["credentialsBackup"] = "NotASecretValueRight"
+    out = tool_diff_spec({"left": yaml.safe_dump(left),
+                          "right": yaml.safe_dump(right)})
+    entry = next(e for e in out["changes"] if e["path"] == "/credentialsBackup")
+    assert entry["left"] == "NotASecretValueLeft"
+    assert entry["right"] == "NotASecretValueRight"

@@ -119,11 +119,30 @@ def _list_key(items: list) -> str | None:
     return None
 
 
-_CREDENTIALS_PATH = "/credentials"
+def _has_credentials_segment(path: str) -> bool:
+    """True if any segment of path, at any depth, is 'credentials'
+    (case-insensitive) -- a whole-segment match, not a prefix test, so a
+    merely similar key like 'credentialsBackup' does not match.
+
+    Depth matters here specifically because vcf_diff_spec never validates
+    its input -- it diffs whatever it is handed, by design. A schema-
+    conformant inventory can only have a free-form 'credentials' block at
+    the document root (every other object in v1.schema.json sets
+    additionalProperties: false), so "root-only" would be a sound rule for
+    valid documents. But this tool's actual inputs are not guaranteed
+    valid: a mid-edit draft, a hand-written fragment, or a document a
+    previous pipeline step mangled can carry a 'credentials' segment
+    nested anywhere, and the diff tool will render it regardless. Matching
+    at any depth is what keeps that gap closed for the inputs this tool
+    genuinely receives, not just the ones the schema would accept.
+    """
+    return any(segment.lower() == "credentials"
+              for segment in path.split("/") if segment)
 
 
 def _change_entry(path: str, left: object, right: object) -> dict:
-    """Build one leaf diff entry, masking anything under /credentials.
+    """Build one leaf diff entry, masking anything under a 'credentials'
+    segment at any depth.
 
     redact() only masks a value that sits next to a credential-named dict
     key -- a diff entry instead stores the changed value under
@@ -131,9 +150,9 @@ def _change_entry(path: str, left: object, right: object) -> dict:
     a changed credential would otherwise slip straight through redact()'s
     key-based check.
 
-    Masking here is keyed off *structural position* (this value sits at or
-    under /credentials), not the key's own name. A name-based check was
-    tried first and missed credentials.vcenterRoot and
+    Masking here is keyed off *structural position* (this value sits under
+    a 'credentials' segment), not the key's own name. A name-based check
+    was tried first and missed credentials.vcenterRoot and
     credentials.sddcManagerRoot: CREDENTIAL_KEY_RE has no entry for either
     name, and the inventory schema declares no closed set of credential key
     names to draw one from -- `credentials` is `{"type": "object",
@@ -145,20 +164,26 @@ def _change_entry(path: str, left: object, right: object) -> dict:
     each one individually.
 
     CREDENTIAL_KEY_RE is kept as a second, independent check for a
-    credential-shaped key living outside /credentials -- e.g. a stray
-    "password" field elsewhere in the document.
+    credential-shaped key living outside any 'credentials' segment -- e.g.
+    a stray "password" field elsewhere in the document.
+
+    Known remaining limitation, stated plainly rather than papered over: a
+    secret sitting under a key that looks nothing like a credential name,
+    in a place the schema would forbid a free-form object at all, is not
+    caught by either check. Nothing short of re-validating every diff
+    input against the schema (which this tool deliberately does not do --
+    it diffs, it does not validate) would close that, and doing so would
+    change what this tool is.
     """
     key = path.rsplit("/", 1)[-1]
-    under_credentials = (path == _CREDENTIALS_PATH
-                         or path.startswith(_CREDENTIALS_PATH + "/"))
-    if under_credentials or CREDENTIAL_KEY_RE.search(key):
+    if _has_credentials_segment(path) or CREDENTIAL_KEY_RE.search(key):
         return {"path": path or "/", "left": _mask_credential_value(left),
                 "right": _mask_credential_value(right)}
     return {"path": path or "/", "left": left, "right": right}
 
 
 def _mask_credential_value(value: object) -> object:
-    """Mask every leaf of a value known to sit at or under /credentials.
+    """Mask every leaf of a value known to sit under a 'credentials' segment.
 
     Recurses through dicts and lists so a whole credentials block added or
     removed on one side (left is None, right is the entire dict, or vice
