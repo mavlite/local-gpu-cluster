@@ -1,7 +1,6 @@
 # VCF deployment-spec authoring and validation — design
 
-**Status:** approved design, not yet implemented
-**Date:** 2026-09-17
+**Status:** design under review (revised after adversarial review, 2026-09-18)
 **Scope:** stage 3 of the bare-metal-to-SDDC roadmap
 
 ## Purpose
@@ -11,139 +10,193 @@ specification, tell the operator whether it is valid, explain anything wrong in
 terms of the VCF documentation, and render it into the JSON the VCF Installer
 accepts.
 
-The first deployment this serves is a **single-instance consolidated lab: three
-physical hosts, VCF 9.1.1, vSAN as principal storage, NFSv3 supplemental.** The
-tools are written so a larger design can be fed in later without redesigning
-them, but nothing outside that shape is implemented now.
+The first deployment this serves is **one VCF instance, `workflowType: VCF`,
+management domain only, with business workloads co-resident: three physical
+hosts, VCF 9.1.1, vSAN ESA as principal storage.**
+
+Note on terminology: VCF 9 retired the Standard/Consolidated architecture names.
+A fleet contains VCF instances; each instance has a management domain and
+optional VCF domains. "Workloads beside management VMs" is a placement choice,
+not a named architecture. The shape switch that matters in the JSON is
+`workflowType` (`VCF`, `VVF`, `VCF_EXTEND`, `VCF_COMPLETE`).
 
 ## Why this stage first
 
-Hosts are still being built, and this stage needs no hardware. It is also the
-stage where mistakes are most expensive: a malformed spec fails during bring-up,
-after the maintenance window has already started.
+Hosts are still being built, and this stage needs no hardware. It is also where
+mistakes are most expensive: a malformed spec fails during bring-up, after the
+maintenance window has started.
 
 ## Non-goals
 
-Explicitly out of scope, to be revisited as later stages:
-
-- Multi-instance fleets, federation, stretched clusters, workload domains.
+- Multiple instances, federation, stretched clusters, additional VCF domains.
 - Planning and Preparation Workbook import/export.
-- Sizing an environment from workload requirements (this stage validates a spec;
-  it does not design one).
-- Submitting the spec or running bring-up — that is stage 4.
-- Any live VCF API mutation. This stage is read-only against real systems.
-- Bare-metal provisioning (stages 1-2; see the separate no-BMC findings).
+- Sizing an environment from workload requirements.
+- Submitting the spec or running bring-up — stage 4.
+- Any live VCF API mutation. Stage 3 is read-only.
+- Bare-metal provisioning (stages 1-2).
+- **Supplemental NFS datastores.** The Installer configures *principal* storage
+  only; adding supplemental NFS is a day-2 SDDC Manager action (natively
+  supported from 9.1.1). The lab's NFS is therefore post-bring-up and out of
+  this spec.
 
 ## Background that shaped this design
 
-Four findings from the research phase, each of which changed a decision:
-
 1. **The VCF Installer never images bare metal.** ESX must already be installed
-   and basic-configured before commissioning, so stage 3's input assumes hosts
-   exist and are reachable.
+   and configured before commissioning, so hosts are an input.
 2. **No official MCP server exists for vSphere or VCF.** VCF 9.1 ships the MCP
-   *consumer* side (Private AI Services registers third-party servers over
-   Streamable HTTP/SSE with per-tool admin approval). Nothing to adopt; the
-   credible community servers are either unlicensed or ship write tools with no
-   confirmation gate.
-3. **Broadcom publishes OpenAPI 3.0.3 specs** for the whole VCF surface
-   (`github.com/vmware/vcf-api-specs`). Schema validation is therefore derived
-   from vendor artifacts, not hand-written.
-4. **The documentation defers host-count minimums.** The 9.1 host-prep page
-   states the number "depends on the type of storage and the deployment model"
-   and points at the Installer's planner or the workbook. A validator built only
-   from prose cannot answer "will three hosts work", so those floors must come
-   from a table we own (see Rule sources).
+   *consumer* side (Private AI Services registers third-party servers). The
+   credible community servers are unlicensed or ship ungated write tools.
+3. **Broadcom publishes OpenAPI 3.0.3 specs**, so schema validation derives from
+   vendor artifacts rather than hand-written rules.
+4. **The documentation defers host-count minimums** to the Installer's planner,
+   so sizing floors come from tables we own.
+
+## What actually gates a three-host lab
+
+Not host count — **capacity**. Installer planning accepts 3 hosts for vSAN (2
+for external storage). What fails a small lab is the mandatory 9.1 stack:
+
+- **VCF Management Services** (`vspClusterSpec`), roughly 40 vCPU / 82 GB RAM /
+  3 TB, plus vCenter, NSX Manager, SDDC Manager, VCF Operations and Operations
+  Fleet Management; VCF Automation is optional and large (24 vCPU / 96 GB).
+- **vSAN ESA Auto-RAID** is the 9.1 default for new clusters: FTT=1 RAID-5 (2+1)
+  at 3-5 hosts, FTT=2 RAID-6 at 6+, both 1.5× overhead. Mirroring is no longer
+  the default, and RAID-5 (4+1)/6-host figures are OSA-era.
+
+So the validator must include a **capacity rule** that compares the mandatory
+appliance footprint plus 1.5× storage overhead against the declared hosts. A
+host-count-only check green-lights specs that fail in the Installer's Prepare
+step.
+
+**Operational caveat:** at three hosts with FTT=1, one host in maintenance drops
+the cluster below its policy floor — no rebuild capacity, objects non-compliant
+until it returns.
+
+## Sections a real 9.1 spec contains
+
+The renderer must cover, at minimum: `sddcId`, `vcfInstanceName`, `workflowType`,
+CEIP, `dnsSpec` (domain, subdomain, search, nameservers), `ntpServers`,
+datacenter and cluster names, `networkSpecs` (MANAGEMENT, VMOTION, VSAN,
+HOST_TEP, EDGE_TEP, uplinks — at least seven VLANs), `dvsSpecs` (MTU,
+`vmnicsToUplinks`, `nsxTeamings`, optional `lagSpecs`), `vsanSpec`,
+`vcenterSpec` (size, SSO domain, credentials), `nsxtSpec` (TEP pools, VIP,
+credential sets), `sddcManagerSpec`, `vcfOperationsSpec`,
+`vcfOperationsFleetManagementSpec`, the Operations Collector, `vspClusterSpec`
+(`ipv4Pool` of 12-30 **consecutive** IPs, minimum /28, plus
+`internalClusterCidrIpv4`, default `198.18.0.0/15`), `hostSpecs` (FQDN,
+credentials, per-host management/vMotion/vSAN/TEP IPs, ESA disk identifiers),
+and proxy/depot plus certificate handling. Appliance specs carry
+`useExistingDeployment`.
+
+**Licensing is not in the spec.** VCF 9.x has no license keys: licensing is
+subscription-based, delivered as license files and assigned in VCF Operations
+after deployment, with a 90-day evaluation. The renderer emits no licence fields
+and the validator raises an `info` finding that the lab runs in evaluation.
+
+Two practical traps for a lab on a single /24: finding **12 consecutive free
+addresses** for `vspClusterSpec`, and the default internal CIDR `198.18.0.0/15`
+colliding with existing lab ranges. Both get explicit rules.
 
 ## Architecture
-
-Three layers, so later stages reuse this rather than duplicating it:
 
 ```
 skills/            SKILL.md procedures naming tools and required checks
    |
-mcp server         thin transport wrapper, ~5 tools, stdio + Streamable HTTP
+mcp server         thin transport wrapper, 5 tools, stdio + Streamable HTTP
    |
 core library       spec model, validation layers, renderer, safety tiers
 ```
 
-The core library has no MCP dependency and is unit-testable with no VMware
-infrastructure. The MCP server contains no VCF knowledge — only tool plumbing.
+The core has no MCP dependency and is unit-testable without VMware
+infrastructure. The MCP server holds no VCF knowledge.
 
-**Language: Python.** It matches our existing MCP servers (`mcp-sdg`, the Memory
-Vault bridge) and their systemd/venv patterns, and it is the language of
-Broadcom's official SDK (VCF Python SDK 9.1.1, Python and Java only — there is no
-JavaScript SDK), which stages 4-5 will need.
+**Language: Python** — matches our existing MCP servers and Broadcom's official
+SDK (Python and Java only; there is no JavaScript SDK) for stages 4-5.
 
-**Relationship to VCF-Design-Studio.** That repo (ours, MIT) holds a mature fleet
-model, 80 validation rules, workbook-derived sizing tables and 1,788 tests. This
-design does **not** depend on it: input is a spec document from any source. Its
-exported design becomes one accepted input adapter later, and its sizing floor
-tables are the reference for our own (with attribution). This keeps stage 3 small
-and avoids a cross-repo, cross-language coupling while the scope is one lab.
+**VCF-Design-Studio** is not a dependency. Its exported design becomes one input
+adapter later, and its workbook-derived tables are the reference for ours, with
+attribution (MIT).
 
 ## Input contract
 
-The agent accepts a **spec document** — YAML or JSON — that is deliberately
-permissive: tools validate what is present and report what is missing, rather
-than refusing anything that is not complete. This matters because an operator
-builds a spec incrementally and wants feedback at every step.
+Input is a **spec document**, YAML or JSON, validated permissively: report what
+is missing rather than refusing incomplete work.
 
-Three input shapes are recognised, in this order:
+**Shape detection is explicit, never guessed.** Our inventory carries
+`apiVersion` and `kind`; native Installer JSON is detected by required installer
+keys. Ambiguous or unrecognised input returns `VCF-INPUT-UNRECOGNISED`. Every
+tool accepts an optional `input_kind` argument that overrides detection.
 
-1. **Native VCF Installer JSON** — passed through to validation unchanged.
-2. **Our lab inventory** (YAML) — a compact form covering the consolidated-lab
-   shape: hosts, management network, VLANs and subnets, DNS/NTP, storage choice,
-   licensing references, credential references. Rendered into installer JSON.
-3. **Adapter output** (future) — e.g. a VCF-Design-Studio design export.
+The **lab inventory schema is a normative deliverable** of the implementation
+plan: a JSON Schema file listing every field, type, cardinality and required
+flag, published with one complete three-host example that doubles as the first
+golden input fixture. The design fixes its shape only at the level of sections:
+instance identity, hosts (FQDN, management IP, vmnics), networks (per-purpose
+VLAN, subnet, gateway, MTU, pools), DNS/NTP, storage choice, VCF Management
+Services pool, and credential references.
 
-Credentials are never values. The inventory carries references such as
-`${esx_root}`, validated for presence and for the VCF password policy, and
-resolved only at submit time in stage 4. A spec document is therefore safe to
-commit to git and safe for a model to read.
+### Credential references
+
+A credential field must match the reference grammar `${IDENTIFIER}` exactly.
+**Any other string is rejected** with a critical finding — this prevents a pasted
+real password from being treated as a value. Stage 3 never holds secrets, so it
+validates *reference presence and position only*; password-policy checks (length,
+character set, dictionary rules) belong in stage 4 where the value exists, and
+stage 3 emits an `info` finding naming the policy instead.
 
 ## Validation layers
 
-Run in order; later layers do not run if an earlier one makes them meaningless.
+1. **Schema** — JSON Schema dereferenced from Broadcom's OpenAPI spec, vendored
+   per VCF version with a checksum. A checksum mismatch is a **hard startup
+   failure**, not a warning. A `scripts/vendor-schema.sh <version>` script
+   performs extraction, and a CI drift test detects upstream change. The
+   implementation plan names the exact source document and operation whose
+   request body is the deployment spec.
+2. **Rules** — cross-field checks, shipped as a `rules/*.yaml` catalogue (id,
+   severity, source, citation) so the rule set is enumerable and each rule has
+   exactly one test.
+3. **Probes** (opt-in) — DNS forward *and* reverse, NTP, TCP reachability.
+   Probes **fail soft**: unreachable is "unknown", never a failure.
 
-1. **Schema** — JSON Schema extracted from Broadcom's OpenAPI spec for the
-   Installer, vendored at a pinned VCF 9.1.1 version with a checksum, so
-   validation is reproducible and offline.
-2. **Rules** — cross-field checks that schema cannot express: subnet containment
-   and overlap, IP pool sizing against host count, VLAN ranges, MTU floors
-   (TEP minimum), gateway within subnet, FQDN and hostname format, storage
-   choice against host count, duplicate IPs, management subnet reuse.
-3. **Probes** (opt-in) — live environment checks from wherever the server runs:
-   DNS forward and reverse resolution, NTP reachability, and TCP reachability of
-   each host. Probes **fail soft**: an unreachable NTP server is reported as
-   "unknown, could not probe", never as a validation failure, because the server
-   may not sit on that VLAN.
+**Layer gating is mechanical:** a schema error suppresses rule evaluation only
+for the subtree at the failing JSON pointer; rules still run elsewhere. Probes
+run only when there are zero `critical` findings. Every result reports
+`layers_run` and `layers_skipped` with reasons.
 
-A future fourth layer submits the spec to a real VCF Installer's validation API
-(`POST /v1/tokens` then the validation endpoints) once an appliance exists. The
-design keeps that seam open; it is not implemented here.
+### Rules the lab needs
 
-### Rule sources
+Beyond structural checks (subnet containment, overlap, pool sizing, VLAN ranges,
+gateway-in-subnet, uniqueness of every IP and FQDN):
 
-Every rule carries a stable ID, a severity, and a citation. Rules come from three
-places, and the source is recorded per rule:
+- **FQDNs must be lowercase** — uppercase fails 9.1 deployment (known issue).
+- Forward **and reverse** DNS for every host and appliance, including the
+  platform, instance, fleet and service FQDNs.
+- Identical NTP server list everywhere.
+- TEP MTU ≥1600 (1700 recommended, 9000 end-to-end with physical ≥9216).
+- Host TEP and edge TEP in **different, routable** VLANs on 2-pNIC hosts.
+- vSAN and vMotion on separate VLANs; at least two physical NICs per host.
+- TEP pool sized per host (typically two TEPs per host).
+- `vspClusterSpec` pool is 12-30 **consecutive** addresses, minimum /28.
+- `internalClusterCidrIpv4` must not collide with any declared network.
+- Single hardware vendor, homogeneous hosts, no stateless ESX.
+- Capacity fit (see above), reported against the declared host hardware.
+- NSX at bring-up is a **single** Manager node, expanded post-deploy via SDDC
+  Manager — rules must not assume a 3-node cluster or VIP at bring-up.
 
-- **Documentation** — a techdocs URL, for anything the docs state outright.
-- **Vendor schema** — the OpenAPI spec, for structural constraints.
-- **Workbook-derived tables** — vSAN policy floors (mirror FTT=1 minimum 3 hosts,
-  RAID-5 minimum 6), appliance sizes, NIC profiles. These are transcribed from
-  VCF-Design-Studio's tables, which were themselves taken from the Planning and
-  Preparation Workbook's static reference tables. Attribution belongs in the
-  source file (MIT).
+IPv6 dual-stack and the alternate internal CIDR are JSON-only 9.1 features:
+rules must not assume IPv4-only and reject valid specs.
 
-The three-host lab sits exactly where this matters: vSAN principal at FTT=1
-mirroring is the policy that three hosts can satisfy, and the tools must say so
-rather than shrug.
+### Rule provenance
+
+Each rule records `source`: `docs` (with URL), `schema`, or `table`
+(workbook-derived). Where authorities disagree — as they do on management-domain
+host count, where KB 392993's "four hosts" is Cloud Builder-era and contradicted
+by 9.1's support for NFS principal storage — the rule reports the caveat and
+cites the dissent rather than silently choosing. Our own RAG corpus produced
+three inconsistent answers to that question, including an invented table: corpus
+output is a lead, never an authority.
 
 ## Findings model
-
-Every tool returns findings in one shape, and this shape is the contract shared
-with every future VCF server in the family:
 
 | Field | Meaning |
 |---|---|
@@ -152,103 +205,117 @@ with every future VCF server in the family:
 | `path` | JSON pointer into the spec |
 | `message` | what is wrong, in one sentence |
 | `fix` | what to change |
-| `source` | `docs` / `schema` / `table`, plus a URL where one exists |
+| `source` | `docs` / `schema` / `table`, plus URL where one exists |
 
-Tools never raise raw tracebacks to the model. An internal error is itself a
-finding with severity `critical` and a code of `INTERNAL`.
+**Severity semantics:**
+
+- `critical` — the document cannot be processed further (unparseable, wrong
+  kind, credential value where a reference belongs).
+- `error` — the Installer would reject or the deployment would fail.
+- `warning` — supported but risky, or disputed between sources.
+- `info` — advisory, including defaults applied and evaluation licensing.
+
+A single `valid` boolean is derived: true when no `critical` or `error` findings
+exist. Rendering proceeds despite `error` findings so the operator can see the
+whole picture, but the output is marked `valid: false`.
+
+Tools never surface raw tracebacks; an internal failure is a finding with code
+`INTERNAL` and severity `critical`.
+
+## Renderer
+
+A declarative mapping (inventory path → installer JSON pointer → transform) plus
+a versioned `defaults-<version>.yaml` where every default records its
+provenance. Three disposal rules, stated so nothing is silent:
+
+- Required installer field, no inventory source, no default → `VCF-RENDER-UNMAPPED`
+  critical finding.
+- Optional field, no source → omitted.
+- Default applied → emitted, with an `info` finding naming the default's source.
 
 ## Tool surface
 
-Five tools. The count is deliberate: the local 27B model degrades with large tool
-lists, which is why `mcp-sdg` exposes few. Every tool is read-only.
+Five read-only tools. The server is **stateless**: every call takes the whole
+document (inline or by path), there are no handles and no ordering requirements.
+Each tool takes an optional `vcf_version` (default 9.1.1) selecting the rule and
+schema tables.
 
-| Tool | Purpose |
-|---|---|
-| `vcf_spec_schema` | What a spec needs for a given deployment shape, with a worked consolidated-lab example |
-| `vcf_render_spec` | Inventory to installer JSON, plus a plain-language summary of what it would build |
-| `vcf_validate_spec` | Run the layers, return findings |
-| `vcf_explain_finding` | Expand one finding with documentation context |
-| `vcf_diff_spec` | Semantic diff between two specs or inventories |
+| Tool | Input | Returns |
+|---|---|---|
+| `vcf_spec_schema` | shape, version | required/optional fields, worked example |
+| `vcf_render_spec` | inventory, version | installer JSON, findings, summary |
+| `vcf_validate_spec` | document, layers, version | findings, `valid`, layers run/skipped |
+| `vcf_explain_finding` | rule `code`, optional path | explanation, citation, fix |
+| `vcf_diff_spec` | two documents | keyed semantic diff |
 
-`vcf_explain_finding` works from the bundled rule catalogue alone. Where our RAG
-corpus is configured it enriches the answer, but the tool must never require it —
-otherwise the server only works on our cluster.
+`vcf_diff_spec` keys list members explicitly (hosts by FQDN, networks by
+purpose, pools by name) so diffs are stable. `vcf_explain_finding` works from the
+bundled catalogue alone; RAG enrichment is optional and never required.
 
-## Safety model
+## Safety, security and trust
 
-Even though stage 3 is entirely read-only, the tier machinery ships now, because
-stages 4-5 add mutation and retrofitting safety is how the community servers got
-it wrong (one exposes 43 write tools with no confirmation gate in MCP mode).
+Stage 3 is read-only, but the machinery ships now because retrofitting it is how
+the community servers ended up with 43 ungated write tools.
 
-- Every operation declares a tier: `read-only`, `mutating`, `destructive`.
-- Enforcement lives in the safety module, **not** in prompt text.
-- `mutating` requires explicit approval; `destructive` echoes the exact object
-  list first and requires confirmation.
-- Stage 3 registers only `read-only` operations, so the gate is exercised but
-  never triggered.
+- **Tiers** (`read-only`, `mutating`, `destructive`) are enforced in a module,
+  not in prompt text. Stage 3 registers only `read-only` operations.
+- **"Read-only" is defined concretely:** the server may write its log file and
+  nothing else. No spec content is persisted beyond a log line; no caches are
+  written outside a configured directory.
+- **Redaction:** all tool output — findings, diffs, rendered specs, error text —
+  passes through one redaction filter before returning, on the assumption that
+  secrets will appear despite the reference contract.
+- **Probe containment:** probe targets must be inside both the spec's declared
+  networks *and* an operator-configured allowlist, because a hostile spec
+  declares its own networks. Per-probe timeout, bounded concurrency, server-side
+  rate limiting, and an audit log line per probe. Without this the probe layer is
+  a port scanner an agent can drive.
+- **Input hardening:** `yaml.safe_load` only, with size, depth and alias-count
+  limits enforced before parsing; file references canonicalised and confined to a
+  configured root.
+- **Transport:** stdio binds nothing. Streamable HTTP defaults to loopback or the
+  LXC-internal address, requires a token, and is never exposed publicly by
+  default. Registering with Private AI Services is a trust-boundary decision to
+  review before stage 4 adds mutation.
+- **Findings are data, not directives.** `fix` text and any RAG-enriched content
+  are display material; skills must not auto-execute remediation.
+- **Logging:** rule IDs, severities, paths, probe targets and results. Never full
+  spec bodies, never resolved secrets, never raw tracebacks.
 
-This pattern is adapted from `vchaindz/claude-vsphere-skill` (Apache-2.0, needs
-attribution). `giulianoberteo/vcf-mcp` and `2501-ai/vmware-mcp` carry **no
-licence**, so their approaches may be studied and reimplemented but their code
-must not be copied.
+Tier enforcement is adapted from `vchaindz/claude-vsphere-skill` (Apache-2.0,
+attribution required). `giulianoberteo/vcf-mcp` and `2501-ai/vmware-mcp` have no
+licence: study, do not copy.
 
 ## Distribution
 
-Built as a standalone package our cluster is the first consumer of, not as
-cluster-specific code:
-
-- **Two transports**: stdio (third-party clients) and Streamable HTTP (our LXC
-  155 deployment, and VCF Private AI Services registration).
-- **Configuration via environment**, with no assumption that an LXC, a router or
-  a local model exists.
-- **Versioned against VCF releases**, since rule tables are version-specific.
+A standalone package our cluster is the first consumer of: two transports,
+environment-based configuration, no assumption of an LXC, router or local model,
+and versioning tied to VCF releases since rule tables are version-specific.
 
 ## Testing
 
-- Golden-file tests for the renderer: inventory in, expected installer JSON out.
-- One unit test per rule, positive and negative, using fixtures.
+- **Golden-file provenance is explicit.** Seed goldens only from vendored OpenAPI
+  example payloads and Broadcom-published samples. Every unverified golden is
+  marked `verified: false`, and stage 4 carries a task to re-verify each against
+  a real Installer. Without this the goldens merely enshrine whatever the
+  renderer first emitted.
+- One test per catalogue rule, positive and negative.
 - Probe tests against fakes; no network access in CI.
-- Schema pinned in-repo so validation results are reproducible.
-- The full suite runs offline, with no VMware infrastructure.
+- Schema pinned in-repo; checksum verified at startup and in CI.
 
-## Host count at three nodes — resolved, with a caveat
+## Stage 4 seam
 
-Three hosts run a vSAN cluster. The storage policies whose floor is three hosts
-are **Mirror FTT=1** and **RAID-5 (2+1) FTT=1** (ESA); RAID-5 (4+1) and RAID-6
-need six. This is what VCF-Design-Studio's own `POLICIES` table encodes, and it
-raises a warning at exactly three hosts.
-
-Sources disagree about the *management domain* specifically, and the validator
-must represent that honestly rather than pick a side:
-
-- The VCF 9.1 host-prep page states no number: host count "depends on the type of
-  storage and the deployment model", deferring to the Installer's planner or the
-  Planning and Preparation Workbook.
-- Broadcom KB 392993 says four hosts for a single availability zone — but it is
-  **stale**: it refers to Cloud Builder (replaced by VCF Installer in 9.x) and
-  asserts non-vSAN storage is unsupported in the management domain, which the
-  9.1 NFS page contradicts (NFSv3 is supported as principal storage).
-- Our own RAG corpus produced three mutually inconsistent answers to this
-  question, including an invented table. Treat it as a lead, never as authority.
-
-**Operational caveat that matters more than the count:** at three hosts with
-FTT=1, one host in maintenance leaves two — below the policy floor. There is no
-rebuild capacity and objects are non-compliant until it returns. Acceptable for a
-lab, and the validator should say so before an upgrade rather than after.
-
-### Consequence for the findings model
-
-A rule is not always a flat pass or fail. Where authorities disagree, a finding
-must carry its provenance and say so: `source` records whether the rule came from
-docs, vendor schema or a workbook-derived table, and a rule may report "supported,
-with this caveat" while citing the dissenting source. Rules that encode a
-disputed value record both positions rather than silently choosing.
+Live validation and submission use the Installer API: authenticate at
+`POST /v1/tokens`, submit at `POST /v1/sddcs`, and retrieve with
+`GET /v1/sddcs/{id}/spec`. Not implemented here.
 
 ## Open questions
 
-1. **Whether the VCF Installer itself enforces a four-host minimum** for the
-   management domain in 9.1.1, independent of the vSAN policy floor. Only the
-   Installer's planner, the workbook, or an actual bring-up attempt settles it.
-   Until then the validator warns rather than blocks.
-2. **Which spec sections the Installer treats as mandatory** for this shape,
-   versus optional — from the OpenAPI spec once vendored.
+1. **Does the mandatory 9.1.1 stack fit three hosts of the chosen hardware?**
+   The capacity rule answers this once host specs are known; it may force a
+   fourth host or a larger one. This is the question that affects hardware, and
+   it should be answered before the hosts are finalised.
+2. **Does `fipsEnabled` still exist in the 9.1 schema?** It is Cloud Builder-era;
+   confirm against the vendored spec before exposing it as an operator input.
+3. **Which sections the Installer treats as mandatory** for this shape — resolved
+   by vendoring the schema, which must happen before layer 1 is written.
