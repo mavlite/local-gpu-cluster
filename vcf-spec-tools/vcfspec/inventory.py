@@ -1,7 +1,6 @@
 """The compact lab inventory: our input format."""
 from __future__ import annotations
 
-import copy
 import json
 import re
 from functools import lru_cache
@@ -63,7 +62,3 @@ def _credential_findings(doc: dict) -> list[Finding]:
 def _pointer(path) -> str:
     parts = list(path)
     return "/" + "/".join(str(p) for p in parts) if parts else "/"
-
-
-def deep_copy_example() -> dict:
-    return copy.deepcopy(load_example())
