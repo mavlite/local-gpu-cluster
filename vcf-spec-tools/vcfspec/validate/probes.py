@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 from dataclasses import dataclass
 
 from ..findings import Finding, Result
@@ -61,6 +62,36 @@ def _default_connector(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
+    """Call resolve(name, want_reverse), but never wait past timeout_s.
+
+    socket.gethostbyname/gethostbyaddr (the default resolver, and any
+    caller-supplied one) do not honour socket.setdefaulttimeout reliably
+    across platforms -- the interaction with the system resolver is
+    outside Python's control, so a timeout that only configures the
+    socket default is not a real bound. The only way to bound a call that
+    may hang is to stop waiting for it, not to make it hang less: this
+    runs it in a daemon thread and joins with a deadline. If the deadline
+    passes, the thread is abandoned (never joined again, so a wedged
+    resolver cannot itself keep the process alive) and this returns None
+    -- the same value a normal resolution failure produces, so a timeout
+    becomes an ordinary VCF-PROBE-* finding downstream, never an
+    exception and never an indefinite wait.
+    """
+    box: list = [None]
+
+    def worker():
+        try:
+            box[0] = resolve(name, want_reverse)
+        except Exception:
+            box[0] = None
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    return None if thread.is_alive() else box[0]
+
+
 def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
                connector=None) -> Result:
     resolve = resolver or _default_resolver
@@ -77,14 +108,14 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", path, target=ip))
             continue
         fqdn = f"{name}.{subdomain}" if subdomain else name
-        resolved = resolve(fqdn, False)
+        resolved = _bounded_resolve(resolve, fqdn, False, config.timeout_s)
         if resolved is None:
             findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
                                         reason="no forward DNS answer"))
         elif resolved != ip:
             findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
                                         fqdn=fqdn, resolved=resolved, expected=ip))
-        if resolve(ip, True) is None:
+        if _bounded_resolve(resolve, ip, True, config.timeout_s) is None:
             findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path, ip=ip,
                                         fqdn=fqdn))
         if not connect(ip, ESX_PORT, config.timeout_s):

@@ -86,6 +86,40 @@ def test_probe_with_allowlist_runs_the_probe_layer(monkeypatch, capsys):
     assert captured["probe_config"].allowlist == ("10.0.0.0/8", "192.168.1.0/24")
 
 
+def test_probe_with_empty_string_allowlist_is_a_usage_error(capsys):
+    """--allowlist "" passes a naive presence check ([""] is truthy) but
+    every CIDR in it fails to parse, so it must be refused exactly like a
+    missing --allowlist -- not silently accepted as containment that
+    happens to block everything."""
+    exit_code = main(["validate", str(EXAMPLE_PATH), "--probe", "--allowlist", ""])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "allowlist" in err.lower()
+
+
+def test_probe_with_partially_invalid_allowlist_is_a_usage_error(capsys):
+    """One bad CIDR among several good ones must refuse the whole run
+    rather than silently probing only the entries that happened to parse
+    -- an operator who typed 2 ranges and got checks against 1 has been
+    told less than they asked for without being told anything went wrong."""
+    exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
+                      "--allowlist", "10.0.0.0/8", "--allowlist", "not-a-cidr"])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "not-a-cidr" in err
+
+
+def test_bogus_flag_returns_two_instead_of_raising(capsys):
+    """argparse's own usage-error path must not escape main() as an
+    uncaught SystemExit -- main(argv) -> int is a contract for
+    programmatic callers, not just the shell."""
+    assert main(["--bogus"]) == 2
+
+
+def test_no_arguments_returns_two_instead_of_raising(capsys):
+    assert main([]) == 2
+
+
 # --- Directive 3: exit codes are the contract; usage error vs invalid spec ---
 
 def test_directory_path_is_a_usage_error(tmp_path, capsys):

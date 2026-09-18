@@ -1,4 +1,7 @@
+import time
+
 import pytest
+from vcfspec.findings import Result
 from vcfspec.rules import load_catalogue
 from vcfspec.validate.probes import ProbeConfig, run_probes
 
@@ -91,6 +94,34 @@ def test_empty_allowlist_blocks_everything(inventory):
     result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
                         connector=lambda *_: True)
     assert set(result.codes) == {"VCF-PROBE-TARGET-BLOCKED"}
+
+
+def test_dns_resolution_is_bounded_by_timeout(inventory):
+    """resolve() must never be allowed to hang past ~timeout_s, even though
+    the real gethostbyname/gethostbyaddr do not honour socket timeouts
+    reliably across platforms. A resolver that sleeps well past the
+    deadline must still return control to run_probes near the deadline,
+    not near the sleep -- and the call must come back as an ordinary
+    Result/finding, never an exception or an indefinite wait.
+    """
+    inventory["hosts"] = inventory["hosts"][:1]
+    config = ProbeConfig(allowlist=("10.50.0.0/16",), timeout_s=0.2)
+
+    def slow_resolver(name, want_reverse=False):
+        time.sleep(5)
+        return None
+
+    start = time.monotonic()
+    result = run_probes(inventory, config, resolver=slow_resolver,
+                        connector=lambda *_: True)
+    elapsed = time.monotonic() - start
+
+    assert isinstance(result, Result)
+    # Two resolve() calls per host (forward + reverse), each bounded by
+    # timeout_s -- elapsed should sit near ~2*timeout_s, nowhere near the
+    # resolver's 5s sleep.
+    assert elapsed < 2.0
+    assert "VCF-PROBE-UNKNOWN" in result.codes
 
 
 @pytest.mark.parametrize("code", ["VCF-PROBE-NO-REVERSE-DNS",

@@ -26,6 +26,7 @@ error, not misleading output.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sys
 from pathlib import Path
@@ -61,6 +62,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _invalid_cidrs(cidrs: list[str]) -> list[str]:
+    """Entries that ProbeConfig.permits() could never match -- including ""
+    and whitespace, which ipaddress.ip_network() already rejects."""
+    invalid = []
+    for cidr in cidrs:
+        try:
+            ipaddress.ip_network(cidr.strip(), strict=False)
+        except ValueError:
+            invalid.append(cidr)
+    return invalid
+
+
 def _read_document(path: Path) -> tuple[str | None, int | None]:
     """Read `path` as UTF-8 text. Returns (text, None) or (None, exit_code).
 
@@ -84,13 +97,32 @@ def _read_document(path: Path) -> tuple[str | None, int | None]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # main(argv) -> int is a stated contract for programmatic callers
+        # (e.g. an MCP server driving this CLI in-process); argparse's own
+        # usage-error path must not surface as an uncaught exception to
+        # them. Shell/CI behaviour is unchanged either way: SystemExit(2)
+        # still yields process exit 2 when __main__ re-raises it below.
+        return exc.code if isinstance(exc.code, int) else 2
 
-    if args.command == "validate" and args.probe and not args.allowlist:
-        print("vcfspec: --probe requires at least one --allowlist CIDR "
-              "(an empty allowlist would silently probe nothing)",
-              file=sys.stderr)
-        return 2
+    if args.command == "validate" and args.probe:
+        if not args.allowlist:
+            print("vcfspec: --probe requires at least one --allowlist CIDR "
+                  "(an empty allowlist would silently probe nothing)",
+                  file=sys.stderr)
+            return 2
+        invalid = _invalid_cidrs(args.allowlist)
+        if invalid:
+            # A partially-bad allowlist (some valid CIDRs, one typo) is
+            # refused wholesale rather than silently probing only the
+            # entries that happened to parse: an operator who typed 5
+            # ranges and gets checks against 4 has been told less than
+            # they asked for without being told anything went wrong.
+            print("vcfspec: --allowlist has invalid CIDR(s): "
+                  f"{', '.join(invalid)}", file=sys.stderr)
+            return 2
 
     text, error_code = _read_document(args.path)
     if error_code is not None:
