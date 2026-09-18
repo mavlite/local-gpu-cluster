@@ -1,7 +1,7 @@
 import pytest
 import yaml
 from vcfspec.documents import (DocumentKind, DocumentTooDeep, DocumentTooLarge,
-                               detect_kind, load_document)
+                               DocumentTooManyAliases, detect_kind, load_document)
 
 
 def test_detects_inventory_by_apiversion_and_kind():
@@ -48,3 +48,15 @@ def test_rejects_deeply_nested_document():
 def test_uses_safe_load_so_python_tags_are_rejected():
     with pytest.raises(yaml.YAMLError):
         load_document("!!python/object/apply:os.system ['echo pwned']")
+
+
+def test_rejects_a_document_that_blows_the_parser_stack():
+    bomb = "a: " + "[" * 10000 + "]" * 10000
+    with pytest.raises(DocumentTooDeep):
+        load_document(bomb)
+
+
+def test_rejects_alias_bomb_before_parsing():
+    doc = "a: &x [1,2]\n" + "".join(f"b{i}: *x\n" for i in range(150))
+    with pytest.raises(DocumentTooManyAliases):
+        load_document(doc)

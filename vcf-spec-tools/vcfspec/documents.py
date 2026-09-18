@@ -1,6 +1,7 @@
 """Loading untrusted spec documents, and deciding what they are."""
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 
 import yaml
@@ -9,7 +10,9 @@ from .findings import Finding, Result, Severity
 
 MAX_BYTES = 2_000_000
 MAX_DEPTH = 40
+MAX_ALIASES = 100
 SDDC_SPEC_KEYS = {"sddcId", "dnsSpec", "networkSpecs", "vcenterSpec"}
+_ALIAS_RE = re.compile(r"(?m)(?<![\w*])\*[A-Za-z0-9_][\w-]*")
 
 
 class DocumentTooLarge(ValueError):
@@ -18,6 +21,10 @@ class DocumentTooLarge(ValueError):
 
 class DocumentTooDeep(ValueError):
     """Document nests deeper than MAX_DEPTH."""
+
+
+class DocumentTooManyAliases(ValueError):
+    """Document uses more YAML aliases than MAX_ALIASES."""
 
 
 class DocumentKind(StrEnum):
@@ -29,7 +36,13 @@ class DocumentKind(StrEnum):
 def load_document(text: str) -> dict:
     if len(text.encode("utf-8")) > MAX_BYTES:
         raise DocumentTooLarge(f"document exceeds {MAX_BYTES} bytes")
-    doc = yaml.safe_load(text)
+    if len(_ALIAS_RE.findall(text)) > MAX_ALIASES:
+        raise DocumentTooManyAliases(f"document uses more than {MAX_ALIASES} aliases")
+    try:
+        doc = yaml.safe_load(text)
+    except RecursionError as exc:
+        raise DocumentTooDeep(
+            "document nests too deeply for the YAML parser") from exc
     if not isinstance(doc, dict):
         raise ValueError("document root must be a mapping")
     if _depth(doc) > MAX_DEPTH:
@@ -60,9 +73,16 @@ def detect_kind(doc: dict, override: str | None = None) -> tuple[DocumentKind, R
         source="schema"),))
 
 
-def _depth(node: object, current: int = 1) -> int:
-    if isinstance(node, dict):
-        return max((_depth(v, current + 1) for v in node.values()), default=current)
-    if isinstance(node, list):
-        return max((_depth(v, current + 1) for v in node), default=current)
-    return current
+def _depth(node: object) -> int:
+    deepest = 0
+    stack = [(node, 1)]
+    while stack:
+        current, level = stack.pop()
+        deepest = max(deepest, level)
+        if level > MAX_DEPTH:
+            return level
+        if isinstance(current, dict):
+            stack.extend((v, level + 1) for v in current.values())
+        elif isinstance(current, list):
+            stack.extend((v, level + 1) for v in current)
+    return deepest
