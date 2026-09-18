@@ -5,6 +5,7 @@ import yaml
 from vcfspec.api import render_document, subtree_blocked, validate_document
 from vcfspec.findings import Finding, Result, Severity
 from vcfspec.inventory import EXAMPLE_PATH
+from vcfspec.validate import probes
 from vcfspec.validate.probes import ProbeConfig
 
 TEXT = EXAMPLE_PATH.read_text(encoding="utf-8")
@@ -434,3 +435,41 @@ def test_no_layers_ran_invariant_does_not_touch_an_already_invalid_result():
                                       message="x", source="schema"),))
     out = _refuse_unvalidated_success(already_invalid, ["detect"])
     assert out.codes == ("VCF-INPUT-UNRECOGNISED",)   # unchanged, not doubled up
+
+
+# --- Finding 6: probes must never be listed as run over a shape they
+# cannot read ---------------------------------------------------------------
+
+def test_probes_are_skipped_with_a_reason_for_an_sddc_spec_document(monkeypatch):
+    """run_probes is written against the inventory shape (dns.subdomain,
+    hosts[].name, hosts[].mgmtIp). An SddcSpec spells those dnsSpec and
+    hostSpecs[].hostname and has no per-host management IP at all, so
+    inventory.get("hosts") returned None, the loop body never ran, and the
+    layer reported success by saying nothing -- while layers_run listed
+    "probes" and layers_skipped said nothing about it. Both halves of the
+    envelope's honesty mechanism agreed a layer had run that had inspected
+    nothing. Either it works on that shape or it records a skip; silent
+    inclusion is the one unacceptable option.
+    """
+    attempted = []
+    monkeypatch.setattr(probes, "_default_resolver",
+                        lambda *a, **k: attempted.append(("resolve", a)))
+    monkeypatch.setattr(probes, "_default_connector",
+                        lambda *a, **k: attempted.append(("connect", a)))
+
+    spec_text = json.dumps(render_document(TEXT)["spec"])
+    out = validate_document(spec_text, input_kind="sddc_spec",
+                            probe_config=ProbeConfig(allowlist=("10.50.10.0/24",),
+                                                     domain_allowlist=("lab.local",)))
+    assert "probes" not in out["layers_run"]
+    assert "probes" in out["layers_skipped"]
+    assert "inventory" in out["layers_skipped"]["probes"]
+    assert attempted == []
+
+
+def test_probes_still_run_for_an_inventory(monkeypatch):
+    """The skip above must be about the document kind, not a blanket
+    disabling of the layer."""
+    out = validate_document(TEXT, probe_config=ProbeConfig())
+    assert "probes" in out["layers_run"]
+    assert "probes" not in out["layers_skipped"]

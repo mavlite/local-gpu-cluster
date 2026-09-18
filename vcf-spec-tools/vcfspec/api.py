@@ -172,7 +172,24 @@ def validate_document(text: str, input_kind: str | None = None,
         layers_run.append("schema")
         skipped["rules"] = "rules operate on inventories; render first"
 
-    if probe_config is None:
+    if kind is not DocumentKind.INVENTORY:
+        # run_probes reads the inventory shape: inventory["dns"]["subdomain"],
+        # inventory["hosts"][i]["name"], ["mgmtIp"]. An SddcSpec spells those
+        # dnsSpec and hostSpecs[].hostname, and has no per-host management
+        # address at all -- so there is nothing for the IP allowlist to gate
+        # a probe against, and probing it correctly is not a matter of
+        # renaming keys. This block used to sit outside the kind branch, so
+        # it ran anyway: inventory.get("hosts") returned None, the loop body
+        # never executed, and the layer reported success by saying nothing.
+        # layers_run listed "probes" and layers_skipped stayed silent, so
+        # both halves of the envelope's own honesty mechanism agreed that
+        # the probe layer had run and was content, having inspected nothing.
+        # An explicit skip, exactly like the "rules" line above, is the only
+        # acceptable answer: telling an operator something was checked when
+        # it was not is the failure mode this envelope exists to prevent.
+        skipped["probes"] = ("probes read the inventory shape; an SddcSpec "
+                             "has no per-host management IP to allowlist")
+    elif probe_config is None:
         skipped["probes"] = "no probe configuration supplied"
     elif any(f.severity is Severity.CRITICAL for f in result.findings):
         skipped["probes"] = "critical findings present"
