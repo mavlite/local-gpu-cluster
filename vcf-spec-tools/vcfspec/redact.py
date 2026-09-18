@@ -19,7 +19,8 @@ CREDENTIAL_KEY_RE = re.compile(
 
 REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
-_QUOTED_SECRET_RE = re.compile(r"'([^']{6,})'(?=\s+is too short)")
+_QUOTED_SECRET_RE = re.compile(
+    r"'([^']{6,})'(?=\s+(?:is too short|is too long|does not match|is not of type))")
 _INLINE_SECRET_RE = re.compile(
     r"((?:password|passwd|secret|token)\s*[=:]\s*)(\S+)", re.IGNORECASE)
 

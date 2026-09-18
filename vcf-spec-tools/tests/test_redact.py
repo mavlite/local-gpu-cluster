@@ -36,3 +36,18 @@ def test_does_not_mutate_input():
     doc = {"password": "hunter2"}
     redact(doc)
     assert doc["password"] == "hunter2"
+
+
+def test_masks_secrets_while_sparing_thumbprints_in_one_payload():
+    doc = {"credentials": {"password": "hunter2", "esxRoot": "hunter3"},
+           "sslThumbprint": "AA:BB:CC", "rootVcenterPassword": "${vcenter_root}"}
+    out = redact(doc)
+    assert out["credentials"]["password"] == MASK
+    assert out["credentials"]["esxRoot"] == MASK
+    assert out["sslThumbprint"] == "AA:BB:CC"
+    assert out["rootVcenterPassword"] == "${vcenter_root}"
+
+
+def test_redacts_a_secret_in_a_pattern_mismatch_message():
+    text = "'hunter2pass' does not match '^[a-z]+$'"
+    assert "hunter2pass" not in redact(text)
