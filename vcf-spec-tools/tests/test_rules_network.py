@@ -76,3 +76,16 @@ def test_malformed_network_does_not_raise(make_inventory):
     "VCF-NET-DUPLICATE-IP", "VCF-NSX-TEP-POOL-TOO-SMALL"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
+
+
+@pytest.mark.parametrize("mutation", [
+    {"networks": ["not", "a", "mapping"]},
+    {"networks": "banana"},
+    {"nsx": "banana"},
+    {"nsx": {"tepPool": "banana"}},
+    {"nsx": {"tepPool": {"ranges": "banana"}}},
+    {"nsx": {"tepPool": {"ranges": ["banana"]}}},
+])
+def test_wrong_typed_sections_do_not_raise(inventory, mutation):
+    inventory.update(mutation)
+    check_networks(inventory)   # must not raise

@@ -30,7 +30,7 @@ def check_networks(inventory: dict) -> Result:
 def _usable_networks(inventory: dict) -> dict[str, dict]:
     """Purpose -> {net, vlan, gateway, subnet}, skipping anything malformed."""
     out: dict[str, dict] = {}
-    for purpose, entry in (inventory.get("networks") or {}).items():
+    for purpose, entry in _mapping(inventory.get("networks")).items():
         if not isinstance(entry, dict):
             continue
         net = _network(entry.get("subnet"))
@@ -38,13 +38,22 @@ def _usable_networks(inventory: dict) -> dict[str, dict]:
             continue
         out[purpose] = {"net": net, "vlan": entry.get("vlan"),
                         "gateway": entry.get("gateway"), "subnet": entry["subnet"]}
-    tep = ((inventory.get("nsx") or {}).get("tepPool") or {})
+    nsx = _mapping(inventory.get("nsx"))
+    tep = _mapping(nsx.get("tepPool"))
     tep_net = _network(tep.get("cidr"))
     if tep_net is not None:
-        out["nsx.tepPool"] = {"net": tep_net, "vlan": (inventory.get("nsx") or {})
-                              .get("transportVlanId"), "gateway": tep.get("gateway"),
-                              "subnet": tep["cidr"]}
+        out["nsx.tepPool"] = {"net": tep_net, "vlan": nsx.get("transportVlanId"),
+                              "gateway": tep.get("gateway"), "subnet": tep["cidr"]}
     return out
+
+
+def _mapping(value: object) -> dict:
+    """Return value when it is a mapping, else an empty one.
+
+    Rules run on documents that failed schema validation, so a field of the
+    wrong type must be skipped, not raised on.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 def _network(value) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
@@ -102,7 +111,7 @@ def _vlan_rules(networks: dict) -> list[Finding]:
 
 
 def _mtu_rules(inventory: dict) -> list[Finding]:
-    mtu = (inventory.get("nsx") or {}).get("fabricMtu")
+    mtu = _mapping(inventory.get("nsx")).get("fabricMtu")
     if isinstance(mtu, int) and mtu < TEP_MTU_MIN:
         return [finding_for("VCF-NSX-FABRIC-MTU-TOO-LOW", "/nsx/fabricMtu", mtu=mtu)]
     return []
@@ -132,11 +141,15 @@ def _host_rules(inventory: dict, networks: dict) -> list[Finding]:
 
 
 def _tep_pool_rules(inventory: dict) -> list[Finding]:
-    pool = ((inventory.get("nsx") or {}).get("tepPool") or {})
-    ranges = pool.get("ranges") or []
+    pool = _mapping(_mapping(inventory.get("nsx")).get("tepPool"))
+    ranges = pool.get("ranges")
+    if not isinstance(ranges, list):
+        ranges = []
     hosts = len(inventory.get("hosts") or [])
     size = 0
     for entry in ranges:
+        if not isinstance(entry, dict):
+            continue
         start, end = _address(entry.get("start")), _address(entry.get("end"))
         if start is None or end is None or int(end) < int(start):
             continue
