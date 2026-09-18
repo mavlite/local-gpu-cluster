@@ -1,0 +1,106 @@
+# vcf-spec-tools/vcfspec/rules/catalogue.yaml
+# Every code the library can emit. source: docs | schema | table
+# 'table' entries derive from VCF-Design-Studio (MIT), whose values come from the
+# VCF Planning and Preparation Workbook static reference tables.
+VCF-INPUT-UNRECOGNISED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "Document is neither a lab inventory nor a VCF SddcSpec."
+  fix: "Add apiVersion and kind, or pass input_kind explicitly."
+VCF-INPUT-BAD-KIND:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "Unknown input_kind."
+  fix: "Use 'inventory' or 'sddc_spec'."
+VCF-INPUT-UNREADABLE:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "The document could not be read."
+  fix: "Provide a YAML or JSON mapping within the size, depth and alias limits."
+VCF-INV-SCHEMA:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "The inventory does not match its schema."
+  fix: "Correct the inventory."
+VCF-SCHEMA:
+  severity: error
+  source: schema
+  source_url: https://github.com/vmware/vcf-api-specs
+  summary: "The spec does not match the VCF Installer schema."
+  fix: "Correct the field."
+VCF-CRED-NOT-A-REFERENCE:
+  severity: critical
+  source: docs
+  source_url: ""
+  summary: "A credential field holds something other than a ${reference}."
+  fix: "Use ${name}; these tools never hold secrets."
+VCF-RENDER-UNMAPPED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "A required spec field has no inventory source and no default."
+  fix: "Add the missing inventory section."
+VCF-RENDER-DEFAULT-APPLIED:
+  severity: info
+  source: table
+  source_url: ""
+  summary: "A default was applied."
+  fix: "Set the value explicitly in the inventory to override."
+VCF-EXPLAIN-UNKNOWN-CODE:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "No rule with that code."
+  fix: "Call vcf_validate_spec to get real codes."
+INTERNAL:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "The tool failed internally."
+  fix: "Report this with the input that caused it."
+VCF-NET-GATEWAY-OUTSIDE-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "Gateway {gateway} is not inside subnet {subnet} for network '{purpose}'."
+  fix: "Set a gateway address within the declared subnet."
+VCF-NET-SUBNET-OVERLAP:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "'{purpose}' ({subnet}) overlaps '{other}' ({other_subnet})."
+  fix: "Give each traffic type a distinct subnet."
+VCF-NET-VLAN-REUSED:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "VLAN {vlan} is used by both '{purpose}' and '{other}'."
+  fix: "Separate each traffic type onto its own VLAN."
+VCF-NSX-FABRIC-MTU-TOO-LOW:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "NSX fabric MTU is {mtu}; overlay traffic needs at least 1600."
+  fix: "Set fabricMtu to 1600 or more (9000 where the switches allow it)."
+VCF-NET-HOST-IP-OUTSIDE-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
+  summary: "Host {name} management IP {ip} is outside {subnet}."
+  fix: "Give the host an address inside the management subnet."
+VCF-NET-DUPLICATE-IP:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
+  summary: "IP {ip} is used more than once ({where})."
+  fix: "Give every host a unique address."
+VCF-NSX-TEP-POOL-TOO-SMALL:
+  severity: warning
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "TEP pool holds {size} addresses; {hosts} hosts typically need {needed}."
+  fix: "Widen the TEP pool: two tunnel endpoints per host is the usual figure."
