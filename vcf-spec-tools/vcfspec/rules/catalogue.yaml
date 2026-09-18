@@ -25,7 +25,7 @@ VCF-INPUT-UNREADABLE:
   source: schema
   source_url: ""
   summary: "The document could not be read ({exc_type})."
-  fix: "Provide a YAML or JSON mapping within the size, depth and alias limits."
+  fix: "Provide a YAML or JSON mapping within the size, depth, alias and expanded-node limits."
 VCF-INV-SCHEMA:
   severity: error
   source: schema

@@ -1,7 +1,11 @@
+import time
+
 import pytest
 import yaml
-from vcfspec.documents import (DocumentKind, DocumentTooDeep, DocumentTooLarge,
-                               DocumentTooManyAliases, detect_kind, load_document)
+from vcfspec.documents import (MAX_ALIASES, MAX_NODES, _ALIAS_RE, DocumentKind,
+                               DocumentTooDeep, DocumentTooLarge,
+                               DocumentTooManyAliases, DocumentTooManyNodes,
+                               detect_kind, load_document)
 
 
 def test_detects_inventory_by_apiversion_and_kind():
@@ -78,3 +82,68 @@ def test_rejects_alias_bomb_before_parsing():
     doc = "a: &x [1,2]\n" + "".join(f"b{i}: *x\n" for i in range(150))
     with pytest.raises(DocumentTooManyAliases):
         load_document(doc)
+
+
+# --- MAX_ALIASES counted occurrences; it never bounded the expansion -------
+
+def alias_bomb(levels: int = 7, fan_out: int = 8) -> str:
+    """The review's reproduction: 320 bytes, 56 aliases (44 under the
+    MAX_ALIASES limit of 100), seven levels of eight -- which expands to
+    8**7 leaves and 21,913,097 nodes. Aliases compose multiplicatively, so
+    counting occurrences in the source text bounds nothing.
+    """
+    lines = ["a0: &a0 [" + ",".join(["x"] * fan_out) + "]"]
+    for level in range(1, levels + 1):
+        lines.append(f"a{level}: &a{level} ["
+                     + ",".join([f"*a{level - 1}"] * fan_out) + "]")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_alias_bomb_is_under_every_older_limit():
+    """Stated explicitly so the next reader does not assume some existing
+    guard catches this: it is small, shallow, and under the alias count."""
+    text = alias_bomb()
+    assert len(text.encode("utf-8")) == 320
+    assert len(_ALIAS_RE.findall(text)) == 56 < MAX_ALIASES
+
+
+def test_alias_expansion_is_refused_and_refused_quickly():
+    """A guard that costs what it prevents is not a guard. MAX_DEPTH could
+    never help here -- it ran after safe_load had already built the graph,
+    and the document is only ten levels deep anyway."""
+    start = time.monotonic()
+    with pytest.raises(DocumentTooManyNodes):
+        load_document(alias_bomb())
+    assert time.monotonic() - start < 1.0
+
+
+def test_one_more_level_of_expansion_is_also_refused_quickly():
+    """The limit permitted 100 aliases; one more level is x8 again."""
+    start = time.monotonic()
+    with pytest.raises(DocumentTooManyNodes):
+        load_document(alias_bomb(levels=8))
+    assert time.monotonic() - start < 1.0
+
+
+def test_aliases_themselves_are_still_perfectly_legal():
+    """The bound is on expansion, not on aliases: a document that uses one
+    to avoid repeating itself must still load."""
+    doc = load_document("common: &c {mtu: 9000}\na: *c\nb: *c\n")
+    assert doc["a"] == {"mtu": 9000} and doc["b"] == {"mtu": 9000}
+
+
+def test_the_bundled_example_is_nowhere_near_the_node_budget():
+    """Three orders of magnitude of headroom is the claim; check it rather
+    than assert it in a comment."""
+    from vcfspec.documents import _inspect
+    from vcfspec.inventory import EXAMPLE_PATH
+    _, nodes = _inspect(load_document(EXAMPLE_PATH.read_text(encoding="utf-8")))
+    assert nodes < MAX_NODES / 100
+
+
+def test_the_bomb_reaches_the_orchestrator_as_a_finding_not_an_exception():
+    from vcfspec.api import validate_document
+    out = validate_document(alias_bomb())
+    assert out["valid"] is False
+    assert out["findings"][0]["code"] == "VCF-INPUT-UNREADABLE"
+    assert "DocumentTooManyNodes" in out["findings"][0]["message"]
