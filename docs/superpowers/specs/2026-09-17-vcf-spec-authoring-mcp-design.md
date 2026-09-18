@@ -72,6 +72,51 @@ step.
 the cluster below its policy floor — no rebuild capacity, objects non-compliant
 until it returns.
 
+## Target lab profile (confirmed 2026-09-18)
+
+**Hosts — 3 × Minisforum 795S7:** Ryzen 9 7945HX (16 cores / 32 threads), 96 GB
+DDR5, 4 TB NVMe for vSAN, 500 GB NVMe for memory tiering, 1 TB NVMe for other
+storage. Dual-port 10G NIC in the PCIe slot plus the onboard 2.5G — three pNICs.
+
+**Capacity, computed from the 9.1 appliance tables:** the mandatory stack
+(vCenter Small, NSX Manager Medium, SDDC Manager, Operations Fleet Manager,
+2 × vCLS, VCF Operations Medium, Operations Collector Medium, VCFMS 1 control +
+3 workers) is **76 vCPU / 219 GB RAM / ~3.0 TB**.
+
+- All three hosts up: 219 of 288 GB — fits at 76% committed.
+- **N-1: 192 GB available against 219 GB needed — does not fit.** A routine host
+  reboot cannot host the stack on RAM alone.
+- **Memory tiering is the lever**: the 500 GB NVMe at a 1:1 ratio presents about
+  192 GB effective per host (384 GB total, 256 GB at N-1), which clears it.
+- Storage: 12 TB raw → ~8 TB usable at Auto-RAID's 1.5×, against 3 TB consumed.
+- CPU: 76 vCPU against 48 cores / 96 threads — normal oversubscription.
+
+Two hardware caveats: 96 GB exceeds Minisforum's official 64 GB maximum (it
+works, but is out of spec), and NIC speeds must not be mixed within one VDS
+uplink set — use the dual 10G ports for the VDS and leave the 2.5G for host
+management.
+
+**Networking:** an isolated lab on MikroTik switches, uplinked to the home
+192.168.6.0/24. IP and DNS naming are therefore free choices, which removes two
+traps: the 12 consecutive addresses for `vspClusterSpec` are easy to reserve, and
+`198.18.0.0/15` collides with nothing. MTU 9000 is available end to end.
+
+- **CRS309-1G-8S+IN** (RouterOS): L3, VLANs, DHCP, NTP.
+- **CSS610-8G-2S+IN** (SwOS Lite): L2 access only — it cannot serve DNS or NTP.
+- **DNS does not live on the switch.** RouterOS auto-generates a PTR per static A
+  record and tolerates multiple PTRs for one IP; VCF validates forward *and*
+  reverse for every host and appliance, and ambiguous reverse records fail
+  bring-up obscurely.
+
+**Infrastructure services: the VIS appliance** (community-built, 2 vCPU / 4 GB /
+30 GB) provides DNS with proper forward and reverse records, NTP, DHCP, the
+**software depot** the Installer needs, an SFTP backup target, a container
+registry, LDAP/OIDC and KMIP. It runs **on the Proxmox host, not on the three lab
+hosts** — those are consumed by bring-up, and DNS and the depot must survive the
+lab being torn down and rebuilt. VIS is a lab tool, not a production dependency;
+an LXC running BIND or dnsmasq is the alternative if we want DNS we control and
+automate ourselves.
+
 ## Sections a real 9.1 spec contains
 
 The renderer must cover, at minimum: `sddcId`, `vcfInstanceName`, `workflowType`,
@@ -311,11 +356,19 @@ Live validation and submission use the Installer API: authenticate at
 
 ## Open questions
 
-1. **Does the mandatory 9.1.1 stack fit three hosts of the chosen hardware?**
-   The capacity rule answers this once host specs are known; it may force a
-   fourth host or a larger one. This is the question that affects hardware, and
-   it should be answered before the hosts are finalised.
+1. **Does memory tiering deliver the assumed 1:1 ratio on this hardware?** The
+   capacity maths above depends on it for the N-1 case. Confirm the supported
+   ratio and the resulting effective RAM once a host is running ESX 9.1.1.
 2. **Does `fipsEnabled` still exist in the 9.1 schema?** It is Cloud Builder-era;
    confirm against the vendored spec before exposing it as an operator input.
 3. **Which sections the Installer treats as mandatory** for this shape — resolved
    by vendoring the schema, which must happen before layer 1 is written.
+
+## Follow-on stages this design enables
+
+- **Stage 1.5, network prep:** the MikroTik RouterOS REST API turns "the VLANs,
+  MTU and trunks exist" from a manual prerequisite into an automated one, and is
+  the natural second MCP server.
+- **Stage 4:** submit and monitor bring-up via the Installer API.
+- **Stage 5:** day-2 operations, where the spec-explorer pattern (a few tools
+  over the OpenAPI surface) fits better than hand-written tools.
