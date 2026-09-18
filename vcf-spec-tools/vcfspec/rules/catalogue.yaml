@@ -164,3 +164,27 @@ VCF-LIC-EVALUATION:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/licensing/licensing-overview/licensing-model.html
   summary: "VCF 9.x has no license keys; this deploys in 90-day evaluation."
   fix: "Assign a subscription licence in VCF Operations after deployment."
+VCF-PROBE-NO-REVERSE-DNS:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "No reverse DNS record for {ip} ({fqdn})."
+  fix: "Add a PTR record; VCF validates forward and reverse for every host."
+VCF-PROBE-FORWARD-MISMATCH:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "{fqdn} resolves to {resolved}, but the inventory says {expected}."
+  fix: "Correct the A record or the inventory so they agree."
+VCF-PROBE-TARGET-BLOCKED:
+  severity: warning
+  source: docs
+  source_url: ""
+  summary: "Refused to probe {target}: outside the configured allowlist."
+  fix: "Add the range to the probe allowlist if it really is yours."
+VCF-PROBE-UNKNOWN:
+  severity: info
+  source: docs
+  source_url: ""
+  summary: "Could not probe {target}: {reason}."
+  fix: "Re-run from a host on the management network to confirm."
