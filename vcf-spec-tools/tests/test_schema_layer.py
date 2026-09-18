@@ -62,6 +62,37 @@ def test_a_pasted_secret_at_a_credential_position_never_reaches_the_message():
     assert "minLength" in rendered
 
 
+def test_nothing_is_echoed_then_masked_at_a_credential_position():
+    """Pins the *mechanism*, not just the outcome.
+
+    "The secret is absent" is satisfied two ways: the value was echoed and
+    then masked, or it was never put in the message at all. Only the second
+    is what this layer promises, and the difference is not academic --
+    masking is pattern-matching, and this codebase has now twice shipped a
+    masker that missed a shape nobody had thought of. Asserting the secret's
+    absence alone passes with the structural message removed, because
+    redact() catches these two particular shapes; asserting that MASK is
+    absent too does not, because an echoed-then-masked message necessarily
+    contains it.
+    """
+    doc = {**MINIMAL, "vcenterSpec": {"vcenterHostname": "vc01",
+                                      "rootVcenterPassword": "hunter2"}}
+    rendered = " ".join(f.message
+                        for f in validate_against_schema(doc).findings)
+    assert "***REDACTED***" not in rendered
+
+
+def test_nothing_is_echoed_then_masked_for_a_container_instance():
+    secret = "VMw@re123!Real"
+    doc = {**MINIMAL, "hostSpecs": {"hostname": "esx01",
+                                    "credentials": {"username": "root",
+                                                    "password": secret}}}
+    rendered = " ".join(f.message
+                        for f in validate_against_schema(doc).findings)
+    assert secret not in rendered
+    assert "***REDACTED***" not in rendered
+
+
 def test_a_short_secret_at_a_credential_position_is_not_echoed_either():
     """redact()'s quoted-value rule used to carry a {6,} length floor, so a
     five-character literal ("'Ab3!x' is too short") was echoed verbatim.
