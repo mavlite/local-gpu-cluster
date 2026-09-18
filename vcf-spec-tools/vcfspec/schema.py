@@ -2,6 +2,7 @@
 """Loading the vendored SddcSpec schema, with integrity enforcement."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from functools import lru_cache
@@ -21,7 +22,7 @@ def schema_path(version: str = DEFAULT_VERSION) -> Path:
 
 
 @lru_cache(maxsize=8)
-def load_schema(version: str = DEFAULT_VERSION) -> dict:
+def _load_verified(version: str) -> dict:
     path = schema_path(version)
     if not path.exists():
         raise FileNotFoundError(f"no vendored schema for VCF {version}: {path}")
@@ -33,3 +34,19 @@ def load_schema(version: str = DEFAULT_VERSION) -> dict:
             f"schema for {version} failed integrity check: "
             f"expected {expected[:16]}..., got {actual[:16]}...")
     return json.loads(text)
+
+
+def load_schema(version: str = DEFAULT_VERSION) -> dict:
+    """Return a private copy: callers must not share schema state.
+
+    The parsed schema is cached (re-reading and re-hashing a ~70 KB file on
+    every validation call would be wasteful), but handing out the cached
+    dict directly would let one caller's in-place edit corrupt every other
+    caller for the rest of the process. Deep-copy on the way out instead —
+    do not "optimise" this away.
+    """
+    return copy.deepcopy(_load_verified(version))
+
+
+# Tests and callers clear the cache through the public name.
+load_schema.cache_clear = _load_verified.cache_clear

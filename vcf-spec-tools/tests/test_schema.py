@@ -44,3 +44,10 @@ def test_checksum_mismatch_is_a_hard_failure(tmp_path, monkeypatch):
 def test_unknown_version_raises():
     with pytest.raises(FileNotFoundError):
         load_schema("0.0.0")
+
+
+def test_each_caller_gets_its_own_copy():
+    first = load_schema()
+    first["$defs"]["SddcSpec"]["required"].append("TAMPERED")
+    second = load_schema()
+    assert "TAMPERED" not in second["$defs"]["SddcSpec"]["required"]
