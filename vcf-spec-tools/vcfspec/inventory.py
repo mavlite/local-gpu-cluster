@@ -41,22 +41,15 @@ def validate_inventory(doc: dict) -> Result:
             path=_pointer(error.absolute_path), message=error.message,
             fix="Correct the inventory to match the documented schema.",
             source="schema"))
-    findings.extend(_credential_findings(doc))
+    # The ${reference} rule is the project's single hardest constraint, so
+    # it does not live here as a loop over this document kind's own root
+    # 'credentials' block -- that shape is what kept it from ever running
+    # on sddc_spec documents. credentials.credential_findings() is the one
+    # structural walk both kinds share; imported lazily because
+    # credentials.py needs REFERENCE_RE from this module.
+    from .credentials import credential_findings
+    findings.extend(credential_findings(doc).findings)
     return Result(tuple(findings))
-
-
-def _credential_findings(doc: dict) -> list[Finding]:
-    out: list[Finding] = []
-    for name, value in (doc.get("credentials") or {}).items():
-        if not isinstance(value, str) or not REFERENCE_RE.match(value):
-            out.append(Finding(
-                code="VCF-CRED-NOT-A-REFERENCE", severity=Severity.CRITICAL,
-                path=f"/credentials/{name}",
-                message=(f"Credential '{name}' is not a reference. These tools "
-                         "never hold secrets."),
-                fix="Use ${name}, e.g. ${esx_root}; resolve it at submit time.",
-                source="docs"))
-    return out
 
 
 def _pointer(path) -> str:

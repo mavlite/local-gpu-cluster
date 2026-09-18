@@ -267,7 +267,14 @@ reaches a finding or the rendered spec.
 
 - **No secrets, ever.** These tools were built to never hold, log or emit
   a real credential. A credential is always `${reference}`; a literal
-  value is rejected outright, both when validating and when rendering.
+  value is rejected outright, when validating and when rendering, and on
+  **both** document kinds — a lab inventory's free-form `credentials`
+  block and an `SddcSpec`'s own credential fields
+  (`hostSpecs[].credentials`, `rootVcenterPassword`,
+  `adminUserSsoPassword`, `rootNsxtManagerPassword`, `rootPassword`, …).
+  One structural walk (`vcfspec/credentials.py`) covers both, matching on
+  position inside a `credentials` block *and* on credential-shaped key
+  names, so a credential key no regex has been taught is still caught.
 - **Probes are opt-in and contained.** They exist only in the CLI, never
   in the MCP server (see below), run only when `--probe` is passed, and
   touch only addresses inside an explicit `--allowlist`. An unreachable or

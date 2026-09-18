@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from .credentials import credential_findings
 from .documents import DocumentKind, detect_kind, load_document
 from .findings import Result, Severity
 from .inventory import validate_inventory
@@ -160,6 +161,13 @@ def validate_document(text: str, input_kind: str | None = None,
         except (FileNotFoundError, SchemaIntegrityError):
             schema_result = Result((finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
                                                 version=version),))
+        # The vendored VMware schema accepts a real password -- real
+        # passwords are what it is for -- so the schema pass alone cannot
+        # enforce "credentials are ${reference} strings, never secrets".
+        # Without this, vcf_validate_spec(input_kind="sddc_spec") returned
+        # valid=True and zero findings on a document holding two real root
+        # passwords, and the operator was told their spec was clean.
+        schema_result = schema_result.merge(credential_findings(doc))
         result = result.merge(schema_result)
         layers_run.append("schema")
         skipped["rules"] = "rules operate on inventories; render first"
