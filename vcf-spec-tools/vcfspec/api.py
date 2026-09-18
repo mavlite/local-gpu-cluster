@@ -11,14 +11,22 @@ every other layer explicitly does not:
    redacting again here must be a no-op; redact() is idempotent (see
    tests/test_redact.py::test_redact_is_idempotent).
 2. Every loader failure (DocumentTooLarge, DocumentTooDeep,
-   DocumentTooManyAliases, a yaml.YAMLError, a non-mapping root) and
-   InsecureCredentialError from the renderer become a structured finding.
-   Nothing here ever lets an exception reach the caller.
-3. A schema finding blocks rules only for the subtree at its JSON pointer:
-   "/networks/vsan" blocks "/networks/vsan/..." and nothing else. Gating
-   compares pointer *segments*, not characters -- a raw
-   `pointer.startswith(blocked)` would wrongly block a sibling like
-   "/networks/vsanWitness".
+   DocumentTooManyAliases, a yaml.YAMLError, a non-mapping root) becomes a
+   structured finding, and so does anything render() raises -- not just
+   the documented InsecureCredentialError. render() is not defensive the
+   way the rules modules are (e.g. a bad int() or a missing dict key on
+   schema-invalid input), and that exception surface is not enumerable in
+   advance, so render_document() catches broadly at that boundary rather
+   than trying to keep the list complete. Nothing here ever lets an
+   exception reach the caller.
+3. In validate_document(), a schema finding blocks rules only for the
+   subtree at its JSON pointer: "/networks/vsan" blocks "/networks/vsan/..."
+   and nothing else. Gating compares pointer *segments*, not characters --
+   a raw `pointer.startswith(blocked)` would wrongly block a sibling like
+   "/networks/vsanWitness". render_document() does NOT gate its rule pass:
+   render() does not respect gating either, so filtering only the finding
+   and not the spec value it warns about would silently hand an operator a
+   spec with a real problem and one fewer finding explaining it.
 """
 from __future__ import annotations
 
@@ -38,14 +46,29 @@ from .validate.schema_layer import validate_against_schema
 # Codes that mean "this JSON pointer's subtree failed schema validation".
 _GATING_CODES = ("VCF-INV-SCHEMA", "VCF-SCHEMA")
 
+# Both "/" (root) and "" are how a root-level error can be spelled; neither
+# may ever gate, or every rule finding in the document is suppressed.
+_ROOT_POINTERS = ("/", "")
+
 
 def subtree_blocked(findings) -> set[str]:
     """Pointers whose subtree failed schema validation."""
-    return {f.path for f in findings if f.code in _GATING_CODES and f.path != "/"}
+    return {f.path for f in findings
+            if f.code in _GATING_CODES and f.path not in _ROOT_POINTERS}
+
+
+def _unescape_segment(segment: str) -> str:
+    """RFC 6901 decoding: ~1 -> '/' must happen before ~0 -> '~'.
+
+    Doing it in the other order would mis-decode a literal "~01": read
+    left to right, that has to become "~1" (an escaped tilde followed by a
+    literal '1'), not "/" (which is what decoding ~0 first would produce).
+    """
+    return segment.replace("~1", "/").replace("~0", "~")
 
 
 def _segments(pointer: str) -> tuple[str, ...]:
-    return tuple(part for part in pointer.split("/") if part != "")
+    return tuple(_unescape_segment(part) for part in pointer.split("/") if part != "")
 
 
 def _is_blocked(pointer: str, blocked: set[str]) -> bool:
@@ -54,11 +77,19 @@ def _is_blocked(pointer: str, blocked: set[str]) -> bool:
     Compares JSON-pointer segments, not raw characters. Segment comparison
     is what keeps "/networks/vsan" from blocking "/networks/vsanWitness":
     they share a character prefix but not a segment prefix.
+
+    A blocked entry with zero segments (root, spelled either "/" or "")
+    is always skipped: an empty segment tuple is a prefix of every
+    pointer's segments, so honouring it here would silently suppress
+    every rule finding in the document. subtree_blocked() already keeps
+    root pointers out of the set it builds, but that guard belongs on
+    this function too -- it must hold regardless of which caller built
+    `blocked`, not just for the one caller that remembers to filter first.
     """
     pointer_segments = _segments(pointer)
     for entry in blocked:
         entry_segments = _segments(entry)
-        if pointer_segments[:len(entry_segments)] == entry_segments:
+        if entry_segments and pointer_segments[:len(entry_segments)] == entry_segments:
             return True
     return False
 
@@ -138,15 +169,21 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
     if kind is not DocumentKind.INVENTORY:
         return _envelope(result, ["detect"], {"render": "input is not an inventory"})
 
+    # No subtree gating here, unlike validate_document: render's rule pass
+    # is never filtered. Gating a rule finding without also gating the
+    # spec value it warns about would let an operator receive a rendered
+    # spec with a real problem in it and one fewer finding explaining why.
     schema_result = validate_inventory(doc)
-    blocked = subtree_blocked(schema_result.findings)
-    combined = result.merge(schema_result).merge(_rules_for_inventory(doc, blocked))
+    rules_result = check_networks(doc).merge(check_platform(doc))
+    combined = result.merge(schema_result).merge(rules_result)
     layers_run = ["detect", "schema", "rules"]
 
     # render() is documented as not trusting that validate_inventory() ran
     # first: it re-checks every credential and raises rather than emitting
-    # a literal secret. That guard must never propagate out of the
-    # orchestrator -- convert it to a finding instead.
+    # a literal secret. That guard, and any other exception render() can
+    # raise on malformed input (a bad int(), a missing key -- the set of
+    # possible failures is not enumerable in advance), must never
+    # propagate out of the orchestrator -- convert it to a finding instead.
     try:
         spec, render_result = render(doc, version)
     except InsecureCredentialError as exc:
@@ -157,6 +194,15 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
             source="schema")
         combined = combined.merge(Result((finding,)))
         return _envelope(combined, layers_run, {"render": "refused an insecure credential"})
+    except Exception as exc:
+        finding = Finding(
+            code="VCF-RENDER-FAILED", severity=Severity.CRITICAL, path="/",
+            message=str(redact(str(exc))),
+            fix="Correct the inventory; it could not be rendered into a spec.",
+            source="schema")
+        combined = combined.merge(Result((finding,)))
+        return _envelope(combined, layers_run,
+                         {"render": "render() raised an unexpected exception"})
 
     combined = combined.merge(render_result)
     layers_run.append("render")

@@ -59,13 +59,31 @@ def test_render_of_an_invalid_inventory_still_emits_a_spec():
 
 
 def test_output_is_redacted_even_if_a_secret_slips_in():
-    leaky = TEXT.replace("${esx_root}", "RealPassword123!")
-    assert "RealPassword123!" not in str(validate_document(leaky))
+    """A literal (non-${reference}) credential never actually demonstrates
+    boundary redaction: it's caught upstream by VCF-CRED-NOT-A-REFERENCE /
+    InsecureCredentialError, both of which already withhold the value in
+    their own message, so that scenario passes even with redact() deleted.
+    inventory.py's validate_inventory() does NOT redact internally (unlike
+    schema_layer.py), so a jsonschema pattern-mismatch on an ordinary field
+    genuinely echoes the raw value -- this is the case that actually
+    exercises _envelope's redact() call.
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["instance"]["sddcId"] = "hunter2pass!"     # fails the sddcId pattern
+    out = validate_document(yaml.safe_dump(doc))
+    assert "hunter2pass!" not in str(out)
 
 
 def test_render_output_is_redacted_even_if_a_secret_slips_in():
-    leaky = TEXT.replace("${esx_root}", "RealPassword123!")
-    assert "RealPassword123!" not in str(render_document(leaky))
+    """Same gap as above, exercised through render_document(): the naming
+    rule (rules/platform.py) deliberately does not redact by design, so a
+    non-lowercase FQDN containing a secret-shaped string genuinely reaches
+    a finding message verbatim before _envelope's redact() call runs.
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["appliances"]["vsp"]["platformFqdn"] = "Secret:hunter2pass"
+    out = render_document(yaml.safe_dump(doc))
+    assert "Secret:hunter2pass" not in str(out)
 
 
 def test_validate_is_independent_of_call_order():
@@ -141,6 +159,66 @@ def test_render_refuses_an_insecure_credential_without_raising():
     assert "spec" not in out
 
 
+# render() itself is not defensive the way rules/network.py and
+# rules/platform.py are: it does `int(entry["vlan"])` and `entry["vlan"]`
+# with no guard, so ordinary schema-invalid input reaches it (schema
+# findings do not stop render_document from calling render()) and can
+# raise ValueError, KeyError, or anything else. All of it must become a
+# finding, not a traceback -- the exception surface is not enumerable in
+# advance, so the catch at that boundary must be broad, not a type list.
+
+def test_render_document_converts_a_type_error_from_render_to_a_finding():
+    doc = yaml.safe_load(TEXT)
+    doc["networks"]["vsan"]["vlan"] = "not-an-int"
+    out = render_document(yaml.safe_dump(doc))
+    assert out["valid"] is False
+    assert "spec" not in out
+    assert out["layers_skipped"]["render"] == "render() raised an unexpected exception"
+
+
+def test_render_document_converts_a_key_error_from_render_to_a_finding():
+    doc = yaml.safe_load(TEXT)
+    del doc["networks"]["vsan"]["vlan"]
+    out = render_document(yaml.safe_dump(doc))
+    assert out["valid"] is False
+    assert "spec" not in out
+    assert out["layers_skipped"]["render"] == "render() raised an unexpected exception"
+
+
+def test_render_document_converts_any_unexpected_exception_to_a_finding(monkeypatch):
+    """No enumerable list of exception types can be complete -- prove the
+    boundary catches an exception type it has never seen before, not just
+    the two reproducers found above.
+    """
+    import vcfspec.api as api
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("boom: totally unrelated to anything render() actually raises")
+
+    monkeypatch.setattr(api, "render", boom)
+    out = api.render_document(TEXT)
+    assert out["valid"] is False
+    assert "spec" not in out
+    assert "VCF-RENDER-FAILED" in [f["code"] for f in out["findings"]]
+
+
+def test_render_document_does_not_gate_rules_so_a_suppressed_warning_never_hides_a_bad_spec():
+    """A schema type-error at /appliances/vsp/poolStart must not suppress
+    the VSP pool-crosses-subnet rule finding derived from that same bad
+    value: render_document has no subtree gating (unlike validate_document)
+    precisely because render() does not respect gating on its output
+    either -- filtering only the finding would leave an operator with a
+    rendered spec that still carries the bad value and fewer findings
+    explaining why.
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["appliances"]["vsp"]["poolStart"] = 12345
+    out = render_document(yaml.safe_dump(doc))
+    codes = [f["code"] for f in out["findings"]]
+    assert "VCF-VSP-POOL-CROSSES-SUBNET" in codes
+    assert out["layers_skipped"] == {}
+
+
 # --- Subtree gating: pointer segments, not string prefixes -----------------
 
 def test_subtree_blocked_collects_schema_finding_pointers():
@@ -151,6 +229,44 @@ def test_subtree_blocked_collects_schema_finding_pointers():
                 path="/nsx/fabricMtu", message="x", source="docs"),
     )
     assert subtree_blocked(findings) == {"/networks/vsan"}
+
+
+def test_subtree_blocked_excludes_both_root_spellings():
+    """"/" and "" both denote a root-level error. Either one left in the
+    blocked set is an empty-segment prefix of every pointer, which would
+    silently suppress every rule finding in the document -- so both must
+    be excluded, not just "/".
+    """
+    findings = (
+        Finding(code="VCF-INV-SCHEMA", severity=Severity.ERROR, path="/",
+                message="x", source="schema"),
+        Finding(code="VCF-INV-SCHEMA", severity=Severity.ERROR, path="",
+                message="x", source="schema"),
+    )
+    assert subtree_blocked(findings) == set()
+
+
+def test_empty_string_pointer_does_not_block_everything():
+    from vcfspec.api import _is_blocked
+    assert _is_blocked("/anything/at/all", {""}) is False
+
+
+def test_pointer_segments_are_rfc6901_unescaped_before_comparison():
+    """Per RFC 6901, '~1' encodes a literal '/' and '~0' encodes a literal
+    '~' within one pointer segment; '~1' must be decoded before '~0' or a
+    literal "~01" mis-decodes. A blocked pointer recorded with an escaped
+    key must still gate the real (unescaped) key it represents, and vice
+    versa -- comparing the raw, still-escaped strings would treat
+    "vsan/legacy" (escaped as "vsan~1legacy") as a different segment than
+    the same key spelled with a real '/' delimiter.
+    """
+    from vcfspec.api import _is_blocked, _segments
+    assert _segments("/networks/vsan~1legacy") == ("networks", "vsan/legacy")
+    assert _segments("/a~01b") == ("a~1b",)          # ~01 -> ~1, not '/'1
+
+    blocked = {"/networks/vsan~1legacy"}
+    assert _is_blocked("/networks/vsan~1legacy/gateway", blocked) is True
+    assert _is_blocked("/networks/vsan", blocked) is False
 
 
 def test_subtree_gate_blocks_the_pointer_itself_and_its_children():
