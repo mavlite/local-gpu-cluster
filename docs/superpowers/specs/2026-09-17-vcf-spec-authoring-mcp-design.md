@@ -211,13 +211,44 @@ cluster-specific code:
 - Schema pinned in-repo so validation results are reproducible.
 - The full suite runs offline, with no VMware infrastructure.
 
+## Host count at three nodes — resolved, with a caveat
+
+Three hosts run a vSAN cluster. The storage policies whose floor is three hosts
+are **Mirror FTT=1** and **RAID-5 (2+1) FTT=1** (ESA); RAID-5 (4+1) and RAID-6
+need six. This is what VCF-Design-Studio's own `POLICIES` table encodes, and it
+raises a warning at exactly three hosts.
+
+Sources disagree about the *management domain* specifically, and the validator
+must represent that honestly rather than pick a side:
+
+- The VCF 9.1 host-prep page states no number: host count "depends on the type of
+  storage and the deployment model", deferring to the Installer's planner or the
+  Planning and Preparation Workbook.
+- Broadcom KB 392993 says four hosts for a single availability zone — but it is
+  **stale**: it refers to Cloud Builder (replaced by VCF Installer in 9.x) and
+  asserts non-vSAN storage is unsupported in the management domain, which the
+  9.1 NFS page contradicts (NFSv3 is supported as principal storage).
+- Our own RAG corpus produced three mutually inconsistent answers to this
+  question, including an invented table. Treat it as a lead, never as authority.
+
+**Operational caveat that matters more than the count:** at three hosts with
+FTT=1, one host in maintenance leaves two — below the policy floor. There is no
+rebuild capacity and objects are non-compliant until it returns. Acceptable for a
+lab, and the validator should say so before an upgrade rather than after.
+
+### Consequence for the findings model
+
+A rule is not always a flat pass or fail. Where authorities disagree, a finding
+must carry its provenance and say so: `source` records whether the rule came from
+docs, vendor schema or a workbook-derived table, and a rule may report "supported,
+with this caveat" while citing the dissenting source. Rules that encode a
+disputed value record both positions rather than silently choosing.
+
 ## Open questions
 
-1. **Does a three-host cluster meet VCF 9.1.1's minimum for a consolidated
-   management domain with vSAN principal?** The docs defer to the Installer's
-   planner and the workbook. Resolve before hardware is committed; it determines
-   whether the lab needs a fourth host.
-2. **vSAN ESA versus OSA at three hosts** — ESA's floor may be higher. Same
-   source of truth as (1).
-3. **Which spec sections the Installer treats as mandatory** for this shape,
+1. **Whether the VCF Installer itself enforces a four-host minimum** for the
+   management domain in 9.1.1, independent of the vSAN policy floor. Only the
+   Installer's planner, the workbook, or an actual bring-up attempt settles it.
+   Until then the validator warns rather than blocks.
+2. **Which spec sections the Installer treats as mandatory** for this shape,
    versus optional — from the OpenAPI spec once vendored.
