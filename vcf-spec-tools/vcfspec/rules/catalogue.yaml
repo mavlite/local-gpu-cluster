@@ -104,3 +104,63 @@ VCF-NSX-TEP-POOL-TOO-SMALL:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
   summary: "TEP pool holds {size} addresses; {hosts} hosts typically need {needed}."
   fix: "Widen the TEP pool: two tunnel endpoints per host is the usual figure."
+VCF-NAME-NOT-LOWERCASE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/release-notes/vmware-cloud-foundation-9-1-0-0-release-notes/known-issues/vcf-installer-91-known-issues.html
+  summary: "'{value}' at {where} is not lowercase."
+  fix: "Use lowercase names everywhere; uppercase fails VCF 9.1 deployment."
+VCF-NAME-WRONG-DOMAIN:
+  severity: warning
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "'{value}' is not in the declared DNS subdomain '{domain}'."
+  fix: "Use names inside the declared subdomain, or correct dns.subdomain."
+VCF-VSP-POOL-TOO-SMALL:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCF Management Services pool holds {size} addresses; the minimum is 12."
+  fix: "Reserve at least 12 consecutive addresses (30 recommended)."
+VCF-VSP-POOL-CROSSES-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCFMS pool {start}-{end} is not inside one subnet."
+  fix: "Keep the pool inside the management subnet."
+VCF-VSP-INTERNAL-CIDR-COLLISION:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCFMS internal CIDR {cidr} overlaps '{purpose}' ({subnet})."
+  fix: "Choose another permitted internal CIDR."
+VCF-CAP-RAM-SHORTFALL:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Mandatory stack needs {needed} GB RAM; the cluster offers {available} GB."
+  fix: "Add RAM, hosts, or memory tiering."
+VCF-CAP-N1-SHORTFALL:
+  severity: warning
+  source: table
+  source_url: ""
+  summary: "Losing one host leaves {available} GB against {needed} GB needed."
+  fix: "Enable memory tiering, or accept that maintenance cannot host the full stack."
+VCF-CAP-STORAGE-SHORTFALL:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Stack needs {needed} GB usable; vSAN offers about {available} GB."
+  fix: "Add capacity: Auto-RAID overhead is 1.5x at three to five hosts."
+VCF-CAP-UNKNOWN-HARDWARE:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Host {name} declares no usable hardware, so capacity cannot be checked."
+  fix: "Add hardware.cores and hardware.ramGb for every host."
+VCF-LIC-EVALUATION:
+  severity: info
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/licensing/licensing-overview/licensing-model.html
+  summary: "VCF 9.x has no license keys; this deploys in 90-day evaluation."
+  fix: "Assign a subscription licence in VCF Operations after deployment."
