@@ -1,7 +1,9 @@
+import json
+
 import yaml
 
 from vcfspec.api import render_document, subtree_blocked, validate_document
-from vcfspec.findings import Finding, Severity
+from vcfspec.findings import Finding, Result, Severity
 from vcfspec.inventory import EXAMPLE_PATH
 from vcfspec.validate.probes import ProbeConfig
 
@@ -353,3 +355,82 @@ def test_probes_skipped_with_no_config_even_though_it_would_otherwise_run():
     out = validate_document(TEXT)
     assert "probes" not in out["layers_run"]
     assert out["layers_skipped"]["probes"] == "no probe configuration supplied"
+
+
+# --- Fix round 3: unknown vcf_version never raises, and render() rejects a
+# document of the wrong kind explicitly instead of reporting a silent,
+# uninspected "valid: true" -----------------------------------------------
+
+def test_validate_document_never_raises_on_an_unvendored_version():
+    # Before this fix, validate_against_schema(doc, version) raised
+    # FileNotFoundError straight out of validate_document() for an
+    # SDDC_SPEC-kind document -- a real violation of this module's own
+    # documented promise that nothing here ever lets an exception reach
+    # the caller (see the module docstring). Only the CLI's and MCP's own
+    # outer safety nets kept that from crashing a real caller.
+    spec_text = json.dumps(render_document(TEXT)["spec"])
+    out = validate_document(spec_text, input_kind="sddc_spec", version="9.9.9.9")
+    assert out["valid"] is False
+    assert out["findings"][0]["code"] == "VCF-SCHEMA-VERSION-UNKNOWN"
+
+
+def test_render_document_never_raises_on_an_unvendored_version():
+    out = render_document(TEXT, version="9.9.9.9")
+    assert out["valid"] is False
+    assert "spec" not in out
+    assert out["findings"][-1]["code"] == "VCF-SCHEMA-VERSION-UNKNOWN"
+    # Not VCF-RENDER-FAILED: that code means render() itself broke: an
+    # unvendored version is a bad argument, not a tool bug, and the two
+    # must stay distinguishable for the same reason VCF-MCP-BAD-ARGS is
+    # kept separate from INTERNAL at the MCP boundary.
+    assert "VCF-RENDER-FAILED" not in [f["code"] for f in out["findings"]]
+
+
+def test_render_document_refuses_a_wrong_kind_document_instead_of_reporting_valid():
+    # A document render_document correctly detects as SDDC_SPEC (not
+    # UNKNOWN -- sniffing it right is not an error) used to reach here
+    # with an *empty* Result: valid=True, zero findings, layers_run only
+    # ever ["detect"]. Nothing about the document was actually checked --
+    # render() never ran, schema/rules never ran -- yet the answer was
+    # "yes, safe", exactly the "confidently wrong" failure mode this round
+    # of fixes exists to close.
+    spec_text = json.dumps(render_document(TEXT)["spec"])
+    out = render_document(spec_text)
+    assert out["valid"] is False
+    assert out["layers_run"] == ["detect"]
+    assert out["findings"][0]["code"] == "VCF-RENDER-WRONG-KIND"
+    assert "spec" not in out
+
+
+# --- Fix round 3: the general invariant -- valid=True requires at least
+# one substantive layer to have actually run. Tested directly against the
+# helper, independent of any one caller's skip logic, per the coordinator's
+# instruction not to test it only through the input_kind case that
+# motivated it.
+
+def test_no_layers_ran_invariant_forces_invalid_and_attaches_a_finding():
+    from vcfspec.api import _refuse_unvalidated_success
+
+    synthetic_valid_but_empty = Result(())
+    out = _refuse_unvalidated_success(synthetic_valid_but_empty, ["detect"])
+    assert out.valid is False
+    assert out.codes == ("VCF-NO-VALIDATION-RAN",)
+
+
+def test_no_layers_ran_invariant_is_a_no_op_once_a_substantive_layer_ran():
+    from vcfspec.api import _refuse_unvalidated_success
+
+    synthetic_valid = Result(())
+    out = _refuse_unvalidated_success(synthetic_valid, ["detect", "schema", "rules"])
+    assert out.valid is True
+    assert out.findings == ()
+
+
+def test_no_layers_ran_invariant_does_not_touch_an_already_invalid_result():
+    from vcfspec.api import _refuse_unvalidated_success
+
+    already_invalid = Result((Finding(code="VCF-INPUT-UNRECOGNISED",
+                                      severity=Severity.CRITICAL, path="/",
+                                      message="x", source="schema"),))
+    out = _refuse_unvalidated_success(already_invalid, ["detect"])
+    assert out.codes == ("VCF-INPUT-UNRECOGNISED",)   # unchanged, not doubled up

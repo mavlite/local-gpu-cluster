@@ -161,6 +161,71 @@ def test_diff_never_echoes_a_changed_credential_value():
     assert any(entry["path"] == "/credentials/esxRoot" for entry in out["changes"])
 
 
+# --- Fix round 3: input_kind is a closed enum, and an unvendored
+# vcf_version is a usage error, not an internal failure, for both tools
+# that accept one. Both used to reach the operator as "valid: true, zero
+# findings" (input_kind="unknown") or a bare INTERNAL finding
+# (vcf_version) respectively -- a wrong, confidently-delivered answer in
+# the first case, and a "do not retry" signal for something retrying with
+# a real version would fix in the second.
+
+def test_input_kind_unknown_is_rejected_at_the_mcp_boundary():
+    # "unknown" is DocumentKind's own internal sentinel, not a value
+    # documents.detect_kind() accepts as an override (see
+    # test_documents.py::test_override_literally_spelled_unknown_is_also_a_finding).
+    # The tool schema's enum must reject it before the handler body even
+    # runs, exactly like any other malformed call.
+    out = call_handler("vcf_validate_spec", {"document": TEXT, "input_kind": "unknown"})
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+    assert out["valid"] is False
+
+
+def test_input_kind_typo_is_rejected_at_the_mcp_boundary():
+    out = call_handler("vcf_validate_spec", {"document": TEXT, "input_kind": "inventroy"})
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+
+
+def test_input_kind_enum_is_declared_on_the_real_tool_schema():
+    schema = TOOLS["vcf_validate_spec"]["inputSchema"]
+    assert schema["properties"]["input_kind"]["enum"] == ["inventory", "sddc_spec"]
+
+
+def test_unvendored_vcf_version_is_a_bad_args_finding_for_validate():
+    # vcf_validate_spec only ever consults vcf_version for an SDDC_SPEC-kind
+    # document (see api.py) -- build a real, valid one first (via the
+    # render tool, which never fails on the bundled example) so the
+    # version is the *only* thing wrong with the call.
+    spec_text = json.dumps(tool_render_spec({"document": TEXT})["spec"])
+    out = call_handler("vcf_validate_spec",
+                       {"document": spec_text, "input_kind": "sddc_spec",
+                        "vcf_version": "9.9.9.9"})
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+    assert "INTERNAL" not in [f["code"] for f in out["findings"]]
+    assert "9.9.9.9" in out["findings"][0]["message"]
+
+
+def test_unvendored_vcf_version_is_a_bad_args_finding_for_render():
+    # vcf_render_spec only accepts a lab inventory (an SddcSpec document
+    # is the wrong kind entirely, a separate case -- see
+    # test_api.py::test_render_document_refuses_a_wrong_kind_document...),
+    # so this must use a real inventory to isolate the version as the only
+    # problem, the same way the validate case above isolates it.
+    out = call_handler("vcf_render_spec", {"document": TEXT, "vcf_version": "9.9.9.9"})
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+    assert "INTERNAL" not in [f["code"] for f in out["findings"]]
+    assert "9.9.9.9" in out["findings"][0]["message"]
+
+
+def test_unvendored_vcf_version_does_not_reject_an_unrelated_inventory_call():
+    # vcf_version only matters when the document turns out to be an
+    # SddcSpec (see api.py's SDDC_SPEC branch); an inventory-kind
+    # validate call never consults it at all, so a bogus value alongside
+    # one must not be rejected just for being present and unused.
+    out = call_handler("vcf_validate_spec", {"document": TEXT, "vcf_version": "9.9.9.9"})
+    assert out["valid"] is True
+    assert "VCF-MCP-BAD-ARGS" not in [f["code"] for f in out["findings"]]
+
+
 # --- Fix round 1, CRITICAL: every credential key is masked, by structural
 # position under /credentials -- not by matching its name against a list.
 # The inventory schema declares no closed set of credential key names

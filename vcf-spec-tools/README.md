@@ -312,11 +312,14 @@ message carries only the exception's class name).
 
 `vcf_validate_spec` and `vcf_render_spec` both also take an optional
 `vcf_version` (default `9.1.1.0`, the only version currently vendored —
-see "Updating for a new VCF release" below). `vcf_validate_spec` also
-takes an optional `input_kind` to skip auto-detection, with two useful
-values: `"inventory"` or `"sddc_spec"`. See
-`.claude/skills/vcf-spec-authoring/SKILL.md` for how an agent should use
-these tools.
+see "Updating for a new VCF release" below); an unvendored value is
+rejected as `VCF-MCP-BAD-ARGS`, the same as any other bad argument, not
+treated as an internal failure. `vcf_validate_spec` also takes an
+optional `input_kind` to skip auto-detection — a closed enum of
+`"inventory"` or `"sddc_spec"`, enforced at this boundary: anything else
+(a typo included) is rejected the same way, before the call does
+anything. See `.claude/skills/vcf-spec-authoring/SKILL.md` for how an
+agent should use these tools.
 
 ## Updating for a new VCF release
 

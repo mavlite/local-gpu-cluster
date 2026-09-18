@@ -40,7 +40,7 @@ from .render import InsecureCredentialError, render
 from .rules import finding_for
 from .rules.network import check_networks
 from .rules.platform import check_platform
-from .schema import DEFAULT_VERSION
+from .schema import DEFAULT_VERSION, SchemaIntegrityError
 from .validate.probes import ProbeConfig, run_probes
 from .validate.schema_layer import validate_against_schema
 
@@ -147,7 +147,20 @@ def validate_document(text: str, input_kind: str | None = None,
         if blocked:
             skipped["rules"] = f"suppressed under {sorted(blocked)}"
     else:
-        result = result.merge(validate_against_schema(doc, version))
+        # validate_against_schema() loads the vendored schema for `version`
+        # unconditionally; if nothing was ever vendored for it (or its
+        # checksum was tampered), that raises rather than returning a
+        # Result. Left uncaught, that would break this module's own
+        # promise that nothing here ever lets an exception reach the
+        # caller -- so it becomes a finding here, the same as every other
+        # documented-but-not-guaranteed input problem, instead of
+        # propagating as a raw FileNotFoundError.
+        try:
+            schema_result = validate_against_schema(doc, version)
+        except (FileNotFoundError, SchemaIntegrityError):
+            schema_result = Result((finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
+                                                version=version),))
+        result = result.merge(schema_result)
         layers_run.append("schema")
         skipped["rules"] = "rules operate on inventories; render first"
 
@@ -170,6 +183,19 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
 
     kind, result = detect_kind(doc)
     if kind is not DocumentKind.INVENTORY:
+        # detect_kind() attaches no finding for a document it correctly
+        # recognised as SDDC_SPEC -- sniffing a real one is not itself an
+        # error. But render() only ever accepts a LabInventory, so without
+        # this, a legitimately-detected SddcSpec document reached here
+        # with an *empty* result: `valid: true`, zero findings, on a
+        # document nothing about was actually checked (render never runs,
+        # schema/rules never run). Say so explicitly instead of reporting
+        # a clean pass over an uninspected document. (UNKNOWN already
+        # carries its own finding from detect_kind -- VCF-INPUT-UNRECOGNISED
+        # -- so this does not double up on that branch.)
+        if kind is not DocumentKind.UNKNOWN:
+            result = result.merge(Result((finding_for(
+                "VCF-RENDER-WRONG-KIND", "/", kind=str(kind)),)))
         return _envelope(result, ["detect"], {"render": "input is not an inventory"})
 
     # No subtree gating here, unlike validate_document: render's rule pass
@@ -202,6 +228,18 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
         finding = finding_for("VCF-RENDER-INSECURE-CREDENTIAL", "/credentials")
         combined = combined.merge(Result((finding,)))
         return _envelope(combined, layers_run, {"render": "refused an insecure credential"})
+    except (FileNotFoundError, SchemaIntegrityError):
+        # render() loads vcfspec/defaults/<version>.yaml unconditionally;
+        # an unvendored `version` raises here. That used to be caught by
+        # the broad `except Exception` below and reported as
+        # VCF-RENDER-FAILED -- true, but indistinguishable from "render()
+        # has a bug", when this is really "you asked for a VCF release
+        # nothing is vendored for". Same code as validate_document's
+        # equivalent guard, for the same underlying condition.
+        finding = finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/", version=version)
+        combined = combined.merge(Result((finding,)))
+        return _envelope(combined, layers_run,
+                         {"render": "no vendored data for this VCF version"})
     except Exception as exc:
         finding = finding_for("VCF-RENDER-FAILED", "/", exc_type=type(exc).__name__)
         combined = combined.merge(Result((finding,)))
@@ -216,9 +254,33 @@ def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
 
 
 def _envelope(result: Result, layers_run: list[str], skipped: dict[str, str]) -> dict:
+    result = _refuse_unvalidated_success(result, layers_run)
     return redact({
         "valid": result.valid,
         "findings": [asdict(f) for f in result.findings],
         "layers_run": layers_run,
         "layers_skipped": skipped,
     })
+
+
+def _refuse_unvalidated_success(result: Result, layers_run: list[str]) -> Result:
+    """Defence in depth, independent of any one caller's own skip logic:
+    a result must never report valid=True when no substantive layer --
+    anything beyond the unconditional 'detect' step -- actually ran.
+
+    Every current path that skips every layer already attaches its own
+    explanatory finding (VCF-INPUT-UNRECOGNISED, VCF-INPUT-BAD-KIND,
+    VCF-INPUT-UNREADABLE, VCF-RENDER-WRONG-KIND...), so in today's code
+    this should never actually fire -- it is not the primary signal for
+    any of those cases, on purpose; each of them says precisely *why*
+    nothing ran. It exists for the path neither this fix nor the one
+    before it has thought of: a future kind-detection branch, a new
+    input_kind value, a new document shape, anything that reaches
+    _envelope() with layers_run == ["detect"] and forgets to attach a
+    finding of its own. That path fails safe here -- reported invalid,
+    with an explanation that at least says nothing was checked -- instead
+    of silently reporting a clean pass on a document nothing inspected.
+    """
+    if result.valid and layers_run == ["detect"]:
+        return result.merge(Result((finding_for("VCF-NO-VALIDATION-RAN", "/"),)))
+    return result

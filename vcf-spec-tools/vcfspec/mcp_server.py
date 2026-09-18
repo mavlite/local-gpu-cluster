@@ -33,6 +33,13 @@ from .rules import finding_for, load_catalogue
 from .schema import DEFAULT_VERSION
 
 _STRING = {"type": "string"}
+# A closed enum, not a bare string: the input_kind documents.detect_kind()
+# actually accepts is exactly {"inventory", "sddc_spec"} (see documents.py's
+# _VALID_OVERRIDES). Declaring that here means a bad value -- "unknown"
+# included, which used to parse as DocumentKind.UNKNOWN and silently skip
+# every layer -- is rejected at this boundary as VCF-MCP-BAD-ARGS before
+# the handler body ever runs, not discovered several layers in.
+_INPUT_KIND = {"type": "string", "enum": ["inventory", "sddc_spec"]}
 
 
 def _schema(required: tuple[str, ...] = (), **properties: dict) -> dict:
@@ -53,13 +60,41 @@ def tool_spec_schema(args: dict) -> dict:
 
 
 def tool_validate_spec(args: dict) -> dict:
-    return validate_document(args["document"], input_kind=args.get("input_kind"),
-                             version=args.get("vcf_version", DEFAULT_VERSION))
+    version = args.get("vcf_version", DEFAULT_VERSION)
+    result = validate_document(args["document"], input_kind=args.get("input_kind"),
+                               version=version)
+    return _reclassify_unknown_version(result, "vcf_validate_spec", version)
 
 
 def tool_render_spec(args: dict) -> dict:
-    return render_document(args["document"],
-                           version=args.get("vcf_version", DEFAULT_VERSION))
+    version = args.get("vcf_version", DEFAULT_VERSION)
+    result = render_document(args["document"], version=version)
+    return _reclassify_unknown_version(result, "vcf_render_spec", version)
+
+
+def _reclassify_unknown_version(result: dict, tool: str, version: str) -> dict:
+    """VCF-SCHEMA-VERSION-UNKNOWN (from api.py) means the caller asked for a
+    VCF release this package has nothing vendored for -- a bad argument to
+    retry with a real version, not a broken tool. INTERNAL tells an agent
+    "do not retry this"; that is the wrong message here, since retrying
+    with a real vcf_version would work fine. This is the same distinction
+    VCF-MCP-BAD-ARGS exists for (see call_handler's docstring), so a
+    version-not-vendored result is translated to it here, uniformly for
+    both tools that accept vcf_version, rather than left to surface
+    through render_document/validate_document's own generic framing (or,
+    before api.py grew its own guard for this, an uncaught
+    FileNotFoundError that call_handler could only label INTERNAL).
+
+    Only fires when the version was actually consulted and found missing
+    (the code is present in the real findings) -- an inventory-kind
+    validate call with an irrelevant, unused vcf_version is not rejected
+    just for carrying one, because that argument was never actually acted
+    on for that document.
+    """
+    codes = {f["code"] for f in result.get("findings", [])}
+    if "VCF-SCHEMA-VERSION-UNKNOWN" in codes:
+        return _bad_args_finding(tool, f"no vendored schema for VCF version {version!r}")
+    return result
 
 
 def tool_explain_finding(args: dict) -> dict:
@@ -224,7 +259,7 @@ _TOOL_DEFS: tuple[ToolDef, ...] = (
     ToolDef("vcf_validate_spec",
             "Validate an inventory or SddcSpec document; returns findings.",
             _schema(("document",), document=_STRING, vcf_version=_STRING,
-                     input_kind=_STRING),
+                     input_kind=_INPUT_KIND),
             tool_validate_spec),
     ToolDef("vcf_explain_finding",
             "Explain one finding code, with its severity, fix and documentation source.",

@@ -34,6 +34,24 @@ def test_unknown_override_is_a_finding_not_an_exception():
     assert result.codes == ("VCF-INPUT-BAD-KIND",)
 
 
+def test_override_literally_spelled_unknown_is_also_a_finding():
+    """DocumentKind.UNKNOWN is a real enum member ("unknown"), so a bare
+    `DocumentKind(override)` construction used to accept override="unknown"
+    without raising ValueError, unlike any other bad string -- silently
+    routing to the same "kind could not be determined" branch as a
+    genuinely unrecognised document, but with no finding attached, since
+    that branch normally relies on the caller (detect_kind's own
+    fallback path) to attach one. The net effect upstream, before this
+    fix, was validate_document(doc, input_kind="unknown") reporting
+    `valid: true` with zero findings on a document nothing had validated.
+    "unknown" must be rejected exactly like any other invalid override.
+    """
+    kind, result = detect_kind({"apiVersion": "vcfspec/v1", "kind": "LabInventory"},
+                               override="unknown")
+    assert kind is DocumentKind.UNKNOWN
+    assert result.codes == ("VCF-INPUT-BAD-KIND",)
+
+
 def test_rejects_oversized_document():
     with pytest.raises(DocumentTooLarge):
         load_document("a: " + "x" * 2_000_001)

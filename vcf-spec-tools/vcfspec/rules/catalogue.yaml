@@ -14,6 +14,12 @@ VCF-INPUT-BAD-KIND:
   source_url: ""
   summary: "Unknown input_kind."
   fix: "Use 'inventory' or 'sddc_spec'."
+VCF-NO-VALIDATION-RAN:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "No validation layer actually ran, so this result cannot certify the document."
+  fix: "This is a defensive fallback and indicates a bug -- report it with the input that triggered it. Do not treat 'valid' from this response as meaningful."
 VCF-INPUT-UNREADABLE:
   severity: critical
   source: schema
@@ -32,6 +38,12 @@ VCF-SCHEMA:
   source_url: https://github.com/vmware/vcf-api-specs
   summary: "The spec does not match the VCF Installer schema."
   fix: "Correct the field."
+VCF-SCHEMA-VERSION-UNKNOWN:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "No vendored schema or defaults for VCF version '{version}'."
+  fix: "Use a vendored VCF version, or omit vcf_version/--version to use the default. Vendor a new one first with scripts/vendor_schema.py."
 VCF-CRED-NOT-A-REFERENCE:
   severity: critical
   source: docs
@@ -44,6 +56,12 @@ VCF-RENDER-UNMAPPED:
   source_url: ""
   summary: "A required spec field has no inventory source and no default."
   fix: "Add the missing inventory section."
+VCF-RENDER-WRONG-KIND:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "render() only accepts a lab inventory; this document was detected as '{kind}'."
+  fix: "Use vcf_validate_spec to check an already-rendered SddcSpec document; render() only works on a LabInventory."
 VCF-RENDER-DEFAULT-APPLIED:
   severity: info
   source: table

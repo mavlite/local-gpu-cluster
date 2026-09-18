@@ -50,16 +50,32 @@ def load_document(text: str) -> dict:
     return doc
 
 
+# The only two values an override may usefully take. DocumentKind itself
+# also has UNKNOWN, but that is an internal sentinel for "detection could
+# not tell" -- accepting override="unknown" via a bare `DocumentKind(override)`
+# construction used to succeed silently (UNKNOWN is a real enum member),
+# which sent a caller straight to the "kind unknown, skip everything"
+# branch with no explanatory finding attached: a typo'd or nonsensical
+# input_kind of exactly "unknown" reported `valid: true` having validated
+# nothing. Restricting overrides to this explicit, closed tuple closes
+# that: any override that isn't one of these two -- "unknown" included --
+# is now the same VCF-INPUT-BAD-KIND finding as any other bad string.
+_VALID_OVERRIDES = (DocumentKind.INVENTORY, DocumentKind.SDDC_SPEC)
+
+
 def detect_kind(doc: dict, override: str | None = None) -> tuple[DocumentKind, Result]:
     if override:
         try:
-            return DocumentKind(override), Result()
+            kind = DocumentKind(override)
         except ValueError:
-            return DocumentKind.UNKNOWN, Result((Finding(
-                code="VCF-INPUT-BAD-KIND", severity=Severity.CRITICAL, path="/",
-                message=f"Unknown input_kind {override!r}.",
-                fix="Use 'inventory' or 'sddc_spec', or omit it.",
-                source="schema"),))
+            kind = None
+        if kind in _VALID_OVERRIDES:
+            return kind, Result()
+        return DocumentKind.UNKNOWN, Result((Finding(
+            code="VCF-INPUT-BAD-KIND", severity=Severity.CRITICAL, path="/",
+            message=f"Unknown input_kind {override!r}.",
+            fix="Use 'inventory' or 'sddc_spec', or omit it.",
+            source="schema"),))
     if str(doc.get("apiVersion", "")).startswith("vcfspec/") and \
             doc.get("kind") == "LabInventory":
         return DocumentKind.INVENTORY, Result()

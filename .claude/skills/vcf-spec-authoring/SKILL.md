@@ -29,18 +29,24 @@ yourself first and pass its contents.
    `{valid, findings, layers_run, layers_skipped}`. Always send the
    *whole* document; there is no partial-update mode. `vcf_version`
    selects which vendored schema an `SddcSpec` document is checked
-   against (default `9.1.1.0` — currently the only version vendored;
-   anything else comes back as a finding, not a crash). It has no effect
-   on inventory documents, which have one fixed schema regardless.
-   `input_kind` skips auto-detection; its only two useful values are
-   `"inventory"` and `"sddc_spec"` — leave it unset unless you already
-   know which one you're sending.
+   against (default `9.1.1.0` — currently the only version vendored). It
+   has no effect on inventory documents, which have one fixed schema
+   regardless. `input_kind` skips auto-detection and is a **closed enum**:
+   `"inventory"` or `"sddc_spec"`, nothing else — any other value,
+   including a typo, is rejected as `VCF-MCP-BAD-ARGS` before the call
+   does anything, not silently accepted.
 3. `vcf_render_spec({document, vcf_version?})` — turns a lab inventory
    into VCF Installer `SddcSpec` JSON, applying the lab-default value
    table for `vcf_version` (default `9.1.1.0`), with the same findings
    envelope plus a `spec` key on success. On failure (e.g. an insecure
-   credential, or a `vcf_version` with no vendored defaults) there is no
-   `spec` key at all — never fabricate one.
+   credential) there is no `spec` key at all — never fabricate one.
+
+Both tools reject an unvendored `vcf_version` the same way, as
+`VCF-MCP-BAD-ARGS` — a bad argument to retry with a real version, not an
+internal failure to give up on. This only fires when the version was
+actually needed: an inventory-kind `vcf_validate_spec` call ignores
+`vcf_version` entirely, so an unused, irrelevant value alongside one is
+not rejected just for being present.
 4. `vcf_explain_finding({code})` — look up one finding code's severity,
    fix text and documentation source. An unrecognised code returns a
    `VCF-EXPLAIN-UNKNOWN-CODE` finding, not a tool error.
@@ -129,6 +135,10 @@ credential) — read it before treating a clean-looking result as complete.
 - VCF 9.x has no license keys: deployment runs in 90-day evaluation
   (`VCF-LIC-EVALUATION`) and a subscription licence is assigned in VCF
   Operations afterwards.
+- `vcf_render_spec` only accepts a lab inventory. Pass it an
+  already-rendered `SddcSpec` by mistake and it does not attempt anything
+  — it reports `VCF-RENDER-WRONG-KIND` and `valid: false`. Use
+  `vcf_validate_spec` to check an `SddcSpec` document instead.
 
 ## What this cannot do
 
