@@ -16,6 +16,24 @@ SKILL = (Path(__file__).resolve().parents[2] / ".claude" / "skills" /
          "vcf-spec-authoring" / "SKILL.md")
 
 DOC_CODE_RE = re.compile(r"\bVCF-[A-Z]{2,}(?:-[A-Z0-9]+)+\b")
+_VCF_PREFIXED_RE = re.compile(r"\bvcf_[a-z_]+\b")
+
+
+def _known_tool_parameter_names() -> set[str]:
+    """Every argument key any real tool's inputSchema actually declares.
+
+    A bare `vcf_[a-z_]+` scan of the skill text matches tool names
+    (`vcf_validate_spec`) and legitimate parameter names (`vcf_version`)
+    alike -- both share the `vcf_` prefix, but only one is a tool. This
+    set is what lets the test below tell them apart without hardcoding a
+    denylist of "known non-tool words": it is read from TOOLS itself, the
+    same live source of truth the tool-name half of the check already
+    uses, so it can never drift from the real schemas.
+    """
+    names: set[str] = set()
+    for spec in TOOLS.values():
+        names |= set(spec["inputSchema"].get("properties", {}))
+    return names
 
 
 def test_skill_exists_with_frontmatter():
@@ -24,8 +42,15 @@ def test_skill_exists_with_frontmatter():
 
 
 def test_every_tool_named_in_the_skill_exists():
-    for name in set(re.findall(r"vcf_[a-z_]+", SKILL.read_text(encoding="utf-8"))):
-        assert name in TOOLS, f"skill names unknown tool {name}"
+    """Every vcf_-prefixed identifier in the skill must be a real tool
+    name or a real parameter name of some tool -- never a hallucinated
+    tool, and never flagged just for sharing the vcf_ prefix with one
+    (e.g. the vcf_version parameter is not a tool called vcf_version).
+    """
+    known_parameters = _known_tool_parameter_names()
+    for name in set(_VCF_PREFIXED_RE.findall(SKILL.read_text(encoding="utf-8"))):
+        assert name in TOOLS or name in known_parameters, (
+            f"skill names unknown tool {name}")
 
 
 def test_every_catalogued_code_explains_through_the_real_tool():

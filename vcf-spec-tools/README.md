@@ -308,7 +308,13 @@ or JSON **text**, not file paths — and every call goes through one
 boundary (`call_handler` in `vcfspec/mcp_server.py`) that never lets an
 exception escape: a malformed call comes back as `VCF-MCP-BAD-ARGS`
 (retryable), a handler failure as `INTERNAL` (not retryable, and its
-message carries only the exception's class name). See
+message carries only the exception's class name).
+
+`vcf_validate_spec` and `vcf_render_spec` both also take an optional
+`vcf_version` (default `9.1.1.0`, the only version currently vendored —
+see "Updating for a new VCF release" below). `vcf_validate_spec` also
+takes an optional `input_kind` to skip auto-detection, with two useful
+values: `"inventory"` or `"sddc_spec"`. See
 `.claude/skills/vcf-spec-authoring/SKILL.md` for how an agent should use
 these tools.
 

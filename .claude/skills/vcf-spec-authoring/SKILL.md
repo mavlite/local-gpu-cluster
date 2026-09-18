@@ -24,16 +24,23 @@ yourself first and pass its contents.
 1. `vcf_spec_schema` — no arguments. Returns the inventory's
    required/optional fields and a full worked example. Call this first if
    you don't already know the shape.
-2. `vcf_validate_spec({document, input_kind?})` — validates a lab
-   inventory or a rendered `SddcSpec` and returns
+2. `vcf_validate_spec({document, vcf_version?, input_kind?})` — validates
+   a lab inventory or a rendered `SddcSpec` and returns
    `{valid, findings, layers_run, layers_skipped}`. Always send the
-   *whole* document; there is no partial-update mode. Both this tool and
-   the next accept an optional target-release override string (default
-   `9.1.1.0`) alongside `document`.
-3. `vcf_render_spec({document})` — turns a lab inventory into VCF
-   Installer `SddcSpec` JSON, with the same findings envelope plus a
-   `spec` key on success. On failure (e.g. an insecure credential) there
-   is no `spec` key at all — never fabricate one.
+   *whole* document; there is no partial-update mode. `vcf_version`
+   selects which vendored schema an `SddcSpec` document is checked
+   against (default `9.1.1.0` — currently the only version vendored;
+   anything else comes back as a finding, not a crash). It has no effect
+   on inventory documents, which have one fixed schema regardless.
+   `input_kind` skips auto-detection; its only two useful values are
+   `"inventory"` and `"sddc_spec"` — leave it unset unless you already
+   know which one you're sending.
+3. `vcf_render_spec({document, vcf_version?})` — turns a lab inventory
+   into VCF Installer `SddcSpec` JSON, applying the lab-default value
+   table for `vcf_version` (default `9.1.1.0`), with the same findings
+   envelope plus a `spec` key on success. On failure (e.g. an insecure
+   credential, or a `vcf_version` with no vendored defaults) there is no
+   `spec` key at all — never fabricate one.
 4. `vcf_explain_finding({code})` — look up one finding code's severity,
    fix text and documentation source. An unrecognised code returns a
    `VCF-EXPLAIN-UNKNOWN-CODE` finding, not a tool error.
