@@ -115,6 +115,19 @@ VCF-RENDER-INSECURE-CREDENTIAL:
   source_url: ""
   summary: "render() refused to emit a credential that is not a ${reference}."
   fix: "Use ${name} references for every credential, never a literal value. Run validate_document on the same input to see which credential field is affected."
+VCF-DIFF-TRUNCATED:
+  severity: error
+  source: schema
+  source_url: ""
+  # Blocking on purpose. A partial diff that reported valid: true would be
+  # read as a complete one -- an agent asking "did anything under
+  # /credentials change?" would get a clean-looking answer from a walk
+  # that stopped early. The diff that IS returned is still correct as far
+  # as it goes, so it is returned rather than withheld; it just may not be
+  # all of it, and the caller is told so twice (this finding and a
+  # `truncated` key).
+  summary: "The diff was truncated at {changes} changes / {chars} characters: this comparison is INCOMPLETE and must not be read as 'nothing else changed'."
+  fix: "Diff a smaller pair of documents, or narrower sections of them. A document using YAML aliases can expand to far more changes than its source text suggests."
 VCF-EXPLAIN-UNKNOWN-CODE:
   severity: error
   source: schema

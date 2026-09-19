@@ -204,37 +204,112 @@ def tool_diff_spec(args: dict) -> dict:
             finding = finding_for("VCF-INPUT-UNREADABLE", f"/{side}",
                                   exc_type=type(exc).__name__)
             return redact({"valid": False, "findings": [asdict(finding)]})
-    changes = _diff(documents["left"], documents["right"], "")
+    budget = _ChangeBudget()
+    changes = _diff(documents["left"], documents["right"], "", budget)
+    if budget.truncated:
+        # `valid` for this tool means "both inputs were readable" -- and,
+        # from here on, "and the diff you are holding is complete". A
+        # truncated diff reported as valid is the worst answer available:
+        # an agent asking "did anything under /credentials change?" would
+        # read a partial diff as a complete one. Blocking severity, so
+        # valid is false, and an explicit `truncated` key so a consumer
+        # does not have to infer it from the findings list.
+        finding = finding_for("VCF-DIFF-TRUNCATED", "/",
+                              changes=MAX_CHANGES, chars=MAX_CHANGE_CHARS)
+        return redact({"valid": False, "findings": [asdict(finding)],
+                       "changes": changes, "changed": len(changes),
+                       "truncated": True})
     return redact({"valid": True, "findings": [], "changes": changes,
-                   "changed": len(changes)})
+                   "changed": len(changes), "truncated": False})
 
 
 # --- Diff engine --------------------------------------------------------
+#
+# The diff's OUTPUT is bounded, not just its input. documents.MAX_NODES
+# bounds how far a document expands; it does not bound how much this tool
+# emits about it, and the two are not the same number. Measured after the
+# first round of security fixes: a 10,073-character document -- 30 aliases
+# (limit 100), 196,590 nodes (limit 200,000), comfortably inside every
+# input bound -- produced a 306.8 MB response in 15.82 s, a 30,461x
+# amplification, synchronously, on a long-lived single-process server.
+# Cost scales with change count x path length, and alias expansion drives
+# both while the source text stays tiny.
+#
+# Two limits, because neither subsumes the other: many small changes is a
+# different shape from few changes with enormous JSON pointers, and the
+# alias construction above produces the second.
+MAX_CHANGES = 10_000
+MAX_CHANGE_CHARS = 1_000_000
 
-def _diff(left: object, right: object, path: str) -> list[dict]:
+
+class _ChangeBudget:
+    """Bounds what the diff may emit, and remembers if it ran out.
+
+    `truncated` is the important field: a diff that silently stopped
+    early is exactly the "confidently wrong" answer this package exists
+    to prevent -- an agent asking "did anything under /credentials
+    change?" must never receive a clean-looking partial answer.
+    """
+
+    __slots__ = ("changes", "chars", "truncated")
+
+    def __init__(self) -> None:
+        self.changes = 0
+        self.chars = 0
+        self.truncated = False
+
+    def take(self, cost: int) -> bool:
+        if self.changes >= MAX_CHANGES or self.chars + cost > MAX_CHANGE_CHARS:
+            self.truncated = True
+            return False
+        self.changes += 1
+        self.chars += cost
+        return True
+
+
+def _diff(left: object, right: object, path: str,
+          budget: _ChangeBudget) -> list[dict]:
+    # Bail as soon as the budget is spent so the recursion unwinds
+    # immediately instead of walking the rest of an expanded document it
+    # has already decided not to report on.
+    if budget.truncated:
+        return []
     if isinstance(left, dict) and isinstance(right, dict):
         out: list[dict] = []
         for key in sorted(set(left) | set(right)):
-            out += _diff(left.get(key), right.get(key), f"{path}/{key}")
+            out += _diff(left.get(key), right.get(key), f"{path}/{key}", budget)
+            if budget.truncated:
+                break
         return out
     if isinstance(left, list) and isinstance(right, list):
-        return _diff_lists(left, right, path)
+        return _diff_lists(left, right, path, budget)
     if left != right:
-        return [_change_entry(path, left, right)]
+        return _emit(path, left, right, budget)
     return []
 
 
-def _diff_lists(left: list, right: list, path: str) -> list[dict]:
+def _emit(path: str, left: object, right: object,
+          budget: _ChangeBudget) -> list[dict]:
+    """One leaf change, if the budget allows it."""
+    if not budget.take(len(path) + 32):
+        return []
+    return [_change_entry(path, left, right)]
+
+
+def _diff_lists(left: list, right: list, path: str,
+                budget: _ChangeBudget) -> list[dict]:
     key = _list_key(left) or _list_key(right)
     if key:
         lmap = {item.get(key): item for item in left if isinstance(item, dict)}
         rmap = {item.get(key): item for item in right if isinstance(item, dict)}
         out: list[dict] = []
         for name in sorted(set(lmap) | set(rmap), key=str):
-            out += _diff(lmap.get(name), rmap.get(name), f"{path}/{name}")
+            out += _diff(lmap.get(name), rmap.get(name), f"{path}/{name}", budget)
+            if budget.truncated:
+                break
         return out
     if left != right:
-        return [_change_entry(path, left, right)]
+        return _emit(path, left, right, budget)
     return []
 
 

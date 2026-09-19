@@ -136,3 +136,54 @@ def test_a_changed_upstream_with_an_identical_bundle_is_still_refused(
     assert "example" not in bundle          # the change is invisible in the bundle
     assert run("after") == 1                # ...and is refused anyway
     assert run("after", accept=True) == 0
+
+
+# --- Follow-up: the guard must not fail OPEN when a sidecar is absent ----
+#
+# Found in re-review. _refuse_on_change treated "no digest recorded" as
+# "first run" unconditionally, so deleting both sidecars let a different
+# bundle be written with rc=0. Absence of evidence became evidence of
+# absence -- the wrong default for an integrity control. A schema already
+# on disk is what distinguishes an anomaly from a genuine first vendor.
+
+def test_a_missing_sidecar_beside_an_existing_schema_is_refused(vendor):
+    code, out = vendor({"sddcId": {"type": "string"}})
+    assert code == 0
+    before = (out / "sddc-spec.schema.json").read_text(encoding="utf-8")
+    (out / "sddc-spec.schema.json.sha256").unlink()
+    (out / "sddc-spec.source.sha256").unlink()
+
+    code, out = vendor({"sddcId": {"type": "string"},
+                        "backdoor": {"type": "string"}})
+    assert code == 1, "guard failed OPEN with the sidecars deleted"
+    assert (out / "sddc-spec.schema.json").read_text(encoding="utf-8") == before
+    assert "backdoor" not in before
+
+
+@pytest.mark.parametrize("victim", ["sddc-spec.schema.json.sha256",
+                                    "sddc-spec.source.sha256"])
+def test_either_sidecar_going_missing_is_enough_to_refuse(vendor, victim):
+    """Neither digest is optional. Removing just one must still refuse --
+    otherwise an attacker deletes the one that would have caught them."""
+    code, out = vendor({"sddcId": {"type": "string"}})
+    assert code == 0
+    (out / victim).unlink()
+    assert vendor({"sddcId": {"type": "string"},
+                   "evil": {"type": "string"}})[0] == 1
+
+
+def test_a_genuine_first_vendor_is_still_clean(vendor):
+    """The fix must not turn every first run into a refusal: no schema and
+    no digests is a first vendor, not an anomaly."""
+    assert vendor({"sddcId": {"type": "string"}})[0] == 0
+
+
+def test_the_override_still_resolves_a_missing_sidecar(vendor):
+    """The operator's escape hatch has to actually work, or the guard just
+    wedges them."""
+    code, out = vendor({"sddcId": {"type": "string"}})
+    assert code == 0
+    (out / "sddc-spec.source.sha256").unlink()
+    assert vendor({"sddcId": {"type": "string"}})[0] == 1
+    assert vendor({"sddcId": {"type": "string"}}, accept=True)[0] == 0
+    assert (out / "sddc-spec.source.sha256").read_text().strip()

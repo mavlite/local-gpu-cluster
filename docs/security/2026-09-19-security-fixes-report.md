@@ -134,6 +134,13 @@ already-vendored `9.1.1.0` has no source digest recorded (it predates
 this); the first re-vendor records one without needing the flag, which is
 the graceful path rather than a one-off migration.
 
+> **CORRECTED 2026-09-19.** No longer true, and deliberately so.
+> Treating a missing sidecar as a fresh start was a fail-open hole (see
+> OBS-3 in the second follow-up): deleting both sidecars let a different
+> bundle be written with `rc=0`. A missing sidecar beside an existing
+> schema is now refused, so the first re-vendor of `9.1.1.0` **does**
+> require `--accept-new-upstream` once.
+
 **Mutation:** making the guard always allow → **3 failures**; checking only
 the bundle digest and dropping the upstream half → **1**.
 
@@ -166,6 +173,12 @@ inventory is ~1.5 KB, so that is ~170x headroom.
 Combined effect at the server surface: the worst legal `vcf_diff_spec`
 call is now **0.36 s and 10.2 MB**, down from ~18 s and ~102 MB.
 
+> **CORRECTED 2026-09-19 (see the second follow-up below).** The 0.36 s
+> figure is wrong — it holds only for flat, keyed and deep document
+> shapes, and I did not test alias expansion. The true worst case was
+> **15.82 s with a 306.8 MB response**. The residual decision below was
+> reasoned from the wrong number and is re-rated in the follow-up.
+
 Two things stated honestly rather than glossed:
 
 - `maxLength` counts characters, not bytes. `documents.MAX_BYTES` remains
@@ -176,6 +189,8 @@ Two things stated honestly rather than glossed:
   `build_server()` cannot be exercised, and shipping an unverified change
   to the transport on top of a 50x improvement is the wrong trade.
   Recommended as a follow-up once `mcp` is installed.
+  **Re-rated in the second follow-up below, against the corrected
+  figure.**
 
 I also drafted a `MemoryError` handler on the theory that libyaml reports
 its nesting limit that way, then **removed it after measuring**: this build
@@ -279,9 +294,9 @@ Neither blocks the branch; both are recorded so they are not lost.
    regressing, but nothing yet re-checks them against *new* advisories.
 3. **A `deadline` in `ProbeConfig`** — optional, per finding 7 above.
 4. **`sddc-spec.source.sha256` for the vendored `9.1.1.0`** — not
-   backfillable without a network fetch of the upstream document. The
-   script handles its absence gracefully and records it on the next
-   re-vendor.
+   backfillable without a network fetch of the upstream document. Its
+   absence is now refused rather than tolerated, so the next re-vendor
+   needs `--accept-new-upstream` once to record it.
 
 ## Disagreements with the review
 
@@ -386,3 +401,166 @@ rejects it in `call_handler` before any handler body runs, and the
 resulting message carries only `ValidationError` — but it **did** echo one
 layer down in `detect_kind`, reachable through the library API, and that
 is fixed too.
+
+---
+
+# Second follow-up — re-review observations (OBS-1 … OBS-4)
+
+- **Date:** 2026-09-19 (same day, after re-review APPROVED)
+- **Tests:** 381 → **392 passed** (+11)
+
+Re-review approved all nine findings and confirmed 20 evasion vectors
+against the closed-set gate return one byte-identical envelope with zero
+filesystem calls. Four observations came back. Two were documentation
+corrections; two were fixes. One of the corrections changed a conclusion,
+which is the important part of this round.
+
+## OBS-4 — my worst-case figure was wrong, and I had budgeted against it
+
+**I reported 0.36 s / 10.2 MB as the worst legal `vcf_diff_spec` call.
+That figure only holds for flat, keyed and deep document shapes. I never
+tested alias expansion.**
+
+Reproduced, and then pushed further than the re-review did:
+
+| Input | Legal? | Cost (pre-fix) |
+|---|---|---|
+| 254,349-char flat (my original) | yes | 0.36 s, 10.2 MB peak |
+| 1,673-char alias chain | yes | 4.78 s, 49.9 MB response |
+| 2,873-char alias chain | yes | 6.12 s, 86.6 MB response |
+| **10,073-char alias chain** | **yes** | **15.82 s, 306.8 MB response, 323.8 MB peak** |
+
+All are inside every input bound: 30 aliases (limit 100), 196,590 nodes
+(limit 200,000), well under `maxLength`. The amplification is **30,461x**
+and scales linearly with JSON-pointer length, which is bounded only by
+`MAX_DOCUMENT_CHARS`.
+
+**Root cause: `MAX_NODES` bounds how far a document expands; nothing
+bounded how much the diff emits about it.** Those are different numbers,
+and I had conflated them.
+
+**Fix.** `vcf_diff_spec`'s output is now bounded by two limits, because
+neither subsumes the other — many small changes is a different shape from
+few changes with enormous pointers, and alias expansion produces the
+second:
+
+- `MAX_CHANGES = 10_000`
+- `MAX_CHANGE_CHARS = 1_000_000`
+
+On truncation the tool returns `truncated: true`, `valid: false` and a
+blocking `VCF-DIFF-TRUNCATED` finding. **Blocking is deliberate**: a
+partial diff reported as valid is the worst answer available, because an
+agent asking "did anything under `/credentials` change?" would read an
+early-stopped walk as "no". The changes found are still returned — they
+are correct as far as they go — but the caller is told twice that the
+comparison is incomplete.
+
+| | before | after |
+|---|---|---|
+| 10,073-char alias chain | 15.82 s, 306.8 MB | **0.37 s, 1.0 MB** |
+| 254,349-char flat | 0.36 s | **0.13 s**, not truncated |
+| real 3-host inventory, 1 field changed | 1 change | **1 change**, not truncated |
+
+**Mutation results:** budget never truncates → **2 failures** (and the
+suite takes 41 s instead of 2.6 s, which is itself the finding); bounding
+count but not size → **1**; reporting a truncated diff as valid → **1**.
+
+### Re-rating the `asyncio.to_thread` residual
+
+**Re-rated: warranted, and now the top residual.** I deferred it on the
+strength of 0.36 s. The real number was 15.82 s — a 44x error, and 15.82 s
+of synchronous stall on a long-lived single-process server is not
+something to wave through on "it is only 0.36 s".
+
+Two things follow, and the order matters:
+
+1. **The output bound above is the actual fix, and it is done.**
+   `to_thread` would not have helped here: moving a 306.8 MB response off
+   the event loop still builds a 306.8 MB response and still returns it.
+   Bounding the output takes the worst case to 0.37 s — below the figure I
+   originally, wrongly, claimed. Had I shipped `to_thread` on the strength
+   of the corrected number without bounding the output, I would have
+   hidden the symptom and kept the amplification.
+2. **`to_thread` remains recommended, now as defence in depth rather than
+   as the fix.** With the output bounded, the worst measured call is
+   0.37 s; that is a real stall on a shared loop but not a denial of
+   service, and it is no longer load-bearing for anything. It still cannot
+   be verified here — `mcp` is not installed, so `build_server()` cannot
+   be exercised — so it stays deferred, but it is now the first thing to
+   do once `mcp` is installed, not an optional nicety.
+
+The honest summary: the deferral was reasoned from a number I had not
+tested widely enough, and the correct response was neither "defer harder"
+nor "ship `to_thread`" but "bound the output, which neither figure had
+prompted anyone to do".
+
+## OBS-3 — the vendor guard failed open on a missing sidecar
+
+Reproduced: delete both sidecars, and a bundle containing a planted
+`backdoor` property was written with `rc=0`. `_refuse_on_change` treated
+"no digest recorded" as "first run" unconditionally, so absence of
+evidence became evidence of absence.
+
+**Fix.** A schema already on disk is what distinguishes an anomaly from a
+genuine first vendor. If `sddc-spec.schema.json` exists and either digest
+sidecar is absent, the script refuses and says the sidecar should have
+been committed alongside the schema. A true first vendor — no schema, no
+digests — is still a clean `rc=0`.
+
+Knock-on, documented rather than special-cased: the vendored `9.1.1.0` has
+no `sddc-spec.source.sha256`, so its first re-vendor now requires
+`--accept-new-upstream` once. Carving out "this particular sidecar may be
+absent" would reintroduce exactly the fail-open path the guard closes. The
+earlier statement in this report has been corrected in place.
+
+**Mutation:** restoring the fail-open behaviour → **2 failures**. A
+parametrized test also removes each sidecar individually, so deleting only
+the one that would have caught you is not enough.
+
+## OBS-1 — `schema.py`'s docstring overstated the guarantee
+
+The docstring claimed set membership constrains symlinks and junctions. It
+does not. Verified: `mklink /J` (no privilege required) inside
+`vcfspec/schemas/` is followed by `_discover()`, appears in
+`known_versions()`, and its planted schema+sidecar certified junk as
+`valid: True`.
+
+**Corrected to state the real boundary:** the gate constrains the **name**,
+not what the name points at. The trust boundary it defends is the
+caller-supplied string — an MCP `vcf_version` or a CLI `--version` — and
+against that it is complete: no such string can name anything outside
+`SCHEMA_DIR`. Integrity of the package directory itself is the installer's
+and the filesystem's job. The docstring now says so, including why
+hardening against it here would be pointless: anyone who can plant a
+junction inside the package can overwrite the schema and its sidecar
+directly, which defeats the checksum far more simply.
+
+## OBS-2 — the no-reflection rule is argument-scoped
+
+Correct, and now stated in the README under its own heading.
+
+- **Tool arguments are never echoed** — `vcf_version`, `code`,
+  `input_kind`. Each rejection names what the package ships instead.
+- **Document bodies are reported, necessarily** — values and key names
+  appear in finding messages and JSON pointers, because saying what is
+  wrong with your document is the tool's job. The largest instance is the
+  new `maxItems: 64` rejection, where jsonschema serialises the whole
+  `hosts` array: **10,347 characters at 65 hosts**, measured.
+- **Credentials inside that output are masked.** Verified by planting a
+  literal credential inside an over-length `hosts` array: it came back
+  `***REDACTED***` and the literal appears nowhere in the envelope.
+
+The distinction to hold onto: arguments are not reflected; document
+content is reported, and redacted on the way out.
+
+## Corrections applied to the earlier sections of this report
+
+1. The "worst legal `vcf_diff_spec` = 0.36 s / 10.2 MB" claim, annotated
+   in place with the corrected 15.82 s / 306.8 MB figure.
+2. The `to_thread` residual, cross-referenced to the re-rating above.
+3. The claim that `9.1.1.0`'s first re-vendor "records one without needing
+   the flag" — no longer true after OBS-3, corrected in place.
+4. Residual item 4, same correction.
+
+A wrong number in a security document is worse than no number, because the
+next person budgets against it. In this case the next person was me.

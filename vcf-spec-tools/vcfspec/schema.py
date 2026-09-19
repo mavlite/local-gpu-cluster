@@ -33,10 +33,30 @@ before any path is built, so:
   whether or not anything exists at the path it implied. There is no path.
 
 _VERSION_RE is an *additional* filter applied to the directory listing, not
-the gate. A regex alone would still permit "9.1.1.0" to name whatever a
-symlink, junction or a future SCHEMA_DIR reshuffle put there; membership of
-a listing of real vendored directories is what actually constrains it.
-Do not replace the set test with the regex.
+the gate. Do not replace the set test with the regex: a regex answers "is
+this string shaped like a version", which is not the question. The
+question is "did this package vendor this", and only the listing can
+answer it.
+
+What this gate does NOT do, stated precisely because an earlier version of
+this docstring overstated it:
+
+    It constrains the NAME. It does not constrain what the name points at.
+
+_discover() lists SCHEMA_DIR and follows whatever is there. A directory
+junction planted inside SCHEMA_DIR (`mklink /J`, which needs no special
+privilege on Windows) is followed, its schema and sidecar are read from
+the junction target, and the pair is accepted -- verified, not assumed.
+
+That is not an escalation and is not worth hardening against here: it
+requires write access INSIDE the installed package directory, and anyone
+who has that can overwrite sddc-spec.schema.json and its sidecar
+directly, which defeats the checksum far more simply than planting a
+junction. The trust boundary this gate defends is the CALLER-SUPPLIED
+STRING -- an MCP `vcf_version` or a CLI `--version` -- and against that it
+is complete: no such string can name anything outside SCHEMA_DIR.
+Integrity of the package directory itself is the installer's and the
+filesystem's job, not this function's.
 """
 from __future__ import annotations
 

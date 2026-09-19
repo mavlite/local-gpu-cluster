@@ -389,3 +389,105 @@ def test_input_kind_is_not_reflected_by_the_library_entry_point():
     out = validate_document(INVENTORY, input_kind=_CANARY)
     assert _CANARY not in json.dumps(out)
     assert "VCF-INPUT-BAD-KIND" in [f["code"] for f in out["findings"]]
+
+
+# --- Follow-up round 2: the diff's OUTPUT is bounded, not just its input -
+#
+# documents.MAX_NODES bounds how far a document expands. It does not bound
+# how much vcf_diff_spec emits about it, and the two are very different
+# numbers. Measured against the post-round-1 code: a 10,073-character
+# document -- 30 aliases (limit 100), 196,590 nodes (limit 200,000),
+# inside every input bound and inside maxLength -- produced a 306.8 MB
+# response in 15.82 s, a 30,461x amplification, synchronously on the
+# long-lived server. Cost scales with change count x path length, and
+# alias expansion drives both while the source text stays tiny.
+
+def _alias_bomb(levels=14, fan=2, pad=64, keylen=320):
+    """A legal document that expands to ~196k nodes from ~10 KB of text."""
+    key = "k" * keylen
+    lines = [f"l0: &a0 {{v: {'x' * pad}}}"]
+    for i in range(1, levels + 1):
+        lines.append(f"l{i}: &a{i} {{"
+                     + ", ".join(f"{key}{j}: *a{i - 1}" for j in range(fan)) + "}")
+    lines.append("root: {"
+                 + ", ".join(f"{key}r{j}: *a{levels}" for j in range(fan)) + "}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_alias_bomb_is_genuinely_legal_input():
+    """Guards the guard: if this document ever stops being accepted by the
+    input limits, the tests below would pass for the wrong reason."""
+    from vcfspec.documents import (MAX_ALIASES, MAX_NODES, _ALIAS_RE,
+                                   _inspect, load_document)
+    from vcfspec.mcp_server import MAX_DOCUMENT_CHARS
+    text = _alias_bomb()
+    assert len(text) <= MAX_DOCUMENT_CHARS
+    assert len(_ALIAS_RE.findall(text)) <= MAX_ALIASES
+    _, nodes = _inspect(load_document(text))
+    assert nodes <= MAX_NODES
+    assert nodes > 100_000, "the bomb should still expand enormously"
+
+
+def test_a_legal_alias_bomb_cannot_produce_an_unbounded_response():
+    from vcfspec.mcp_server import MAX_CHANGE_CHARS, MAX_CHANGES
+    text = _alias_bomb()
+    out = call_handler("vcf_diff_spec",
+                       {"left": text, "right": text.replace("x" * 64, "y" * 64)})
+    assert out["truncated"] is True
+    assert out["changed"] <= MAX_CHANGES
+    # The response is bounded in SIZE, not merely in count -- bounding the
+    # count alone still permits few changes with enormous JSON pointers,
+    # which is exactly the shape alias expansion produces.
+    assert len(json.dumps(out)) < MAX_CHANGE_CHARS * 3
+
+
+def test_a_truncated_diff_is_never_reported_as_valid():
+    """The dangerous answer is a partial diff that looks complete: an
+    agent asking "did anything under /credentials change?" must not read
+    a truncated walk as "no"."""
+    text = _alias_bomb()
+    out = call_handler("vcf_diff_spec",
+                       {"left": text, "right": text.replace("x" * 64, "y" * 64)})
+    assert out["valid"] is False
+    assert "VCF-DIFF-TRUNCATED" in [f["code"] for f in out["findings"]]
+    assert out["truncated"] is True
+
+
+def test_an_ordinary_diff_is_untouched_by_the_bound():
+    """The bound must not change what a real caller sees. A 3-host
+    inventory with one field changed is one change, complete, valid."""
+    import yaml
+    doc = yaml.safe_load(INVENTORY)
+    doc["hosts"][0]["mgmtIp"] = "10.50.10.99"
+    out = call_handler("vcf_diff_spec",
+                       {"left": INVENTORY, "right": yaml.safe_dump(doc)})
+    assert out["valid"] is True
+    assert out["truncated"] is False
+    assert out["changed"] == 1
+    assert [c["path"] for c in out["changes"]] == ["/hosts/esx01/mgmtIp"]
+
+
+def test_truncated_is_always_present_so_a_consumer_can_branch_on_it():
+    """Finding 8's shape rule, applied to the new key: `truncated` is
+    present on success AND on truncation, never absent on one of them."""
+    import yaml
+    doc = yaml.safe_load(INVENTORY)
+    doc["hosts"][0]["mgmtIp"] = "10.50.10.99"
+    clean = call_handler("vcf_diff_spec",
+                         {"left": INVENTORY, "right": yaml.safe_dump(doc)})
+    text = _alias_bomb()
+    cut = call_handler("vcf_diff_spec",
+                       {"left": text, "right": text.replace("x" * 64, "y" * 64)})
+    assert "truncated" in clean and "truncated" in cut
+
+
+def test_credentials_are_still_masked_in_a_truncated_diff():
+    """Truncation must not open a hole in the masking that the whole diff
+    tool is built around."""
+    left = {"credentials": {"esxRoot": "LeakCanaryAAA111"}, "a": {"b": 1}}
+    right = {"credentials": {"esxRoot": "LeakCanaryBBB222"}, "a": {"b": 2}}
+    import yaml
+    out = call_handler("vcf_diff_spec", {"left": yaml.safe_dump(left),
+                                         "right": yaml.safe_dump(right)})
+    blob = json.dumps(out)
+    assert "LeakCanaryAAA111" not in blob and "LeakCanaryBBB222" not in blob

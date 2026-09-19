@@ -136,12 +136,23 @@ def _refuse_on_change(out: Path, source_digest: str, bundle_text: str,
     "upstream is unchanged", and only a person can decide the difference
     does not matter. That decision is what ACCEPT_FLAG records.
     """
+    # A schema already on disk is what makes a missing digest an anomaly
+    # rather than a first run. Before this, the two were indistinguishable
+    # and the guard failed OPEN: deleting both sidecars let a different
+    # bundle be written with rc=0, which is the wrong default for an
+    # integrity control -- absence of evidence became evidence of absence.
+    # A first vendor (no schema, no digests) is still a clean rc=0.
+    vendored_already = (out / SCHEMA_NAME).is_file()
+
     changed: list[str] = []
     for name, fresh in ((SOURCE_DIGEST_NAME, source_digest),
                         (f"{SCHEMA_NAME}.sha256", _digest(bundle_text))):
         recorded = _recorded(out / name)
         if recorded is None:
-            print(f"  {name}: (nothing vendored yet) -> {fresh[:16]}...")
+            state = "MISSING" if vendored_already else "(nothing vendored yet)"
+            print(f"  {name}: {state} -> {fresh[:16]}...")
+            if vendored_already:
+                changed.append(f"{name} (missing)")
             continue
         print(f"  {name}: {recorded[:16]}... -> {fresh[:16]}..."
               f"{'  CHANGED' if recorded != fresh else ''}")
@@ -149,10 +160,15 @@ def _refuse_on_change(out: Path, source_digest: str, bundle_text: str,
             changed.append(name)
 
     if changed and not accepted:
-        print(f"refusing: {', '.join(changed)} would change. This script "
-              "attests provenance, not just integrity-at-rest: a re-vendor "
-              "that silently overwrites a vendored schema would write a "
+        print(f"refusing: {', '.join(changed)}. This script attests "
+              "provenance, not just integrity-at-rest: a re-vendor that "
+              "silently overwrites a vendored schema would write a "
               "perfectly valid checksum for a hostile one.")
+        if vendored_already and any("(missing)" in c for c in changed):
+            print("  A vendored schema whose digest sidecar is absent is an "
+                  "anomaly, not a fresh start -- the sidecar should have "
+                  "been committed alongside it. Restore it from git, or "
+                  "re-vendor deliberately with the flag below.")
         print(f"If you have reviewed the change and intend it, re-run with "
               f"{ACCEPT_FLAG} and quote both digests in the commit message.")
         return 1

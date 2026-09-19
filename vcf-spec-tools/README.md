@@ -437,14 +437,46 @@ report" from "this tool doesn't report that"):
 | `layers_run` / `layers_skipped` | Every path (success and failure) of `vcf_validate_spec` and `vcf_render_spec` only — the two tools with an actual layered pipeline. `result["layers_run"]` is therefore safe to read unconditionally on those two tools, including when the call failed, which is exactly when an operator most needs to see it. |
 
 `vcf_diff_spec`'s `valid` means "both `left` and `right` were readable
-documents" — it never validates the documents it diffs, so `valid` there
-is never a statement about whether either one is a good VCF spec.
+documents, **and the diff you are holding is complete**" — it never
+validates the documents it diffs, so `valid` there is never a statement
+about whether either one is a good VCF spec.
+
+It also always carries a `truncated` boolean. The diff's output is
+bounded (10,000 changes / 1,000,000 characters) because bounding the
+*input* does not bound the output: a 10 KB document using YAML aliases,
+inside every input limit, previously produced a 306.8 MB response in
+15.8 s. If either bound is hit, `truncated` is `true`, `valid` is
+`false`, and a `VCF-DIFF-TRUNCATED` finding says so. **Do not read a
+truncated diff as "nothing else changed"** — the changes reported are
+correct as far as they go, but the walk stopped early. Diff a smaller
+pair of documents, or narrower sections of them.
 
 `vcf_explain_finding` returns the same flat shape
 (`code`/`severity`/`summary`/`fix`/`source`/`source_url`) whether or not
 the code was found — an unrecognised code explains
-`VCF-EXPLAIN-UNKNOWN-CODE` itself, naming the code you asked about in its
-`summary`, rather than switching to a different response shape.
+`VCF-EXPLAIN-UNKNOWN-CODE` itself rather than switching to a different
+response shape. It does **not** echo the code you asked about (see below).
+
+### What is and is not reflected back to you
+
+Tool **arguments** are never echoed into a finding message: not
+`vcf_version`, not `code`, not `input_kind`. Each rejection names what
+this package actually ships instead. The caller already knows what it
+sent, and these envelopes are read by an AI agent that may be handling a
+document from an untrusted source.
+
+Document **bodies** are a different matter, and the rule does not extend
+to them — it cannot, because reporting what is wrong with your document
+*is the job*. Values and key names from the document do appear in finding
+messages and JSON pointers. The largest instance is a `hosts` array that
+exceeds `maxItems`: jsonschema serialises the whole array into its
+message, which is ~10,300 characters at 65 hosts.
+
+Credential values are masked before any of that leaves the process —
+verified with a literal planted inside an over-length `hosts` array, which
+came back `***REDACTED***`. The distinction to hold onto is: **arguments
+are not reflected; document content is reported, and redacted on the way
+out.**
 
 ## Updating for a new VCF release
 
@@ -484,7 +516,21 @@ An unchanged re-vendor is a no-op and needs no flag. A changed upstream
 whose extracted bundle happens to be byte-identical is still refused:
 the extraction drops `example`, `discriminator`, `xml` and
 `externalDocs`, so "the part we vendor is unchanged" is a weaker claim
-than "upstream is unchanged". Rule tables (capacity, defaults) are
+than "upstream is unchanged".
+
+A vendored schema whose digest sidecar is **missing** is also refused,
+rather than treated as a fresh start. Otherwise deleting the sidecars
+would be enough to bypass the guard entirely, which is fail-open — the
+wrong default for an integrity control. Restore the sidecar from git, or
+re-vendor deliberately with the flag.
+
+One consequence worth knowing before you hit it: the currently vendored
+`9.1.1.0` predates `sddc-spec.source.sha256` and does not have one, so
+the first re-vendor of `9.1.1.0` **will** refuse and require
+`--accept-new-upstream` once, purely to record the missing digest. That
+is friction rather than a warning about the schema itself, and it is
+accepted deliberately — special-casing "this particular sidecar may be
+absent" would reintroduce the fail-open path the guard exists to close. Rule tables (capacity, defaults) are
 versioned separately in `vcfspec/rules/tables.py` and
 `vcfspec/defaults/<version>.yaml`, and are not touched by this script.
 
