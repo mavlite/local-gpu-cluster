@@ -35,24 +35,32 @@ yourself first and pass its contents.
    `"inventory"` or `"sddc_spec"`, nothing else — any other value,
    including a typo, is rejected as `VCF-MCP-BAD-ARGS` before the call
    does anything, not silently accepted.
-3. `vcf_render_spec({document, vcf_version?})` — turns a lab inventory
-   into VCF Installer `SddcSpec` JSON, applying the lab-default value
-   table for `vcf_version` (default `9.1.1.0`), with the same findings
-   envelope plus a `spec` key on success. On failure (e.g. an insecure
-   credential) there is no `spec` key at all — never fabricate one.
+3. `vcf_render_spec({document, vcf_version?, input_kind?})` — turns a lab
+   inventory into VCF Installer `SddcSpec` JSON, applying the lab-default
+   value table for `vcf_version` (default `9.1.1.0`), with the same
+   findings envelope plus a `spec` key on success. On failure (e.g. an
+   insecure credential) there is no `spec` key at all — never fabricate
+   one. `render` only ever accepts a lab inventory, so `input_kind` is
+   mainly useful to turn a misdetection into an explicit
+   `VCF-RENDER-WRONG-KIND` rather than a silent wrong guess.
 
 Both tools reject an unvendored `vcf_version` the same way, as
 `VCF-MCP-BAD-ARGS` — a bad argument to retry with a real version, not an
 internal failure to give up on. This only fires when the version was
 actually needed: an inventory-kind `vcf_validate_spec` call ignores
 `vcf_version` entirely, so an unused, irrelevant value alongside one is
-not rejected just for being present.
+not rejected just for being present — but it is not silently swallowed
+either. The result carries an `info`-level `VCF-VERSION-NOT-CONSULTED`
+finding instead, so nothing implies a version check happened that did
+not.
 4. `vcf_explain_finding({code})` — look up one finding code's severity,
-   fix text and documentation source. An unrecognised code returns a
-   `VCF-EXPLAIN-UNKNOWN-CODE` finding, not a tool error.
+   fix text and documentation source. An unrecognised code explains
+   `VCF-EXPLAIN-UNKNOWN-CODE` itself (same flat shape, not a tool error),
+   naming the code you asked about.
 5. `vcf_diff_spec({left, right})` — structural diff of two inventories or
    specs. Credential values are masked in the output; see "Security
-   model" below.
+   model" below. `valid` here means "both documents were readable", not
+   "these are valid VCF specs" — this tool never validates what it diffs.
 
 ## The loop
 
@@ -80,6 +88,17 @@ Every finding has `code`, `severity` (`critical` | `error` | `warning` |
 *not* run and why (probes skipped because none were configured, rules
 skipped under a schema-invalid subtree, render skipped after an insecure
 credential) — read it before treating a clean-looking result as complete.
+
+Not every tool returns every key, and each one is deliberately present or
+absent everywhere consistently — never present on success and missing (or
+vice versa) on failure, so `result.get("valid")`/`result.get("findings")`
+are always safe: `valid` and `layers_run`/`layers_skipped` appear on every
+call (success or failure) of `vcf_validate_spec` and `vcf_render_spec`;
+`valid` also appears on every call of `vcf_diff_spec`, but `layers_run`
+never does (diffing has no layered pipeline); `vcf_spec_schema` and
+`vcf_explain_finding` never carry `valid` at all, because they validate
+nothing — do not infer success or failure from its absence on those two,
+read `findings` instead (empty means nothing to report).
 
 ## Rules that are not negotiable
 

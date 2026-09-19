@@ -90,6 +90,15 @@ $ echo $?
 | `1` | The document is invalid — a structured finding explains why — or an internal error was caught and reported as one. |
 | `2` | Usage error: bad CLI arguments, a path that doesn't exist or isn't readable, or `--probe` without `--allowlist`. This is deliberately distinct from `1`: a file that exists and parses but is a bad spec is not a usage error. |
 
+Both `validate` and `render` also accept `--input-kind {inventory,sddc_spec}`
+to force the document kind instead of relying on auto-detection — the CLI
+equivalent of the MCP server's `input_kind` argument on `vcf_validate_spec`
+and `vcf_render_spec`. A value outside that closed pair is a usage error
+(exit `2`), never a silent skip. `render` only ever accepts an inventory,
+so forcing `--input-kind sddc_spec` there is only useful to turn a
+misdetection into an explicit, honest `VCF-RENDER-WRONG-KIND` rather than
+guessing wrong silently.
+
 A usage error, for real:
 
 ```
@@ -381,12 +390,43 @@ message carries only the exception's class name).
 `vcf_version` (default `9.1.1.0`, the only version currently vendored —
 see "Updating for a new VCF release" below); an unvendored value is
 rejected as `VCF-MCP-BAD-ARGS`, the same as any other bad argument, not
-treated as an internal failure. `vcf_validate_spec` also takes an
+treated as an internal failure. `vcf_version` has no effect on an
+inventory-kind document, which has one fixed schema regardless of VCF
+release; supplying a non-default one anyway does not reject the call (an
+inventory-kind call carrying an irrelevant `vcf_version` is legitimate),
+but it is reported back as an `info`-level `VCF-VERSION-NOT-CONSULTED`
+finding, so the result never silently implies something was checked that
+was not. `vcf_validate_spec` and `vcf_render_spec` both also take an
 optional `input_kind` to skip auto-detection — a closed enum of
 `"inventory"` or `"sddc_spec"`, enforced at this boundary: anything else
 (a typo included) is rejected the same way, before the call does
 anything. See `.claude/skills/vcf-spec-authoring/SKILL.md` for how an
 agent should use these tools.
+
+### Envelope shape
+
+The five tools do not all return the same keys, and that asymmetry is
+deliberate, not an oversight — each key is present exactly where it means
+something, and never present only on one of success or failure (a key
+that only shows up when something went wrong is worse than one that is
+always there or never there, because a caller cannot tell "nothing to
+report" from "this tool doesn't report that"):
+
+| Key | Present on |
+|---|---|
+| `findings` | Every path of `vcf_validate_spec`, `vcf_render_spec`, `vcf_diff_spec`; and the failure path only of `vcf_spec_schema`/`vcf_explain_finding` (their own success responses describe something other than a finding). |
+| `valid` | Every path (success and failure) of `vcf_validate_spec`, `vcf_render_spec`, `vcf_diff_spec` — the three tools with a real validity concept. Never present for `vcf_spec_schema` or `vcf_explain_finding`, which validate nothing; forcing a `valid` value onto either would answer a question nobody asked. |
+| `layers_run` / `layers_skipped` | Every path (success and failure) of `vcf_validate_spec` and `vcf_render_spec` only — the two tools with an actual layered pipeline. `result["layers_run"]` is therefore safe to read unconditionally on those two tools, including when the call failed, which is exactly when an operator most needs to see it. |
+
+`vcf_diff_spec`'s `valid` means "both `left` and `right` were readable
+documents" — it never validates the documents it diffs, so `valid` there
+is never a statement about whether either one is a good VCF spec.
+
+`vcf_explain_finding` returns the same flat shape
+(`code`/`severity`/`summary`/`fix`/`source`/`source_url`) whether or not
+the code was found — an unrecognised code explains
+`VCF-EXPLAIN-UNKNOWN-CODE` itself, naming the code you asked about in its
+`summary`, rather than switching to a different response shape.
 
 ## Updating for a new VCF release
 
