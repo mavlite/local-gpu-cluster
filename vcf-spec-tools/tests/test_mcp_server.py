@@ -45,9 +45,18 @@ def test_explain_covers_codes_raised_outside_the_rule_modules():
         assert tool_explain_finding({"code": code})["severity"]
 
 
-def test_explain_unknown_code_is_a_finding_not_an_exception():
+def test_explain_unknown_code_is_explained_not_an_exception():
+    # Finding 8: the not-found path returns the same flat shape as the
+    # found path (code/severity/summary/fix/source/source_url), not a
+    # {"findings": [...]} wrapper -- tool_explain_finding used to be
+    # inconsistent with itself, returning a different shape depending on
+    # whether the code existed.
     out = tool_explain_finding({"code": "NOPE"})
-    assert out["findings"][0]["code"] == "VCF-EXPLAIN-UNKNOWN-CODE"
+    assert out["code"] == "VCF-EXPLAIN-UNKNOWN-CODE"
+    assert "NOPE" in out["summary"]
+    assert out["severity"]
+    assert "findings" not in out
+    assert "valid" not in out
 
 
 def test_diff_keys_hosts_by_name():
@@ -195,13 +204,20 @@ def test_unvendored_vcf_version_is_a_bad_args_finding_for_validate():
     # document (see api.py) -- build a real, valid one first (via the
     # render tool, which never fails on the bundled example) so the
     # version is the *only* thing wrong with the call.
+    #
+    # Finding 10: the bad-args finding is translated in place, not left as
+    # the *only* finding -- so this checks membership, not position, and a
+    # sibling test below (test_reclassify_keeps_every_other_finding) checks
+    # that a real finding computed alongside it survives.
     spec_text = json.dumps(tool_render_spec({"document": TEXT})["spec"])
     out = call_handler("vcf_validate_spec",
                        {"document": spec_text, "input_kind": "sddc_spec",
                         "vcf_version": "9.9.9.9"})
-    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
-    assert "INTERNAL" not in [f["code"] for f in out["findings"]]
-    assert "9.9.9.9" in out["findings"][0]["message"]
+    codes = [f["code"] for f in out["findings"]]
+    assert "VCF-MCP-BAD-ARGS" in codes
+    assert "INTERNAL" not in codes
+    bad_args = next(f for f in out["findings"] if f["code"] == "VCF-MCP-BAD-ARGS")
+    assert "9.9.9.9" in bad_args["message"]
 
 
 def test_unvendored_vcf_version_is_a_bad_args_finding_for_render():
@@ -211,9 +227,30 @@ def test_unvendored_vcf_version_is_a_bad_args_finding_for_render():
     # so this must use a real inventory to isolate the version as the only
     # problem, the same way the validate case above isolates it.
     out = call_handler("vcf_render_spec", {"document": TEXT, "vcf_version": "9.9.9.9"})
-    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
-    assert "INTERNAL" not in [f["code"] for f in out["findings"]]
-    assert "9.9.9.9" in out["findings"][0]["message"]
+    codes = [f["code"] for f in out["findings"]]
+    assert "VCF-MCP-BAD-ARGS" in codes
+    assert "INTERNAL" not in codes
+    bad_args = next(f for f in out["findings"] if f["code"] == "VCF-MCP-BAD-ARGS")
+    assert "9.9.9.9" in bad_args["message"]
+
+
+# --- Finding 10: reclassification translates one finding, does not discard
+# every other finding the layers below already computed. Before this fix,
+# `vcf_render_spec` on the bundled example inventory with an unknown
+# `vcf_version` returned findings that were exactly `['VCF-MCP-BAD-ARGS']`
+# -- the schema and rules layers had both already run and found nothing
+# wrong (a clean render), but VCF-LIC-EVALUATION (the always-present
+# licensing-mode finding every render/validate call reports) was thrown
+# away along with everything else, replaced wholesale by the one
+# reclassified finding.
+
+def test_reclassify_keeps_every_other_finding():
+    out = call_handler("vcf_render_spec", {"document": TEXT, "vcf_version": "0.0.0"})
+    codes = [f["code"] for f in out["findings"]]
+    assert codes != ["VCF-MCP-BAD-ARGS"]
+    assert "VCF-LIC-EVALUATION" in codes
+    assert "VCF-MCP-BAD-ARGS" in codes
+    assert out["valid"] is False
 
 
 def test_unvendored_vcf_version_does_not_reject_an_unrelated_inventory_call():
@@ -325,3 +362,122 @@ def test_diff_does_not_mask_a_merely_similar_key_name():
     entry = next(e for e in out["changes"] if e["path"] == "/credentialsBackup")
     assert entry["left"] == "NotASecretValueLeft"
     assert entry["right"] == "NotASecretValueRight"
+
+
+# --- Finding 7: an unparseable document must mean the same thing on every
+# tool. vcf_validate_spec/vcf_render_spec route a bad document through
+# api.py's own VCF-INPUT-UNREADABLE finding (retryable: fix the argument
+# and call again). vcf_diff_spec used to call load_document() bare and let
+# every DocumentTooLarge/DocumentTooDeep/DocumentTooManyAliases/
+# DocumentTooManyNodes/YAMLError fall through to call_handler's catch-all,
+# which reports INTERNAL -- "the tool is broken, do not retry", the
+# opposite advice for the identical condition.
+
+def test_diff_unreadable_document_is_bad_input_not_internal():
+    out = call_handler("vcf_diff_spec", {"left": "][", "right": "]["})
+    assert out["findings"][0]["code"] == "VCF-INPUT-UNREADABLE"
+    assert "INTERNAL" not in [f["code"] for f in out["findings"]]
+    assert out["valid"] is False
+
+
+def test_diff_unreadable_document_names_which_side_failed():
+    # A good left and a bad right must still report VCF-INPUT-UNREADABLE
+    # (not INTERNAL), and the path should point at the side that actually
+    # failed to parse.
+    out = call_handler("vcf_diff_spec", {"left": TEXT, "right": "]["})
+    assert out["findings"][0]["code"] == "VCF-INPUT-UNREADABLE"
+    assert out["findings"][0]["path"] == "/right"
+
+
+def test_diff_unreadable_document_is_reported_the_same_way_as_validate():
+    # Mutation-provable: the exact code an agent sees for the same bad
+    # input must agree across tools, or an agent's retry policy for one
+    # tool gives the wrong advice for the other.
+    bad = "]["
+    validate_code = call_handler("vcf_validate_spec", {"document": bad})["findings"][0]["code"]
+    diff_code = call_handler("vcf_diff_spec", {"left": bad, "right": bad})["findings"][0]["code"]
+    assert validate_code == diff_code == "VCF-INPUT-UNREADABLE"
+
+
+# --- Finding 8: envelope uniformity. `valid` is present on every path for
+# the three tools with a real validity concept (vcf_validate_spec,
+# vcf_render_spec, vcf_diff_spec), and absent on every path -- success and
+# failure alike -- for the two that validate nothing (vcf_spec_schema,
+# vcf_explain_finding), so a consumer never sees `valid` appear only when
+# something went wrong. layers_run/layers_skipped are present on every
+# path, success or failure, for the two tools with an actual layered
+# pipeline, so reading result["layers_run"] can never KeyError on exactly
+# the call where an operator most needs it.
+
+@pytest.mark.parametrize("tool,args", [
+    ("vcf_validate_spec", {"document": TEXT}),
+    ("vcf_render_spec", {"document": TEXT}),
+    ("vcf_diff_spec", {"left": TEXT, "right": TEXT}),
+])
+def test_valid_is_present_on_success_for_tools_with_a_validity_concept(tool, args):
+    out = call_handler(tool, args)
+    assert "valid" in out
+    assert isinstance(out["valid"], bool)
+
+
+@pytest.mark.parametrize("tool,bad_args", [
+    ("vcf_validate_spec", {}),                       # missing required 'document'
+    ("vcf_render_spec", {}),                         # missing required 'document'
+    ("vcf_diff_spec", {"left": TEXT}),               # missing required 'right'
+])
+def test_valid_is_present_on_failure_for_tools_with_a_validity_concept(tool, bad_args):
+    out = call_handler(tool, bad_args)
+    assert "valid" in out and out["valid"] is False
+
+
+@pytest.mark.parametrize("tool,args", [
+    ("vcf_spec_schema", {}),
+    ("vcf_explain_finding", {"code": "INTERNAL"}),
+])
+def test_valid_is_absent_on_success_for_tools_with_no_validity_concept(tool, args):
+    assert "valid" not in call_handler(tool, args)
+
+
+@pytest.mark.parametrize("tool,bad_args", [
+    ("vcf_spec_schema", {"bogus": 1}),               # additionalProperties: False
+    ("vcf_explain_finding", {}),                     # missing required 'code'
+])
+def test_valid_is_absent_on_failure_too_for_tools_with_no_validity_concept(tool, bad_args):
+    # This is the exact asymmetry finding 8 named: before the fix, both
+    # of these returned {"valid": False, "findings": [...]} on a bad call
+    # even though their own success path never carries "valid" at all --
+    # a key present only on failure is worse than one consistently absent.
+    out = call_handler(tool, bad_args)
+    assert "valid" not in out
+    assert out["findings"][0]["code"] == "VCF-MCP-BAD-ARGS"
+
+
+@pytest.mark.parametrize("tool,bad_args", [
+    ("vcf_validate_spec", {}),
+    ("vcf_render_spec", {}),
+])
+def test_layers_run_never_keyerrors_even_on_a_bad_args_failure(tool, bad_args):
+    out = call_handler(tool, bad_args)
+    assert out["layers_run"] == []
+    assert out["layers_skipped"] == {}
+
+
+def test_layers_run_never_keyerrors_on_an_internal_failure(monkeypatch):
+    def boom(_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(HANDLERS, "vcf_validate_spec", boom)
+    out = call_handler("vcf_validate_spec", {"document": TEXT})
+    assert out["findings"][0]["code"] == "INTERNAL"
+    assert out["layers_run"] == []
+    assert out["layers_skipped"] == {}
+
+
+def test_diff_and_schema_tools_never_carry_layers_run():
+    # vcf_diff_spec and vcf_spec_schema have no layered pipeline at all --
+    # layers_run is not merely empty for them, it is absent, the same
+    # judgement call that keeps `valid` off vcf_spec_schema/
+    # vcf_explain_finding: a key that cannot mean anything for a tool
+    # should not be forced onto it just for uniformity's sake.
+    assert "layers_run" not in call_handler("vcf_diff_spec", {"left": TEXT, "right": TEXT})
+    assert "layers_run" not in call_handler("vcf_spec_schema", {})

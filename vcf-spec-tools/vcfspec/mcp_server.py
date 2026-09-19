@@ -26,7 +26,6 @@ from jsonschema import Draft202012Validator
 
 from .api import render_document, validate_document
 from .documents import load_document
-from .findings import Finding
 from .inventory import EXAMPLE_PATH, REFERENCE_RE, load_inventory_schema
 from .redact import CREDENTIAL_KEY_RE, MASK, redact
 from .rules import finding_for, load_catalogue
@@ -68,7 +67,8 @@ def tool_validate_spec(args: dict) -> dict:
 
 def tool_render_spec(args: dict) -> dict:
     version = args.get("vcf_version", DEFAULT_VERSION)
-    result = render_document(args["document"], version=version)
+    result = render_document(args["document"], version=version,
+                             input_kind=args.get("input_kind"))
     return _reclassify_unknown_version(result, "vcf_render_spec", version)
 
 
@@ -90,32 +90,89 @@ def _reclassify_unknown_version(result: dict, tool: str, version: str) -> dict:
     validate call with an irrelevant, unused vcf_version is not rejected
     just for carrying one, because that argument was never actually acted
     on for that document.
+
+    Translates that ONE finding and keeps every other finding the layers
+    below already computed -- it used to replace the whole envelope with
+    a single VCF-MCP-BAD-ARGS finding, discarding real schema/rules
+    findings the same call had already earned (e.g. vcf_render_spec on a
+    valid inventory with an unknown vcf_version used to report exactly
+    `['VCF-MCP-BAD-ARGS']`, throwing away VCF-LIC-EVALUATION and anything
+    else the render pipeline found). The translation happens in place, so
+    a caller inspecting findings[i] for the position they last saw still
+    finds the same finding, just recoded.
     """
-    codes = {f["code"] for f in result.get("findings", [])}
-    if "VCF-SCHEMA-VERSION-UNKNOWN" in codes:
-        return _bad_args_finding(tool, f"no vendored schema for VCF version {version!r}")
-    return result
+    findings = result.get("findings", [])
+    if not any(f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" for f in findings):
+        return result
+    bad_args = asdict(finding_for(
+        "VCF-MCP-BAD-ARGS", "/", tool=tool,
+        detail=f"no vendored schema for VCF version {version!r}"))
+    new_findings = [bad_args if f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" else f
+                   for f in findings]
+    valid = not any(f["severity"] in ("critical", "error") for f in new_findings)
+    return {**result, "findings": new_findings, "valid": valid}
 
 
 def tool_explain_finding(args: dict) -> dict:
+    """Always the same flat shape -- {code, severity, summary, fix, source,
+    source_url} -- whether or not the code was found. Before this, the
+    found path returned that flat shape and the not-found path wrapped a
+    Finding in {"findings": [...]}: two different shapes from one tool
+    depending on its own argument, which is the self-inconsistency finding
+    8 calls out by name. An unrecognised code is not a protocol error (the
+    call was well-formed; the catalogue just has nothing under that key),
+    so it is reported the same way a found code is: as an explanation --
+    here, an explanation of VCF-EXPLAIN-UNKNOWN-CODE itself, with the
+    caller's own (invalid) code named in its summary.
+
+    No `valid` key, on this path or the found one: this tool explains a
+    code, it does not validate a document, and forcing a `valid` value
+    here would be answering a question nobody asked (see call_handler's
+    envelope-shaping for the same call on this tool's own bad-args path).
+    """
     code = args.get("code", "")
     meta = load_catalogue().get(code)
     if meta is None:
         unknown = load_catalogue()["VCF-EXPLAIN-UNKNOWN-CODE"]
-        finding = Finding(code=unknown.code, severity=unknown.severity, path="/",
-                          message=f"No rule with code {code!r}.",
-                          fix=unknown.fix, source=unknown.source,
-                          source_url=unknown.source_url)
-        return {"findings": [asdict(finding)]}
+        return {"code": unknown.code, "severity": str(unknown.severity),
+                "summary": f"No rule with code {code!r}.",
+                "fix": unknown.fix, "source": unknown.source,
+                "source_url": unknown.source_url}
     return {"code": meta.code, "severity": str(meta.severity), "summary": meta.summary,
             "fix": meta.fix, "source": meta.source, "source_url": meta.source_url}
 
 
 def tool_diff_spec(args: dict) -> dict:
-    left = load_document(args["left"])
-    right = load_document(args["right"])
-    changes = _diff(left, right, "")
-    return redact({"changes": changes, "changed": len(changes)})
+    """Structural diff of two documents, with a uniform findings/valid
+    envelope: `valid` here means "both inputs were readable", not "these
+    are valid VCF specs" -- vcf_diff_spec never validates its input, by
+    design (see _change_entry's docstring on why it deliberately does
+    not), so `valid: false` never means anything more than "one side
+    could not be parsed" and `findings` never carries anything but that.
+
+    Before this, an unparseable 'left' or 'right' fell through to
+    call_handler's catch-all and came back as INTERNAL -- "the tool is
+    broken, do not retry" -- for the identical condition
+    vcf_validate_spec reports as VCF-INPUT-UNREADABLE, a retryable bad
+    argument (finding 7). load_document() is called here, the same way
+    api.py's own loader boundary calls it, so the same exception family
+    (DocumentTooLarge, DocumentTooDeep, DocumentTooManyAliases,
+    DocumentTooManyNodes, a yaml.YAMLError, a non-mapping root) becomes
+    the same code an agent already knows how to act on. The path names
+    which side failed ("/left" or "/right"), which single-document tools
+    have no equivalent need for.
+    """
+    documents: dict[str, dict] = {}
+    for side in ("left", "right"):
+        try:
+            documents[side] = load_document(args[side])
+        except Exception as exc:
+            finding = finding_for("VCF-INPUT-UNREADABLE", f"/{side}",
+                                  exc_type=type(exc).__name__)
+            return redact({"valid": False, "findings": [asdict(finding)]})
+    changes = _diff(documents["left"], documents["right"], "")
+    return redact({"valid": True, "findings": [], "changes": changes,
+                   "changed": len(changes)})
 
 
 # --- Diff engine --------------------------------------------------------
@@ -245,26 +302,39 @@ class ToolDef(NamedTuple):
     description: str
     schema: dict
     handler: Callable[[dict], dict]
+    # Envelope shape (finding 8): reports_valid is False for the two tools
+    # that validate nothing (vcf_spec_schema, vcf_explain_finding) -- for
+    # those, `valid` is never present, on success OR failure, rather than
+    # being absent on success and `false` on failure, which is the shape
+    # a consumer cannot safely branch on (see _error_envelope). reports_layers
+    # is True only for the two tools whose pipeline actually has layers.
+    reports_valid: bool = True
+    reports_layers: bool = False
 
 
 _TOOL_DEFS: tuple[ToolDef, ...] = (
     ToolDef("vcf_spec_schema",
             "What a lab inventory needs, with a worked example.",
             _schema(),
-            tool_spec_schema),
+            tool_spec_schema,
+            reports_valid=False),
     ToolDef("vcf_render_spec",
             "Render a lab inventory into VCF Installer SddcSpec JSON.",
-            _schema(("document",), document=_STRING, vcf_version=_STRING),
-            tool_render_spec),
+            _schema(("document",), document=_STRING, vcf_version=_STRING,
+                     input_kind=_INPUT_KIND),
+            tool_render_spec,
+            reports_layers=True),
     ToolDef("vcf_validate_spec",
             "Validate an inventory or SddcSpec document; returns findings.",
             _schema(("document",), document=_STRING, vcf_version=_STRING,
                      input_kind=_INPUT_KIND),
-            tool_validate_spec),
+            tool_validate_spec,
+            reports_layers=True),
     ToolDef("vcf_explain_finding",
             "Explain one finding code, with its severity, fix and documentation source.",
             _schema(("code",), code=_STRING),
-            tool_explain_finding),
+            tool_explain_finding,
+            reports_valid=False),
     ToolDef("vcf_diff_spec",
             "Semantic diff of two inventories or specs; credential values are masked.",
             _schema(("left", "right"), left=_STRING, right=_STRING),
@@ -274,9 +344,32 @@ _TOOL_DEFS: tuple[ToolDef, ...] = (
 TOOLS = {t.name: {"description": t.description, "inputSchema": t.schema}
         for t in _TOOL_DEFS}
 HANDLERS = {t.name: t.handler for t in _TOOL_DEFS}
+_TOOL_DEFS_BY_NAME = {t.name: t for t in _TOOL_DEFS}
 
 
-def _internal_finding(exc: Exception) -> dict:
+def _error_envelope(tool: ToolDef | None, finding) -> dict:
+    """Build a failure envelope shaped like the tool it failed for --
+    finding 8's fix. `valid` is added exactly when the tool has a validity
+    concept at all (every tool but vcf_spec_schema and vcf_explain_finding,
+    which validate nothing); `tool is None` means the name itself did not
+    match a real tool, so there is no profile to consult and `valid` is
+    included as a conservative default, matching every other tool's shape.
+    `layers_run`/`layers_skipped` are added only for the two tools whose
+    pipeline actually has layers (vcf_validate_spec, vcf_render_spec), and
+    on THIS failure path too -- not just their success path -- so
+    `result["layers_run"]` never raises on a failed call, which is exactly
+    what the README teaches an operator to read before trusting a result.
+    """
+    envelope: dict = {"findings": [asdict(finding)]}
+    if tool is None or tool.reports_valid:
+        envelope["valid"] = False
+    if tool is not None and tool.reports_layers:
+        envelope["layers_run"] = []
+        envelope["layers_skipped"] = {}
+    return redact(envelope)
+
+
+def _internal_finding(tool: ToolDef | None, exc: Exception) -> dict:
     """The tool itself failed -- an agent should not blindly retry this.
 
     Only the exception's class name reaches the message, never str(exc):
@@ -285,10 +378,10 @@ def _internal_finding(exc: Exception) -> dict:
     operating on operator data could carry spec content straight through it.
     """
     finding = finding_for("INTERNAL", "/", detail=type(exc).__name__)
-    return redact({"valid": False, "findings": [asdict(finding)]})
+    return _error_envelope(tool, finding)
 
 
-def _bad_args_finding(tool: str, detail: str) -> dict:
+def _bad_args_finding(tool: ToolDef | None, tool_name: str, detail: str) -> dict:
     """The *call* was malformed -- an agent should fix its arguments and
     retry, unlike an INTERNAL finding. Distinct from INTERNAL (severity
     critical) so a caller can tell "you called this wrong" apart from "this
@@ -299,8 +392,8 @@ def _bad_args_finding(tool: str, detail: str) -> dict:
     before use), and that is exactly the operator data this boundary must
     never leak.
     """
-    finding = finding_for("VCF-MCP-BAD-ARGS", "/", tool=tool, detail=detail)
-    return redact({"valid": False, "findings": [asdict(finding)]})
+    finding = finding_for("VCF-MCP-BAD-ARGS", "/", tool=tool_name, detail=detail)
+    return _error_envelope(tool, finding)
 
 
 def call_handler(name: str, arguments: dict) -> dict:
@@ -313,18 +406,25 @@ def call_handler(name: str, arguments: dict) -> dict:
     additionalProperties: False) are VCF-MCP-BAD-ARGS, a retryable usage
     error. Anything a handler itself raises once called with schema-valid
     arguments is INTERNAL, a non-retryable tool failure.
+
+    Dispatch still goes through the mutable HANDLERS dict (not
+    tool.handler) so a caller can substitute a handler for testing;
+    _TOOL_DEFS_BY_NAME is consulted only to shape the error envelope for
+    the real tool being called (finding 8), which is a separate concern
+    from which function actually runs.
     """
+    tool = _TOOL_DEFS_BY_NAME.get(name)
     if name not in HANDLERS:
-        return _bad_args_finding(name, "unknown tool name")
+        return _bad_args_finding(None, name, "unknown tool name")
     args = arguments or {}
     try:
         Draft202012Validator(TOOLS[name]["inputSchema"]).validate(args)
     except Exception as exc:
-        return _bad_args_finding(name, type(exc).__name__)
+        return _bad_args_finding(tool, name, type(exc).__name__)
     try:
         return HANDLERS[name](args)
     except Exception as exc:
-        return _internal_finding(exc)
+        return _internal_finding(tool, exc)
 
 
 # --- Transport: only reached when the optional 'mcp' extra is installed ----
