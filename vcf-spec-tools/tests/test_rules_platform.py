@@ -44,6 +44,41 @@ def test_missing_host_hardware_is_reported_not_skipped(inventory):
     assert "VCF-CAP-UNKNOWN-HARDWARE" in check_platform(inventory).codes
 
 
+# --- Finding 13: VCF-CAP-UNKNOWN-HARDWARE's fix text used to say "Add
+# hardware.cores and hardware.ramGb for every host", promising a vCPU
+# capacity check that has never existed -- _capacity_rules only ever reads
+# ramGb. Corrected the text rather than adding the check, because vCPU is
+# routinely oversubscribed in a vSphere cluster (unlike RAM/storage, which
+# cannot be), and a raw core-count check would also fail the bundled
+# example (48 physical cores across 3 hosts vs. a 76-vCPU mandatory stack),
+# which is a real, deployable lab.
+
+def test_a_host_with_cores_but_no_ram_is_still_unknown_hardware(inventory):
+    """hardware.cores alone is not enough to satisfy the capacity check --
+    proves the rule genuinely never substitutes cores for ramGb."""
+    inventory["hosts"][0]["hardware"] = {"cores": 64}
+    assert "VCF-CAP-UNKNOWN-HARDWARE" in check_platform(inventory).codes
+
+
+def test_cap_unknown_hardware_fix_text_does_not_promise_a_cores_check():
+    fix = load_catalogue()["VCF-CAP-UNKNOWN-HARDWARE"].fix
+    assert "ramGb" in fix
+    assert fix != "Add hardware.cores and hardware.ramGb for every host."
+    assert "not" in fix.lower() and "cores" in fix.lower()
+
+
+def test_capacity_rules_source_never_reads_hardware_cores():
+    """Mutation-style guard on the fix text's own honesty: if a future
+    change starts reading hardware.cores for capacity, this must be
+    revisited alongside the fix text and this test, not silently drift
+    out of sync with what the catalogue promises again."""
+    import inspect
+
+    from vcfspec.rules import platform
+    assert '"cores"' not in inspect.getsource(platform._capacity_rules)
+    assert "'cores'" not in inspect.getsource(platform._capacity_rules)
+
+
 def test_missing_vsan_capacity_is_a_shortfall_not_a_silent_pass(inventory):
     for host in inventory["hosts"]:
         host["hardware"].pop("vsanDeviceTb", None)

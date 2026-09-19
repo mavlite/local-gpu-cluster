@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
-from ..findings import Finding, Result, Severity
+from ..findings import Finding, Result, Severity, json_pointer
 from ..inventory import REFERENCE_RE
 from ..redact import CREDENTIAL_KEY_RE, redact
 from ..schema import DEFAULT_VERSION, load_schema
@@ -59,17 +59,13 @@ def substitute_secrets(spec: object) -> object:
     return copy.copy(spec)
 
 
-def declared_properties(schema: dict, def_name: str) -> set[str]:
-    return set(schema["$defs"][def_name].get("properties", {}))
-
-
 def validate_against_schema(spec: dict, version: str = DEFAULT_VERSION) -> Result:
     validator = Draft202012Validator(load_schema(version))
     candidate = substitute_secrets(spec)
     findings = tuple(
         Finding(
             code="VCF-SCHEMA", severity=Severity.ERROR,
-            path=_pointer(error.absolute_path),
+            path=json_pointer(error.absolute_path),
             message=_message_for(error),
             fix="Correct the field to match the VCF Installer schema.",
             source="schema", source_url=SOURCE_URL)
@@ -77,11 +73,6 @@ def validate_against_schema(spec: dict, version: str = DEFAULT_VERSION) -> Resul
                             key=lambda e: [str(p) for p in e.absolute_path])
     )
     return Result(findings)
-
-
-def _pointer(path) -> str:
-    parts = list(path)
-    return "/" + "/".join(str(p) for p in parts) if parts else "/"
 
 
 # --- Message construction -------------------------------------------------
@@ -114,7 +105,7 @@ def _constraint_detail(value: object) -> str:
 
 
 def _structural_message(error) -> str:
-    where = _pointer(error.absolute_path)
+    where = json_pointer(error.absolute_path)
     if error.validator == "required":
         declared = error.validator_value or []
         missing = (sorted(set(declared) - set(error.instance))
@@ -134,14 +125,18 @@ def _message_for(error) -> str:
 
 # --- Recursive $defs walk -------------------------------------------------
 #
-# declared_properties() above checks one node, one level deep. That is not
-# enough to guard a renderer that hand-builds nested dicts (credentials,
-# NSX manager lists, IP pool ranges, ESA config, ...): a wrong key three
-# levels down would pass both declared_properties() and full jsonschema
-# validation, because no $def in this vendored schema sets
-# additionalProperties: false, so Draft202012Validator never rejects an
-# invented key at any depth. walk_declared_properties() is the only check
-# that can catch that class of bug; it must actually descend.
+# An earlier one-level-deep helper (declared_properties(), checking a single
+# node's own `properties` and nothing under it) is not enough to guard a
+# renderer that hand-builds nested dicts (credentials, NSX manager lists, IP
+# pool ranges, ESA config, ...): a wrong key three levels down would pass
+# both that check and full jsonschema validation, because no $def in this
+# vendored schema sets additionalProperties: false, so Draft202012Validator
+# never rejects an invented key at any depth. walk_declared_properties() is
+# the only check that can catch that class of bug; it must actually
+# descend -- which is why it, not the one-level helper, is what api.py
+# wires into render_document()'s verify layer. The one-level helper was
+# removed once nothing called it any more (its own test was its only
+# caller).
 
 @dataclass(frozen=True, slots=True)
 class SchemaWalkResult:

@@ -32,3 +32,17 @@ def test_finding_is_frozen():
 def test_severity_serialises_as_a_plain_string():
     assert f().severity == "error"
     assert dataclasses.asdict(f())["severity"] == "error"
+
+
+def test_by_severity_returns_only_that_severitys_findings():
+    result = Result((f(code="A", severity=Severity.ERROR),
+                     f(code="B", severity=Severity.WARNING),
+                     f(code="C", severity=Severity.ERROR)))
+    errors = result.by_severity(Severity.ERROR)
+    assert [x.code for x in errors] == ["A", "C"]
+    assert all(x.severity is Severity.ERROR for x in errors)
+
+
+def test_by_severity_is_empty_when_nothing_matches():
+    result = Result((f(severity=Severity.WARNING),))
+    assert result.by_severity(Severity.CRITICAL) == ()

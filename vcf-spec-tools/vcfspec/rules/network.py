@@ -5,11 +5,13 @@ is defensive: a malformed entry is skipped, not raised on.
 """
 from __future__ import annotations
 
-import ipaddress
 from collections import defaultdict
 
 from ..findings import Finding, Result
 from . import finding_for
+from .coerce import as_address as _address
+from .coerce import as_mapping as _mapping
+from .coerce import as_network as _network
 
 TEP_MTU_MIN = 1600
 TEPS_PER_HOST = 2
@@ -45,29 +47,6 @@ def _usable_networks(inventory: dict) -> dict[str, dict]:
         out["nsx.tepPool"] = {"net": tep_net, "vlan": nsx.get("transportVlanId"),
                               "gateway": tep.get("gateway"), "subnet": tep["cidr"]}
     return out
-
-
-def _mapping(value: object) -> dict:
-    """Return value when it is a mapping, else an empty one.
-
-    Rules run on documents that failed schema validation, so a field of the
-    wrong type must be skipped, not raised on.
-    """
-    return value if isinstance(value, dict) else {}
-
-
-def _network(value) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
-    try:
-        return ipaddress.ip_network(value, strict=False)
-    except (TypeError, ValueError):
-        return None
-
-
-def _address(value):
-    try:
-        return ipaddress.ip_address(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _gateway_rules(networks: dict) -> list[Finding]:

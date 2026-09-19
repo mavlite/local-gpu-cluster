@@ -205,7 +205,7 @@ VCF-CAP-UNKNOWN-HARDWARE:
   source: table
   source_url: ""
   summary: "Host {name} declares no usable hardware, so capacity cannot be checked."
-  fix: "Add hardware.cores and hardware.ramGb for every host."
+  fix: "Add hardware.ramGb for every host. hardware.cores is required by the inventory schema but is not part of capacity sizing here -- vCPU is routinely oversubscribed in a vSphere cluster, unlike RAM, so it is not checked against the mandatory stack's vCPU demand."
 VCF-LIC-EVALUATION:
   severity: info
   source: docs

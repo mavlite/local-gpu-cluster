@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 from jsonschema import Draft202012Validator
 
-from .findings import Finding, Result, Severity
+from .findings import Finding, Result, Severity, json_pointer
 
 _HERE = Path(__file__).resolve().parent
 INVENTORY_SCHEMA_PATH = _HERE / "schemas" / "inventory" / "v1.schema.json"
@@ -38,7 +38,7 @@ def validate_inventory(doc: dict) -> Result:
                         key=lambda e: [str(p) for p in e.absolute_path]):
         findings.append(Finding(
             code="VCF-INV-SCHEMA", severity=Severity.ERROR,
-            path=_pointer(error.absolute_path), message=error.message,
+            path=json_pointer(error.absolute_path), message=error.message,
             fix="Correct the inventory to match the documented schema.",
             source="schema"))
     # The ${reference} rule is the project's single hardest constraint, so
@@ -50,8 +50,3 @@ def validate_inventory(doc: dict) -> Result:
     from .credentials import credential_findings
     findings.extend(credential_findings(doc).findings)
     return Result(tuple(findings))
-
-
-def _pointer(path) -> str:
-    parts = list(path)
-    return "/" + "/".join(str(p) for p in parts) if parts else "/"

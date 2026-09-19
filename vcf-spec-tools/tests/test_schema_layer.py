@@ -1,6 +1,5 @@
-from vcfspec.schema import load_schema
-from vcfspec.validate.schema_layer import (PLACEHOLDER_SECRET, declared_properties,
-                                           substitute_secrets, validate_against_schema)
+from vcfspec.validate.schema_layer import (PLACEHOLDER_SECRET, substitute_secrets,
+                                           validate_against_schema)
 
 MINIMAL = {
     "sddcId": "lab01",
@@ -120,8 +119,3 @@ def test_a_container_instance_is_replaced_by_a_pointer_not_reprinted():
     assert secret not in rendered
     assert "/hostSpecs" in rendered
     assert "'array'" in rendered
-
-
-def test_declared_properties_reads_the_vendored_schema():
-    props = declared_properties(load_schema(), "SddcHostSpec")
-    assert props == {"hostname", "credentials", "sshThumbprint", "sslThumbprint"}

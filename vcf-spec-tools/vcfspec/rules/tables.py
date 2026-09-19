@@ -20,7 +20,18 @@ MANDATORY_STACK_9_1_1 = (
     ("VCFMS worker nodes x3", 36, 72, 300),
 )
 
-STACK_VCPU = sum(row[1] for row in MANDATORY_STACK_9_1_1)          # 76
+# The vcpu column (row[1]) is transcribed for completeness with the source
+# table but deliberately has no derived STACK_VCPU sum: _capacity_rules
+# checks RAM and storage only, never vCPU count, because vCPU is routinely
+# oversubscribed in a vSphere cluster (a 4:1 or higher ratio is normal),
+# unlike RAM and storage, which cannot be oversubscribed without the
+# workload actually failing. A raw "total physical cores >= stack vCPU
+# demand" check would be checking the wrong thing -- and would also fail
+# the bundled example (48 physical cores across 3 hosts vs a 76-vCPU
+# mandatory stack), which is deployable in practice. See
+# VCF-CAP-UNKNOWN-HARDWARE's catalogue entry for the corresponding fix-text
+# correction: it used to promise a hardware.cores capacity check that this
+# module has never implemented.
 STACK_RAM_GB = sum(row[2] for row in MANDATORY_STACK_9_1_1)        # 219.25
 STACK_STORAGE_GB = sum(row[3] for row in MANDATORY_STACK_9_1_1)    # 3054
 

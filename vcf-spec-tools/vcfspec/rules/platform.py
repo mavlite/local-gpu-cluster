@@ -6,10 +6,11 @@ raised on -- mirroring the ``_mapping()`` discipline in rules/network.py.
 """
 from __future__ import annotations
 
-import ipaddress
-
 from ..findings import Finding, Result
 from . import finding_for
+from .coerce import as_address as _address
+from .coerce import as_mapping as _mapping
+from .coerce import as_network as _network
 from .tables import (AUTO_RAID_OVERHEAD, ESX_HOST_RAM_OVERHEAD_GB, STACK_RAM_GB,
                      STACK_STORAGE_GB, TB_TO_GB, VSP_POOL_MIN)
 
@@ -21,14 +22,6 @@ def check_platform(inventory: dict) -> Result:
     findings += _capacity_rules(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
     return Result(tuple(findings))
-
-
-def _mapping(value: object) -> dict:
-    """Return value when it is a mapping, else an empty one.
-
-    A field of the wrong type must be skipped, not raised on.
-    """
-    return value if isinstance(value, dict) else {}
 
 
 def _sequence(value: object) -> list:
@@ -146,17 +139,3 @@ def _capacity_rules(inventory: dict) -> list[Finding]:
             out.append(finding_for("VCF-CAP-STORAGE-SHORTFALL", "/hosts",
                                    needed=STACK_STORAGE_GB, available=usable_storage))
     return out
-
-
-def _address(value):
-    try:
-        return ipaddress.ip_address(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _network(value):
-    try:
-        return ipaddress.ip_network(value, strict=False)
-    except (TypeError, ValueError):
-        return None

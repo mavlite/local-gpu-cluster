@@ -89,3 +89,19 @@ def test_codes_exist_in_catalogue(code):
 def test_wrong_typed_sections_do_not_raise(inventory, mutation):
     inventory.update(mutation)
     check_networks(inventory)   # must not raise
+
+
+# --- Finding 13: rules/network.py and rules/platform.py each carried a
+# byte-identical private copy of _mapping/_address/_network. Both now
+# import the same functions from rules/coerce.py -- `is`, not just
+# behavioural equality, so a future edit to one module cannot silently
+# re-fork a "local" copy without this catching it.
+
+def test_network_and_platform_share_the_same_coerce_helpers():
+    from vcfspec.rules import coerce, network, platform
+    assert network._mapping is coerce.as_mapping
+    assert network._address is coerce.as_address
+    assert network._network is coerce.as_network
+    assert platform._mapping is coerce.as_mapping
+    assert platform._address is coerce.as_address
+    assert platform._network is coerce.as_network

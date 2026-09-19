@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from .inventory import REFERENCE_RE
+
 MASK = "***REDACTED***"
 
 # 'credential' deliberately absent: it matches the container, not a secret.
@@ -17,7 +19,9 @@ CREDENTIAL_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
-REFERENCE_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+# REFERENCE_RE used to be redefined here, byte-identical to inventory.py's
+# copy (finding 13) -- imported from there instead, the same pattern
+# credentials.py already follows for the same regex.
 
 # No length floor. An earlier {6,} bound let "'Ab3!x' is too short" through
 # verbatim -- a five-character ESXi root password is still a password, and

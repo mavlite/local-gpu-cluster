@@ -1,4 +1,17 @@
+import vcfspec.inventory
+import vcfspec.redact
 from vcfspec.redact import MASK, redact
+
+
+def test_reference_re_is_the_one_from_inventory_not_a_second_copy():
+    """Finding 13: redact.py used to define its own REFERENCE_RE,
+    byte-identical to inventory.py's -- two independently maintained
+    copies of the project's single most load-bearing pattern, which is
+    exactly the drift risk credentials.py's own docstring warns about.
+    Asserting `is` pins the mechanism (one compiled pattern, imported,
+    not re-typed) rather than just its current, coincidentally-matching
+    text."""
+    assert vcfspec.redact.REFERENCE_RE is vcfspec.inventory.REFERENCE_RE
 
 
 def test_masks_scalar_secrets_but_keeps_the_containing_dict():
