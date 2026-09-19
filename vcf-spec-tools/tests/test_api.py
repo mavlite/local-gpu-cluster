@@ -512,6 +512,21 @@ def test_no_layers_ran_invariant_does_not_touch_an_already_invalid_result():
     assert out.codes == ("VCF-INPUT-UNRECOGNISED",)   # unchanged, not doubled up
 
 
+def test_the_invariant_is_actually_wired_into_the_envelope():
+    """The three tests above call the helper directly, so all of them pass
+    even if _envelope() stops calling it -- the guard would still be
+    correct, and no longer protect anything. That is the defect this
+    branch's final review found in its most serious form (a schema walk
+    that worked perfectly and had no production call site), so the call
+    site gets pinned here rather than trusted.
+    """
+    from vcfspec.api import _envelope
+
+    out = _envelope(Result(()), ["detect"], {})
+    assert out["valid"] is False
+    assert [f["code"] for f in out["findings"]] == ["VCF-NO-VALIDATION-RAN"]
+
+
 # --- Finding 6: probes must never be listed as run over a shape they
 # cannot read ---------------------------------------------------------------
 
