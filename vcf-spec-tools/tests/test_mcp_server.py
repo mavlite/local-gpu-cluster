@@ -217,7 +217,16 @@ def test_unvendored_vcf_version_is_a_bad_args_finding_for_validate():
     assert "VCF-MCP-BAD-ARGS" in codes
     assert "INTERNAL" not in codes
     bad_args = next(f for f in out["findings"] if f["code"] == "VCF-MCP-BAD-ARGS")
-    assert "9.9.9.9" in bad_args["message"]
+    # Security review findings 1/2: this assertion used to be
+    # `"9.9.9.9" in bad_args["message"]`. It is now its inverse, on
+    # purpose. Every rejected version must produce an identical envelope
+    # (see test_security_version.py), which a message quoting the
+    # caller's own string cannot do -- and reflecting arbitrary caller
+    # text into an envelope an AI agent reads is a surface worth not
+    # having. The vendored set is named instead, which is the thing a
+    # legitimate caller actually needs.
+    assert "9.9.9.9" not in bad_args["message"]
+    assert "9.1.1.0" in bad_args["message"]
 
 
 def test_unvendored_vcf_version_is_a_bad_args_finding_for_render():
@@ -231,7 +240,9 @@ def test_unvendored_vcf_version_is_a_bad_args_finding_for_render():
     assert "VCF-MCP-BAD-ARGS" in codes
     assert "INTERNAL" not in codes
     bad_args = next(f for f in out["findings"] if f["code"] == "VCF-MCP-BAD-ARGS")
-    assert "9.9.9.9" in bad_args["message"]
+    # Inverted deliberately -- see the validate-side twin above.
+    assert "9.9.9.9" not in bad_args["message"]
+    assert "9.1.1.0" in bad_args["message"]
 
 
 # --- Finding 10: reclassification translates one finding, does not discard

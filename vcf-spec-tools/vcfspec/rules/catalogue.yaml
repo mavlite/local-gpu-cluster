@@ -42,8 +42,25 @@ VCF-SCHEMA-VERSION-UNKNOWN:
   severity: critical
   source: schema
   source_url: ""
-  summary: "No vendored schema or defaults for VCF version '{version}'."
+  # Deliberately does NOT quote the requested version. Every rejected
+  # version must produce a byte-identical envelope (findings 1/2: a
+  # varying message is the last thing an existence oracle needs), and this
+  # message is read by an AI agent, so an arbitrary caller-supplied string
+  # is not reflected into it. The vendored set is named instead, which is
+  # what a legitimate caller actually needs to know.
+  summary: "The requested VCF version is not vendored in this installation. Vendored: {known}."
   fix: "Use a vendored VCF version, or omit vcf_version/--version to use the default. Vendor a new one first with scripts/vendor_schema.py."
+VCF-SCHEMA-INTEGRITY:
+  severity: critical
+  source: schema
+  source_url: ""
+  # Finding 6: distinct from VCF-SCHEMA-VERSION-UNKNOWN, which is a
+  # retryable bad argument. This one means the schema shipped inside the
+  # installation no longer hashes to its recorded checksum -- tampering or
+  # a corrupt install, never a caller mistake. It must not be translated
+  # to VCF-MCP-BAD-ARGS, and retrying it is pointless.
+  summary: "Integrity check FAILED for the vendored VCF {version} schema: its contents do not match the checksum shipped with this installation. This is not a problem with the request."
+  fix: "Do not retry. Treat this installation as compromised until proven otherwise: reinstall vcfspec from a trusted source, or re-vendor the schema with scripts/vendor_schema.py and review the diff."
 VCF-VERSION-NOT-CONSULTED:
   severity: info
   source: schema

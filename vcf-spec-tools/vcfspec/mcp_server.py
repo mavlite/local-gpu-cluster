@@ -29,9 +29,29 @@ from .documents import load_document
 from .inventory import EXAMPLE_PATH, REFERENCE_RE, load_inventory_schema
 from .redact import CREDENTIAL_KEY_RE, MASK, redact
 from .rules import finding_for, load_catalogue
-from .schema import DEFAULT_VERSION
+from .schema import DEFAULT_VERSION, known_versions
+
+# Every string argument carries a maxLength, enforced by the
+# Draft202012Validator in call_handler() before any handler body runs.
+#
+# MAX_DOCUMENT_CHARS is the server-surface answer to finding 5. The
+# library's own documents.MAX_BYTES (2 MB) stays where it is -- the CLI
+# reads an operator's own file under their own account and a big one there
+# costs only their own patience -- but the MCP server is long-lived,
+# single-process and asyncio-driven, and vcf_diff_spec parses *two*
+# documents per call. A real 3-host inventory is ~1.5 KB and the largest
+# rendered SddcSpec this package produces is a few tens of KB, so 256 K
+# characters is ~170x headroom over any legitimate input while cutting the
+# worst-case parse to a fraction of a second. Note this bounds characters,
+# not bytes; documents.MAX_BYTES remains the byte-side backstop underneath.
+MAX_DOCUMENT_CHARS = 262_144
+MAX_VERSION_CHARS = 32          # longest vendored version is 7 characters
+MAX_CODE_CHARS = 128            # longest catalogue code is ~32 characters
 
 _STRING = {"type": "string"}
+_DOCUMENT = {"type": "string", "maxLength": MAX_DOCUMENT_CHARS}
+_VERSION = {"type": "string", "maxLength": MAX_VERSION_CHARS}
+_CODE = {"type": "string", "maxLength": MAX_CODE_CHARS}
 # A closed enum, not a bare string: the input_kind documents.detect_kind()
 # actually accepts is exactly {"inventory", "sddc_spec"} (see documents.py's
 # _VALID_OVERRIDES). Declaring that here means a bad value -- "unknown"
@@ -104,9 +124,16 @@ def _reclassify_unknown_version(result: dict, tool: str, version: str) -> dict:
     findings = result.get("findings", [])
     if not any(f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" for f in findings):
         return result
+    # `detail` names the vendored versions, never the one the caller asked
+    # for. Findings 1/2: the rejection must read identically for every
+    # rejected version, and echoing an arbitrary caller string into an
+    # envelope an agent reads is a surface worth not having. `version` is
+    # still a parameter because the caller-facing signature has not
+    # changed and the value is used for nothing else here.
     bad_args = asdict(finding_for(
         "VCF-MCP-BAD-ARGS", "/", tool=tool,
-        detail=f"no vendored schema for VCF version {version!r}"))
+        detail="requested VCF version is not vendored; vendored: "
+               + (", ".join(sorted(known_versions())) or "(none)")))
     new_findings = [bad_args if f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" else f
                    for f in findings]
     valid = not any(f["severity"] in ("critical", "error") for f in new_findings)
@@ -320,24 +347,24 @@ _TOOL_DEFS: tuple[ToolDef, ...] = (
             reports_valid=False),
     ToolDef("vcf_render_spec",
             "Render a lab inventory into VCF Installer SddcSpec JSON.",
-            _schema(("document",), document=_STRING, vcf_version=_STRING,
+            _schema(("document",), document=_DOCUMENT, vcf_version=_VERSION,
                      input_kind=_INPUT_KIND),
             tool_render_spec,
             reports_layers=True),
     ToolDef("vcf_validate_spec",
             "Validate an inventory or SddcSpec document; returns findings.",
-            _schema(("document",), document=_STRING, vcf_version=_STRING,
+            _schema(("document",), document=_DOCUMENT, vcf_version=_VERSION,
                      input_kind=_INPUT_KIND),
             tool_validate_spec,
             reports_layers=True),
     ToolDef("vcf_explain_finding",
             "Explain one finding code, with its severity, fix and documentation source.",
-            _schema(("code",), code=_STRING),
+            _schema(("code",), code=_CODE),
             tool_explain_finding,
             reports_valid=False),
     ToolDef("vcf_diff_spec",
             "Semantic diff of two inventories or specs; credential values are masked.",
-            _schema(("left", "right"), left=_STRING, right=_STRING),
+            _schema(("left", "right"), left=_DOCUMENT, right=_DOCUMENT),
             tool_diff_spec),
 )
 
