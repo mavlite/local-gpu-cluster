@@ -3,17 +3,27 @@ name = "vcfspec"
 version = "0.1.0"
 description = "Validate and render VMware Cloud Foundation deployment specifications"
 requires-python = ">=3.11"
-dependencies = ["pyyaml>=6.0", "jsonschema>=4.21"]
+# Every dependency carries BOTH bounds. The floor is a security floor: it
+# excludes releases with known advisories. The ceiling is an availability
+# floor: this homelab lost mcp-sdg on 2026-08-21 when an unbounded
+# `mcp>=1.2` resolved to 2.0.0, so "unlikely to ship a breaking major" is
+# not a reason to omit one -- that was the reasoning last time too.
+dependencies = ["pyyaml>=6.0.2,<7", "jsonschema>=4.21,<5"]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.2,<2"]
-dev = ["pytest>=8.0"]
+# Floor raised from 1.2: every mcp release below 1.28.1 carries at least
+# one of PYSEC-2026-1616 (fixed 1.9.4), -1618 (1.10.0), -1617 (1.23.0),
+# -3482 (1.27.2) and -3483 (1.28.1). A fresh resolve picks a clean
+# version today, so this was latent -- it becomes live on any constrained
+# resolve, stale wheel cache, or offline/mirror install.
+mcp = ["mcp>=1.28.1,<2"]
+dev = ["pytest>=8.0,<10"]
 
 [project.scripts]
 vcfspec = "vcfspec.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68,<84"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

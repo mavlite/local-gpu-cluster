@@ -22,7 +22,7 @@ import yaml
 
 from .findings import Finding, Result, Severity
 from .inventory import REFERENCE_RE
-from .schema import DEFAULT_VERSION
+from .schema import DEFAULT_VERSION, resolve_version
 
 DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
 
@@ -51,8 +51,26 @@ NETWORK_TYPES = {"management": "MANAGEMENT", "vmotion": "VMOTION", "vsan": "VSAN
 NETWORK_ORDER = ("management", "vmotion", "vsan")
 
 
-@lru_cache(maxsize=4)
 def _defaults_text(version: str) -> str:
+    """Read the defaults table for `version`, which must be a vendored one.
+
+    Same gate as schema.schema_path(), for the same reason: `version` is
+    caller-controlled (MCP `vcf_version`, CLI `--version`) and this was the
+    second path it reached. It was the worse of the two for disclosure --
+    `render.default()` puts `entry['value']!r` into a finding message and
+    `entry['source']` into `source_url`, so any readable `.yaml` shaped
+    like a defaults table would have had its contents echoed back to the
+    caller verbatim. resolve_version() runs first and raises before any
+    path exists to read.
+
+    The cache is keyed on the *resolved* version, so caller text never
+    becomes a cache key.
+    """
+    return _defaults_text_for(resolve_version(version))
+
+
+@lru_cache(maxsize=4)
+def _defaults_text_for(version: str) -> str:
     return (DEFAULTS_DIR / f"{version}.yaml").read_text(encoding="utf-8")
 
 

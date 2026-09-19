@@ -44,6 +44,31 @@ MAX_NODES = 200_000
 SDDC_SPEC_KEYS = {"sddcId", "dnsSpec", "networkSpecs", "vcenterSpec"}
 _ALIAS_RE = re.compile(r"(?m)(?<![\w*])\*[A-Za-z0-9_][\w-]*")
 
+# Finding 5 of the 2026-09-19 security review: MAX_BYTES bounds size, not
+# cost. A legal 1.79 MB document took ~18 s to load, and cProfile put 18.1
+# of those 18.4 s inside yaml.safe_load -- the parser, not the diff. The
+# MCP server is long-lived, single-process and asyncio-driven, so one such
+# call stalled every other.
+#
+# CSafeLoader is the libyaml-backed parser. It is the SAME safe subset as
+# SafeLoader -- no arbitrary object construction, no !!python tags -- so
+# this changes speed and nothing else about what is accepted. It is not
+# always present (a pure-Python PyYAML wheel, or a build without libyaml),
+# hence the fallback.
+#
+# yaml.safe_load(text) is by definition yaml.load(text, SafeLoader), so
+# selecting between the two safe loaders here keeps safe_load semantics
+# exactly. Do NOT widen this to yaml.Loader, yaml.UnsafeLoader or
+# yaml.FullLoader: every one of them can construct Python objects from
+# operator-supplied text, which is the whole thing safe_load exists to
+# prevent.
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def _safe_load(text: str):
+    """yaml.safe_load, on libyaml when this install has it."""
+    return yaml.load(text, Loader=_SAFE_LOADER)
+
 
 class DocumentTooLarge(ValueError):
     """Document exceeds MAX_BYTES."""
@@ -73,7 +98,12 @@ def load_document(text: str) -> dict:
     if len(_ALIAS_RE.findall(text)) > MAX_ALIASES:
         raise DocumentTooManyAliases(f"document uses more than {MAX_ALIASES} aliases")
     try:
-        doc = yaml.safe_load(text)
+        doc = _safe_load(text)
+    # Both loaders signal their nesting limit as RecursionError -- libyaml
+    # raises it as "Stack overflow (used 2912 kB)" rather than letting the
+    # C stack actually run out. Verified for CSafeLoader at 10k and 100k
+    # levels of nesting; see tests/test_documents.py. One handler covers
+    # both, and there is no second exception type to catch.
     except RecursionError as exc:
         raise DocumentTooDeep(
             "document nests too deeply for the YAML parser") from exc
@@ -109,9 +139,18 @@ def detect_kind(doc: dict, override: str | None = None) -> tuple[DocumentKind, R
             kind = None
         if kind in _VALID_OVERRIDES:
             return kind, Result()
+        # `override` is not quoted back. The MCP boundary already refuses
+        # anything outside the closed enum before this runs, and argparse
+        # does the same for the CLI, so no caller-facing surface can
+        # currently reach this message with arbitrary text -- but
+        # validate_document() is a public library entry point that takes
+        # input_kind directly, and the rule ("never reflect caller text
+        # into a message an agent reads") should not depend on which
+        # front door happens to be in front of it today.
         return DocumentKind.UNKNOWN, Result((Finding(
             code="VCF-INPUT-BAD-KIND", severity=Severity.CRITICAL, path="/",
-            message=f"Unknown input_kind {override!r}.",
+            message="Unknown input_kind. Valid values are 'inventory' and "
+                    "'sddc_spec'.",
             fix="Use 'inventory' or 'sddc_spec', or omit it.",
             source="schema"),))
     if str(doc.get("apiVersion", "")).startswith("vcfspec/") and \

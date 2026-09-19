@@ -29,9 +29,29 @@ from .documents import load_document
 from .inventory import EXAMPLE_PATH, REFERENCE_RE, load_inventory_schema
 from .redact import CREDENTIAL_KEY_RE, MASK, redact
 from .rules import finding_for, load_catalogue
-from .schema import DEFAULT_VERSION
+from .schema import DEFAULT_VERSION, known_versions
+
+# Every string argument carries a maxLength, enforced by the
+# Draft202012Validator in call_handler() before any handler body runs.
+#
+# MAX_DOCUMENT_CHARS is the server-surface answer to finding 5. The
+# library's own documents.MAX_BYTES (2 MB) stays where it is -- the CLI
+# reads an operator's own file under their own account and a big one there
+# costs only their own patience -- but the MCP server is long-lived,
+# single-process and asyncio-driven, and vcf_diff_spec parses *two*
+# documents per call. A real 3-host inventory is ~1.5 KB and the largest
+# rendered SddcSpec this package produces is a few tens of KB, so 256 K
+# characters is ~170x headroom over any legitimate input while cutting the
+# worst-case parse to a fraction of a second. Note this bounds characters,
+# not bytes; documents.MAX_BYTES remains the byte-side backstop underneath.
+MAX_DOCUMENT_CHARS = 262_144
+MAX_VERSION_CHARS = 32          # longest vendored version is 7 characters
+MAX_CODE_CHARS = 128            # longest catalogue code is ~32 characters
 
 _STRING = {"type": "string"}
+_DOCUMENT = {"type": "string", "maxLength": MAX_DOCUMENT_CHARS}
+_VERSION = {"type": "string", "maxLength": MAX_VERSION_CHARS}
+_CODE = {"type": "string", "maxLength": MAX_CODE_CHARS}
 # A closed enum, not a bare string: the input_kind documents.detect_kind()
 # actually accepts is exactly {"inventory", "sddc_spec"} (see documents.py's
 # _VALID_OVERRIDES). Declaring that here means a bad value -- "unknown"
@@ -104,9 +124,16 @@ def _reclassify_unknown_version(result: dict, tool: str, version: str) -> dict:
     findings = result.get("findings", [])
     if not any(f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" for f in findings):
         return result
+    # `detail` names the vendored versions, never the one the caller asked
+    # for. Findings 1/2: the rejection must read identically for every
+    # rejected version, and echoing an arbitrary caller string into an
+    # envelope an agent reads is a surface worth not having. `version` is
+    # still a parameter because the caller-facing signature has not
+    # changed and the value is used for nothing else here.
     bad_args = asdict(finding_for(
         "VCF-MCP-BAD-ARGS", "/", tool=tool,
-        detail=f"no vendored schema for VCF version {version!r}"))
+        detail="requested VCF version is not vendored; vendored: "
+               + (", ".join(sorted(known_versions())) or "(none)")))
     new_findings = [bad_args if f["code"] == "VCF-SCHEMA-VERSION-UNKNOWN" else f
                    for f in findings]
     valid = not any(f["severity"] in ("critical", "error") for f in new_findings)
@@ -133,9 +160,16 @@ def tool_explain_finding(args: dict) -> dict:
     code = args.get("code", "")
     meta = load_catalogue().get(code)
     if meta is None:
+        # The requested code is NOT echoed into the summary. It used to be
+        # (`No rule with code {code!r}.`), which handed an agent up to 128
+        # caller-chosen characters back inside a message it reads -- the
+        # same reflection removed from the version findings, and with the
+        # same lack of upside, since the caller already knows what it
+        # asked for. The catalogue is finite and small, so naming it is a
+        # strictly more useful answer than repeating the question.
         unknown = load_catalogue()["VCF-EXPLAIN-UNKNOWN-CODE"]
         return {"code": unknown.code, "severity": str(unknown.severity),
-                "summary": f"No rule with code {code!r}.",
+                "summary": unknown.summary,
                 "fix": unknown.fix, "source": unknown.source,
                 "source_url": unknown.source_url}
     return {"code": meta.code, "severity": str(meta.severity), "summary": meta.summary,
@@ -170,37 +204,112 @@ def tool_diff_spec(args: dict) -> dict:
             finding = finding_for("VCF-INPUT-UNREADABLE", f"/{side}",
                                   exc_type=type(exc).__name__)
             return redact({"valid": False, "findings": [asdict(finding)]})
-    changes = _diff(documents["left"], documents["right"], "")
+    budget = _ChangeBudget()
+    changes = _diff(documents["left"], documents["right"], "", budget)
+    if budget.truncated:
+        # `valid` for this tool means "both inputs were readable" -- and,
+        # from here on, "and the diff you are holding is complete". A
+        # truncated diff reported as valid is the worst answer available:
+        # an agent asking "did anything under /credentials change?" would
+        # read a partial diff as a complete one. Blocking severity, so
+        # valid is false, and an explicit `truncated` key so a consumer
+        # does not have to infer it from the findings list.
+        finding = finding_for("VCF-DIFF-TRUNCATED", "/",
+                              changes=MAX_CHANGES, chars=MAX_CHANGE_CHARS)
+        return redact({"valid": False, "findings": [asdict(finding)],
+                       "changes": changes, "changed": len(changes),
+                       "truncated": True})
     return redact({"valid": True, "findings": [], "changes": changes,
-                   "changed": len(changes)})
+                   "changed": len(changes), "truncated": False})
 
 
 # --- Diff engine --------------------------------------------------------
+#
+# The diff's OUTPUT is bounded, not just its input. documents.MAX_NODES
+# bounds how far a document expands; it does not bound how much this tool
+# emits about it, and the two are not the same number. Measured after the
+# first round of security fixes: a 10,073-character document -- 30 aliases
+# (limit 100), 196,590 nodes (limit 200,000), comfortably inside every
+# input bound -- produced a 306.8 MB response in 15.82 s, a 30,461x
+# amplification, synchronously, on a long-lived single-process server.
+# Cost scales with change count x path length, and alias expansion drives
+# both while the source text stays tiny.
+#
+# Two limits, because neither subsumes the other: many small changes is a
+# different shape from few changes with enormous JSON pointers, and the
+# alias construction above produces the second.
+MAX_CHANGES = 10_000
+MAX_CHANGE_CHARS = 1_000_000
 
-def _diff(left: object, right: object, path: str) -> list[dict]:
+
+class _ChangeBudget:
+    """Bounds what the diff may emit, and remembers if it ran out.
+
+    `truncated` is the important field: a diff that silently stopped
+    early is exactly the "confidently wrong" answer this package exists
+    to prevent -- an agent asking "did anything under /credentials
+    change?" must never receive a clean-looking partial answer.
+    """
+
+    __slots__ = ("changes", "chars", "truncated")
+
+    def __init__(self) -> None:
+        self.changes = 0
+        self.chars = 0
+        self.truncated = False
+
+    def take(self, cost: int) -> bool:
+        if self.changes >= MAX_CHANGES or self.chars + cost > MAX_CHANGE_CHARS:
+            self.truncated = True
+            return False
+        self.changes += 1
+        self.chars += cost
+        return True
+
+
+def _diff(left: object, right: object, path: str,
+          budget: _ChangeBudget) -> list[dict]:
+    # Bail as soon as the budget is spent so the recursion unwinds
+    # immediately instead of walking the rest of an expanded document it
+    # has already decided not to report on.
+    if budget.truncated:
+        return []
     if isinstance(left, dict) and isinstance(right, dict):
         out: list[dict] = []
         for key in sorted(set(left) | set(right)):
-            out += _diff(left.get(key), right.get(key), f"{path}/{key}")
+            out += _diff(left.get(key), right.get(key), f"{path}/{key}", budget)
+            if budget.truncated:
+                break
         return out
     if isinstance(left, list) and isinstance(right, list):
-        return _diff_lists(left, right, path)
+        return _diff_lists(left, right, path, budget)
     if left != right:
-        return [_change_entry(path, left, right)]
+        return _emit(path, left, right, budget)
     return []
 
 
-def _diff_lists(left: list, right: list, path: str) -> list[dict]:
+def _emit(path: str, left: object, right: object,
+          budget: _ChangeBudget) -> list[dict]:
+    """One leaf change, if the budget allows it."""
+    if not budget.take(len(path) + 32):
+        return []
+    return [_change_entry(path, left, right)]
+
+
+def _diff_lists(left: list, right: list, path: str,
+                budget: _ChangeBudget) -> list[dict]:
     key = _list_key(left) or _list_key(right)
     if key:
         lmap = {item.get(key): item for item in left if isinstance(item, dict)}
         rmap = {item.get(key): item for item in right if isinstance(item, dict)}
         out: list[dict] = []
         for name in sorted(set(lmap) | set(rmap), key=str):
-            out += _diff(lmap.get(name), rmap.get(name), f"{path}/{name}")
+            out += _diff(lmap.get(name), rmap.get(name), f"{path}/{name}", budget)
+            if budget.truncated:
+                break
         return out
     if left != right:
-        return [_change_entry(path, left, right)]
+        return _emit(path, left, right, budget)
     return []
 
 
@@ -320,24 +429,24 @@ _TOOL_DEFS: tuple[ToolDef, ...] = (
             reports_valid=False),
     ToolDef("vcf_render_spec",
             "Render a lab inventory into VCF Installer SddcSpec JSON.",
-            _schema(("document",), document=_STRING, vcf_version=_STRING,
+            _schema(("document",), document=_DOCUMENT, vcf_version=_VERSION,
                      input_kind=_INPUT_KIND),
             tool_render_spec,
             reports_layers=True),
     ToolDef("vcf_validate_spec",
             "Validate an inventory or SddcSpec document; returns findings.",
-            _schema(("document",), document=_STRING, vcf_version=_STRING,
+            _schema(("document",), document=_DOCUMENT, vcf_version=_VERSION,
                      input_kind=_INPUT_KIND),
             tool_validate_spec,
             reports_layers=True),
     ToolDef("vcf_explain_finding",
             "Explain one finding code, with its severity, fix and documentation source.",
-            _schema(("code",), code=_STRING),
+            _schema(("code",), code=_CODE),
             tool_explain_finding,
             reports_valid=False),
     ToolDef("vcf_diff_spec",
             "Semantic diff of two inventories or specs; credential values are masked.",
-            _schema(("left", "right"), left=_STRING, right=_STRING),
+            _schema(("left", "right"), left=_DOCUMENT, right=_DOCUMENT),
             tool_diff_spec),
 )
 

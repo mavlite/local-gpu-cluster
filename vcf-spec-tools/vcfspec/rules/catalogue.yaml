@@ -42,13 +42,36 @@ VCF-SCHEMA-VERSION-UNKNOWN:
   severity: critical
   source: schema
   source_url: ""
-  summary: "No vendored schema or defaults for VCF version '{version}'."
+  # Deliberately does NOT quote the requested version. Every rejected
+  # version must produce a byte-identical envelope (findings 1/2: a
+  # varying message is the last thing an existence oracle needs), and this
+  # message is read by an AI agent, so an arbitrary caller-supplied string
+  # is not reflected into it. The vendored set is named instead, which is
+  # what a legitimate caller actually needs to know.
+  summary: "The requested VCF version is not vendored in this installation. Vendored: {known}."
   fix: "Use a vendored VCF version, or omit vcf_version/--version to use the default. Vendor a new one first with scripts/vendor_schema.py."
+VCF-SCHEMA-INTEGRITY:
+  severity: critical
+  source: schema
+  source_url: ""
+  # Finding 6: distinct from VCF-SCHEMA-VERSION-UNKNOWN, which is a
+  # retryable bad argument. This one means the schema shipped inside the
+  # installation no longer hashes to its recorded checksum -- tampering or
+  # a corrupt install, never a caller mistake. It must not be translated
+  # to VCF-MCP-BAD-ARGS, and retrying it is pointless.
+  summary: "Integrity check FAILED for the vendored VCF {version} schema: its contents do not match the checksum shipped with this installation. This is not a problem with the request."
+  fix: "Do not retry. Treat this installation as compromised until proven otherwise: reinstall vcfspec from a trusted source, or re-vendor the schema with scripts/vendor_schema.py and review the diff."
 VCF-VERSION-NOT-CONSULTED:
   severity: info
   source: schema
   source_url: ""
-  summary: "vcf_version '{version}' was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release."
+  # Does not quote the supplied version, for the same reason
+  # VCF-SCHEMA-VERSION-UNKNOWN does not: the caller of this tool is an AI
+  # agent that may be validating a document from an untrusted source, and
+  # handing it back caller-chosen characters inside a message it reads is
+  # a surface with no upside. The operator learns both things they needed
+  # -- their version was ignored, and what this package actually ships.
+  summary: "A non-default vcf_version was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release. Vendored: {known}."
   fix: "Omit vcf_version when validating an inventory document, or pass input_kind: \"sddc_spec\" if you meant to validate a rendered spec instead."
 VCF-CRED-NOT-A-REFERENCE:
   severity: critical
@@ -92,6 +115,19 @@ VCF-RENDER-INSECURE-CREDENTIAL:
   source_url: ""
   summary: "render() refused to emit a credential that is not a ${reference}."
   fix: "Use ${name} references for every credential, never a literal value. Run validate_document on the same input to see which credential field is affected."
+VCF-DIFF-TRUNCATED:
+  severity: error
+  source: schema
+  source_url: ""
+  # Blocking on purpose. A partial diff that reported valid: true would be
+  # read as a complete one -- an agent asking "did anything under
+  # /credentials change?" would get a clean-looking answer from a walk
+  # that stopped early. The diff that IS returned is still correct as far
+  # as it goes, so it is returned rather than withheld; it just may not be
+  # all of it, and the caller is told so twice (this finding and a
+  # `truncated` key).
+  summary: "The diff was truncated at {changes} changes / {chars} characters: this comparison is INCOMPLETE and must not be read as 'nothing else changed'."
+  fix: "Diff a smaller pair of documents, or narrower sections of them. A document using YAML aliases can expand to far more changes than its source text suggests."
 VCF-EXPLAIN-UNKNOWN-CODE:
   severity: error
   source: schema

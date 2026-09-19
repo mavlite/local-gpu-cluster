@@ -390,7 +390,25 @@ message carries only the exception's class name).
 `vcf_version` (default `9.1.1.0`, the only version currently vendored —
 see "Updating for a new VCF release" below); an unvendored value is
 rejected as `VCF-MCP-BAD-ARGS`, the same as any other bad argument, not
-treated as an internal failure. `vcf_version` has no effect on an
+treated as an internal failure.
+
+`vcf_version` is never used to build a filesystem path from what the
+caller typed. It is resolved against the set of versions actually
+vendored in the package — discovered by listing the schemas directory —
+and anything outside that set is refused before any file is touched. The
+refusal is deliberately uniform: a traversal, an absolute path, an
+embedded NUL and a plain unknown `9.9.9.9` all produce the same envelope,
+and the requested version is *not* quoted back in it (the vendored
+versions are named instead). That uniformity is the control; without it
+the tool is a filesystem existence oracle for whoever is driving it.
+
+If the vendored schema itself fails its checksum at load, that is
+**not** reported as a bad argument. It gets its own critical
+`VCF-SCHEMA-INTEGRITY` finding saying the installation's integrity check
+failed, because a supply-chain compromise should not look like a typo,
+and retrying it is pointless.
+
+`vcf_version` has no effect on an
 inventory-kind document, which has one fixed schema regardless of VCF
 release; supplying a non-default one anyway does not reject the call (an
 inventory-kind call carrying an irrelevant `vcf_version` is legitimate),
@@ -419,19 +437,51 @@ report" from "this tool doesn't report that"):
 | `layers_run` / `layers_skipped` | Every path (success and failure) of `vcf_validate_spec` and `vcf_render_spec` only — the two tools with an actual layered pipeline. `result["layers_run"]` is therefore safe to read unconditionally on those two tools, including when the call failed, which is exactly when an operator most needs to see it. |
 
 `vcf_diff_spec`'s `valid` means "both `left` and `right` were readable
-documents" — it never validates the documents it diffs, so `valid` there
-is never a statement about whether either one is a good VCF spec.
+documents, **and the diff you are holding is complete**" — it never
+validates the documents it diffs, so `valid` there is never a statement
+about whether either one is a good VCF spec.
+
+It also always carries a `truncated` boolean. The diff's output is
+bounded (10,000 changes / 1,000,000 characters) because bounding the
+*input* does not bound the output: a 10 KB document using YAML aliases,
+inside every input limit, previously produced a 306.8 MB response in
+15.8 s. If either bound is hit, `truncated` is `true`, `valid` is
+`false`, and a `VCF-DIFF-TRUNCATED` finding says so. **Do not read a
+truncated diff as "nothing else changed"** — the changes reported are
+correct as far as they go, but the walk stopped early. Diff a smaller
+pair of documents, or narrower sections of them.
 
 `vcf_explain_finding` returns the same flat shape
 (`code`/`severity`/`summary`/`fix`/`source`/`source_url`) whether or not
 the code was found — an unrecognised code explains
-`VCF-EXPLAIN-UNKNOWN-CODE` itself, naming the code you asked about in its
-`summary`, rather than switching to a different response shape.
+`VCF-EXPLAIN-UNKNOWN-CODE` itself rather than switching to a different
+response shape. It does **not** echo the code you asked about (see below).
+
+### What is and is not reflected back to you
+
+Tool **arguments** are never echoed into a finding message: not
+`vcf_version`, not `code`, not `input_kind`. Each rejection names what
+this package actually ships instead. The caller already knows what it
+sent, and these envelopes are read by an AI agent that may be handling a
+document from an untrusted source.
+
+Document **bodies** are a different matter, and the rule does not extend
+to them — it cannot, because reporting what is wrong with your document
+*is the job*. Values and key names from the document do appear in finding
+messages and JSON pointers. The largest instance is a `hosts` array that
+exceeds `maxItems`: jsonschema serialises the whole array into its
+message, which is ~10,300 characters at 65 hosts.
+
+Credential values are masked before any of that leaves the process —
+verified with a literal planted inside an over-length `hosts` array, which
+came back `***REDACTED***`. The distinction to hold onto is: **arguments
+are not reflected; document content is reported, and redacted on the way
+out.**
 
 ## Updating for a new VCF release
 
 ```
-python scripts/vendor_schema.py <version> [path-or-url]
+python scripts/vendor_schema.py <version> [path-or-url] [--accept-new-upstream]
 ```
 
 Fetches `vcf-installer-openapi.json` from `vmware/vcf-api-specs` (or a
@@ -439,7 +489,48 @@ local path, if your network blocks GitHub), extracts and converts the
 `SddcSpec` subtree, and writes a checksummed copy under
 `vcfspec/schemas/<version>/`. It refuses to write anything if the
 document's own declared version doesn't match what you asked for, or if
-any schema reference is dangling. Rule tables (capacity, defaults) are
+any schema reference is dangling.
+
+**It also refuses to change anything it has already vendored.** Two
+digests are recorded — `sddc-spec.source.sha256` (the fetched upstream
+document) and `sddc-spec.schema.json.sha256` (the extracted bundle) — and
+both are checked before any write, including before the directory is
+created, so a refused run leaves the filesystem exactly as it found it.
+Without that, the script computed the checksum from the bytes it had just
+written, which attests integrity-at-rest and nothing about provenance: a
+MITM'd fetch or a wrong `source` argument produced a perfectly
+self-consistent schema+sidecar pair that the runtime check would then
+certify.
+
+To legitimately update a vendored schema:
+
+1. Re-run the command. It prints both digests as `old -> new` and exits
+   non-zero if either would change.
+2. Review the change. Diff the upstream document, not the 1,685-line
+   generated JSON.
+3. Re-run with `--accept-new-upstream` and quote both printed digests in
+   the commit message, so the bump is reviewable from the commit rather
+   than from the JSON diff.
+
+An unchanged re-vendor is a no-op and needs no flag. A changed upstream
+whose extracted bundle happens to be byte-identical is still refused:
+the extraction drops `example`, `discriminator`, `xml` and
+`externalDocs`, so "the part we vendor is unchanged" is a weaker claim
+than "upstream is unchanged".
+
+A vendored schema whose digest sidecar is **missing** is also refused,
+rather than treated as a fresh start. Otherwise deleting the sidecars
+would be enough to bypass the guard entirely, which is fail-open — the
+wrong default for an integrity control. Restore the sidecar from git, or
+re-vendor deliberately with the flag.
+
+One consequence worth knowing before you hit it: the currently vendored
+`9.1.1.0` predates `sddc-spec.source.sha256` and does not have one, so
+the first re-vendor of `9.1.1.0` **will** refuse and require
+`--accept-new-upstream` once, purely to record the missing digest. That
+is friction rather than a warning about the schema itself, and it is
+accepted deliberately — special-casing "this particular sidecar may be
+absent" would reintroduce the fail-open path the guard exists to close. Rule tables (capacity, defaults) are
 versioned separately in `vcfspec/rules/tables.py` and
 `vcfspec/defaults/<version>.yaml`, and are not touched by this script.
 

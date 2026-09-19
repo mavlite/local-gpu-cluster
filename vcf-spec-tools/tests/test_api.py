@@ -427,7 +427,15 @@ def test_irrelevant_version_on_an_inventory_gets_an_informational_note():
     assert "VCF-VERSION-NOT-CONSULTED" in [f["code"] for f in out["findings"]]
     note = next(f for f in out["findings"] if f["code"] == "VCF-VERSION-NOT-CONSULTED")
     assert note["severity"] == "info"    # advisory only, never blocks
-    assert "0.0.0" in note.get("message", "")
+    # This assertion used to be `"0.0.0" in note["message"]`. Inverted on
+    # 2026-09-19: the note must say that a version was supplied and
+    # ignored, and name the vendored versions, WITHOUT echoing the
+    # caller's own string -- the same rule the rejection path follows.
+    # See tests/test_security_version.py::test_no_finding_message_ever_
+    # reflects_caller_supplied_text.
+    assert "0.0.0" not in note.get("message", "")
+    assert DEFAULT_VERSION in note.get("message", "")
+    assert "not consulted" in note.get("message", "")
 
 
 def test_default_version_on_an_inventory_gets_no_note():

@@ -12,3 +12,16 @@ weekly_customer_adoption_review.html
 # checkout would have published them. Generated per-host; never commit it.
 config.env
 scripts/config.env
+
+# Python build artefacts. vcf-spec-tools/vcfspec.egg-info/ was tracked
+# until 2026-09-19 (security review, finding 8). It held no local paths or
+# usernames, so this is hygiene rather than disclosure -- but a generated
+# directory in git invites a stale one, and any `pip install -e .` or
+# `pip wheel .` regenerates these.
+*.egg-info/
+build/
+dist/
+.venv/
+# .pytest_cache/ self-ignores via its own generated .gitignore, which
+# works but is incidental; say it here too.
+.pytest_cache/

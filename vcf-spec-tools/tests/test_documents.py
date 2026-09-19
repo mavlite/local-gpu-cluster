@@ -147,3 +147,56 @@ def test_the_bomb_reaches_the_orchestrator_as_a_finding_not_an_exception():
     assert out["valid"] is False
     assert out["findings"][0]["code"] == "VCF-INPUT-UNREADABLE"
     assert "DocumentTooManyNodes" in out["findings"][0]["message"]
+
+
+# --- Security review 2026-09-19, finding 5: the libyaml loader -----------
+#
+# A legal 1.79 MB document cost ~18 s to load, 18.1 s of which cProfile
+# put inside yaml.safe_load -- the parser, not the diff -- blocking the
+# long-lived asyncio MCP server for the duration. CSafeLoader is the same
+# safe subset, roughly 20x faster. These tests pin the two things that
+# must not drift: that the loader stays inside the safe subset, and that
+# it behaves identically to the pure-Python one.
+
+def test_the_loader_is_libyaml_when_available_and_safe_either_way():
+    import yaml
+
+    from vcfspec.documents import _SAFE_LOADER
+    assert _SAFE_LOADER in (getattr(yaml, "CSafeLoader", None), yaml.SafeLoader)
+    # The point of the guard: never a loader that can construct objects.
+    for unsafe in ("Loader", "UnsafeLoader", "FullLoader", "CLoader"):
+        assert _SAFE_LOADER is not getattr(yaml, unsafe, None)
+    if hasattr(yaml, "CSafeLoader"):
+        assert _SAFE_LOADER is yaml.CSafeLoader
+
+
+def test_python_object_tags_are_still_refused():
+    """safe_load semantics, restated against whichever loader is active.
+    A !!python tag must never construct anything."""
+    with pytest.raises(Exception) as caught:
+        load_document("a: !!python/object/apply:os.system ['echo pwned']\n")
+    assert "ConstructorError" in type(caught.value).__name__ or \
+        isinstance(caught.value, ValueError)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("a: &x 1\nb: *x\n", {"a": 1, "b": 1}),          # aliases
+    ("a: 1\na: 2\n", {"a": 2}),                       # duplicate keys
+    ("y: 010\nz: yes\n", {"y": 8, "z": True}),        # implicit resolution
+])
+def test_the_active_loader_agrees_with_pure_python_safe_load(text, expected):
+    """Parity, not just speed: swapping the parser must not change what a
+    document means."""
+    import yaml
+    assert load_document(text) == expected
+    assert yaml.safe_load(text) == expected
+
+
+def test_deep_nesting_is_still_DocumentTooDeep_not_a_raw_parser_error():
+    """Both loaders signal their nesting limit as RecursionError (libyaml
+    raises "Stack overflow"), so the single handler in load_document
+    covers both. If that ever stops being true this reddens rather than
+    letting a raw parser exception reach the orchestrator."""
+    text = "{a: " * 10_000 + "1" + "}" * 10_000
+    with pytest.raises(DocumentTooDeep):
+        load_document(text)

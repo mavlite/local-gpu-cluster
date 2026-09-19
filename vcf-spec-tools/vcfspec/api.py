@@ -41,7 +41,8 @@ from .render import InsecureCredentialError, render
 from .rules import finding_for
 from .rules.network import check_networks
 from .rules.platform import check_platform
-from .schema import DEFAULT_VERSION, SchemaIntegrityError, load_schema
+from .schema import (DEFAULT_VERSION, SchemaIntegrityError, known_versions,
+                     load_schema)
 from .validate.probes import ProbeConfig, run_probes
 from .validate.schema_layer import (validate_against_schema,
                                     walk_declared_properties)
@@ -103,6 +104,43 @@ def _filter_blocked(result: Result, blocked: set[str]) -> Result:
     return Result(tuple(f for f in result.findings if not _is_blocked(f.path, blocked)))
 
 
+def _unknown_version_finding():
+    """The requested VCF version is not one this installation vendors.
+
+    Takes no argument on purpose. Findings 1 and 2: the caller's version
+    string never reaches the envelope, so every rejected version -- a
+    traversal, an absolute path, an embedded NUL, a URL-encoded traversal,
+    or a plain unknown-but-well-formed "9.9.9.9" -- yields a byte-identical
+    result. That uniformity IS the fix for the existence oracle; the
+    closed-set gate in schema.resolve_version() means no path was built to
+    have an existence in the first place, and this keeps the envelope from
+    reintroducing a difference the filesystem no longer has.
+
+    The vendored set is reported instead, which is the thing a legitimate
+    caller needs and the thing an attacker already knows.
+    """
+    return finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
+                       known=", ".join(sorted(known_versions())) or "(none)")
+
+
+def _integrity_finding(version: str):
+    """The vendored schema no longer matches its recorded checksum.
+
+    Finding 6: this used to share an `except` clause with "no such
+    version" and so reached an MCP caller as VCF-MCP-BAD-ARGS -- a
+    retryable usage error -- for what is a supply-chain event. It gets its
+    own critical code, and mcp_server._reclassify_unknown_version
+    deliberately does not translate it.
+
+    `version` IS quoted here, unlike the unknown-version finding above,
+    and that is safe rather than inconsistent: reaching an integrity check
+    at all means the version already passed schema.resolve_version(), so
+    it is a member of the closed vendored set -- a string this package
+    read off its own disk, never caller text.
+    """
+    return finding_for("VCF-SCHEMA-INTEGRITY", "/", version=version)
+
+
 def _unreadable_envelope(exc: Exception, skipped: dict[str, str]) -> dict:
     # str(exc) is never used here: it is text from documents.py's parser
     # and depth/size checks, built from operator-supplied YAML, and
@@ -156,9 +194,17 @@ def validate_document(text: str, input_kind: str | None = None,
         # does that without changing `valid`, and is skipped when `version`
         # is the default: a caller who never mentioned a version, or who
         # asked for the one already in effect, has nothing to be told.
+        #
+        # The note does not quote `version` back. That is the same rule
+        # the rejection path follows (_unknown_version_finding), applied
+        # here too: this path performs no filesystem access and is not an
+        # oracle, but the value is still arbitrary caller text landing in
+        # a message an AI agent reads, and naming the vendored set tells
+        # the operator strictly more than repeating what they just sent.
         if version != DEFAULT_VERSION:
             result = result.merge(Result((finding_for(
-                "VCF-VERSION-NOT-CONSULTED", "/", version=version),)))
+                "VCF-VERSION-NOT-CONSULTED", "/",
+                known=", ".join(sorted(known_versions())) or "(none)"),)))
 
         blocked = subtree_blocked(schema_result.findings)
         result = result.merge(_rules_for_inventory(doc, blocked))
@@ -176,9 +222,10 @@ def validate_document(text: str, input_kind: str | None = None,
         # propagating as a raw FileNotFoundError.
         try:
             schema_result = validate_against_schema(doc, version)
-        except (FileNotFoundError, SchemaIntegrityError):
-            schema_result = Result((finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
-                                                version=version),))
+        except SchemaIntegrityError:
+            schema_result = Result((_integrity_finding(version),))
+        except FileNotFoundError:
+            schema_result = Result((_unknown_version_finding(),))
         # The vendored VMware schema accepts a real password -- real
         # passwords are what it is for -- so the schema pass alone cannot
         # enforce "credentials are ${reference} strings, never secrets".
@@ -272,7 +319,11 @@ def render_document(text: str, version: str = DEFAULT_VERSION,
         finding = finding_for("VCF-RENDER-INSECURE-CREDENTIAL", "/credentials")
         combined = combined.merge(Result((finding,)))
         return _envelope(combined, layers_run, {"render": "refused an insecure credential"})
-    except (FileNotFoundError, SchemaIntegrityError):
+    except SchemaIntegrityError:
+        combined = combined.merge(Result((_integrity_finding(version),)))
+        return _envelope(combined, layers_run,
+                         {"render": "the vendored schema failed its integrity check"})
+    except FileNotFoundError:
         # render() loads vcfspec/defaults/<version>.yaml unconditionally;
         # an unvendored `version` raises here. That used to be caught by
         # the broad `except Exception` below and reported as
@@ -280,8 +331,7 @@ def render_document(text: str, version: str = DEFAULT_VERSION,
         # has a bug", when this is really "you asked for a VCF release
         # nothing is vendored for". Same code as validate_document's
         # equivalent guard, for the same underlying condition.
-        finding = finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/", version=version)
-        combined = combined.merge(Result((finding,)))
+        combined = combined.merge(Result((_unknown_version_finding(),)))
         return _envelope(combined, layers_run,
                          {"render": "no vendored data for this VCF version"})
     except Exception as exc:
@@ -355,9 +405,10 @@ def _verify_rendered(spec: dict, version: str) -> tuple[Result, bool]:
     try:
         findings = list(validate_against_schema(spec, version).findings)
         walk = walk_declared_properties(load_schema(version), "SddcSpec", spec)
-    except (FileNotFoundError, SchemaIntegrityError):
-        return Result((finding_for("VCF-SCHEMA-VERSION-UNKNOWN", "/",
-                                   version=version),)), False
+    except SchemaIntegrityError:
+        return Result((_integrity_finding(version),)), False
+    except FileNotFoundError:
+        return Result((_unknown_version_finding(),)), False
     except Exception as exc:
         return Result((finding_for("VCF-RENDER-FAILED", "/",
                                    exc_type=type(exc).__name__),)), False
