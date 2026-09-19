@@ -390,7 +390,25 @@ message carries only the exception's class name).
 `vcf_version` (default `9.1.1.0`, the only version currently vendored —
 see "Updating for a new VCF release" below); an unvendored value is
 rejected as `VCF-MCP-BAD-ARGS`, the same as any other bad argument, not
-treated as an internal failure. `vcf_version` has no effect on an
+treated as an internal failure.
+
+`vcf_version` is never used to build a filesystem path from what the
+caller typed. It is resolved against the set of versions actually
+vendored in the package — discovered by listing the schemas directory —
+and anything outside that set is refused before any file is touched. The
+refusal is deliberately uniform: a traversal, an absolute path, an
+embedded NUL and a plain unknown `9.9.9.9` all produce the same envelope,
+and the requested version is *not* quoted back in it (the vendored
+versions are named instead). That uniformity is the control; without it
+the tool is a filesystem existence oracle for whoever is driving it.
+
+If the vendored schema itself fails its checksum at load, that is
+**not** reported as a bad argument. It gets its own critical
+`VCF-SCHEMA-INTEGRITY` finding saying the installation's integrity check
+failed, because a supply-chain compromise should not look like a typo,
+and retrying it is pointless.
+
+`vcf_version` has no effect on an
 inventory-kind document, which has one fixed schema regardless of VCF
 release; supplying a non-default one anyway does not reject the call (an
 inventory-kind call carrying an irrelevant `vcf_version` is legitimate),
@@ -431,7 +449,7 @@ the code was found — an unrecognised code explains
 ## Updating for a new VCF release
 
 ```
-python scripts/vendor_schema.py <version> [path-or-url]
+python scripts/vendor_schema.py <version> [path-or-url] [--accept-new-upstream]
 ```
 
 Fetches `vcf-installer-openapi.json` from `vmware/vcf-api-specs` (or a
@@ -439,7 +457,34 @@ local path, if your network blocks GitHub), extracts and converts the
 `SddcSpec` subtree, and writes a checksummed copy under
 `vcfspec/schemas/<version>/`. It refuses to write anything if the
 document's own declared version doesn't match what you asked for, or if
-any schema reference is dangling. Rule tables (capacity, defaults) are
+any schema reference is dangling.
+
+**It also refuses to change anything it has already vendored.** Two
+digests are recorded — `sddc-spec.source.sha256` (the fetched upstream
+document) and `sddc-spec.schema.json.sha256` (the extracted bundle) — and
+both are checked before any write, including before the directory is
+created, so a refused run leaves the filesystem exactly as it found it.
+Without that, the script computed the checksum from the bytes it had just
+written, which attests integrity-at-rest and nothing about provenance: a
+MITM'd fetch or a wrong `source` argument produced a perfectly
+self-consistent schema+sidecar pair that the runtime check would then
+certify.
+
+To legitimately update a vendored schema:
+
+1. Re-run the command. It prints both digests as `old -> new` and exits
+   non-zero if either would change.
+2. Review the change. Diff the upstream document, not the 1,685-line
+   generated JSON.
+3. Re-run with `--accept-new-upstream` and quote both printed digests in
+   the commit message, so the bump is reviewable from the commit rather
+   than from the JSON diff.
+
+An unchanged re-vendor is a no-op and needs no flag. A changed upstream
+whose extracted bundle happens to be byte-identical is still refused:
+the extraction drops `example`, `discriminator`, `xml` and
+`externalDocs`, so "the part we vendor is unchanged" is a weaker claim
+than "upstream is unchanged". Rule tables (capacity, defaults) are
 versioned separately in `vcfspec/rules/tables.py` and
 `vcfspec/defaults/<version>.yaml`, and are not touched by this script.
 

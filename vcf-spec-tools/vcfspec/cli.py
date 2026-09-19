@@ -124,6 +124,19 @@ def _read_document(path: Path) -> tuple[str | None, int | None]:
     try:
         return path.read_text(encoding="utf-8"), None
     except OSError as exc:
+        # str(exc) is deliberate here, and is the one place in this
+        # package where an exception's text reaches a human. Reviewed
+        # 2026-09-19 (finding 9) and kept: the exception is an OSError
+        # from Path.read_text, so its text is an errno message plus the
+        # path the operator themselves typed. No document content and no
+        # credential can reach it -- the file was never opened.
+        #
+        # Trimming it to a class name would make "permission denied",
+        # "is a special file" and "name too long" indistinguishable, which
+        # costs a real operator a real diagnostic to buy nothing. Note the
+        # contrast with main()'s last-resort handler below, which prints
+        # only type(exc).__name__ precisely because spec content CAN be in
+        # play on that path.
         print(f"cannot read {path}: {exc}", file=sys.stderr)
         return None, 2
 
