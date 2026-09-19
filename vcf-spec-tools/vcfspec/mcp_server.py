@@ -19,6 +19,7 @@ by application code is not one of them.
 from __future__ import annotations
 
 import json
+from importlib import metadata
 from dataclasses import asdict
 from typing import Callable, NamedTuple
 
@@ -542,7 +543,15 @@ def build_server():
     from mcp.server import Server
     from mcp.types import TextContent, Tool
 
-    server = Server("vcfspec")
+    # Without an explicit version the SDK advertises its OWN version as
+    # ours, so a client sees "vcfspec 1.30.0" -- a version of this package
+    # that does not exist. Read it from installed metadata, with a fallback
+    # for running from a source tree that was never installed.
+    try:
+        version = metadata.version("vcfspec")
+    except metadata.PackageNotFoundError:   # pragma: no cover - source tree
+        version = "0+unknown"
+    server = Server("vcfspec", version=version)
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:

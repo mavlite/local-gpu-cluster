@@ -497,3 +497,19 @@ def test_diff_and_schema_tools_never_carry_layers_run():
     # should not be forced onto it just for uniformity's sake.
     assert "layers_run" not in call_handler("vcf_diff_spec", {"left": TEXT, "right": TEXT})
     assert "layers_run" not in call_handler("vcf_spec_schema", {})
+
+
+def test_server_advertises_this_packages_version_not_the_sdks():
+    """Server(name) with no version makes the SDK advertise its OWN version
+    as ours, so a client sees a vcfspec release that does not exist. Only a
+    real handshake shows it -- every handler test here passes either way --
+    so the wiring is pinned rather than trusted.
+    """
+    pytest.importorskip("mcp")
+    from importlib import metadata
+
+    from vcfspec.mcp_server import build_server
+
+    server = build_server()
+    assert server.version == metadata.version("vcfspec")
+    assert server.version != metadata.version("mcp")
