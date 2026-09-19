@@ -254,11 +254,17 @@ sources:
   # techdocs.broadcom.com's sitemap does NOT list them yet, so the sphinx
   # vcf-release-notes source cannot discover them. This curated list ingests
   # the 15 9.1.1 RN URLs now via trafilatura (same extraction path).
-  # RETIRE this source once the sitemap catches up and vcf-release-notes adopts
-  # these URLs (they match its include: .../vcf-9-0-and-later/[^/]+/release-notes).
+  # RETIRED 2026-09-17: the sitemap caught up. vcf-release-notes now enumerates
+  # all 17 9.1.1 RN URLs itself (it picked up the last two — PowerCLI and SDKs —
+  # on the 2026-09-17 forced run), so this source only duplicated documents into
+  # the workspace under a second doc_prefix. Kept disabled rather than deleted:
+  # its 15 state entries are the record of what the stopgap ingested, and the
+  # same shape is the template for the next "shipped before the sitemap" gap.
+  # Its 15 duplicate documents in the workspace are removed separately — the
+  # handler is additive_only and never deletes.
   - id: vcf-9-1-1-release-notes
     handler: url_list_hashed
-    enabled: true
+    enabled: false
     workspace: vcf-reference
     doc_prefix: "[OFFICIAL] VMware Cloud Foundation 9.1.1 release notes"
     refresh_interval: 7d

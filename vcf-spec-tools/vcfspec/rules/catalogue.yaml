@@ -1,0 +1,250 @@
+# vcf-spec-tools/vcfspec/rules/catalogue.yaml
+# Every code the library can emit. source: docs | schema | table
+# 'table' entries derive from VCF-Design-Studio (MIT), whose values come from the
+# VCF Planning and Preparation Workbook static reference tables.
+VCF-INPUT-UNRECOGNISED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "Document is neither a lab inventory nor a VCF SddcSpec."
+  fix: "Add apiVersion and kind, or pass input_kind explicitly."
+VCF-INPUT-BAD-KIND:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "Unknown input_kind."
+  fix: "Use 'inventory' or 'sddc_spec'."
+VCF-NO-VALIDATION-RAN:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "No validation layer actually ran, so this result cannot certify the document."
+  fix: "This is a defensive fallback and indicates a bug -- report it with the input that triggered it. Do not treat 'valid' from this response as meaningful."
+VCF-INPUT-UNREADABLE:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "The document could not be read ({exc_type})."
+  fix: "Provide a YAML or JSON mapping within the size, depth, alias and expanded-node limits."
+VCF-INV-SCHEMA:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "The inventory does not match its schema."
+  fix: "Correct the inventory."
+VCF-SCHEMA:
+  severity: error
+  source: schema
+  source_url: https://github.com/vmware/vcf-api-specs
+  summary: "The spec does not match the VCF Installer schema."
+  fix: "Correct the field."
+VCF-SCHEMA-VERSION-UNKNOWN:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "No vendored schema or defaults for VCF version '{version}'."
+  fix: "Use a vendored VCF version, or omit vcf_version/--version to use the default. Vendor a new one first with scripts/vendor_schema.py."
+VCF-VERSION-NOT-CONSULTED:
+  severity: info
+  source: schema
+  source_url: ""
+  summary: "vcf_version '{version}' was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release."
+  fix: "Omit vcf_version when validating an inventory document, or pass input_kind: \"sddc_spec\" if you meant to validate a rendered spec instead."
+VCF-CRED-NOT-A-REFERENCE:
+  severity: critical
+  source: docs
+  source_url: ""
+  summary: "A credential field holds something other than a ${reference}."
+  fix: "Use ${name}; these tools never hold secrets."
+VCF-RENDER-UNMAPPED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "A required spec field has no inventory source and no default."
+  fix: "Add the missing inventory section."
+VCF-RENDER-WRONG-KIND:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "render() only accepts a lab inventory; this document was detected as '{kind}'."
+  fix: "Use vcf_validate_spec to check an already-rendered SddcSpec document; render() only works on a LabInventory."
+VCF-RENDER-UNDECLARED-FIELD:
+  severity: error
+  source: schema
+  source_url: https://github.com/vmware/vcf-api-specs
+  summary: "The rendered spec has a field at {pointer} that the VCF Installer schema does not declare."
+  fix: "This is a renderer bug, not an input problem: no $def in the vendored schema sets additionalProperties:false, so jsonschema alone cannot catch an invented key. Report it with the inventory that produced it."
+VCF-RENDER-DEFAULT-APPLIED:
+  severity: info
+  source: table
+  source_url: ""
+  summary: "A default was applied."
+  fix: "Set the value explicitly in the inventory to override."
+VCF-RENDER-FAILED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render() raised {exc_type} while building the spec."
+  fix: "Run validate_document on the same input; its structured findings explain what is wrong. render() itself never describes the failure, so it cannot echo spec content."
+VCF-RENDER-INSECURE-CREDENTIAL:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render() refused to emit a credential that is not a ${reference}."
+  fix: "Use ${name} references for every credential, never a literal value. Run validate_document on the same input to see which credential field is affected."
+VCF-EXPLAIN-UNKNOWN-CODE:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "No rule with that code."
+  fix: "Call vcf_validate_spec to get real codes."
+INTERNAL:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "The tool failed internally ({detail})."
+  fix: "Report this with the input that caused it."
+VCF-MCP-BAD-ARGS:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "The tool '{tool}' was called with invalid arguments ({detail})."
+  fix: "Check the tool's input schema (required fields, types, and that no unknown properties are set) and retry with corrected arguments."
+VCF-NET-GATEWAY-OUTSIDE-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "Gateway {gateway} is not inside subnet {subnet} for network '{purpose}'."
+  fix: "Set a gateway address within the declared subnet."
+VCF-NET-SUBNET-OVERLAP:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "'{purpose}' ({subnet}) overlaps '{other}' ({other_subnet})."
+  fix: "Give each traffic type a distinct subnet."
+VCF-NET-VLAN-REUSED:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "VLAN {vlan} is used by both '{purpose}' and '{other}'."
+  fix: "Separate each traffic type onto its own VLAN."
+VCF-NSX-FABRIC-MTU-TOO-LOW:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "NSX fabric MTU is {mtu}; overlay traffic needs at least 1600."
+  fix: "Set fabricMtu to 1600 or more (9000 where the switches allow it)."
+VCF-NET-HOST-IP-OUTSIDE-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
+  summary: "Host {name} management IP {ip} is outside {subnet}."
+  fix: "Give the host an address inside the management subnet."
+VCF-NET-DUPLICATE-IP:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
+  summary: "IP {ip} is used more than once ({where})."
+  fix: "Give every host a unique address."
+VCF-NSX-TEP-POOL-TOO-SMALL:
+  severity: warning
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/design/design-library/vsphere-detailed-design/esx-design.html
+  summary: "TEP pool holds {size} addresses; {hosts} hosts typically need {needed}."
+  fix: "Widen the TEP pool: two tunnel endpoints per host is the usual figure."
+VCF-NAME-NOT-LOWERCASE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/release-notes/vmware-cloud-foundation-9-1-0-0-release-notes/known-issues/vcf-installer-91-known-issues.html
+  summary: "'{value}' at {where} is not lowercase."
+  fix: "Use lowercase names everywhere; uppercase fails VCF 9.1 deployment."
+VCF-NAME-WRONG-DOMAIN:
+  severity: warning
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "'{value}' is not in the declared DNS subdomain '{domain}'."
+  fix: "Use names inside the declared subdomain, or correct dns.subdomain."
+VCF-VSP-POOL-TOO-SMALL:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCF Management Services pool holds {size} addresses; the minimum is 12."
+  fix: "Reserve at least 12 consecutive addresses (30 recommended)."
+VCF-VSP-POOL-CROSSES-SUBNET:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCFMS pool {start}-{end} is not inside one subnet."
+  fix: "Keep the pool inside the management subnet."
+VCF-VSP-INTERNAL-CIDR-COLLISION:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/upgrading-cloud-foundation/deploy-vcf-management-services.html
+  summary: "VCFMS internal CIDR {cidr} overlaps '{purpose}' ({subnet})."
+  fix: "Choose another permitted internal CIDR."
+VCF-CAP-RAM-SHORTFALL:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Mandatory stack needs {needed} GB RAM; the cluster offers {available} GB."
+  fix: "Add RAM, hosts, or memory tiering."
+VCF-CAP-N1-SHORTFALL:
+  severity: warning
+  source: table
+  source_url: ""
+  summary: "Losing one host leaves {available} GB against {needed} GB needed."
+  fix: "Enable memory tiering, or accept that maintenance cannot host the full stack."
+VCF-CAP-STORAGE-SHORTFALL:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Stack needs {needed} GB usable; vSAN offers about {available} GB."
+  fix: "Add capacity: Auto-RAID overhead is 1.5x at three to five hosts."
+VCF-CAP-UNKNOWN-HARDWARE:
+  severity: error
+  source: table
+  source_url: ""
+  summary: "Host {name} declares no usable hardware, so capacity cannot be checked."
+  fix: "Add hardware.ramGb for every host. hardware.cores is required by the inventory schema but is not part of capacity sizing here -- vCPU is routinely oversubscribed in a vSphere cluster, unlike RAM, so it is not checked against the mandatory stack's vCPU demand."
+VCF-LIC-EVALUATION:
+  severity: info
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/licensing/licensing-overview/licensing-model.html
+  summary: "VCF 9.x has no license keys; this deploys in 90-day evaluation."
+  fix: "Assign a subscription licence in VCF Operations after deployment."
+VCF-PROBE-NO-REVERSE-DNS:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "No reverse DNS record for {ip} ({fqdn})."
+  fix: "Add a PTR record; VCF validates forward and reverse for every host."
+VCF-PROBE-FORWARD-MISMATCH:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "{fqdn} resolves to {resolved}, but the inventory says {expected}."
+  fix: "Correct the A record or the inventory so they agree."
+VCF-PROBE-TARGET-BLOCKED:
+  severity: warning
+  source: docs
+  source_url: ""
+  summary: "Refused to probe {target}: outside the configured allowlist."
+  fix: "Add the range to the probe allowlist if it really is yours."
+VCF-PROBE-NAME-BLOCKED:
+  severity: warning
+  source: docs
+  source_url: ""
+  summary: "Refused to resolve {name}: outside the configured DNS name allowlist."
+  fix: "Pass --allowlist-domain with the DNS suffix your lab really uses. With none configured no forward lookup is issued at all: an IP allowlist cannot gate a name, because the query that would reveal the IP is itself the exfiltration channel."
+VCF-PROBE-NOTHING-PERMITTED:
+  severity: error
+  source: docs
+  source_url: ""
+  summary: "Probes were requested, but the allowlist permitted none of the {count} host(s) in this document, so nothing was checked."
+  fix: "Correct --allowlist so it covers the management network these hosts are on, or drop --probe. A non-empty allowlist that matches no host checks exactly as much as no allowlist at all."
+VCF-PROBE-UNKNOWN:
+  severity: info
+  source: docs
+  source_url: ""
+  summary: "Could not probe {target}: {reason}."
+  fix: "Re-run from a host on the management network to confirm."

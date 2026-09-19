@@ -1,0 +1,1685 @@
+{
+  "$defs": {
+    "DataInTransitConfig": {
+      "description": "This specification contains data-in-transit encryption configuration for vSAN enabled clusters",
+      "properties": {
+        "enable": {
+          "description": "Enable vSAN DIT encryption",
+          "type": "boolean"
+        },
+        "rekeyInterval": {
+          "description": "Periodical rekeying interval in minutes for vSAN DIT encryption",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enable"
+      ],
+      "type": "object"
+    },
+    "DnsSpec": {
+      "description": "Spec contains parameters of Domain Name System",
+      "properties": {
+        "nameservers": {
+          "description": "Nameservers to be configured for vCenter/ESXi's/NSX. The first is the primary nameserver. Maximum allowed is two entries",
+          "items": {
+            "description": "Nameservers to be configured for vCenter/ESXi's/NSX. The first is the primary nameserver. Maximum allowed is two entries",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "subdomain": {
+          "description": "Tenant Sub domain. Includes the full domain suffix",
+          "minLength": 1,
+          "pattern": "^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "subdomain"
+      ],
+      "type": "object"
+    },
+    "DtgwSpec": {
+      "description": "Specification for Distributed Transit Gateway aka DTGW",
+      "properties": {
+        "externalIpBlockCidr": {
+          "description": "External IP Block CIDR for VPCs, required for external connectivity via DTGW",
+          "minLength": 1,
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\/(([0-9])|([12][0-9])|(3[0-2]))$",
+          "type": "string"
+        },
+        "gatewayCidr": {
+          "description": "Gateway CIDR for Distributed Transit Gateway",
+          "minLength": 1,
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\/(([0-9])|([12][0-9])|(3[0-2]))$",
+          "type": "string"
+        },
+        "privateTgwIpBlockCidr": {
+          "description": "Private TGW IP Block CIDR for VPCs",
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\/(([0-9])|([12][0-9])|(3[0-2]))$",
+          "type": "string"
+        },
+        "vlan": {
+          "description": "VLAN for Distributed Transit Gateway",
+          "format": "int64",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "externalIpBlockCidr",
+        "gatewayCidr",
+        "vlan"
+      ],
+      "type": "object"
+    },
+    "DvsSpec": {
+      "description": "Spec contains parameters for DVS",
+      "properties": {
+        "dvsName": {
+          "description": "vSphere Distributed Switch Name. It will be auto-generated if blank",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "lagSpecs": {
+          "description": "List of LAGs to be associated with the vSphere Distributed Switch",
+          "items": {
+            "$ref": "#/$defs/LagSpec"
+          },
+          "type": "array"
+        },
+        "mtu": {
+          "description": "Distributed vSphere Switch MTU (default value is 9000). If not specified during cluster creation or domain creation (with NSX sharing), this value will be automatically populated with the Physical Uplink MTU specified in the NSX Global Config from the associated NSX cluster.",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networks": {
+          "description": "Types of networks in this Distributed vSphere Switch. One among: VSAN, VMOTION, MANAGEMENT, VM_MANAGEMENT, NFS, FLEET_MANAGEMENT or any custom network types defined in networkSpecs",
+          "items": {
+            "description": "Types of networks in this Distributed vSphere Switch. One among: VSAN, VMOTION, MANAGEMENT, VM_MANAGEMENT, NFS, FLEET_MANAGEMENT or any custom network types defined in networkSpecs",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nsxTeamings": {
+          "description": "The teaming policies to be associated with the uplink profile in NSX",
+          "items": {
+            "$ref": "#/$defs/TeamingSpec"
+          },
+          "maxItems": 1,
+          "minItems": 0,
+          "type": "array"
+        },
+        "nsxtSwitchConfig": {
+          "$ref": "#/$defs/NsxtSwitchConfig"
+        },
+        "vmnicsToUplinks": {
+          "description": "List of vmnic to uplink mapping",
+          "items": {
+            "$ref": "#/$defs/VmnicToUplink"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "vmnicsToUplinks"
+      ],
+      "type": "object"
+    },
+    "EncryptionConfig": {
+      "description": "This specification contains encryption configuration for vSAN enabled clusters",
+      "properties": {
+        "dataInTransitConfig": {
+          "$ref": "#/$defs/DataInTransitConfig"
+        }
+      },
+      "type": "object"
+    },
+    "FcSpec": {
+      "description": "Cluster storage configuration for VMFS on FC",
+      "properties": {
+        "datastoreName": {
+          "description": "Datastore name used for cluster creation. This field is optional in case of management domain deployment (datastore name will be auto-generated) but it is required for all Day-N operations",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "FleetDepotServiceSpec": {
+      "description": "Specification for deploy/configure of Software Depot",
+      "properties": {
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "FleetLcmServiceSpec": {
+      "description": "Specification for deploy/configure of Fleet LCM service",
+      "properties": {
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "IPv4Pool": {
+      "description": "Spec contains parameters for IPv4Pool. One of addresses, ipRange or cidr is required",
+      "properties": {
+        "addresses": {
+          "description": "List of IPv4 addresses.",
+          "items": {
+            "description": "List of IPv4 addresses.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cidr": {
+          "description": "Network CIDR.",
+          "type": "string"
+        },
+        "excludedAddresses": {
+          "description": "List of IPv4 addresses to exclude. Applies to range and CIDR",
+          "items": {
+            "description": "List of IPv4 addresses to exclude. Applies to range and CIDR",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ipRange": {
+          "$ref": "#/$defs/IpRange"
+        }
+      },
+      "type": "object"
+    },
+    "IPv6Pool": {
+      "description": "Spec contains parameters for IPv6Pool",
+      "properties": {
+        "addresses": {
+          "description": "List of IPv6 addresses.",
+          "items": {
+            "description": "List of IPv6 addresses.",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cidr": {
+          "description": "Network CIDR.",
+          "type": "string"
+        },
+        "excludedAddresses": {
+          "description": "List of IPv6 addresses to exclude. Applies to range and CIDR",
+          "items": {
+            "description": "List of IPv6 addresses to exclude. Applies to range and CIDR",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "ipRange": {
+          "$ref": "#/$defs/IpRangeV6"
+        }
+      },
+      "type": "object"
+    },
+    "IpAddressPoolRangeSpec": {
+      "description": "This specification contains the parameters required to create an IP address range",
+      "properties": {
+        "end": {
+          "description": "The last IP Address of the IP Address Range",
+          "minLength": 1,
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])$",
+          "type": "string"
+        },
+        "start": {
+          "description": "The first IP Address of the IP Address Range",
+          "minLength": 1,
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "end",
+        "start"
+      ],
+      "type": "object"
+    },
+    "IpAddressPoolSpec": {
+      "description": "This specification contains the parameters required to create or reuse an IP address pool.",
+      "properties": {
+        "description": {
+          "description": "Description of the IP address pool",
+          "type": "string"
+        },
+        "ignoreUnavailableNsxtCluster": {
+          "description": "Ignore unavailable NSX cluster(s) during IP pool spec validation",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Name of the IP address pool",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9-_]+$",
+          "type": "string"
+        },
+        "subnets": {
+          "description": "List of IP address pool subnet specification",
+          "items": {
+            "$ref": "#/$defs/IpAddressPoolSubnetSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "IpAddressPoolSubnetSpec": {
+      "description": "This specification contains the parameters required to create an IP address pool subnet",
+      "properties": {
+        "cidr": {
+          "description": "The subnet representation, contains the network address and the prefix length",
+          "minLength": 1,
+          "type": "string"
+        },
+        "gateway": {
+          "description": "The default gateway address of the network",
+          "minLength": 1,
+          "pattern": "^([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])\\.([01]?\\d\\d?|2[0-4]\\d|25[0-5])$",
+          "type": "string"
+        },
+        "ipAddressPoolRanges": {
+          "description": "List of the IP allocation ranges. Atleast 1 IP address range has to be specified",
+          "items": {
+            "$ref": "#/$defs/IpAddressPoolRangeSpec"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "cidr",
+        "gateway",
+        "ipAddressPoolRanges"
+      ],
+      "type": "object"
+    },
+    "IpRange": {
+      "description": "Spec contains parameters for range of IP addresses",
+      "properties": {
+        "endIpAddress": {
+          "description": "End IP Address",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        },
+        "startIpAddress": {
+          "description": "Start IP Address",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        }
+      },
+      "required": [
+        "endIpAddress",
+        "startIpAddress"
+      ],
+      "type": "object"
+    },
+    "IpRangeV6": {
+      "description": "Spec contains parameters for range of IP addresses",
+      "properties": {
+        "endIpAddress": {
+          "description": "End IP Address",
+          "maxLength": 39,
+          "minLength": 2,
+          "type": "string"
+        },
+        "startIpAddress": {
+          "description": "Start IP Address",
+          "maxLength": 39,
+          "minLength": 2,
+          "type": "string"
+        }
+      },
+      "required": [
+        "endIpAddress",
+        "startIpAddress"
+      ],
+      "type": "object"
+    },
+    "LagSpec": {
+      "description": "This specification contains VDS (vSphere distributed switch) LAG configurations",
+      "properties": {
+        "lacpMode": {
+          "description": "LACP mode of this LAG",
+          "pattern": "(ACTIVE|PASSIVE)",
+          "type": "string"
+        },
+        "lacpTimeoutMode": {
+          "description": "LACP timeout mode of this LAG",
+          "pattern": "(SLOW|FAST)",
+          "type": "string"
+        },
+        "loadBalancingMode": {
+          "description": "Load balancing mode of this LAG",
+          "pattern": "(SOURCE_MAC|DESTINATION_MAC|SOURCE_AND_DESTINATION_MAC|DESTINATION_IP_AND_VLAN|SOURCE_IP_AND_VLAN|SOURCE_AND_DESTINATION_IP_AND_VLAN|DESTINATION_TCP_UDP_PORT|SOURCE_TCP_UDP_PORT|SOURCE_AND_DESTINATION_TCP_UDP_PORT|DESTINATION_IP_AND_TCP_UDP_PORT|SOURCE_IP_AND_TCP_UDP_PORT|SOURCE_AND_DESTINATION_IP_AND_TCP_UDP_PORT|DESTINATION_IP_AND_TCP_UDP_PORT_AND_VLAN|SOURCE_IP_AND_TCP_UDP_PORT_AND_VLAN|SOURCE_AND_DESTINATION_IP_AND_TCP_UDP_PORT_AND_VLAN|DESTINATION_IP|SOURCE_IP|SOURCE_AND_DESTINATION_IP|VLAN|SOURCE_PORT_ID)",
+          "type": "string"
+        },
+        "name": {
+          "description": "LAG name",
+          "maxLength": 16,
+          "minLength": 0,
+          "type": "string"
+        },
+        "uplinksCount": {
+          "description": "Number of uplinks/ports in this LAG",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lacpMode",
+        "lacpTimeoutMode",
+        "loadBalancingMode",
+        "name",
+        "uplinksCount"
+      ],
+      "type": "object"
+    },
+    "LicenseServerSpec": {
+      "description": "Specification for License Server",
+      "properties": {
+        "hostname": {
+          "description": "Host name",
+          "minLength": 1,
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "NasVolumeSpec": {
+      "description": "NAS configuration for NFS based cluster",
+      "properties": {
+        "enableBindToVmknic": {
+          "description": "Indicates whether to bind the created NFS datastore to the VMkernel NIC created based on NFS Network Spec. This is to prevent unintentional flow of NFS traffic through any other VMkernel NIC, if such connectivity exists.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Shared directory path used for NFS based cluster creation",
+          "minLength": 1,
+          "type": "string"
+        },
+        "readOnly": {
+          "description": "Readonly is used to identify whether to mount the directory as readOnly or not",
+          "type": "boolean"
+        },
+        "serverName": {
+          "description": "NFS Server name used for cluster creation",
+          "items": {
+            "description": "NFS Server name used for cluster creation",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "userTag": {
+          "description": "User tag used to annotate NFS share",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "readOnly",
+        "serverName"
+      ],
+      "type": "object"
+    },
+    "NfsDatastoreSpec": {
+      "description": "This specification contains cluster storage configuration for NFS",
+      "properties": {
+        "datastoreName": {
+          "description": "Datastore name used for cluster creation. This field is optional in case of management domain deployment (datastore name will be auto-generated) but it is required for all Day-N operations",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "nasVolume": {
+          "$ref": "#/$defs/NasVolumeSpec"
+        }
+      },
+      "required": [
+        "nasVolume"
+      ],
+      "type": "object"
+    },
+    "NsxtManagerSpec": {
+      "description": "Spec contains parameters for NSX manager",
+      "properties": {
+        "hostname": {
+          "description": "NSX Manager hostname",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "NsxtSwitchConfig": {
+      "description": "This specification contains the configurations to be associated with the vSphere Distributed Switch managed by NSX",
+      "properties": {
+        "hostSwitchOperationalMode": {
+          "description": "Operational mode type of a Host Switch. Applicable only for the VI Workload Domains.",
+          "pattern": "(STANDARD|ENS|ENS_INTERRUPT)",
+          "type": "string"
+        },
+        "ipAssignmentType": {
+          "description": "Ip Assignment Type of a Host Switch",
+          "type": "string"
+        },
+        "transportZones": {
+          "description": "The list of transport zones to be associated with the vSphere Distributed Switch managed by NSX. When creating a new cluster in an existing domain configured for NSX Overlay, only the VLAN transport zones specified in the input will be configured for the cluster. Any overlay transport zones specified in the input will be ignored, and the domain's default overlay transport zone will be used instead.",
+          "items": {
+            "$ref": "#/$defs/TransportZone"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "OverlayVtepSpec": {
+      "description": "This specification defines the NSX overlay VTEP configuration for the vSphere cluster in terms of IP assignment type for the VTEPs. Specifying OverlayVtepSpec with VtepType NO_IP disables VTEP creation on hosts, enabling the NSX VLAN Backed VPC configuration. At this point in time, configuring the NSX overlay VTEP by the means of DHCP or static IP pool assignment types can be done without specifying any OverlayVtepSpec.",
+      "properties": {
+        "vtepType": {
+          "description": "The overlay VTEP configuration type for configuring vSphere cluster for NSX Overlay",
+          "pattern": "(NO_IP)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "ResourcePoolSpec": {
+      "description": "Spec contains parameters for Resource Pool",
+      "properties": {
+        "cpuLimit": {
+          "description": "CPU limit, default -1 (unlimited)",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cpuReservationExpandable": {
+          "description": "Is CPU reservation expandable, default true",
+          "type": "boolean"
+        },
+        "cpuReservationMhz": {
+          "description": "CPU reservation in Mhz, default 0",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cpuReservationPercentage": {
+          "description": "CPU reservation percentage, from 0 to 100, default 0",
+          "format": "int32",
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cpuSharesLevel": {
+          "description": "CPU shares level, default 'normal'",
+          "enum": [
+            "custom,high,low,normal"
+          ],
+          "type": "string"
+        },
+        "cpuSharesValue": {
+          "description": "CPU shares value, only relevant when shares level is 'custom', default 0",
+          "format": "int32",
+          "type": "integer"
+        },
+        "memoryLimit": {
+          "description": "Memory limit, default -1 (unlimited)",
+          "format": "int64",
+          "type": "integer"
+        },
+        "memoryReservationExpandable": {
+          "description": "Is Memory reservation expandable, default true",
+          "type": "boolean"
+        },
+        "memoryReservationMb": {
+          "description": "Memory reservation in MB, default 0",
+          "format": "int64",
+          "type": "integer"
+        },
+        "memoryReservationPercentage": {
+          "description": "Memory reservation percentage, from 0 to 100, default 0",
+          "format": "int32",
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memorySharesLevel": {
+          "description": "Memory shares level. default 'normal'",
+          "enum": [
+            "custom,high,low,normal"
+          ],
+          "type": "string"
+        },
+        "memorySharesValue": {
+          "description": "Memory shares value, only relevant when shares level is 'custom', default 0",
+          "format": "int32",
+          "type": "integer"
+        },
+        "name": {
+          "description": "Resource Pool name. It will be auto-generated if blank",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of resource pool. One among: management, compute, network",
+          "enum": [
+            "management",
+            "compute",
+            "network"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RootCaCerts": {
+      "description": "Spec contains Root Certificate Authority parameters",
+      "properties": {
+        "alias": {
+          "description": "Certificate alias",
+          "type": "string"
+        },
+        "certChain": {
+          "description": "List of Base64 encoded certificates",
+          "items": {
+            "description": "List of Base64 encoded certificates",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SaltSpec": {
+      "description": "Specification for Salt services",
+      "properties": {
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SddcClusterSpec": {
+      "description": "Spec contains parameters for vCenter Cluster",
+      "properties": {
+        "clusterEvcMode": {
+          "description": "EVC mode for vSphere cluster, if needed",
+          "type": "string"
+        },
+        "clusterName": {
+          "description": "vCenter Cluster Name. It will be auto-generated if blank.",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "datacenterName": {
+          "description": "vCenter Datacenter Name. It will be auto-generated if blank.",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "resourcePoolSpecs": {
+          "description": "List of Resource Pool Specification. If blank, no resource pools will be created. However, if you want to create resource pool, Management Resource Pool is required to be present in the list.",
+          "items": {
+            "$ref": "#/$defs/ResourcePoolSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "SddcCredentials": {
+      "description": "Credentials contains the username and password",
+      "properties": {
+        "password": {
+          "description": "Password",
+          "minLength": 1,
+          "type": "string"
+        },
+        "username": {
+          "description": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "password"
+      ],
+      "type": "object"
+    },
+    "SddcDatastoreSpec": {
+      "description": "This specification contains cluster storage configuration",
+      "properties": {
+        "existingDatastoreName": {
+          "description": "Name of an existing datastore that is to be used when converting an existing environment.",
+          "type": "string"
+        },
+        "nfsDatastoreSpec": {
+          "$ref": "#/$defs/NfsDatastoreSpec"
+        },
+        "vmfsDatastoreSpec": {
+          "$ref": "#/$defs/VmfsDatastoreSpec"
+        },
+        "vsanSpec": {
+          "$ref": "#/$defs/VsanSpec"
+        }
+      },
+      "type": "object"
+    },
+    "SddcHostSpec": {
+      "description": "Spec contains parameters for Host",
+      "properties": {
+        "credentials": {
+          "$ref": "#/$defs/SddcCredentials"
+        },
+        "hostname": {
+          "description": "ESX hostname. This value will be prefixed to the DNS subdomain name and should not include the domain name itself. Must also adhere to RFC 1123 naming conventions",
+          "maxLength": 63,
+          "minLength": 0,
+          "pattern": "^(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])$",
+          "type": "string"
+        },
+        "sshThumbprint": {
+          "description": "ESX host SSH thumbprint (RSA SHA256) in new deployment scenario or ESX host SSH key (RSA, ECDSA) in reuse existing deployment scenario",
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "ESX host SSL thumbprint (SHA256)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "SddcLcmServiceSpec": {
+      "description": "Specification for deploy/configure of a SDDC LCM service",
+      "properties": {
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SddcManagerSpec": {
+      "description": "Client input parameters for SDDC Manager Virtual Machine",
+      "properties": {
+        "hostname": {
+          "description": "SDDC Manager Hostname.",
+          "maxLength": 63,
+          "minLength": 0,
+          "type": "string"
+        },
+        "localUserPassword": {
+          "description": "The local account is a built-in admin account in VCF that can be used in emergency scenarios. The password of this account must be at least 12 characters long. It also must contain at-least 1 uppercase, 1 lowercase, 1 special character specified in braces [!%@$^#?*] and 1 digit. If blank, the password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 12,
+          "type": "string"
+        },
+        "rootPassword": {
+          "description": "Password for the 'root' user on SDDC Manager appliance. The password of this account must be at least 15 characters long. It also must contain at-least 1 uppercase, 1 lowercase, 1 special character  specified in braces [!%@$^#?*] and 1 digit. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "sshPassword": {
+          "description": "Password for the 'vcf' user on SDDC Manager appliance. The password of this account must be at least 15 characters long. It also must contain at-least 1 uppercase, 1 lowercase, 1 special character  specified in braces [!%@$^#?*] and 1 digit. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "SddcNetworkSpec": {
+      "description": "Defines a network spec",
+      "properties": {
+        "activeUplinks": {
+          "description": "Active Uplinks for teaming policy, specify uplink1 for failover_explicit VSAN Teaming Policy",
+          "items": {
+            "description": "Active Uplinks for teaming policy, specify uplink1 for failover_explicit VSAN Teaming Policy",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gateway": {
+          "description": "Gateway",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        },
+        "includeIpAddress": {
+          "description": "IP Addresses to be included",
+          "items": {
+            "description": "IP Addresses to be included",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "includeIpAddressRanges": {
+          "description": "IP Address ranges to be included",
+          "items": {
+            "$ref": "#/$defs/IpRange"
+          },
+          "type": "array"
+        },
+        "ipAddressAssignmentMode": {
+          "default": "STATIC",
+          "description": "IP Address assignment mode. One among: STATIC, DHCP, SLAAC",
+          "pattern": "(STATIC|DHCP|SLAAC)",
+          "type": "string"
+        },
+        "ipAddressVersion": {
+          "default": "IPv4",
+          "description": "IP Address version. One among: IPv4, IPv6",
+          "pattern": "(IPv4|IPv6)",
+          "type": "string"
+        },
+        "mtu": {
+          "description": "MTU size",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networkType": {
+          "description": "Network Type. One among: VSAN, VMOTION, MANAGEMENT, VM_MANAGEMENT, NFS, FLEET_MANAGEMENT or any custom network type",
+          "minLength": 1,
+          "type": "string"
+        },
+        "portGroupKey": {
+          "description": "Name of the Distributed Portgroup to be created. It will be autogenerated if null",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "standbyUplinks": {
+          "description": "Standby Uplinks for teaming policy, specify uplink2 for failover_explicit VSAN Teaming Policy",
+          "items": {
+            "description": "Standby Uplinks for teaming policy, specify uplink2 for failover_explicit VSAN Teaming Policy",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "subnet": {
+          "description": "Subnet",
+          "maxLength": 18,
+          "minLength": 7,
+          "type": "string"
+        },
+        "subnetMask": {
+          "description": "Subnet Mask",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        },
+        "teamingPolicy": {
+          "description": "Teaming Policy for VSAN and VMOTION network types, Default is loadbalance_loadbased. One among:loadbalance_ip, loadbalance_srcmac, loadbalance_srcid, failover_explicit, loadbalance_loadbased",
+          "type": "string"
+        },
+        "vlanId": {
+          "description": "VLAN ID",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "networkType",
+        "vlanId"
+      ],
+      "type": "object"
+    },
+    "SddcNsxtSpec": {
+      "description": "Spec contains parameters for NSX deployment and configurations",
+      "properties": {
+        "enableEdgeClusterSync": {
+          "default": false,
+          "description": "Enable NSX Edge Cluster synchronization. Applicable only when NSX exists and is being imported. If enabled and your NSX deployment has one or more Edge clusters, the import process will add the discovered Edge node VMs to the VCF inventory, including their user credentials. As part of this process, a one-time reset of the Edge node credential passwords will be done. The updated passwords may be retrieved from the VCF credential store if desired. Once an Edge cluster's node VMs have been imported, any node VMs added to that Edge cluster will also be imported and subject to the same one-time password reset.",
+          "type": "boolean"
+        },
+        "ipAddressPoolSpec": {
+          "$ref": "#/$defs/IpAddressPoolSpec"
+        },
+        "nsxtAdminPassword": {
+          "description": "NSX admin password. The password must be at least 12 characters long. Must contain at-least 1 uppercase, 1 lowercase, 1 special character and 1 digit. In addition, a character cannot be repeated 3 or more times consectively. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 12,
+          "type": "string"
+        },
+        "nsxtAuditPassword": {
+          "description": "NSX audit password. The password must be at least 12 characters long. Must contain at-least 1 uppercase, 1 lowercase, 1 special character and 1 digit. In addition, a character cannot be repeated 3 or more times consectively. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 12,
+          "type": "string"
+        },
+        "nsxtManagerSize": {
+          "description": "NSX Manager size. One among: medium, large,xlarge. Default value if not provided is medium",
+          "pattern": "(xlarge|large|medium)",
+          "type": "string"
+        },
+        "nsxtManagers": {
+          "description": "NSX Managers",
+          "items": {
+            "$ref": "#/$defs/NsxtManagerSpec"
+          },
+          "type": "array"
+        },
+        "overlayVtepSpec": {
+          "$ref": "#/$defs/OverlayVtepSpec"
+        },
+        "rootNsxtManagerPassword": {
+          "description": "NSX root password. The password must be at least 12 characters long. Must contain at-least 1 uppercase, 1 lowercase, 1 special character and 1 digit. In addition, a character cannot be repeated 3 or more times consectively. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 12,
+          "type": "string"
+        },
+        "skipNsxOverlayOverManagementNetwork": {
+          "description": "Flag that indicates if the Overlay over Management Network configuration will be skipped. Applicable only when vCenter is existing and being converted.",
+          "type": "boolean"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "transportVlanId": {
+          "description": "Transport VLAN ID. Default '0' if not specified",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        },
+        "vipFqdn": {
+          "description": "Hostname for VIP so that common SSL certificates can be installed across all managers.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "vpcSpec": {
+          "$ref": "#/$defs/VpcSpec"
+        }
+      },
+      "required": [
+        "nsxtManagers",
+        "vipFqdn"
+      ],
+      "type": "object"
+    },
+    "SddcSpec": {
+      "description": "VCF Installer specification",
+      "properties": {
+        "ceipEnabled": {
+          "description": "Enable VCF Customer Experience Improvement Program",
+          "type": "boolean"
+        },
+        "clusterSpec": {
+          "$ref": "#/$defs/SddcClusterSpec"
+        },
+        "datastoreSpec": {
+          "$ref": "#/$defs/SddcDatastoreSpec"
+        },
+        "dnsSpec": {
+          "$ref": "#/$defs/DnsSpec"
+        },
+        "dvsSpecs": {
+          "description": "List of vSphere Distributed Switches to be created. For VCF only: if blank, a default single one will be created for all types of traffic connected to vmnic0 and vmnic1",
+          "items": {
+            "$ref": "#/$defs/DvsSpec"
+          },
+          "type": "array"
+        },
+        "fleetDepotSpec": {
+          "$ref": "#/$defs/FleetDepotServiceSpec"
+        },
+        "fleetLcmSpec": {
+          "$ref": "#/$defs/FleetLcmServiceSpec"
+        },
+        "hostSpecs": {
+          "description": "List of ESXi to be added to the Management Cluster",
+          "items": {
+            "$ref": "#/$defs/SddcHostSpec"
+          },
+          "type": "array"
+        },
+        "licenseServerSpec": {
+          "$ref": "#/$defs/LicenseServerSpec"
+        },
+        "managementPoolName": {
+          "description": "Name for the network pool to be created and associated with the Management Cluster",
+          "type": "string"
+        },
+        "networkSpecs": {
+          "description": "List of Networks which be created and used for Management Cluster",
+          "items": {
+            "$ref": "#/$defs/SddcNetworkSpec"
+          },
+          "type": "array"
+        },
+        "nsxtSpec": {
+          "$ref": "#/$defs/SddcNsxtSpec"
+        },
+        "ntpServers": {
+          "description": "List of NTP servers to be used for configuring Management Appliances",
+          "items": {
+            "description": "List of NTP servers to be used for configuring Management Appliances",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "saltRaasSpec": {
+          "$ref": "#/$defs/SaltSpec"
+        },
+        "saltSpec": {
+          "$ref": "#/$defs/SaltSpec"
+        },
+        "sddcId": {
+          "description": "Client string that identifies an SDDC by name or instance name. Used for management domain name. Can contain only letters, numbers and the following symbols: '-'. Minimum length 3, maximum length 20.",
+          "maxLength": 20,
+          "minLength": 3,
+          "pattern": "^[a-zA-Z0-9-]+$",
+          "type": "string"
+        },
+        "sddcLcmSpec": {
+          "$ref": "#/$defs/SddcLcmServiceSpec"
+        },
+        "sddcManagerSpec": {
+          "$ref": "#/$defs/SddcManagerSpec"
+        },
+        "securitySpec": {
+          "$ref": "#/$defs/SecuritySpec"
+        },
+        "skipEsxThumbprintValidation": {
+          "description": "Skip ESXi thumbprint validation. Applies to both converting an existing environment and deploying a new one",
+          "type": "boolean"
+        },
+        "skipGatewayPingValidation": {
+          "description": "Skip networks gateway connectivity validation",
+          "type": "boolean"
+        },
+        "telemetryAcceptorSpec": {
+          "$ref": "#/$defs/TelemetryAcceptorSpec"
+        },
+        "vcenterSpec": {
+          "$ref": "#/$defs/SddcVcenterSpec"
+        },
+        "vcfAutomationSpec": {
+          "$ref": "#/$defs/VcfAutomationSpec"
+        },
+        "vcfInstanceName": {
+          "description": "VCF Instance name. Minimum length 1, maximum length 300",
+          "maxLength": 300,
+          "minLength": 1,
+          "type": "string"
+        },
+        "vcfManagementComponentsInfrastructureSpec": {
+          "$ref": "#/$defs/VcfManagementComponentsInfrastructureSpec"
+        },
+        "vcfOperationsCollectorSpec": {
+          "$ref": "#/$defs/VcfOperationsCollectorSpec"
+        },
+        "vcfOperationsSpec": {
+          "$ref": "#/$defs/VcfOperationsSpec"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        },
+        "vidbSpec": {
+          "$ref": "#/$defs/VidbSpec"
+        },
+        "vspClusterSpec": {
+          "$ref": "#/$defs/SddcVspClusterSpec"
+        },
+        "workflowType": {
+          "description": "Type of workflow to initiate creation and/or validation of SDDC. If building a secondary VCF instance to connect it to the fleet, specify workflowType as VCF_EXTEND.",
+          "pattern": "(VCF|VCF_COMPLETE|VCF_EXTEND|VVF|VCF_BOOTSTRAP)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dnsSpec",
+        "networkSpecs",
+        "sddcId",
+        "vcenterSpec"
+      ],
+      "type": "object"
+    },
+    "SddcVcenterSpec": {
+      "description": "Spec contains parameters for vCenter",
+      "properties": {
+        "adminUserSsoPassword": {
+          "description": "Admin user sso password. Password needs to be a strong password with at least one Uppercase character, one lowercase character, one digit and one special character specified in braces [!$%^] and 8-20 characters in length,and 3 maximum identical adjacent characters!. If blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 8,
+          "type": "string"
+        },
+        "adminUserSsoUsername": {
+          "description": "Admin user sso username. If blank, administrator username will be used.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "rootVcenterPassword": {
+          "description": "vCenter root password. For new deployments, the password must be between 15 and 20 characters long. For existing vCenter (brownfield convert), the password must be between 8 and 20 characters long. It must also contain at least one uppercase and lowercase letter, one number, and one character from '! \" # $ % & ' ( ) * + , - . / : ; < = > ? @ [ \\ ] ^ _ ` { &Iota; } ~' and all characters must be ASCII. Space is not allowed in password. For VCF only: if blank, the SDDC Local Admin Password will be used (if provided) or password will be auto-generated.",
+          "maxLength": 20,
+          "minLength": 8,
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "ssoDomain": {
+          "description": "PSC SSO Domain",
+          "type": "string"
+        },
+        "storageSize": {
+          "description": "vCenter Virtual Machine Storage size. One among:lstorage, xlstorage",
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "vcenterHostname": {
+          "description": "vCenter hostname address.",
+          "maxLength": 63,
+          "minLength": 0,
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        },
+        "vmSize": {
+          "description": "vCenter Virtual Machine size. One among:xlarge, large, medium, small, tiny",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rootVcenterPassword",
+        "vcenterHostname"
+      ],
+      "type": "object"
+    },
+    "SddcVspClusterSpec": {
+      "description": "Specification VSP cluster deployment",
+      "properties": {
+        "fleetFqdn": {
+          "description": "VSP cluster fleet FQDN. This should be provided in VVF and primary VCF instance. If building a secondary VCF instance, do not provide this field.",
+          "type": "string"
+        },
+        "instanceFqdn": {
+          "description": "VSP cluster instance FQDN.",
+          "type": "string"
+        },
+        "internalClusterCidrIpv4": {
+          "default": "198.18.0.0/15",
+          "description": "Internal Cluster CIDR for IPv4. The set of addresses must be completely unique and not in use anywhere in your entire environment. Supported values: 198.18.0.0/15, 240.0.0.0/15, 250.0.0.0/15.",
+          "type": "string"
+        },
+        "internalClusterCidrIpv6": {
+          "default": "fd00::/111",
+          "description": "Internal Cluster CIDR for IPv6. The set of addresses must be completely unique and not in use anywhere in your entire environment. Supported values: fd00::/111, fd00::0/111, fc00::/111, fc00::0/111, fc00::4:0/111, fc00::0004:0/111.",
+          "type": "string"
+        },
+        "ipv4Pool": {
+          "$ref": "#/$defs/IPv4Pool"
+        },
+        "ipv6Pool": {
+          "$ref": "#/$defs/IPv6Pool"
+        },
+        "platformFqdn": {
+          "description": "VSP cluster primary FQDN. Short hostname part of the FQDN must be maximum 63 characters in length and may contain alphanumeric characters and dashes.",
+          "minLength": 1,
+          "pattern": "^$|^[a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?(?:\\..*)?$",
+          "type": "string"
+        },
+        "size": {
+          "description": "Size of VSP cluster. One among: small, small_ha, medium, large (small_ha is for management VSP cluster only and cannot be used for consumption VSP cluster (VCF Automation)).",
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "systemUserPassword": {
+          "description": "SSH password for vmware-system-user and admin@vsp.local on VMSP cluster nodes. Password must be at least 15 characters long. If blank the password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceFqdn",
+        "ipv4Pool",
+        "platformFqdn"
+      ],
+      "type": "object"
+    },
+    "SecuritySpec": {
+      "description": "Spec contains security settings",
+      "properties": {
+        "esxiCertsMode": {
+          "description": "ESXi certificates mode. One among:Custom, VMCA",
+          "type": "string"
+        },
+        "rootCaCerts": {
+          "description": "Root Certificate Authority certificate list",
+          "items": {
+            "$ref": "#/$defs/RootCaCerts"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TeamingSpec": {
+      "description": "This specification contains the teaming policies associated with the uplink profile.",
+      "properties": {
+        "activeUplinks": {
+          "description": "The list of active uplinks",
+          "items": {
+            "description": "The list of active uplinks",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "policy": {
+          "description": "The teaming policy associated with the uplink profile",
+          "minLength": 1,
+          "pattern": "(FAILOVER_ORDER|LOADBALANCE_SRCID|LOADBALANCE_SRC_MAC)",
+          "type": "string"
+        },
+        "standByUplinks": {
+          "description": "The list of stand by uplinks",
+          "items": {
+            "description": "The list of stand by uplinks",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "activeUplinks",
+        "policy"
+      ],
+      "type": "object"
+    },
+    "TelemetryAcceptorSpec": {
+      "description": "Specification for deploy/configure of Telemetry acceptor service",
+      "properties": {
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "TransportZone": {
+      "description": "The transport zone to be associated with the vSphere Distributed Switch managed by NSX",
+      "properties": {
+        "name": {
+          "description": "The name of the transport zone",
+          "maxLength": 255,
+          "minLength": 0,
+          "type": "string"
+        },
+        "transportType": {
+          "description": "The type of the transport zone",
+          "minLength": 1,
+          "pattern": "(VLAN|OVERLAY)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "transportType"
+      ],
+      "type": "object"
+    },
+    "VcfAutomationSpec": {
+      "description": "Specification for VCF Automation",
+      "properties": {
+        "adminUserPassword": {
+          "description": "Admin user password. Password must be at least 15 characters long. If blank the password will be auto-generated.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "hostname": {
+          "description": "Host name",
+          "minLength": 1,
+          "type": "string"
+        },
+        "internalClusterCidr": {
+          "description": "Internal Cluster CIDR. The set of addresses must be completely unique and not in use anywhere in your entire environment.",
+          "type": "string"
+        },
+        "ipPool": {
+          "description": "List of IP addresses for the IP pool",
+          "items": {
+            "description": "List of IP addresses for the IP pool",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "nodePrefix": {
+          "description": "Node Prefix. It cannot be blank and must begin and end with an alphanumeric character, and can only contain lowercase alphanumeric characters or hyphens.",
+          "maxLength": 57,
+          "minLength": 0,
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "type": "string"
+        },
+        "platformFqdn": {
+          "description": "FQDN of the VSP platform (required when useExistingDeployment is not 'true'). Short hostname part of the FQDN must be maximum 63 characters in length and may contain alphanumeric characters and dashes.",
+          "pattern": "^$|^[a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?(?:\\..*)?$",
+          "type": "string"
+        },
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname",
+        "internalClusterCidr"
+      ],
+      "type": "object"
+    },
+    "VcfManagementComponentsInfrastructureSpec": {
+      "description": "Specification for infrastructure to be used for VCF Management Components deployment",
+      "properties": {
+        "localRegionNetwork": {
+          "$ref": "#/$defs/VcfManagementComponentsNetworkSpec"
+        },
+        "xRegionNetwork": {
+          "$ref": "#/$defs/VcfManagementComponentsNetworkSpec"
+        }
+      },
+      "type": "object"
+    },
+    "VcfManagementComponentsNetworkSpec": {
+      "description": "Specification for network to be used for VCF Management Components deployment",
+      "properties": {
+        "gateway": {
+          "description": "Gateway",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        },
+        "ipv6Gateway": {
+          "description": "Gateway for IPv6 network",
+          "type": "string"
+        },
+        "ipv6Prefix": {
+          "description": "Prefix for IPv6 network",
+          "format": "int32",
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "networkName": {
+          "description": "Name of the network to be used for deployment",
+          "minLength": 1,
+          "type": "string"
+        },
+        "subnetMask": {
+          "description": "Subnet Mask",
+          "maxLength": 15,
+          "minLength": 7,
+          "type": "string"
+        }
+      },
+      "required": [
+        "gateway",
+        "networkName",
+        "subnetMask"
+      ],
+      "type": "object"
+    },
+    "VcfOperationsCollectorSpec": {
+      "description": "Specification for VCF Operations collector",
+      "properties": {
+        "applianceSize": {
+          "description": "VCF Operations collector appliance size. One among: small, standard. Default value if not provided is small",
+          "type": "string"
+        },
+        "hostname": {
+          "description": "Host name",
+          "minLength": 1,
+          "type": "string"
+        },
+        "rootUserPassword": {
+          "description": "Root user password.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the product's certificate. Need to be populated when using existing deployment in order to establish trust with the existing product.",
+          "type": "string"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "VcfOperationsNode": {
+      "description": "Specification for VCF Operations Node",
+      "properties": {
+        "hostname": {
+          "description": "Host name",
+          "minLength": 1,
+          "type": "string"
+        },
+        "rootUserPassword": {
+          "description": "Root user password.",
+          "maxLength": 2147483647,
+          "minLength": 15,
+          "type": "string"
+        },
+        "sslThumbprint": {
+          "description": "SSL thumbprint (SHA256) of the node certificate. Need to be populated when using existing VCF Ops deployment or when connecting a secondary VCF instance to the primary VCF instance (fleet).",
+          "type": "string"
+        },
+        "type": {
+          "description": "Node type. One among: master, replica, data. If building a secondary VCF instance, specify the master node details.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "VcfOperationsSpec": {
+      "description": "Specification for VCF Operations",
+      "properties": {
+        "adminUserPassword": {
+          "description": "Admin user password. If blank the password will be auto-generated. If building a secondary VCF instance, this field should be set to the existing admin password of VCF Ops.",
+          "maxLength": 2147483647,
+          "minLength": 8,
+          "type": "string"
+        },
+        "applianceSize": {
+          "description": "VCF Operations appliance size. One among: xsmall, small, medium, large, xlarge for Simple deployment model and one among: small, medium, large, xlarge for High Availability. Default value if not provided is medium for both deployment models.",
+          "pattern": "(xsmall|small|medium|large|xlarge)",
+          "type": "string"
+        },
+        "loadBalancerFqdn": {
+          "description": "Load Balancer FQDN",
+          "type": "string"
+        },
+        "nodes": {
+          "description": "List of VCF Ops nodes. If building a secondary VCF instance, specify the details of the existing VCF Ops master node.",
+          "items": {
+            "$ref": "#/$defs/VcfOperationsNode"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array"
+        },
+        "useExistingDeployment": {
+          "default": false,
+          "description": "Import existing deployment or deploy one. If building a secondary VCF instance, this field should be set to true",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "type": "object"
+    },
+    "VidbSpec": {
+      "description": "Specification for VIDB",
+      "properties": {
+        "hostname": {
+          "description": "VIDB hostname.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "size": {
+          "description": "size",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hostname"
+      ],
+      "type": "object"
+    },
+    "VmfsDatastoreSpec": {
+      "description": "Cluster storage configuration for VMFS",
+      "properties": {
+        "fcSpec": {
+          "description": "Cluster storage configuration for VMFS on FC",
+          "items": {
+            "$ref": "#/$defs/FcSpec"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "VmnicToUplink": {
+      "description": "This specification contains vmnic to uplink configurations for vSphere host.",
+      "properties": {
+        "id": {
+          "description": "VmNic ID of vSphere host to be associated with VDS, once added to cluster",
+          "minLength": 1,
+          "type": "string"
+        },
+        "uplink": {
+          "description": "The uplink name of the vSphere Distributed Switch to be associated",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "uplink"
+      ],
+      "type": "object"
+    },
+    "VpcSpec": {
+      "description": "Specification for VPC related configurations",
+      "properties": {
+        "dtgwSpec": {
+          "$ref": "#/$defs/DtgwSpec"
+        },
+        "vpcNetworkConfigurationType": {
+          "default": "FULL_STACK_VPC",
+          "description": "VPC network configuration type. Only applicable for shell domains. Allowed values: VLAN_BACKED_VPC, FULL_STACK_VPC. Defaults to FULL_STACK_VPC when not provided.",
+          "pattern": "(VLAN_BACKED_VPC|FULL_STACK_VPC)",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "VsanEsaConfig": {
+      "description": "This spec contains cluster vSAN ESA configuration",
+      "properties": {
+        "enabled": {
+          "description": "Whether the vSAN ESA is enabled.",
+          "type": "boolean"
+        },
+        "skipHclAutoDiskClaim": {
+          "description": "Whether to enable or disable vSAN auto disk claim for vSAN ESA cluster",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "VsanSpec": {
+      "description": "Spec contains parameters of Virtual SAN",
+      "properties": {
+        "datastoreName": {
+          "description": "Datastore Name. It will be auto-generated if blank",
+          "maxLength": 80,
+          "minLength": 0,
+          "type": "string"
+        },
+        "encryptionConfig": {
+          "$ref": "#/$defs/EncryptionConfig"
+        },
+        "esaConfig": {
+          "$ref": "#/$defs/VsanEsaConfig"
+        },
+        "failuresToTolerate": {
+          "description": "Host failures to tolerate",
+          "format": "int32",
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vsanDedup": {
+          "description": "VSAN feature Deduplication and Compression flag, one flag for both features",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://vcfspec.invalid/sddc-spec/9.1.1.0",
+  "$ref": "#/$defs/SddcSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-source": "https://raw.githubusercontent.com/vmware/vcf-api-specs/main/specifications/vcf-installer/vcf-installer-openapi.json",
+  "x-vcf-version": "9.1.1.0"
+}

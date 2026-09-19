@@ -46,7 +46,7 @@ ALLM_TEMP="${ALLM_TEMP:-0.3}"
 # and a two-way branch placed at the END was truncated away on long answers --
 # exactly when a reader most needs to know how current the material is. It now
 # leads the answer and states one refresh date for the whole corpus, which the
-# 2026-08-24 backfill made true. Update the date after any bulk re-ingest.
+# 2026-09-17 bulk re-ingest made true. Update the date after any bulk re-ingest.
 read -r -d '' VCF_PROMPT <<'VCF_PROMPT_EOF' || true
 You are a technical reference assistant for VMware Cloud Foundation (VCF).
 
@@ -55,7 +55,7 @@ You are a technical reference assistant for VMware Cloud Foundation (VCF).
 Begin every substantive answer with exactly this line, then a blank line, then
 the answer:
 
-Currency: VCF corpus refreshed 2026-08-24 — release notes weekly, other pages monthly.
+Currency: VCF corpus refreshed 2026-09-17 — release notes weekly, other pages monthly.
 
 It goes at the TOP, not the end. A trailing disclaimer is the first thing lost
 when an answer hits the token limit, which is precisely when a reader most

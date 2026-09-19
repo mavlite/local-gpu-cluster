@@ -1,0 +1,59 @@
+apiVersion: vcfspec/v1
+kind: LabInventory
+instance:
+  name: lab01
+  sddcId: lab01
+  vcfVersion: 9.1.1.0
+dns:
+  subdomain: lab.local
+  nameservers: [10.50.10.5]
+ntp:
+  servers: [10.50.10.5]
+networks:
+  management: {vlan: 1610, subnet: 10.50.10.0/24, gateway: 10.50.10.1, mtu: 1500}
+  vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000}
+  vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000}
+nsx:
+  vipFqdn: nsx.lab.local
+  managers: [nsx01]
+  size: medium
+  transportVlanId: 1613
+  fabricMtu: 9000
+  tepPool:
+    name: lab01-tep
+    cidr: 10.50.13.0/24
+    gateway: 10.50.13.1
+    ranges:
+      - {start: 10.50.13.20, end: 10.50.13.60}
+storage:
+  type: VSAN_ESA
+  datastoreName: vsan-lab01
+  failuresToTolerate: 1
+appliances:
+  vcenter: {hostname: vc01, size: small, ssoDomain: vsphere.local}
+  sddcManager: {hostname: sddcm01}
+  vsp:
+    platformFqdn: vcf.lab.local
+    instanceFqdn: lab01.lab.local
+    poolStart: 10.50.10.100
+    poolEnd: 10.50.10.115
+    internalCidr: 198.18.0.0/15
+hosts:
+  - name: esx01
+    mgmtIp: 10.50.10.11
+    vmnics: [vmnic0, vmnic1]
+    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+  - name: esx02
+    mgmtIp: 10.50.10.12
+    vmnics: [vmnic0, vmnic1]
+    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+  - name: esx03
+    mgmtIp: 10.50.10.13
+    vmnics: [vmnic0, vmnic1]
+    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+credentials:
+  esxRoot: ${esx_root}
+  vcenterRoot: ${vcenter_root}
+  ssoAdmin: ${sso_admin}
+  nsxAdmin: ${nsx_admin}
+  sddcManagerRoot: ${sddc_root}

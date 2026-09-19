@@ -1,0 +1,19 @@
+# Every default records where it came from, so a rendered spec explains itself.
+workflowType:
+  value: VCF
+  source: "SddcSpec.workflowType pattern (VCF|VCF_COMPLETE|VCF_EXTEND|VVF)."
+ceipEnabled:
+  value: false
+  source: "Lab default: telemetry off unless asked for."
+skipEsxThumbprintValidation:
+  value: true
+  source: "Lab default: hosts are freshly installed and thumbprints are unknown."
+vcenterSize:
+  value: small
+  source: "VCF-Design-Studio 9.1 'simple' profile (P&P Workbook static tables)."
+nsxSize:
+  value: medium
+  source: "SddcNsxtSpec.nsxtManagerSize pattern allows xlarge|large|medium only."
+ssoDomain:
+  value: vsphere.local
+  source: "vSphere default SSO domain."
