@@ -226,3 +226,45 @@ def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(capsys):
     assert exit_code == 1
     assert payload["valid"] is False
     assert "VCF-PROBE-NOTHING-PERMITTED" in {f["code"] for f in payload["findings"]}
+
+
+# --- Finding 12: the MCP server exposed input_kind on vcf_validate_spec
+# but the CLI had no equivalent, and render_document could not be
+# overridden on either surface. --input-kind closes both gaps, restricted
+# to the same closed enum documents.py actually accepts.
+
+def test_validate_input_kind_forces_kind_detection(tmp_path, capsys):
+    # A rendered SddcSpec, force-validated as an inventory: auto-detection
+    # would correctly call this sddc_spec, so seeing inventory-shaped
+    # findings (not VCF-SCHEMA) is proof the override, not autodetection,
+    # decided the kind.
+    assert main(["render", str(EXAMPLE_PATH)]) == 0
+    spec = json.loads(capsys.readouterr().out)["spec"]
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    exit_code = main(["validate", str(spec_path), "--input-kind", "inventory"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["findings"][0]["code"] == "VCF-INV-SCHEMA"
+
+
+def test_validate_input_kind_rejects_an_unrecognised_value(capsys):
+    exit_code = main(["validate", str(EXAMPLE_PATH), "--input-kind", "bogus"])
+    assert exit_code == 2
+    assert "bogus" in capsys.readouterr().err.lower()
+
+
+def test_render_input_kind_forces_wrong_kind_rejection_not_misdetection(capsys):
+    # render only ever accepts an inventory; forcing sddc_spec on the real
+    # inventory example must produce the explicit VCF-RENDER-WRONG-KIND
+    # path, not a silent, uninspected pass.
+    exit_code = main(["render", str(EXAMPLE_PATH), "--input-kind", "sddc_spec"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["findings"][0]["code"] == "VCF-RENDER-WRONG-KIND"
+    assert "spec" not in payload
+
+
+def test_render_input_kind_rejects_an_unrecognised_value(capsys):
+    exit_code = main(["render", str(EXAMPLE_PATH), "--input-kind", "bogus"])
+    assert exit_code == 2

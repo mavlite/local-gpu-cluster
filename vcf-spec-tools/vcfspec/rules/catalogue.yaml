@@ -44,6 +44,12 @@ VCF-SCHEMA-VERSION-UNKNOWN:
   source_url: ""
   summary: "No vendored schema or defaults for VCF version '{version}'."
   fix: "Use a vendored VCF version, or omit vcf_version/--version to use the default. Vendor a new one first with scripts/vendor_schema.py."
+VCF-VERSION-NOT-CONSULTED:
+  severity: info
+  source: schema
+  source_url: ""
+  summary: "vcf_version '{version}' was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release."
+  fix: "Omit vcf_version when validating an inventory document, or pass input_kind: \"sddc_spec\" if you meant to validate a rendered spec instead."
 VCF-CRED-NOT-A-REFERENCE:
   severity: critical
   source: docs

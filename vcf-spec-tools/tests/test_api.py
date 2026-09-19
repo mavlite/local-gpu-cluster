@@ -410,6 +410,74 @@ def test_render_document_refuses_a_wrong_kind_document_instead_of_reporting_vali
     assert "spec" not in out
 
 
+# --- Finding 11: an irrelevant vcf_version must not be silently ignored --
+# validate_document only ever consults `version` for an SDDC_SPEC-kind
+# document (see the branch above); for an inventory, it never reads it.
+# Before this, `vcf_validate_spec` on the bundled inventory with
+# `vcf_version: "0.0.0"` returned `valid: True` with nothing telling the
+# caller that "0.0.0" was never actually checked against anything -- a
+# confidently-wrong-shaped result, the same failure family as finding 1.
+# The fix must not reject the call (fix A already established that an
+# inventory-kind call carrying an irrelevant vcf_version is legitimate),
+# only stop it from being silently misleading about what ran.
+
+def test_irrelevant_version_on_an_inventory_gets_an_informational_note():
+    out = validate_document(TEXT, version="0.0.0")
+    assert out["valid"] is True          # not rejected -- fix A's promise holds
+    assert "VCF-VERSION-NOT-CONSULTED" in [f["code"] for f in out["findings"]]
+    note = next(f for f in out["findings"] if f["code"] == "VCF-VERSION-NOT-CONSULTED")
+    assert note["severity"] == "info"    # advisory only, never blocks
+    assert "0.0.0" in note.get("message", "")
+
+
+def test_default_version_on_an_inventory_gets_no_note():
+    # The common case -- no vcf_version supplied, or the one already in
+    # effect -- must stay exactly as quiet as before this fix: nobody who
+    # never mentioned a version needs to be told it was not consulted.
+    out = validate_document(TEXT)
+    assert "VCF-VERSION-NOT-CONSULTED" not in [f["code"] for f in out["findings"]]
+    out = validate_document(TEXT, version=DEFAULT_VERSION)
+    assert "VCF-VERSION-NOT-CONSULTED" not in [f["code"] for f in out["findings"]]
+
+
+def test_relevant_version_on_an_sddc_spec_gets_no_note():
+    # The note is specific to the inventory branch, where version really
+    # is unused -- an SDDC_SPEC document does consult it, so no note.
+    spec_text = json.dumps(render_document(TEXT)["spec"])
+    out = validate_document(spec_text, input_kind="sddc_spec", version="0.0.0")
+    codes = [f["code"] for f in out["findings"]]
+    assert "VCF-VERSION-NOT-CONSULTED" not in codes
+    assert "VCF-SCHEMA-VERSION-UNKNOWN" in codes
+
+
+# --- Finding 12: render_document could not override kind on either
+# surface -- only validate_document accepted input_kind. Mirrors the same
+# override validate_document already had.
+
+def test_render_document_accepts_an_input_kind_override():
+    out = render_document(TEXT, input_kind="inventory")
+    assert out["valid"] is True
+    assert out["spec"]["sddcId"] == "lab01"
+
+
+def test_render_document_forcing_sddc_spec_kind_reports_wrong_kind():
+    # Forcing "sddc_spec" on a real inventory must not silently render it
+    # as one -- render() only ever accepts a LabInventory, so the override
+    # must still hit the same explicit VCF-RENDER-WRONG-KIND path a
+    # correctly auto-detected SddcSpec document hits above, rather than
+    # being misread as the inventory it actually is.
+    out = render_document(TEXT, input_kind="sddc_spec")
+    assert out["valid"] is False
+    assert out["findings"][0]["code"] == "VCF-RENDER-WRONG-KIND"
+    assert "spec" not in out
+
+
+def test_render_document_bad_input_kind_override_is_a_finding_not_a_crash():
+    out = render_document(TEXT, input_kind="not-a-real-kind")
+    assert out["valid"] is False
+    assert out["findings"][0]["code"] == "VCF-INPUT-BAD-KIND"
+
+
 # --- Fix round 3: the general invariant -- valid=True requires at least
 # one substantive layer to have actually run. Tested directly against the
 # helper, independent of any one caller's skip logic, per the coordinator's

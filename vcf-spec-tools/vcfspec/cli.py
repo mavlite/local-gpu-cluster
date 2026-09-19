@@ -61,6 +61,11 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--version", default=DEFAULT_VERSION,
                           help="VCF schema version to validate SDDC specs against.")
     validate.add_argument(
+        "--input-kind", choices=("inventory", "sddc_spec"), default=None,
+        help="Force the document kind instead of auto-detecting it. An "
+             "unrecognised value is a usage error (argparse rejects it "
+             "before validate_document ever runs), never a silent skip.")
+    validate.add_argument(
         "--probe", action="store_true",
         help="Run live network probes against hosts. Requires --allowlist.")
     validate.add_argument(
@@ -80,6 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
     render.add_argument("path", type=Path)
     render.add_argument("--version", default=DEFAULT_VERSION,
                         help="VCF schema version to render for.")
+    render.add_argument(
+        "--input-kind", choices=("inventory", "sddc_spec"), default=None,
+        help="Force the document kind instead of auto-detecting it. "
+             "render only ever accepts an inventory, so forcing "
+             "sddc_spec here is only useful to get an explicit "
+             "VCF-RENDER-WRONG-KIND rather than a misdetection.")
 
     return parser
 
@@ -158,10 +169,12 @@ def main(argv: list[str] | None = None) -> int:
                     allowlist=tuple(args.allowlist),
                     timeout_s=args.probe_timeout,
                     domain_allowlist=tuple(args.allowlist_domain or ()))
-            result = validate_document(text, probe_config=probe_config,
+            result = validate_document(text, input_kind=args.input_kind,
+                                       probe_config=probe_config,
                                        version=args.version)
         else:
-            result = render_document(text, version=args.version)
+            result = render_document(text, version=args.version,
+                                     input_kind=args.input_kind)
     except Exception as exc:
         # api.py promises no exception ever reaches this point; this is
         # the last line of defence if that promise is ever broken. Only

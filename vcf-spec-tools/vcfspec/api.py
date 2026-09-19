@@ -143,6 +143,23 @@ def validate_document(text: str, input_kind: str | None = None,
         result = result.merge(schema_result)
         layers_run.append("schema")
 
+        # Finding 11: an inventory document has one fixed schema regardless
+        # of `version` -- nothing below this branch ever reads it. Before
+        # this, `vcf_version: "0.0.0"` on an inventory silently had zero
+        # effect and the result still said `valid: true`, which a caller
+        # could easily read as "checked and fine for VCF 0.0.0" when
+        # nothing checked that at all. This must not *reject* the call --
+        # an inventory-kind call carrying an irrelevant vcf_version is a
+        # legitimate shape (fix A already established that rejecting it
+        # outright is wrong) -- it only has to stop the result being
+        # silently misleading about what was consulted. An info finding
+        # does that without changing `valid`, and is skipped when `version`
+        # is the default: a caller who never mentioned a version, or who
+        # asked for the one already in effect, has nothing to be told.
+        if version != DEFAULT_VERSION:
+            result = result.merge(Result((finding_for(
+                "VCF-VERSION-NOT-CONSULTED", "/", version=version),)))
+
         blocked = subtree_blocked(schema_result.findings)
         result = result.merge(_rules_for_inventory(doc, blocked))
         layers_run.append("rules")
@@ -201,13 +218,14 @@ def validate_document(text: str, input_kind: str | None = None,
     return _envelope(result, layers_run, skipped)
 
 
-def render_document(text: str, version: str = DEFAULT_VERSION) -> dict:
+def render_document(text: str, version: str = DEFAULT_VERSION,
+                    input_kind: str | None = None) -> dict:
     try:
         doc = load_document(text)
     except Exception as exc:
         return _unreadable_envelope(exc, {"render": "document unreadable"})
 
-    kind, result = detect_kind(doc)
+    kind, result = detect_kind(doc, input_kind)
     if kind is not DocumentKind.INVENTORY:
         # detect_kind() attaches no finding for a document it correctly
         # recognised as SDDC_SPEC -- sniffing a real one is not itself an
