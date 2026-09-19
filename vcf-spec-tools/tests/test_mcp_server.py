@@ -53,7 +53,12 @@ def test_explain_unknown_code_is_explained_not_an_exception():
     # whether the code existed.
     out = tool_explain_finding({"code": "NOPE"})
     assert out["code"] == "VCF-EXPLAIN-UNKNOWN-CODE"
-    assert "NOPE" in out["summary"]
+    # This used to assert `"NOPE" in out["summary"]`. Inverted on
+    # 2026-09-19: the requested code is no longer echoed back. It handed
+    # an agent up to 128 caller-chosen characters inside a message it
+    # reads, for no benefit -- the caller already knows what it asked.
+    assert "NOPE" not in out["summary"]
+    assert out["summary"]
     assert out["severity"]
     assert "findings" not in out
     assert "valid" not in out

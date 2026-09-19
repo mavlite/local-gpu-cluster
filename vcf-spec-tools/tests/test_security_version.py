@@ -303,3 +303,89 @@ def test_an_oversized_version_is_refused_at_the_mcp_boundary():
 def test_a_real_document_is_comfortably_within_the_bound():
     from vcfspec.mcp_server import MAX_DOCUMENT_CHARS
     assert len(INVENTORY) * 100 < MAX_DOCUMENT_CHARS
+
+
+# --- No finding message ever reflects caller-supplied text ---------------
+#
+# Found in follow-up review on 2026-09-19: the first pass removed this
+# reflection from the two *rejection* messages and missed three other
+# places a caller-supplied value reached a message -- the
+# VCF-VERSION-NOT-CONSULTED note (inventory path), the `code` argument to
+# vcf_explain_finding, and input_kind in detect_kind.
+#
+# None of the three is an oracle: no filesystem access occurs on any of
+# them and each answers identically regardless of what is on disk. The
+# concern is narrower and worth stating exactly -- the caller of these
+# tools is an AI agent that may be validating a document from an
+# untrusted source, and handing it back caller-chosen characters inside a
+# message it reads is a surface with no upside. The caller already knows
+# what it sent; naming what this package actually ships is strictly more
+# useful.
+#
+# This test is written as a sweep over every argument rather than three
+# separate cases, so a NEW tool argument that echoes is caught by a test
+# nobody had to remember to write.
+
+_CANARY = "ZZ-CANARY-REFLECTED-9174-ZZ"
+
+
+def _sweep_arguments():
+    """(tool, args) for every string argument, each carrying the canary."""
+    from vcfspec.mcp_server import TOOLS
+    for tool, spec in TOOLS.items():
+        properties = spec["inputSchema"].get("properties", {})
+        for name, declared in properties.items():
+            if declared.get("type") != "string":
+                continue
+            args = {}
+            for required in spec["inputSchema"].get("required", []):
+                args[required] = INVENTORY if required in (
+                    "document", "left", "right") else _CANARY
+            args[name] = _CANARY
+            yield tool, name, args
+
+
+@pytest.mark.parametrize(
+    "tool,argument,args",
+    [pytest.param(t, n, a, id=f"{t}.{n}") for t, n, a in _sweep_arguments()])
+def test_no_finding_message_ever_reflects_caller_supplied_text(tool, argument, args):
+    blob = json.dumps(call_handler(tool, args))
+    assert _CANARY not in blob, (
+        f"{tool}.{argument} echoes its caller-supplied value back into the "
+        "envelope an agent reads")
+
+
+def test_the_sweep_itself_covers_every_tool_and_the_known_offenders():
+    """Guards the guard: a sweep that silently covered nothing would pass
+    every assertion above."""
+    covered = {(tool, name) for tool, name, _ in _sweep_arguments()}
+    assert {("vcf_validate_spec", "vcf_version"),
+            ("vcf_render_spec", "vcf_version"),
+            ("vcf_explain_finding", "code"),
+            ("vcf_validate_spec", "document"),
+            ("vcf_diff_spec", "left")} <= covered
+    assert len({tool for tool, _ in covered}) >= 4
+
+
+def test_the_not_consulted_note_names_the_vendored_set_instead(tmp_path):
+    """The positive half: dropping the echo must not drop the
+    information. An operator still learns that their version was ignored
+    AND what this package actually ships."""
+    out = call_handler("vcf_validate_spec",
+                       {"document": INVENTORY, "vcf_version": "9.9.9.9"})
+    note = next(f for f in out["findings"]
+                if f["code"] == "VCF-VERSION-NOT-CONSULTED")
+    assert "9.9.9.9" not in note["message"]
+    assert DEFAULT_VERSION in note["message"]
+    assert "not consulted" in note["message"]
+    assert out["valid"] is True          # still advisory, still not a rejection
+
+
+def test_input_kind_is_not_reflected_by_the_library_entry_point():
+    """The MCP enum and argparse both refuse a bad input_kind before
+    detect_kind sees it, so this is only reachable through the library --
+    which is a public entry point, and the rule should not depend on
+    which front door is in front of it."""
+    out = validate_document(INVENTORY, input_kind=_CANARY)
+    assert _CANARY not in json.dumps(out)
+    assert "VCF-INPUT-BAD-KIND" in [f["code"] for f in out["findings"]]

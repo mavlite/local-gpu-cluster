@@ -139,9 +139,18 @@ def detect_kind(doc: dict, override: str | None = None) -> tuple[DocumentKind, R
             kind = None
         if kind in _VALID_OVERRIDES:
             return kind, Result()
+        # `override` is not quoted back. The MCP boundary already refuses
+        # anything outside the closed enum before this runs, and argparse
+        # does the same for the CLI, so no caller-facing surface can
+        # currently reach this message with arbitrary text -- but
+        # validate_document() is a public library entry point that takes
+        # input_kind directly, and the rule ("never reflect caller text
+        # into a message an agent reads") should not depend on which
+        # front door happens to be in front of it today.
         return DocumentKind.UNKNOWN, Result((Finding(
             code="VCF-INPUT-BAD-KIND", severity=Severity.CRITICAL, path="/",
-            message=f"Unknown input_kind {override!r}.",
+            message="Unknown input_kind. Valid values are 'inventory' and "
+                    "'sddc_spec'.",
             fix="Use 'inventory' or 'sddc_spec', or omit it.",
             source="schema"),))
     if str(doc.get("apiVersion", "")).startswith("vcfspec/") and \

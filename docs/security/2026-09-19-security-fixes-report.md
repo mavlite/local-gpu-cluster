@@ -299,3 +299,90 @@ weaker than it looks: by the time it runs, the caller's path has already
 been built and resolved. Stated here because a future reader comparing the
 two documents will otherwise see the regex in the review, find it demoted
 in the code, and reasonably wonder which was intended.
+
+---
+
+# Follow-up — caller-text reflection, applied consistently
+
+- **Date:** 2026-09-19 (same day, after coordinator verification)
+- **Commit:** see below
+- **Tests:** 369 → **381 passed** (+12)
+
+The coordinator independently verified the HIGH fix (all five hostile
+vectors on the version-consulted path return one byte-identical envelope,
+no echo — oracle closed) and then found that my own stated principle had
+not been applied everywhere. They were right, and the gap is instructive:
+I removed the reflection from the two *rejection* messages, which is where
+the oracle lived, and stopped there — treating it as an oracle fix rather
+than as the general rule I had written down.
+
+## What was still reflecting
+
+Three sites, found by sweeping every tool argument rather than by
+inspecting the two I had already touched:
+
+| Site | Bound | Reflected? |
+|---|---|---|
+| `VCF-VERSION-NOT-CONSULTED` (inventory path) | 32 chars | **yes** — `vcf_version '../../../../../../Windows' was supplied but not consulted: ...` |
+| `vcf_explain_finding`, `code` | 128 chars | **yes** — `No rule with code 'IGNORE-PREVIOUS-INSTRUCTIONS-XYZ'.` |
+| `input_kind`, MCP boundary | closed enum | no — refused by the enum, message is a class name only |
+| `input_kind`, library `detect_kind` | unbounded | **yes** — `Unknown input_kind 'NOT-A-KIND-LIB'.` |
+
+**Severity: LOW, as the coordinator scoped it.** None is an oracle — no
+filesystem access occurs on any of these paths and each answers
+identically regardless of what is on disk — and all are length-bounded at
+the MCP surface. The concern is only that the caller is an AI agent which
+may be validating a document from an untrusted source, and handing it back
+caller-chosen characters inside a message it reads is a surface with no
+upside.
+
+## Fix
+
+All three now state what happened and name what the package actually
+ships, without the echo:
+
+- `VCF-VERSION-NOT-CONSULTED` → *"A non-default vcf_version was supplied
+  but not consulted: this document validated as a lab inventory, which has
+  one fixed schema regardless of VCF release. Vendored: 9.1.1.0."* Still
+  `info`, still does not reject the call — fix A's promise is intact.
+- `vcf_explain_finding` → the catalogue's own `VCF-EXPLAIN-UNKNOWN-CODE`
+  summary, *"No rule with that code."*, which was already echo-free; only
+  the hand-built f-string override was reflecting.
+- `detect_kind` → *"Unknown input_kind. Valid values are 'inventory' and
+  'sddc_spec'."*
+
+The `input_kind` case is unreachable from any caller-facing surface today
+(the MCP enum and argparse `choices=` both refuse it first), and it was
+fixed anyway: `validate_document()` is a public library entry point, and
+the rule should not depend on which front door happens to be in front of
+it.
+
+## Two more assertions inverted
+
+`test_api.py` required `"0.0.0" in note["message"]` and
+`test_mcp_server.py` required `"NOPE" in out["summary"]`. Both now assert
+the opposite, with the reason recorded at the call site — the same
+treatment the first two inversions got.
+
+## The regression test is a sweep, not three cases
+
+`test_no_finding_message_ever_reflects_caller_supplied_text` enumerates
+every string argument of every tool from `TOOLS` itself, sends a canary
+through each, and asserts the canary never appears in the returned
+envelope. Nine arguments across four tools are covered today, and a *new*
+tool argument that echoes is caught by a test nobody has to remember to
+write — which is the failure mode that produced this follow-up in the
+first place. A companion test guards the sweep against silently covering
+nothing.
+
+**Mutation results:** restoring the version echo → **3 failures**;
+restoring the `code` echo → **2**; restoring the `input_kind` echo → **1**.
+
+## Answer on `code` and `input_kind`
+
+Both were checked, as asked. `code` **did** echo and is fixed.
+`input_kind` does **not** echo at the MCP boundary — the closed enum
+rejects it in `call_handler` before any handler body runs, and the
+resulting message carries only `ValidationError` — but it **did** echo one
+layer down in `detect_kind`, reachable through the library API, and that
+is fixed too.

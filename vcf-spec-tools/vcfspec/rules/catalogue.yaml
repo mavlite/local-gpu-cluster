@@ -65,7 +65,13 @@ VCF-VERSION-NOT-CONSULTED:
   severity: info
   source: schema
   source_url: ""
-  summary: "vcf_version '{version}' was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release."
+  # Does not quote the supplied version, for the same reason
+  # VCF-SCHEMA-VERSION-UNKNOWN does not: the caller of this tool is an AI
+  # agent that may be validating a document from an untrusted source, and
+  # handing it back caller-chosen characters inside a message it reads is
+  # a surface with no upside. The operator learns both things they needed
+  # -- their version was ignored, and what this package actually ships.
+  summary: "A non-default vcf_version was supplied but not consulted: this document validated as a lab inventory, which has one fixed schema regardless of VCF release. Vendored: {known}."
   fix: "Omit vcf_version when validating an inventory document, or pass input_kind: \"sddc_spec\" if you meant to validate a rendered spec instead."
 VCF-CRED-NOT-A-REFERENCE:
   severity: critical

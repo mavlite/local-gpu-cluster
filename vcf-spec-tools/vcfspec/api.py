@@ -194,9 +194,17 @@ def validate_document(text: str, input_kind: str | None = None,
         # does that without changing `valid`, and is skipped when `version`
         # is the default: a caller who never mentioned a version, or who
         # asked for the one already in effect, has nothing to be told.
+        #
+        # The note does not quote `version` back. That is the same rule
+        # the rejection path follows (_unknown_version_finding), applied
+        # here too: this path performs no filesystem access and is not an
+        # oracle, but the value is still arbitrary caller text landing in
+        # a message an AI agent reads, and naming the vendored set tells
+        # the operator strictly more than repeating what they just sent.
         if version != DEFAULT_VERSION:
             result = result.merge(Result((finding_for(
-                "VCF-VERSION-NOT-CONSULTED", "/", version=version),)))
+                "VCF-VERSION-NOT-CONSULTED", "/",
+                known=", ".join(sorted(known_versions())) or "(none)"),)))
 
         blocked = subtree_blocked(schema_result.findings)
         result = result.merge(_rules_for_inventory(doc, blocked))

@@ -160,9 +160,16 @@ def tool_explain_finding(args: dict) -> dict:
     code = args.get("code", "")
     meta = load_catalogue().get(code)
     if meta is None:
+        # The requested code is NOT echoed into the summary. It used to be
+        # (`No rule with code {code!r}.`), which handed an agent up to 128
+        # caller-chosen characters back inside a message it reads -- the
+        # same reflection removed from the version findings, and with the
+        # same lack of upside, since the caller already knows what it
+        # asked for. The catalogue is finite and small, so naming it is a
+        # strictly more useful answer than repeating the question.
         unknown = load_catalogue()["VCF-EXPLAIN-UNKNOWN-CODE"]
         return {"code": unknown.code, "severity": str(unknown.severity),
-                "summary": f"No rule with code {code!r}.",
+                "summary": unknown.summary,
                 "fix": unknown.fix, "source": unknown.source,
                 "source_url": unknown.source_url}
     return {"code": meta.code, "severity": str(meta.severity), "summary": meta.summary,
