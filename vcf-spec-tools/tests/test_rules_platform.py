@@ -98,7 +98,7 @@ def test_uppercase_host_name_is_an_error(inventory):
 
 
 def test_uppercase_fqdn_field_is_an_error(make_inventory):
-    doc = make_inventory(**{"nsx.vipFqdn": "NSX.lab.local"})
+    doc = make_inventory(**{"nsx.vipFqdn": "NSX.vcf.lab.knowledgeondemand.net"})
     assert "VCF-NAME-NOT-LOWERCASE" in check_platform(doc).codes
 
 

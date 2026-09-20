@@ -257,14 +257,14 @@ $ echo $?
 
    ```
    $ python -m vcfspec.cli validate vcfspec/examples/lab-3-host.yaml \
-       --probe --allowlist 10.50.10.0/24 --allowlist-domain lab.local \
+       --probe --allowlist 10.50.10.0/24 --allowlist-domain vcf.lab.knowledgeondemand.net \
        --probe-timeout 0.5
    ...
    {
      "code": "VCF-PROBE-UNKNOWN",
      "severity": "info",
      "path": "/hosts/0",
-     "message": "Could not probe esx01.lab.local: no forward DNS answer.",
+     "message": "Could not probe esx01.vcf.lab.knowledgeondemand.net: no forward DNS answer.",
      "fix": "Re-run from a host on the management network to confirm.",
      "source": "docs",
      "source_url": ""
@@ -273,7 +273,7 @@ $ echo $?
      "code": "VCF-PROBE-NO-REVERSE-DNS",
      "severity": "error",
      "path": "/hosts/0",
-     "message": "No reverse DNS record for 10.50.10.11 (esx01.lab.local).",
+     "message": "No reverse DNS record for 10.50.10.11 (esx01.vcf.lab.knowledgeondemand.net).",
      "fix": "Add a PTR record; VCF validates forward and reverse for every host.",
      "source": "docs",
      "source_url": "https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html"
@@ -302,7 +302,7 @@ $ echo $?
      suffix configured, **no forward lookup is issued at all** and each
      one is reported as `VCF-PROBE-NAME-BLOCKED`. The reverse lookup
      needs no gate — it takes the already-allowlisted IP. Suffix matching
-     is on whole labels, so `lab.local` does not permit `evil-lab.local`.
+     is on whole labels, so `vcf.lab.knowledgeondemand.net` does not permit `evil-vcf.lab.knowledgeondemand.net`.
    - **An allowlist that matches nothing is not a pass.** If probes were
      asked for and the allowlist permitted none of the document's hosts
      (`--allowlist 203.0.113.0/24` against a `10.50.10.0/24` lab), that is

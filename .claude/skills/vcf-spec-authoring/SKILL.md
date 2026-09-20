@@ -148,7 +148,7 @@ read `findings` instead (empty means nothing to report).
 - Host names in the inventory are **short** (`esx01`), and the schema
   enforces it (no dots permitted): the Installer prefixes them to the DNS
   subdomain itself, so an FQDN there produces
-  `esx01.lab.local.lab.local`.
+  `esx01.vcf.lab.knowledgeondemand.net.vcf.lab.knowledgeondemand.net`.
 - TEP traffic is **not** a `networks` entry. It is configured under
   `nsx.tepPool`.
 - VCF 9.x has no license keys: deployment runs in 90-day evaluation

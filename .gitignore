@@ -25,3 +25,6 @@ dist/
 # .pytest_cache/ self-ignores via its own generated .gitignore, which
 # works but is incidental; say it here too.
 .pytest_cache/
+
+# Playwright MCP session artifacts
+.playwright-mcp/

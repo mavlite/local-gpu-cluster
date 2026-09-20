@@ -5,7 +5,7 @@ instance:
   sddcId: lab01
   vcfVersion: 9.1.1.0
 dns:
-  subdomain: lab.local
+  subdomain: vcf.lab.knowledgeondemand.net
   nameservers: [10.50.10.5]
 ntp:
   servers: [10.50.10.5]
@@ -14,7 +14,7 @@ networks:
   vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000}
   vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000}
 nsx:
-  vipFqdn: nsx.lab.local
+  vipFqdn: nsx.vcf.lab.knowledgeondemand.net
   managers: [nsx01]
   size: medium
   transportVlanId: 1613
@@ -33,8 +33,8 @@ appliances:
   vcenter: {hostname: vc01, size: small, ssoDomain: vsphere.local}
   sddcManager: {hostname: sddcm01}
   vsp:
-    platformFqdn: vcf.lab.local
-    instanceFqdn: lab01.lab.local
+    platformFqdn: platform.vcf.lab.knowledgeondemand.net
+    instanceFqdn: lab01.vcf.lab.knowledgeondemand.net
     poolStart: 10.50.10.100
     poolEnd: 10.50.10.115
     internalCidr: 198.18.0.0/15

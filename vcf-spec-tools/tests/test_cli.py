@@ -193,10 +193,10 @@ def test_allowlist_domain_is_threaded_through_to_probeconfig(monkeypatch, capsys
     monkeypatch.setattr(cli, "validate_document", fake_validate_document)
     exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
                       "--allowlist", "10.50.10.0/24",
-                      "--allowlist-domain", "lab.local",
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net",
                       "--allowlist-domain", "lab2.local"])
     assert exit_code == 0
-    assert captured["probe_config"].domain_allowlist == ("lab.local", "lab2.local")
+    assert captured["probe_config"].domain_allowlist == ("vcf.lab.knowledgeondemand.net", "lab2.local")
 
 
 def test_probe_with_no_allowlist_domain_defaults_to_resolving_nothing(
@@ -221,7 +221,7 @@ def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(capsys):
     """
     exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
                       "--allowlist", "203.0.113.0/24",
-                      "--allowlist-domain", "lab.local"])
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net"])
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert payload["valid"] is False

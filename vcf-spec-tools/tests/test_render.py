@@ -108,7 +108,7 @@ def test_nsx_carries_managers_vip_and_tep_pool(inventory):
     spec, _ = render(inventory)
     nsxt = spec["nsxtSpec"]
     assert nsxt["nsxtManagers"] == [{"hostname": "nsx01"}]
-    assert nsxt["vipFqdn"] == "nsx.lab.local"
+    assert nsxt["vipFqdn"] == "nsx.vcf.lab.knowledgeondemand.net"
     assert nsxt["transportVlanId"] == 1613
     subnet = nsxt["ipAddressPoolSpec"]["subnets"][0]
     assert subnet["cidr"] == "10.50.13.0/24"
@@ -119,8 +119,8 @@ def test_nsx_carries_managers_vip_and_tep_pool(inventory):
 def test_vsp_cluster_uses_an_iprange_pool(inventory):
     spec, _ = render(inventory)
     vsp = spec["vspClusterSpec"]
-    assert vsp["platformFqdn"] == "vcf.lab.local"
-    assert vsp["instanceFqdn"] == "lab01.lab.local"
+    assert vsp["platformFqdn"] == "platform.vcf.lab.knowledgeondemand.net"
+    assert vsp["instanceFqdn"] == "lab01.vcf.lab.knowledgeondemand.net"
     assert vsp["ipv4Pool"] == {"ipRange": {"startIpAddress": "10.50.10.100",
                                            "endIpAddress": "10.50.10.115"}}
 

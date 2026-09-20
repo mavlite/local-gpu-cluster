@@ -558,7 +558,7 @@ def test_probes_are_skipped_with_a_reason_for_an_sddc_spec_document(monkeypatch)
     spec_text = json.dumps(render_document(TEXT)["spec"])
     out = validate_document(spec_text, input_kind="sddc_spec",
                             probe_config=ProbeConfig(allowlist=("10.50.10.0/24",),
-                                                     domain_allowlist=("lab.local",)))
+                                                     domain_allowlist=("vcf.lab.knowledgeondemand.net",)))
     assert "probes" not in out["layers_run"]
     assert "probes" in out["layers_skipped"]
     assert "inventory" in out["layers_skipped"]["probes"]

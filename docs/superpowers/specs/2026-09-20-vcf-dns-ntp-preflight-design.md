@@ -5,10 +5,6 @@
 **Extends:** `docs/superpowers/specs/2026-09-17-vcf-spec-authoring-mcp-design.md`
 **Code:** `vcf-spec-tools/`
 
-> **Placeholder:** this document uses `vcf.example.com` as the lab DNS
-> subdomain. The real subdomain is pending and gets substituted throughout
-> before planning. It must not be `.local` — see "Name validity" below.
-
 ## Why this exists
 
 VCF hard-fails on DNS, and the pre-flight probe layer exists to catch that
@@ -107,8 +103,13 @@ address is the defect**, not the reassurance.
 ## Name validity (static rules, no network)
 
 - `VCF-NAME-UNSUPPORTED-SUFFIX` (error) — `.local` and other non-RFC suffixes.
-  This invalidates the shipped example and the nested lab, both currently on
-  `lab.local`; both change with this work.
+  This invalidated the shipped example and the nested lab, which were built on
+  `lab.local`; both moved to `vcf.lab.knowledgeondemand.net` on 2026-09-20.
+- **`appliances.vcenter.ssoDomain` is exempt.** It is `vsphere.local` by
+  default and that is correct: the SSO domain is an identity namespace, not a
+  DNS domain, and Broadcom's `.local` restriction does not apply to it. A rule
+  that flags it produces a false positive on every correct spec, which is the
+  fastest way to train an operator to ignore the tool. Test this explicitly.
 - Existing lowercase and domain-suffix rules stay as they are.
 
 ## What gets probed

@@ -34,7 +34,7 @@ def test_non_string_credential_is_rejected(make_inventory):
 
 def test_host_name_must_be_short_not_an_fqdn(make_inventory):
     doc = make_inventory()
-    doc["hosts"][0]["name"] = "esx01.lab.local"
+    doc["hosts"][0]["name"] = "esx01.vcf.lab.knowledgeondemand.net"
     assert "VCF-INV-SCHEMA" in validate_inventory(doc).codes
 
 

@@ -3,7 +3,7 @@ from vcfspec.validate.schema_layer import (PLACEHOLDER_SECRET, substitute_secret
 
 MINIMAL = {
     "sddcId": "lab01",
-    "dnsSpec": {"subdomain": "lab.local"},
+    "dnsSpec": {"subdomain": "vcf.lab.knowledgeondemand.net"},
     "networkSpecs": [{"networkType": "MANAGEMENT", "vlanId": 1610}],
     "vcenterSpec": {"vcenterHostname": "vc01",
                     "rootVcenterPassword": "${vcenter_root}"},

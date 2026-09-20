@@ -10,7 +10,7 @@ from vcfspec.validate.probes import ProbeConfig, run_probes
 # lookup would resolve. Both fail closed, so a config that names only one
 # of them is a config that checks half of what the operator asked for.
 CONFIG = ProbeConfig(allowlist=("10.50.0.0/16",),
-                     domain_allowlist=("lab.local",))
+                     domain_allowlist=("vcf.lab.knowledgeondemand.net",))
 
 
 def resolver_for(answers):
@@ -22,7 +22,7 @@ def resolver_for(answers):
 def all_good(inventory):
     answers = {}
     for host in inventory["hosts"]:
-        fqdn = f"{host['name']}.lab.local"
+        fqdn = f"{host['name']}.vcf.lab.knowledgeondemand.net"
         answers[(fqdn, False)] = host["mgmtIp"]
         answers[(host["mgmtIp"], True)] = fqdn
     return resolver_for(answers)
@@ -35,7 +35,7 @@ def test_clean_environment_produces_no_findings(inventory):
 
 
 def test_missing_reverse_record_is_reported(inventory):
-    answers = {(f"{h['name']}.lab.local", False): h["mgmtIp"]
+    answers = {(f"{h['name']}.vcf.lab.knowledgeondemand.net", False): h["mgmtIp"]
                for h in inventory["hosts"]}
     result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
                         connector=lambda *_: True)
@@ -43,7 +43,7 @@ def test_missing_reverse_record_is_reported(inventory):
 
 
 def test_forward_mismatch_is_an_error(inventory):
-    answers = {(f"{h['name']}.lab.local", False): "10.50.99.99"
+    answers = {(f"{h['name']}.vcf.lab.knowledgeondemand.net", False): "10.50.99.99"
                for h in inventory["hosts"]}
     result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
                         connector=lambda *_: True)
@@ -112,7 +112,7 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
     """
     inventory["hosts"] = inventory["hosts"][:1]
     config = ProbeConfig(allowlist=("10.50.0.0/16",), timeout_s=0.2,
-                         domain_allowlist=("lab.local",))
+                         domain_allowlist=("vcf.lab.knowledgeondemand.net",))
 
     def slow_resolver(name, want_reverse=False):
         time.sleep(5)
@@ -184,7 +184,7 @@ def test_an_attacker_chosen_name_on_an_allowlisted_ip_is_never_resolved():
     calls: list = []
     result = run_probes(exfil_inventory(),
                         ProbeConfig(allowlist=("10.50.0.0/16",),
-                                    domain_allowlist=("lab.local",)),
+                                    domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
                         resolver=tracking_resolver(calls),
                         connector=lambda *_: True)
     assert forward_calls(calls) == []
@@ -201,7 +201,7 @@ def test_no_domain_allowlist_issues_no_forward_lookup_at_all():
         resolved.append((name, want_reverse))
         return None
 
-    result = run_probes(exfil_inventory(subdomain="lab.local"),
+    result = run_probes(exfil_inventory(subdomain="vcf.lab.knowledgeondemand.net"),
                         ProbeConfig(allowlist=("10.50.0.0/16",)),
                         resolver=resolver, connector=lambda *_: True)
     assert "VCF-PROBE-NAME-BLOCKED" in result.codes
@@ -216,7 +216,7 @@ def test_an_attacker_chosen_subdomain_under_a_permitted_hostname_is_blocked():
     calls: list = []
     result = run_probes(exfil_inventory(name="esx01"),
                         ProbeConfig(allowlist=("10.50.0.0/16",),
-                                    domain_allowlist=("lab.local",)),
+                                    domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
                         resolver=tracking_resolver(calls),
                         connector=lambda *_: True)
     assert forward_calls(calls) == []
@@ -224,16 +224,16 @@ def test_an_attacker_chosen_subdomain_under_a_permitted_hostname_is_blocked():
 
 
 def test_a_suffix_match_is_on_whole_labels_not_characters():
-    """'lab.local' must not permit 'evil-lab.local', which is a different
+    """'vcf.lab.knowledgeondemand.net' must not permit 'evil-vcf.lab.knowledgeondemand.net', which is a different
     zone with a different authoritative nameserver -- the same
     segment-versus-character distinction api._is_blocked makes for JSON
     pointers."""
     config = ProbeConfig(allowlist=("10.50.0.0/16",),
-                         domain_allowlist=("lab.local",))
-    assert config.permits_name("esx01.lab.local") is True
-    assert config.permits_name("lab.local") is True
-    assert config.permits_name("esx01.evil-lab.local") is False
-    assert config.permits_name("lab.local.attacker.example") is False
+                         domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    assert config.permits_name("esx01.vcf.lab.knowledgeondemand.net") is True
+    assert config.permits_name("vcf.lab.knowledgeondemand.net") is True
+    assert config.permits_name("esx01.evil-vcf.lab.knowledgeondemand.net") is False
+    assert config.permits_name("vcf.lab.knowledgeondemand.net.attacker.example") is False
     assert config.permits_name("") is False
     assert config.permits_name(None) is False
 
@@ -255,7 +255,7 @@ def test_an_allowlist_matching_no_host_is_a_blocking_finding(inventory):
     calls: list = []
     result = run_probes(inventory,
                         ProbeConfig(allowlist=("203.0.113.0/24",),
-                                    domain_allowlist=("lab.local",)),
+                                    domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
                         resolver=tracking_resolver(calls),
                         connector=lambda *_: True)
     assert calls == []
@@ -287,7 +287,7 @@ def test_a_document_with_no_hosts_at_all_is_not_reported_as_all_blocked():
     """Nothing was refused, so there is nothing to warn about -- the
     finding means "your allowlist matched none of them", not "there were
     none"."""
-    result = run_probes({"dns": {"subdomain": "lab.local"}, "hosts": []},
+    result = run_probes({"dns": {"subdomain": "vcf.lab.knowledgeondemand.net"}, "hosts": []},
                         CONFIG, resolver=tracking_resolver([]),
                         connector=lambda *_: True)
     assert result.findings == ()
@@ -302,11 +302,11 @@ def test_reverse_dns_pointing_at_a_different_host_is_a_finding(inventory):
     """
     answers = {}
     for host in inventory["hosts"]:
-        fqdn = f"{host['name']}.lab.local"
+        fqdn = f"{host['name']}.vcf.lab.knowledgeondemand.net"
         answers[(fqdn, False)] = host["mgmtIp"]
         answers[(host["mgmtIp"], True)] = fqdn
     # esx03's PTR names a different host entirely.
-    answers[(inventory["hosts"][2]["mgmtIp"], True)] = "impostor.lab.local"
+    answers[(inventory["hosts"][2]["mgmtIp"], True)] = "impostor.vcf.lab.knowledgeondemand.net"
 
     result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
                         connector=lambda *_: True)
@@ -322,9 +322,9 @@ def test_reverse_dns_match_is_case_and_trailing_dot_insensitive(inventory):
     """
     answers = {}
     for host in inventory["hosts"]:
-        fqdn = f"{host['name']}.lab.local"
+        fqdn = f"{host['name']}.vcf.lab.knowledgeondemand.net"
         answers[(fqdn, False)] = host["mgmtIp"]
-        answers[(host["mgmtIp"], True)] = f"{host['name'].upper()}.LAB.LOCAL."
+        answers[(host["mgmtIp"], True)] = f"{host['name'].upper()}.VCF.LAB.KNOWLEDGEONDEMAND.NET."
     result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
                         connector=lambda *_: True)
     assert "VCF-PROBE-REVERSE-MISMATCH" not in result.codes
