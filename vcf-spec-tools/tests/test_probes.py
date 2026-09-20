@@ -291,3 +291,40 @@ def test_a_document_with_no_hosts_at_all_is_not_reported_as_all_blocked():
                         CONFIG, resolver=tracking_resolver([]),
                         connector=lambda *_: True)
     assert result.findings == ()
+
+
+def test_reverse_dns_pointing_at_a_different_host_is_a_finding(inventory):
+    """A PTR that exists but names someone else is the failure this tool was
+    built for: VCF validates both directions, and a RouterOS-style
+    auto-generated PTR is exactly how a lab acquires a wrong one. Found
+    against real dnsmasq -- the old check only asked whether reverse
+    returned anything, so an impostor name passed silently.
+    """
+    answers = {}
+    for host in inventory["hosts"]:
+        fqdn = f"{host['name']}.lab.local"
+        answers[(fqdn, False)] = host["mgmtIp"]
+        answers[(host["mgmtIp"], True)] = fqdn
+    # esx03's PTR names a different host entirely.
+    answers[(inventory["hosts"][2]["mgmtIp"], True)] = "impostor.lab.local"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
+                        connector=lambda *_: True)
+    assert "VCF-PROBE-REVERSE-MISMATCH" in result.codes
+    assert [f.path for f in result.findings
+            if f.code == "VCF-PROBE-REVERSE-MISMATCH"] == ["/hosts/2"]
+    assert not result.valid
+
+
+def test_reverse_dns_match_is_case_and_trailing_dot_insensitive(inventory):
+    """dnsmasq and BIND both return a trailing dot; DNS is case-insensitive.
+    Neither may be read as a mismatch or every real lab fails validation.
+    """
+    answers = {}
+    for host in inventory["hosts"]:
+        fqdn = f"{host['name']}.lab.local"
+        answers[(fqdn, False)] = host["mgmtIp"]
+        answers[(host["mgmtIp"], True)] = f"{host['name'].upper()}.LAB.LOCAL."
+    result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
+                        connector=lambda *_: True)
+    assert "VCF-PROBE-REVERSE-MISMATCH" not in result.codes

@@ -254,6 +254,12 @@ VCF-PROBE-NO-REVERSE-DNS:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
   summary: "No reverse DNS record for {ip} ({fqdn})."
   fix: "Add a PTR record; VCF validates forward and reverse for every host."
+VCF-PROBE-REVERSE-MISMATCH:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html
+  summary: "Reverse DNS for {ip} says {resolved}, but the inventory calls it {fqdn}."
+  fix: "Correct the PTR record so it matches the host's FQDN. A PTR that resolves to a different name is worse than a missing one: VCF validates both directions and fails obscurely on the mismatch."
 VCF-PROBE-FORWARD-MISMATCH:
   severity: error
   source: docs
