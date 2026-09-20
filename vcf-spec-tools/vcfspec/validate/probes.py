@@ -105,6 +105,14 @@ def _default_connector(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _dns_name(value: object) -> str:
+    """Normalise a DNS name for comparison. Resolvers return a trailing dot
+    and arbitrary case; neither is a difference, and treating either as one
+    would fail every correctly-configured lab.
+    """
+    return str(value).strip().rstrip(".").lower()
+
+
 def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
     """Call resolve(name, want_reverse), but never wait past timeout_s.
 
@@ -168,9 +176,17 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             elif resolved != ip:
                 findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
                                             fqdn=fqdn, resolved=resolved, expected=ip))
-        if _bounded_resolve(resolve, ip, True, config.timeout_s) is None:
+        reverse = _bounded_resolve(resolve, ip, True, config.timeout_s)
+        if reverse is None:
             findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path, ip=ip,
                                         fqdn=fqdn))
+        elif _dns_name(reverse) != _dns_name(fqdn):
+            # A PTR that exists but names a different host is worse than a
+            # missing one: it looks healthy and VCF fails obscurely on the
+            # disagreement. Checking only that reverse returned *something*
+            # is why this went undetected until the tool met real dnsmasq.
+            findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", path,
+                                        ip=ip, resolved=reverse, fqdn=fqdn))
         if not connect(ip, ESX_PORT, config.timeout_s):
             findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
                                         reason=f"no TCP {ESX_PORT} response"))
