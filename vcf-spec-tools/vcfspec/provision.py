@@ -28,11 +28,20 @@ import re
 from dataclasses import dataclass
 
 from .findings import Finding, Result
+from .firstboot import (MAX_TIER_RATIO_PCT, MIN_TIER_RATIO_PCT,
+                        memory_tiering_block, render_firstboot,
+                        workarounds_block)
 from .render import InsecureCredentialError
 from .inventory import REFERENCE_RE
 from .rules import finding_for
 
 DEFAULT_ESX_VERSION = "9.1.1.0"
+
+# Where ESX exposes block devices, and the form `esxcli memtier enable -d`
+# wants. bootDisk is passed to `install --disk=` uninterpreted because the
+# installer accepts either spelling; the memtier device is normalised, because
+# that command takes a path and not a device name.
+_DISK_PATH_PREFIX = "/vmfs/devices/disks/"
 
 # A SHA-512 crypt hash, which is what `rootpw --iscrypted` wants. Deliberately
 # strict about the `$6$` prefix: `$1$` (MD5) and `$5$` (SHA-256) are accepted by
@@ -50,8 +59,35 @@ _RUNTIME_DISK_RE = re.compile(
     r"^(?:/vmfs/devices/disks/)?(?:mpx\.)?vmhba\d+:C\d+:T\d+:L\d+$"
     r"|^(?:/vmfs/devices/disks/)?mpx\.", re.IGNORECASE)
 
+# An OpenSSH public key, as it appears in a .pub file: type, base64 blob, and
+# an optional comment. Deliberately strict -- this value is written verbatim
+# into a file published over unauthenticated HTTP, and the single quotes it is
+# echoed inside are the only thing between it and the shell, so no character
+# that could close them is allowed to reach the template.
+_SSH_PUBLIC_KEY_RE = re.compile(
+    r"^(?:ssh-ed25519|ssh-rsa|ssh-dss"
+    r"|ecdsa-sha2-nistp(?:256|384|521)"
+    r"|sk-ssh-ed25519@openssh\.com"
+    r"|sk-ecdsa-sha2-nistp256@openssh\.com)"
+    r"\s+[A-Za-z0-9+/]+={0,3}"
+    r"(?:\s+[^\s'\\]+)?$")
+# A private key pasted where the public one belongs. Not merely a wrong value:
+# it is a secret headed for a world-readable file, so it gets the same refusal
+# a plaintext password gets rather than a finding.
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+
+
+class _NotAPublicKey(ValueError):
+    """provisioning.sshPublicKey is present but is not a public key.
+
+    Its own class, not a bare ValueError, because InsecureCredentialError is
+    *also* a ValueError: catching the broad one here would swallow the private
+    key refusal, which is the one thing that must never be swallowed.
+    """
+
 # One place for every kickstart directive, so correcting the syntax is a
 # single edit rather than a hunt. Real hardware is the only authority here.
+# The %firstboot body lives in firstboot.py; this is everything above it.
 #
 # On `install`: --overwritevmfs, and deliberately *not* --novmfsondisk. The two
 # read as a contradictory pair, and with no BMC the only failure mode that
@@ -78,65 +114,8 @@ network --bootproto=static --device={mac} --ip={ip} --netmask={netmask} \
 --addvmportgroup=0{vlan_opt}
 reboot
 
-%firstboot --interpreter=busybox
-# NOTE: %firstboot is silently skipped when UEFI Secure Boot is enabled. None
-# of the following runs, kickstart.log records the skip, and the host looks
-# installed. Secure Boot must be OFF for the install and turned back on after.
-#
-# Enough to make the host commissionable by VCF; everything else is the
-# Installer's job once it takes over.
-esxcli system ntp set --enabled=yes {ntp_opts}
-vim-cmd hostsvc/enable_ssh
-vim-cmd hostsvc/start_ssh
-
 """
 
-# Only emitted when provisioning.hostWorkarounds contains "consumer-amd" --
-# see _workarounds_block(). Placed here, before the %firstboot block's own
-# reboot, so that reboot is the one that serves disable_apichv and
-# entropySources too: neither of them gets a reboot of its own.
-#
-# Source: William Lam, "VCF 9.1 Comprehensive ESX Configuration Workarounds
-# for Lab Deployments" --
-# https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html
-_CONSUMER_AMD_WORKAROUNDS = """\
-# Consumer-AMD host workarounds (provisioning.hostWorkarounds: consumer-amd).
-# William Lam, VCF 9.1 comprehensive ESX configuration workarounds for lab
-# deployments:
-# https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html
-#
-# NSX Edge/VNA deployment fails on consumer AMD: a DPDK vendor check rejects
-# the real Ryzen brand string. The value below exists to satisfy that check,
-# not to describe this host honestly -- it is not this host's real CPU. No
-# reboot needed.
-echo 'cpuid.brandstring = "{brand}"' >> /etc/vmware/config
-# NVMe memory tiering cannot power on VMs on AMD Ryzen without this. Needs a
-# reboot, served by the one below.
-echo 'monitor_control.disable_apichv ="TRUE"' >> /etc/vmware/config
-# Zen 4/5 entropy collection is slow; widen the kernel's entropy source
-# count. Needs a reboot, served by the one below.
-esxcli system settings kernel set -s entropySources -v 2
-# vSAN's default compression (Zstd) costs more CPU on this hardware than
-# LZ4. No reboot needed.
-esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0
-
-"""
-
-_KICKSTART_TAIL = """\
-# ESX generates its certificates before the hostname is configured, so a
-# freshly installed host presents CN=localhost.localdomain. VCF Installer
-# compares the certificate common name against the FQDN it is commissioning
-# and rejects the host. Set the FQDN, regenerate, then reboot so hostd
-# actually serves the new certificate.
-esxcli system hostname set --fqdn={fqdn}
-/sbin/generate-certificates
-esxcli system shutdown reboot -d 10 -r "hostname and certificate regenerated"
-"""
-
-# Real host CPU models never appear here: the brand string exists to fool a
-# DPDK vendor check, not to describe the hardware. Used when hardware.cpuModel
-# is absent for a host that requested the consumer-amd workaround.
-_GENERIC_EPYC_BRAND = "AMD EPYC 9124"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,17 +180,76 @@ def _root_hash(creds: dict) -> str | None:
         "unauthenticated HTTP.")
 
 
-def _workarounds_block(host_workarounds: list[str], cpu_model: str | None) -> str:
-    """The %firstboot text for provisioning.hostWorkarounds, or "" when empty.
+def _ssh_public_key(prov: dict) -> str:
+    """provisioning.sshPublicKey, or "" when absent.
 
-    consumer-amd is the only value today; an unrecognised one is ignored here
-    (the schema enum is what refuses it at validation time), so this stays
-    correct if the enum grows.
+    Raises InsecureCredentialError for a private key, which is the same
+    refusal _root_hash() makes and for the same reason: this file is published
+    over unauthenticated HTTP. A merely malformed value is not a secret, so
+    that is a finding instead -- raised by the caller, which has the path.
+
+    Raises _NotAPublicKey for "present but not a public key" so the caller can
+    attach the finding without this function needing to know JSON pointers.
     """
-    if "consumer-amd" not in host_workarounds:
+    value = prov.get("sshPublicKey")
+    if value in (None, ""):
         return ""
-    brand = f"AMD EPYC {cpu_model}" if cpu_model else _GENERIC_EPYC_BRAND
-    return _CONSUMER_AMD_WORKAROUNDS.format(brand=brand)
+    text = str(value).strip()
+    if _PRIVATE_KEY_RE.search(text):
+        raise InsecureCredentialError(
+            "provisioning.sshPublicKey holds a PRIVATE key; refusing to "
+            "render it into a kickstart that is published over "
+            "unauthenticated HTTP. Give the .pub half instead.")
+    if not _SSH_PUBLIC_KEY_RE.match(text):
+        raise _NotAPublicKey(text)
+    return text
+
+
+def _tier_ratio_pct(tier_gb: float, ram_gb: float) -> int:
+    """The `-r` percentage for `esxcli memtier enable`.
+
+    Derived rather than pinned at Lam's flat 100, because the device is
+    normally larger than the tier the inventory asks for and this is what
+    decides how much of it gets used. A non-positive ramGb yields 0, which the
+    caller's range guard rejects with a message naming both numbers -- better
+    than a ZeroDivisionError from a pure renderer.
+    """
+    if ram_gb <= 0:
+        return 0
+    return int(round(tier_gb / ram_gb * 100))
+
+
+def _device_key(selector: str) -> str:
+    """`t10.X` and `/vmfs/devices/disks/t10.X` are one device, not two."""
+    return selector[len(_DISK_PATH_PREFIX):] if selector.startswith(
+        _DISK_PATH_PREFIX) else selector
+
+
+def _device_path(selector: str) -> str:
+    """The `/vmfs/devices/disks/…` form `esxcli memtier enable -d` wants."""
+    return selector if selector.startswith(_DISK_PATH_PREFIX) else (
+        _DISK_PATH_PREFIX + selector)
+
+
+def _collision_finding(roles: list[tuple[str, str]], path: str,
+                       host: str) -> Finding | None:
+    """None when every declared device role names a different device.
+
+    `roles` is (field name, selector) for each of bootDisk, vsanDevice and
+    memoryTieringDevice that the host actually declares. Any two naming one
+    device is the expensive mistake this whole area circles: the install
+    overwrites the device it is given, vSAN ESA claims the device it is given,
+    and `esxcli memtier enable` consumes the device it is given. None of the
+    three asks whether something else is already there.
+    """
+    seen: dict[str, str] = {}
+    for field, selector in roles:
+        key = _device_key(selector)
+        if key in seen:
+            return finding_for("VCF-PROV-DEVICE-COLLISION", path, host=host,
+                               device=selector, first=seen[key], second=field)
+        seen[key] = field
+    return None
 
 
 def _boot_disk_finding(selector: str, path: str, host: str) -> Finding | None:
@@ -226,6 +264,50 @@ def _boot_disk_finding(selector: str, path: str, host: str) -> Finding | None:
         return finding_for("VCF-PROV-BOOT-DISK-NOT-STABLE", path,
                            host=host, selector=selector)
     return None
+
+
+def _tiering(hardware: dict, hw_path: str, host: str) -> tuple[str, list[Finding]]:
+    """The memory-tiering %firstboot block, or "" plus the reason it is absent.
+
+    The gap that motivated the port: the inventory has declared
+    hardware.memoryTieringGb since the capacity rules were written, the lab's
+    N-1 headroom depends on it (192 GB available against a 219 GB mandatory
+    stack), and nothing ever turned tiering on. A host declares the size here
+    and the device it comes from, and both have to be there.
+
+    Never fatal to the host's artifacts: a host with no tiering still installs
+    and still commissions, it simply has less memory than the plan assumed.
+    That is a finding to read, not a reason to withhold a kickstart. A device
+    *collision* is different, and is handled by the caller.
+    """
+    tier = hardware.get("memoryTieringGb")
+    tier = float(tier) if isinstance(tier, (int, float)) else 0.0
+    if tier <= 0:
+        return "", []
+    device = str(hardware.get("memoryTieringDevice") or "")
+    if not device:
+        return "", [finding_for("VCF-PROV-NO-TIERING-DEVICE", hw_path,
+                                host=host, tier=_plain(tier))]
+    # One check, not the boot disk's three: --firstdisk is not a thing
+    # `esxcli memtier enable -d` accepts, and a runtime name fails the stable
+    # pattern anyway, so a second branch for it would be unreachable.
+    if not _STABLE_DISK_RE.match(device):
+        return "", [finding_for("VCF-PROV-TIERING-DEVICE-NOT-STABLE",
+                                f"{hw_path}/memoryTieringDevice",
+                                host=host, selector=device)]
+    ram = hardware.get("ramGb")
+    ram = float(ram) if isinstance(ram, (int, float)) else 0.0
+    ratio = _tier_ratio_pct(tier, ram)
+    if not MIN_TIER_RATIO_PCT <= ratio <= MAX_TIER_RATIO_PCT:
+        return "", [finding_for("VCF-PROV-TIERING-RATIO-UNSUPPORTED",
+                                f"{hw_path}/memoryTieringGb", host=host,
+                                ratio=ratio, tier=_plain(tier), ram=_plain(ram))]
+    return memory_tiering_block(_device_path(device), ratio, tier, ram), []
+
+
+def _plain(value: float) -> str:
+    """96.0 -> "96", so a finding message reads like the inventory does."""
+    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def _rewrite_boot_cfg(iso_boot_cfg: str, prefix: str, kernelopt: str) -> str:
@@ -325,6 +407,22 @@ def render_provisioning(inventory: dict,
 
     host_workarounds = [str(x) for x in (prov.get("hostWorkarounds") or [])]
 
+    # vmk0 and vSwitch0 take the MANAGEMENT MTU, never nsx.fabricMtu -- see
+    # the block comment in firstboot.py. A missing or malformed value leaves
+    # the ESX default, which is also 1500.
+    mtu = mgmt.get("mtu")
+    mtu = int(mtu) if isinstance(mtu, int) else 1500
+
+    # A public key is not a credential, so it may be a literal here. A private
+    # key is, and _ssh_public_key() raises on one; anything else that is not a
+    # public key is a finding and no key is injected.
+    try:
+        ssh_public_key = _ssh_public_key(prov)
+    except _NotAPublicKey:
+        ssh_public_key = ""
+        findings.append(finding_for("VCF-PROV-SSH-KEY-NOT-PUBLIC",
+                                    "/provisioning/sshPublicKey"))
+
     if esx_boot_cfg is None:
         findings.append(finding_for("VCF-PROV-NO-ESX-BOOT-CFG", "/provisioning"))
 
@@ -351,19 +449,43 @@ def render_provisioning(inventory: dict,
             findings.append(unsafe)
             continue
 
+        hardware = _mapping(host.get("hardware"))
+        # Every role the inventory declares for a physical device on this
+        # host. Two of them on one NVMe is the mistake that costs a drive to
+        # the rack, so it withholds the host's artifacts rather than emitting
+        # a kickstart that would act on it.
+        roles = [("bootDisk", boot_disk)]
+        for field in ("vsanDevice", "memoryTieringDevice"):
+            if hardware.get(field):
+                roles.append((field, str(hardware[field])))
+        collision = _collision_finding(roles, path, str(name))
+        if collision is not None:
+            findings.append(collision)
+            continue
+
         fqdn = f"{name}.{subdomain}" if subdomain else str(name)
         ks_name = f"ks-{name}.cfg"
         ks_url = f"{boot_url}/{ks_name}"
-        cpu_model = _mapping(host.get("hardware")).get("cpuModel")
-        workarounds = _workarounds_block(host_workarounds, cpu_model)
+        tiering, tiering_findings = _tiering(
+            hardware, f"{path}/hardware", str(name))
+        findings += tiering_findings
         kickstarts[ks_name] = (
             _KICKSTART_HEAD.format(
                 fqdn=fqdn, root_hash=root_hash, boot_disk=boot_disk, mac=mac,
                 ip=host.get("mgmtIp", ""), netmask=netmask, gateway=gateway,
-                nameservers=nameservers, vlan_opt=vlan_opt, ntp_opts=ntp_opts,
+                nameservers=nameservers, vlan_opt=vlan_opt,
             )
-            + workarounds
-            + _KICKSTART_TAIL.format(fqdn=fqdn)
+            + render_firstboot(
+                fqdn=fqdn, ntp_opts=ntp_opts, mtu=mtu,
+                # "datastore1" on all three hosts otherwise, disambiguated by
+                # vCenter in registration order. Named from the host, never
+                # from storage.datastoreName -- that is the vSAN datastore.
+                local_datastore=f"{name}-local",
+                ssh_public_key=ssh_public_key,
+                tiering=tiering,
+                workarounds=workarounds_block(
+                    host_workarounds, hardware.get("cpuModel")),
+            )
         )
         if esx_boot_cfg is None:
             continue

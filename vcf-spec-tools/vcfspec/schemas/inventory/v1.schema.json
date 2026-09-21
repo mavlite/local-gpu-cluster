@@ -339,8 +339,19 @@
                 "minimum": 0
               },
               "memoryTieringGb": {
+                "description": "Size of the NVMe memory tier this host contributes, in GB. Read by the capacity rules AND, since the %firstboot port, emitted as the `-r` ratio of `esxcli memtier enable` (memoryTieringGb / ramGb as a percentage, which ESX accepts between 1 and 400). A value > 0 requires hardware.memoryTieringDevice: see VCF-PROV-NO-TIERING-DEVICE.",
                 "type": "number",
                 "minimum": 0
+              },
+              "memoryTieringDevice": {
+                "description": "The NVMe device `esxcli memtier enable -d` consumes for memory tiering. Same stable-identifier rule as bootDisk (/vmfs/devices/disks/t10...., eui.... or naa....), because the command consumes whatever device it is given and a runtime name points somewhere else after a reboot. Must not be the same device as bootDisk or vsanDevice: see VCF-PROV-DEVICE-COLLISION.",
+                "type": "string",
+                "minLength": 1
+              },
+              "vsanDevice": {
+                "description": "The NVMe device this host contributes to vSAN ESA, as a stable identifier. Declared so the tool can prove bootDisk and memoryTieringDevice are not it -- installing over, or tiering onto, the vSAN device destroys the cluster's data and, with no BMC, costs a drive to the rack. Optional: omit it and that check simply has less to check.",
+                "type": "string",
+                "minLength": 1
               },
               "cpuModel": {
                 "description": "CPU model designation (e.g. '7945HX'), used only to build the cpuid.brandstring workaround for provisioning.hostWorkarounds: 'consumer-amd' (rendered as 'AMD EPYC <cpuModel>'). Not consulted anywhere else. When omitted, a generic EPYC model string is used instead.",
@@ -388,6 +399,11 @@
           "description": "URL of the directory holding the unpacked ESX ISO contents, which boot.cfg's prefix= must point at. This is not the kickstart directory. Defaults to <bootServerUrl>/esx-<esxVersion>.",
           "type": "string",
           "pattern": "^https?://"
+        },
+        "sshPublicKey": {
+          "description": "Optional OpenSSH public key written to /etc/ssh/keys-root/authorized_keys by %firstboot, so an operator who wants key access does not have to hand-edit generated files. A public key is not a credential -- it authenticates its holder and discloses nothing to anyone who reads it off the boot server -- so a literal is allowed here where a password never is. A private key is refused outright, and anything else unrecognised raises VCF-PROV-SSH-KEY-NOT-PUBLIC and injects nothing.",
+          "type": "string",
+          "pattern": "^(?:ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com)\\s+[A-Za-z0-9+/]+={0,3}(?:\\s+[^\\s'\\\\]+)?$"
         },
         "hostWorkarounds": {
           "description": "Opt-in ESX host workarounds emitted into %firstboot, one before the reboot that certificate regeneration already performs there. Empty by default, so EPYC and Intel hosts get none of this. 'consumer-amd': four settings from William Lam's VCF 9.1 comprehensive ESX configuration workarounds for lab deployments (https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html) -- (1) cpuid.brandstring set to an EPYC string in /etc/vmware/config, no reboot: without it NSX Edge/VNA deployment fails on consumer AMD because of a DPDK vendor check; (2) monitor_control.disable_apichv=TRUE in /etc/vmware/config, reboot required: without it NVMe memory tiering cannot power on VMs on AMD Ryzen; (3) esxcli entropySources=2, reboot required: Zen 4/5 entropy is otherwise slow; (4) esxcli /VSAN/Vsan2ZdomCompZstd=0, no reboot: uses LZ4 instead of Zstd, which costs less CPU on this hardware. A host that declares hardware.memoryTieringGb > 0 without 'consumer-amd' here is flagged: see VCF-CAP-TIERING-NEEDS-WORKAROUND.",

@@ -350,3 +350,33 @@ VCF-PROV-BOOT-DISK-NOT-STABLE:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
   summary: "Host {host} names its boot disk as '{selector}', which is not a stable device identifier."
   fix: "Use /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list. With no BMC, an install that picks the wrong device destroys the vSAN member and costs a physical visit."
+VCF-PROV-NO-TIERING-DEVICE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} declares hardware.memoryTieringGb {tier}, but no hardware.memoryTieringDevice, so %firstboot has no device to enable tiering on and the host will boot with DRAM only."
+  fix: "Add hardware.memoryTieringDevice naming the NVMe device reserved for tiering, as a stable identifier (/vmfs/devices/disks/t10...., eui.... or naa....). Read them from a live host with: esxcli memtier device list. Until it is there, every capacity figure that counted tiered memory is counting RAM the host will not have."
+VCF-PROV-TIERING-DEVICE-NOT-STABLE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} names its memory tiering device as '{selector}', which is not a stable device identifier, so no tiering was configured."
+  fix: "Use /vmfs/devices/disks/t10...., eui.... or naa..... mpx and vmhbaN:C0:T0:L0 names are assigned at boot in discovery order, so the device one reaches today is not the device it reaches after a reboot -- and `esxcli memtier enable` consumes whatever it is given."
+VCF-PROV-TIERING-RATIO-UNSUPPORTED:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} would need a memory tier ratio of {ratio}% ({tier} GB tier against {ram} GB DRAM), and ESX accepts 1-400%. No tiering was configured."
+  fix: "Bring hardware.memoryTieringGb and hardware.ramGb into a ratio ESX supports: the tier can be at most four times DRAM. A ratio of 0 usually means hardware.ramGb is missing or zero."
+VCF-PROV-DEVICE-COLLISION:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} names the same device '{device}' as both {first} and {second}. The three roles consume the device they are given, so no artifacts were generated for this host."
+  fix: "Give each role its own device. bootDisk is installed over, vsanDevice is claimed by vSAN ESA, and memoryTieringDevice is consumed whole by `esxcli memtier enable` -- any two of them on one NVMe destroys the other's data, and with no BMC that is a drive to the rack. Read the real identifiers from a live host with: esxcli storage core device list."
+VCF-PROV-SSH-KEY-NOT-PUBLIC:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "provisioning.sshPublicKey is not a recognised OpenSSH public key."
+  fix: "Give the one-line contents of a .pub file (ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp* followed by the base64 blob). Not a private key, not a path, and not a ${reference}: this value is written verbatim into a kickstart published over unauthenticated HTTP, so it is refused unless it is visibly a public key."

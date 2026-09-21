@@ -301,8 +301,17 @@ def test_an_oversized_version_is_refused_at_the_mcp_boundary():
 
 
 def test_a_real_document_is_comfortably_within_the_bound():
+    """The cap must never be the thing that stops a real inventory.
+
+    The margin was 100x when the example inventory was smaller; per-host
+    device identifiers (bootDisk, vsanDevice, memoryTieringDevice) are long
+    strings and three hosts' worth of them grew the file past that. 50x is
+    still room for the example to double twice over, and the property being
+    guarded -- that MAX_DOCUMENT_CHARS bounds hostile input, not real input
+    -- is unchanged.
+    """
     from vcfspec.mcp_server import MAX_DOCUMENT_CHARS
-    assert len(INVENTORY) * 100 < MAX_DOCUMENT_CHARS
+    assert len(INVENTORY) * 50 < MAX_DOCUMENT_CHARS
 
 
 # --- No finding message ever reflects caller-supplied text ---------------
