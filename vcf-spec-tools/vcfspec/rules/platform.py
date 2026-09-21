@@ -102,6 +102,8 @@ def _same_subnet(inventory: dict, start, end) -> bool:
 
 def _capacity_rules(inventory: dict) -> list[Finding]:
     hosts = [h for h in _sequence(inventory.get("hosts")) if isinstance(h, dict)]
+    workarounds = _sequence(_mapping(inventory.get("provisioning")).get("hostWorkarounds"))
+    consumer_amd = "consumer-amd" in workarounds
     out: list[Finding] = []
     usable: list[float] = []
     storage_gb = 0.0
@@ -114,6 +116,15 @@ def _capacity_rules(inventory: dict) -> list[Finding]:
             continue
         tier = hardware.get("memoryTieringGb")
         tier = tier if isinstance(tier, (int, float)) else 0
+        # Memory tiering is declared, but the AMD Ryzen workaround that makes
+        # tiered VMs power on at all was not requested: the capacity plan is
+        # counting RAM that will not actually be there. See William Lam's
+        # VCF 9.1 lab workarounds, cited in the catalogue entry.
+        if tier > 0 and not consumer_amd:
+            out.append(finding_for("VCF-CAP-TIERING-NEEDS-WORKAROUND",
+                                   f"/hosts/{index}/hardware/memoryTieringGb",
+                                   host=host.get("name", f"hosts[{index}]"),
+                                   tier=tier))
         usable.append(max(0.0, float(ram) + float(tier) - ESX_HOST_RAM_OVERHEAD_GB))
         vsan_tb = hardware.get("vsanDeviceTb")
         vsan_tb = vsan_tb if isinstance(vsan_tb, (int, float)) else 0

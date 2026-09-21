@@ -406,3 +406,97 @@ def test_the_manifest_warns_that_the_hash_and_password_must_match(out):
     """
     assert "esxRoot and esxRootHash MUST be the same password" in out.manifest
     assert "openssl passwd -6 -salt" in out.manifest
+
+
+# --- 10. consumer-AMD host workarounds --------------------------------------
+# The reference inventory now opts in (see lab-3-host.yaml), so `out` already
+# carries the workaround block for every case below unless a test removes it.
+
+def test_consumer_amd_workarounds_are_opt_in_not_unconditional(inventory):
+    """provisioning.hostWorkarounds defaults to empty: an operator on EPYC or
+    Intel must get none of this. Proven against the same inventory with the
+    opt-in removed, not against a hand-built minimal one.
+    """
+    doc = copy.deepcopy(inventory)
+    del doc["provisioning"]["hostWorkarounds"]
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert "cpuid.brandstring" not in body
+    assert "disable_apichv" not in body
+    assert "entropySources" not in body
+    assert "Vsan2ZdomCompZstd" not in body
+
+
+def test_consumer_amd_workarounds_appear_in_firstboot_before_the_reboot(out):
+    """The two settings that need a reboot (disable_apichv, entropySources)
+    must land before %firstboot's own reboot, which is what serves them --
+    there is no second reboot anywhere in this file.
+    """
+    body = out.kickstarts["ks-esx01.cfg"]
+    firstboot = body.index("%firstboot")
+    disable_apichv = body.index("monitor_control.disable_apichv")
+    entropy = body.index("entropySources")
+    reboot = body.index("esxcli system shutdown reboot")
+    assert firstboot < disable_apichv < reboot
+    assert firstboot < entropy < reboot
+    assert body.count("esxcli system shutdown reboot") == 1
+
+
+def test_consumer_amd_workarounds_include_all_four_settings(out):
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in body
+    assert '>> /etc/vmware/config' in body
+    assert 'monitor_control.disable_apichv ="TRUE"' in body
+    assert "esxcli system settings kernel set -s entropySources -v 2" in body
+    assert ("esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0"
+            in body)
+
+
+def test_the_brand_string_uses_the_hosts_own_cpu_model(out):
+    """hardware.cpuModel is per host; the reference lab sets it to 7945HX for
+    every host and the brand string must reflect it, not a placeholder.
+    """
+    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in out.kickstarts["ks-esx01.cfg"]
+    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in out.kickstarts["ks-esx03.cfg"]
+
+
+def test_a_missing_cpu_model_falls_back_to_a_generic_epyc_string(inventory):
+    """The brand string exists to satisfy a DPDK vendor check, not to
+    describe the hardware honestly, so a missing cpuModel must not stop the
+    workaround from being emitted at all.
+    """
+    doc = copy.deepcopy(inventory)
+    del doc["hosts"][0]["hardware"]["cpuModel"]
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert 'cpuid.brandstring = "AMD EPYC' in body
+    assert "7945HX" not in body
+
+
+def test_workarounds_do_not_disturb_certificate_regeneration_ordering(out):
+    """Section 4's guarantee must still hold with the workaround block
+    inserted ahead of it: FQDN, then regenerate, then reboot.
+    """
+    body = out.kickstarts["ks-esx01.cfg"]
+    fqdn = "esx01.vcf.lab.knowledgeondemand.net"
+    hostname = body.index(f"esxcli system hostname set --fqdn={fqdn}")
+    certs = body.index("/sbin/generate-certificates")
+    reboot = body.index("esxcli system shutdown reboot")
+    workarounds = body.index("cpuid.brandstring")
+    assert workarounds < hostname < certs < reboot
+
+
+def test_no_workaround_requested_is_byte_identical_to_before_this_feature(inventory):
+    """Regression pin: an inventory that never mentions hostWorkarounds must
+    render exactly as it did before this feature existed.
+    """
+    doc = copy.deepcopy(inventory)
+    del doc["provisioning"]["hostWorkarounds"]
+    for host in doc["hosts"]:
+        host["hardware"].pop("cpuModel", None)
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert "\n\n\n" not in body     # no stray blank line where the block was
+    for token in ("cpuid.brandstring", "disable_apichv", "entropySources",
+                  "Vsan2ZdomCompZstd"):
+        assert token not in body

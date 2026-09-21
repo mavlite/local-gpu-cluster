@@ -338,6 +338,12 @@ VCF-PROV-BOOT-DISK-RUNTIME-NAME:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
   summary: "Host {host} selects its boot disk by the runtime name '{selector}'. mpx and vmhbaN:C0:T0:L0 names are assigned at boot in discovery order and are not stable across reboots or hardware changes."
   fix: "Name a stable device identifier instead: /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list."
+VCF-CAP-TIERING-NEEDS-WORKAROUND:
+  severity: error
+  source: docs
+  source_url: https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html
+  summary: "Host {host} declares hardware.memoryTieringGb {tier}, but 'consumer-amd' is not in provisioning.hostWorkarounds. NVMe memory tiering cannot power on VMs on AMD Ryzen without the monitor_control.disable_apichv workaround, so the capacity plan's tiered RAM is not actually available."
+  fix: "Add 'consumer-amd' to provisioning.hostWorkarounds so %firstboot sets monitor_control.disable_apichv=\"TRUE\" in /etc/vmware/config -- or set memoryTieringGb to 0 if this host is not consumer AMD hardware."
 VCF-PROV-BOOT-DISK-NOT-STABLE:
   severity: error
   source: docs

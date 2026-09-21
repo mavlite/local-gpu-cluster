@@ -131,6 +131,50 @@ This matters more here than in the SddcSpec: a kickstart sits on an unauthentica
 HTTP server for any host on the provisioning VLAN to fetch. Anything literal in
 that file is readable by anything that can reach it. State that in the manifest.
 
+## Consumer-AMD host workarounds
+
+The lab's hosts are Minisforum 795S7 (Ryzen 9 7945HX, Zen 4) — consumer AMD,
+not EPYC or Intel. William Lam's [VCF 9.1 comprehensive ESX configuration
+workarounds for lab
+deployments](https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html)
+documents settings without which VCF does not work on this hardware.
+
+This is **opt-in, not unconditional**: `provisioning.hostWorkarounds` is an
+array, empty by default, with one enum value today, `consumer-amd`. An
+operator on real EPYC or Intel hardware sets nothing and gets none of this.
+
+When `consumer-amd` is present, `%firstboot` emits four settings, in this
+order, all before the reboot that already ends `%firstboot` for certificate
+regeneration — that one reboot serves both settings below that need it:
+
+- `cpuid.brandstring = "AMD EPYC <model>"` in `/etc/vmware/config`, no
+  reboot. Load-bearing: NSX Edge/VNA deployment — part of every VCF bring-up
+  — fails on consumer AMD because a DPDK vendor check rejects the real Ryzen
+  string. `<model>` comes from the host's `hardware.cpuModel`; the brand
+  string exists to satisfy that check, not to describe the hardware
+  honestly, and falls back to a generic EPYC string when `cpuModel` is
+  absent.
+- `monitor_control.disable_apichv ="TRUE"` in `/etc/vmware/config`, reboot
+  required. Load-bearing: NVMe memory tiering cannot power on VMs on AMD
+  Ryzen without it.
+- `esxcli system settings kernel set -s entropySources -v 2`, reboot
+  required. Lower stakes: Zen 4/5 entropy collection is otherwise slow.
+- `esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0`, no
+  reboot. Lower stakes: vSAN's default Zstd compression costs more CPU on
+  this hardware than LZ4.
+
+**The rule that makes this worth doing.** The inventory already declares
+`hardware.memoryTieringGb` per host, and the lab's capacity plan depends on
+memory tiering to survive N-1 (192 GB available against the 219 GB
+mandatory stack — see `VCF-CAP-N1-SHORTFALL`). If a host declares
+`memoryTieringGb > 0` and `consumer-amd` is not in
+`provisioning.hostWorkarounds`, `VCF-CAP-TIERING-NEEDS-WORKAROUND` fires:
+tiering is declared, this hardware needs the workaround to make tiering
+function at all, and the workaround was never requested. Without it the
+capacity plan is counting RAM that will not actually be there. The example
+inventory (`lab-3-host.yaml`) requests `consumer-amd` and declares
+`cpuModel: 7945HX` on all three hosts for exactly this reason.
+
 ## Non-goals
 
 - Running a DHCP or HTTP server, or writing to one.
@@ -191,3 +235,10 @@ The reboot is what makes hostd actually serve the new certificate.
   `SddcSpec` — one source, two artifacts, no drift.
 - A host missing `provisioningMac` or `bootDisk`, or naming an unstable one, is
   a finding with a fix, not a silently incomplete file.
+- With `provisioning.hostWorkarounds` empty (the default), the kickstart is
+  byte-identical to before this feature existed. With `consumer-amd` present,
+  all four settings appear in `%firstboot` before its own reboot, and none of
+  it appears unless requested.
+- A host with `memoryTieringGb > 0` and no `consumer-amd` workaround is a
+  finding (`VCF-CAP-TIERING-NEEDS-WORKAROUND`), not a silently optimistic
+  capacity plan.

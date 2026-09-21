@@ -79,6 +79,50 @@ def test_capacity_rules_source_never_reads_hardware_cores():
     assert "'cores'" not in inspect.getsource(platform._capacity_rules)
 
 
+def test_reference_lab_declares_the_workaround_its_tiering_needs(inventory):
+    """The example lab is consumer Ryzen hardware and already relies on
+    memoryTieringGb for N-1 (see test_memory_tiering_clears_the_n1_shortfall).
+    It must also declare the workaround that makes tiering actually work, or
+    the capacity plan is counting RAM that will not be there.
+    """
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" not in check_platform(inventory).codes
+
+
+def test_tiering_without_the_consumer_amd_workaround_is_a_finding(inventory):
+    """This is the rule the whole feature exists for: memoryTieringGb > 0
+    declared, but 'consumer-amd' not requested -- tiering is claimed on
+    hardware that (per the spec) needs a workaround to make it function, and
+    the workaround was never asked for.
+    """
+    inventory["provisioning"]["hostWorkarounds"] = []
+    result = check_platform(inventory)
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" in result.codes
+    assert result.valid is False   # error severity: this is not a warning
+    # Reported per host, not once for the whole document.
+    tiering_findings = [f for f in result.findings
+                        if f.code == "VCF-CAP-TIERING-NEEDS-WORKAROUND"]
+    assert len(tiering_findings) == 3
+    assert tiering_findings[0].path == "/hosts/0/hardware/memoryTieringGb"
+
+
+def test_no_provisioning_workarounds_field_at_all_is_still_a_finding(inventory):
+    """hostWorkarounds is optional; its absence must read the same as an
+    empty list, not silently skip the check.
+    """
+    del inventory["provisioning"]["hostWorkarounds"]
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" in check_platform(inventory).codes
+
+
+def test_zero_tiering_needs_no_workaround(inventory):
+    """A host with no declared tiering has nothing for the workaround to
+    protect, so its absence is not a finding.
+    """
+    inventory["provisioning"]["hostWorkarounds"] = []
+    for host in inventory["hosts"]:
+        host["hardware"]["memoryTieringGb"] = 0
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" not in check_platform(inventory).codes
+
+
 def test_missing_vsan_capacity_is_a_shortfall_not_a_silent_pass(inventory):
     for host in inventory["hosts"]:
         host["hardware"].pop("vsanDeviceTb", None)
@@ -134,6 +178,7 @@ def test_vsp_internal_cidr_colliding_with_a_network_is_an_error(make_inventory):
     "VCF-NAME-NOT-LOWERCASE", "VCF-NAME-WRONG-DOMAIN", "VCF-VSP-POOL-TOO-SMALL",
     "VCF-VSP-POOL-CROSSES-SUBNET", "VCF-VSP-INTERNAL-CIDR-COLLISION",
     "VCF-CAP-RAM-SHORTFALL", "VCF-CAP-N1-SHORTFALL", "VCF-CAP-STORAGE-SHORTFALL",
-    "VCF-CAP-UNKNOWN-HARDWARE", "VCF-LIC-EVALUATION"])
+    "VCF-CAP-UNKNOWN-HARDWARE", "VCF-CAP-TIERING-NEEDS-WORKAROUND",
+    "VCF-LIC-EVALUATION"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()

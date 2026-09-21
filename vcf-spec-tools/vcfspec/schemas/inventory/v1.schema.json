@@ -341,6 +341,11 @@
               "memoryTieringGb": {
                 "type": "number",
                 "minimum": 0
+              },
+              "cpuModel": {
+                "description": "CPU model designation (e.g. '7945HX'), used only to build the cpuid.brandstring workaround for provisioning.hostWorkarounds: 'consumer-amd' (rendered as 'AMD EPYC <cpuModel>'). Not consulted anywhere else. When omitted, a generic EPYC model string is used instead.",
+                "type": "string",
+                "minLength": 1
               }
             }
           },
@@ -383,6 +388,14 @@
           "description": "URL of the directory holding the unpacked ESX ISO contents, which boot.cfg's prefix= must point at. This is not the kickstart directory. Defaults to <bootServerUrl>/esx-<esxVersion>.",
           "type": "string",
           "pattern": "^https?://"
+        },
+        "hostWorkarounds": {
+          "description": "Opt-in ESX host workarounds emitted into %firstboot, one before the reboot that certificate regeneration already performs there. Empty by default, so EPYC and Intel hosts get none of this. 'consumer-amd': four settings from William Lam's VCF 9.1 comprehensive ESX configuration workarounds for lab deployments (https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html) -- (1) cpuid.brandstring set to an EPYC string in /etc/vmware/config, no reboot: without it NSX Edge/VNA deployment fails on consumer AMD because of a DPDK vendor check; (2) monitor_control.disable_apichv=TRUE in /etc/vmware/config, reboot required: without it NVMe memory tiering cannot power on VMs on AMD Ryzen; (3) esxcli entropySources=2, reboot required: Zen 4/5 entropy is otherwise slow; (4) esxcli /VSAN/Vsan2ZdomCompZstd=0, no reboot: uses LZ4 instead of Zstd, which costs less CPU on this hardware. A host that declares hardware.memoryTieringGb > 0 without 'consumer-amd' here is flagged: see VCF-CAP-TIERING-NEEDS-WORKAROUND.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "enum": ["consumer-amd"]
+          }
         }
       }
     }
