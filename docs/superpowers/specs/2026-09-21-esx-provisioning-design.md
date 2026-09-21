@@ -1,7 +1,8 @@
 # Stage 1: ESX provisioning artifacts from the inventory
 
 **Date:** 2026-09-21
-**Status:** implemented; revised 2026-09-20 after domain review
+**Status:** implemented; revised 2026-09-20 after domain review, and again
+2026-09-21 when the `%firstboot` block was ported from `lamw/vcf-91-in-box`
 **Code:** `vcf-spec-tools/`
 **Grounded in:** `[[vcf_baremetal_no_bmc]]` (spike, 2026-09-17)
 
@@ -88,6 +89,27 @@ Two genuinely new decisions, both per host, both currently unexpressible:
   gave to vSAN otherwise fails the install outright, and that is the normal
   state of a lab host being rebuilt.
 
+Two more per-host device fields, added with the `%firstboot` port:
+
+- `hardware.memoryTieringDevice` — the NVMe device `esxcli memtier enable -d`
+  consumes. Same stable-identifier rule as `bootDisk`, for the same reason:
+  the command consumes whatever device it is handed. A host declaring
+  `memoryTieringGb > 0` without this raises `VCF-PROV-NO-TIERING-DEVICE` —
+  the same shape as `VCF-CAP-TIERING-NEEDS-WORKAROUND`, and it does *not*
+  withhold the kickstart, because a host with no tiering still installs and
+  still commissions; it is just smaller than the capacity plan assumed.
+- `hardware.vsanDevice` — optional, and declared for one purpose: so the tool
+  can prove that `bootDisk` and `memoryTieringDevice` are not it.
+
+  **One device, one role.** All three roles consume the device they are given
+  and none of them asks whether something else is already there. Any two of
+  them naming one device (compared after normalising the
+  `/vmfs/devices/disks/` prefix, so `t10.X` and the path form are one device)
+  raises `VCF-PROV-DEVICE-COLLISION` and withholds that host's artifacts
+  entirely — the same judgement `bootDisk` already makes, for the same reason:
+  better no file than a file that repartitions the 4 TB vSAN member with no
+  BMC to watch it happen.
+
 And one block, because a boot server is a property of the provisioning
 environment rather than of any host:
 
@@ -97,6 +119,16 @@ environment rather than of any host:
 - `provisioning.installerPayloadUrl` — where the ISO contents are unpacked,
   which is what `prefix=` points at. Defaults to
   `<bootServerUrl>/esx-<esxVersion>`.
+- `provisioning.sshPublicKey` — optional, written to
+  `/etc/ssh/keys-root/authorized_keys` by `%firstboot`. Optional precisely so
+  an operator who wants key access does not hand-edit a generated file. A
+  public key is **not a credential**: it authenticates its holder and
+  discloses nothing to whoever reads it off the boot server, so a literal is
+  allowed here where a password never is. A *private* key is refused outright
+  with `InsecureCredentialError`, and anything else unrecognised raises
+  `VCF-PROV-SSH-KEY-NOT-PUBLIC` and injects nothing — the value is echoed
+  inside single quotes into a file that runs as root, so nothing reaches the
+  template unless it is visibly a public key.
 
 `vmnics` already exists in the schema and is **read by no code today**, and
 this code does not change that. `network --device=` is emitted from
@@ -206,6 +238,87 @@ esxcli system shutdown reboot -d 10 -r "hostname and certificate regenerated"
 
 The reboot is what makes hostd actually serve the new certificate.
 
+### Ported from `lamw/vcf-91-in-box` (2026-09-21)
+
+The block now follows the structure of a kickstart that has actually built
+this lab's shape — [`config/KS-ESX01.CFG`](https://github.com/lamw/vcf-91-in-box)
+from William Lam's three-node vSAN ESA VCF lab on Minisforum/Ryzen hardware.
+The text lives in `vcfspec/firstboot.py`; `provision.py` keeps the validation
+and the findings, and stays pure.
+
+**The version caveat is the point.** That repo targets VCF 9.1.0.0 / ESX build
+25370933; we target 9.1.1.0 / 25714478. Every command was re-checked rather
+than copied, and each choice is stated in a comment in the generated file.
+
+**Structure.** Wait on `vim-cmd hostsvc/runtimeinfo` until hostd answers →
+enter maintenance mode → do the work → leave maintenance mode → reboot. The
+previous block issued commands immediately, which races hostd; with no BMC a
+half-configured install is invisible until commissioning rejects it. Leaving
+maintenance mode is equally load-bearing: VCF will not commission a host that
+is in it, and a host that reboots while in it comes back still in it.
+
+**Memory tiering — the gap that motivated the port.** `memoryTieringGb` had
+been read only by the capacity rules; nothing ever enabled tiering, while the
+lab's N-1 headroom depends on it. `%firstboot` now emits the **9.1 form**:
+
+```
+esxcli memtier enable -d <device> -r <ratio>
+```
+
+The 9.0 sequence Lam version-branches to (a `MemoryTiering` kernel setting,
+`/Mem/TierNvmePct`, and `esxcli system tierdevice create`, plus a reboot) is
+**not emitted at all**, and neither is the `vmware -r` probe that would choose
+between them: we install exactly one build, and the 9.0 path on a 9.1 host
+sets a knob that is no longer the control — a silent no-op that looks
+configured. 9.1 applies in maintenance mode with no reboot, which is why
+maintenance mode above is load-bearing rather than tidy.
+
+`-r` is **derived**, not pinned at Lam's flat 100: `memoryTieringGb / ramGb`
+as a percentage, which is what makes `memoryTieringGb` act on the host rather
+than only on a capacity table. The device is normally larger than the tier the
+ratio asks for, and the ratio is what decides how much is used. ESX accepts
+1–400%; outside that, `VCF-PROV-TIERING-RATIO-UNSUPPORTED` fires and nothing
+is emitted, because `-r 521` is a command that fails on a host nobody is
+watching.
+
+**MTU — which of two declared MTUs.** `networks.management.mtu` (1500 here),
+**not** `nsx.fabricMtu` (9000). `vmk0` is the management vmkernel and must
+match the MTU the management VLAN actually carries; Lam hardcodes 9000, which
+here would black-hole exactly the commissioning traffic the host exists to
+receive. `vSwitch0` takes the same value because before VCF commissions the
+host it carries nothing but `vmk0` — and `nsx.fabricMtu` describes the NSX
+transport fabric on the VDS that VCF builds *afterwards*, replacing `vSwitch0`
+entirely.
+
+**Also ported:** `/UserVars/SuppressShellWarning` (three hosts otherwise carry
+three standing alarms that hide real ones); the local VMFS datastore rename,
+named `<host>-local` and deliberately **not** `storage.datastoreName`, which
+names the vSAN datastore this cluster is about to build; and
+`esxcli system coredump file set -s -e true`, because with no BMC a PSOD's
+screen is otherwise the only copy.
+
+**Deliberately not ported, and why:**
+
+- **The `"VM Network"` portgroup VLAN.** Lam's install line passes
+  `--addvmportgroup=1`; ours passes `0`, so the portgroup does not exist and
+  the command would fail on every host.
+- **`/Net/TcpipDefLROEnabled` and `/Net/UseHwTSO`.** His comment scopes these
+  to Intel X710 NICs. That is a property of a NIC, not of this inventory, and
+  emitting it unconditionally costs throughput on hardware that does not need
+  it. If the lab ever fits X710s it belongs in `provisioning.hostWorkarounds`
+  as its own enum value.
+- **`enable_esx_shell` / `start_esx_shell`.** With no BMC there is no remote
+  console to use a local shell from: attack surface with no operator benefit.
+- **`/VSAN/Vsan2ZdomCompZstd`, NTP, SSH enablement, `generate-certificates`.**
+  Already emitted. Porting his block verbatim would have emitted each twice.
+- **His credential handling.** `VMware1!VMware1!` in plaintext throughout,
+  including `rootpw`. Ours is `rootpw --iscrypted ${esx_root_hash}` and refuses
+  a plaintext literal outright.
+- **His boot path.** USB stick plus rEFInd. Our per-MAC UEFI HTTP boot
+  generator has no upstream equivalent and is strictly more capable for three
+  hosts: no media to carry, no per-host imaging pass, and the addressing comes
+  from the same inventory as everything else.
+
 ## What the manifest must say
 
 - The DHCP handover. Native UEFI HTTP boot still learns its URL from DHCP:
@@ -242,3 +355,21 @@ The reboot is what makes hostd actually serve the new certificate.
 - A host with `memoryTieringGb > 0` and no `consumer-amd` workaround is a
   finding (`VCF-CAP-TIERING-NEEDS-WORKAROUND`), not a silently optimistic
   capacity plan.
+- `%firstboot` waits for hostd before its first command, enters maintenance
+  mode before the tiering command, and leaves it before the reboot.
+- A host with `memoryTieringGb > 0` and a stable `memoryTieringDevice` emits
+  `esxcli memtier enable -d <path> -r <derived ratio>`; the 9.0 command
+  sequence and any `vmware -r` version branch appear nowhere.
+- A host with `memoryTieringGb > 0` and no device, an unstable device, or a
+  ratio outside 1–400% is a finding and emits no tiering command — but still
+  gets its kickstart.
+- Any two of `bootDisk`, `vsanDevice` and `memoryTieringDevice` naming one
+  device is `VCF-PROV-DEVICE-COLLISION` and no artifacts for that host, with
+  the two spellings of a device treated as one.
+- `vSwitch0` and `vmk0` take `networks.management.mtu`, and `nsx.fabricMtu`
+  never appears in a kickstart.
+- No setting is emitted twice, and none of the upstream lines listed as *not
+  ported* appears at all.
+- With no `provisioning.sshPublicKey`, no `authorized_keys` line exists; with
+  one, every host gets it; with a private key, rendering is refused and the
+  message does not reproduce the key.
