@@ -33,17 +33,29 @@ was found and fixed by running against real dnsmasq and is merged.
 
 ## Three additions, all stdlib
 
-### 1. Unsupported name suffixes — static, no network
+### 1. `.local` on the VSP names only — static, no network
 
-`VCF-NAME-UNSUPPORTED-SUFFIX` (error). Broadcom: *"Domain suffixes such as
-.local are not supported."* This is not hypothetical — the shipped example
-inventory and the whole nested lab were built on `lab.local` and would have
-been rejected by VCF. Enumerate the unsupported suffixes explicitly rather than
-writing "non-RFC", which has no source.
+`VCF-NAME-VSP-LOCAL-SUFFIX` (**warning**, not error). The restriction is
+narrower than rev 4 first claimed. VMware's
+[split-domain post](https://blogs.vmware.com/cloud-foundation/2026/04/17/bridging-the-local-gap-a-split-domain-design-for-vmware-cloud-foundation-deployment/):
 
-**`appliances.vcenter.ssoDomain` is exempt** and is correctly `vsphere.local`:
-the SSO domain is an identity namespace, not a DNS domain. A rule that flags it
-false-positives on every valid spec. Test that exemption explicitly.
+> *"To provide a transition window, core infrastructure components still allow
+> .local configuration: VCF Operations, vCenter Server, VCF Networking (NSX),
+> SDDC Manager."*
+
+Only **VIDB, VCF Automation and vSphere Supervisor** lost `.local`, and those
+run on the VSP platform. So the rule applies to `dns.subdomain` and
+`appliances.vsp.platformFqdn` / `.instanceFqdn` — **not** to vCenter, NSX,
+SDDC Manager or `hosts[].name`, where `.local` is a supported design and
+flagging it would reject a working spec.
+
+Report at `/dns/subdomain` **first** when that is the source, since it is the
+one-line fix; `dns.subdomain` is currently absent from `_named_values()` in
+`rules/platform.py` and must be added, or findings land on three VSP paths
+while the cause sits elsewhere.
+
+`appliances.vcenter.ssoDomain` is exempt and is correctly `vsphere.local` — an
+identity namespace, not a DNS domain. Test that exemption explicitly.
 
 ### 2. Vantage-point mismatch — detect, do not re-query
 
@@ -58,38 +70,87 @@ dnspython and drags in the entire containment problem: a nameserver taken from
 an untrusted document is a destination, and gating it is the hard part.
 
 **Rev 4's answer is to report the mismatch instead.**
-`VCF-PROBE-RESOLVER-MISMATCH` (warning) fires when the runner's configured
-resolvers do not include any declared nameserver. The operator learns that the
-answers came from somewhere other than the DNS the lab will use, which is the
-actual risk, and we add no query class, no dependency and no new attack
-surface. Reading `/etc/resolv.conf` is a file read in a module that is
-otherwise pure, so it belongs behind the same injected seam as `resolver` and
-`connector`.
+`VCF-PROBE-RESOLVER-MISMATCH` (**`info`**, not warning) fires when the runner's
+configured resolvers include none of the declared nameservers.
+
+It is `info` because it is a vantage-point note, not a defect: a corporate
+resolver that *forwards* the lab zone correctly trips it while resolving
+perfectly, a `systemd-resolved` host shows only `127.0.0.53` and can never
+match, and Windows has no `resolv.conf` at all. The `fix` text must say so
+plainly — *"the answers above came from a different resolver than the lab will
+use; this is not necessarily wrong, a forwarder may resolve the zone correctly;
+re-run from the management network to be certain"* — or it misleads more than
+it helps. A missing or unreadable file emits the existing `VCF-PROBE-UNKNOWN`
+(info), never this code.
+
+The reader goes behind an injected seam for **testability**, not purity:
+`probes.py` is the I/O layer by design and the purity test that monkeypatches
+`builtins.open` covers `render_provisioning`, not probes. Build it lazily
+inside `run_probes()` — never at import, never as a default-argument value.
 
 ### 3. Probe the appliance names the inventory can express
 
 Today only `hosts[].mgmtIp` is probed. Extend the **existing** socket-based
-mechanism — already hardened, already gated — to
-`appliances.vcenter.hostname`, `appliances.sddcManager.hostname`,
-`nsx.managers[]`, `nsx.vipFqdn`, `appliances.vsp.platformFqdn` and
-`.instanceFqdn`.
+mechanism to the appliance names — but three things must be specified, because
+appliances differ from hosts in ways that break the existing assumptions.
 
-These have no declared address, so the check is **round-trip consistency**:
-resolve the name, resolve the address back, require the original name. Exempt
-the NSX VIP from requiring a PTR — a VIP legitimately may have none.
+**Gating.** A host is gated by `config.permits(mgmtIp)` *before* any lookup
+(`probes.py:161`), using an address the operator declared. **An appliance has no
+declared address**, so that gate cannot fire and the resolved address is chosen
+by whoever controls the zone. Therefore: after the forward resolve,
+`config.permits(resolved)` gates the reverse lookup, and **appliances are never
+connected to**. Pre-Installer they do not exist, so a 443 probe is guaranteed
+noise; and it would be a connection to an address we did not choose. This is
+rev 3's re-gate-derived-targets principle, which still applies even though its
+machinery does not.
+
+**Composition, by field and not by sniffing.** Two shapes:
+
+| Already an FQDN | Short name, needs `+ dns.subdomain` |
+|---|---|
+| `nsx.vipFqdn` | `appliances.vcenter.hostname` |
+| `appliances.vsp.platformFqdn` | `appliances.sddcManager.hostname` |
+| `appliances.vsp.instanceFqdn` | `nsx.managers[]` |
+
+The existing code composes unconditionally (`probes.py:165`), which would query
+`nsx.vcf.lab.example.net.vcf.lab.example.net`. Name the two sets **explicitly by
+field** — never by testing for a dot, because rules also run on schema-invalid
+documents.
+
+**CNAMEs — deferral reversed.** `gethostbyname` follows a CNAME silently and
+`gethostbyaddr()[0]` returns the *canonical* name (`probes.py:95`), so a CNAME'd
+appliance alias produces `VCF-PROBE-REVERSE-MISMATCH` at `error` on a perfectly
+valid lab. Appliance names are the ones most likely to be aliases, so extending
+round-trip probing to them makes this bite. No new dependency: compare against
+the alias list from `gethostbyname_ex`, same stdlib call.
+
+**PTR exemption.** `nsx.vipFqdn` and `appliances.vsp.platformFqdn` are both
+VIP-like — the VSP platform's addresses come from `vsp.poolStart..poolEnd` — so
+both are exempt from requiring a PTR, not just the NSX VIP.
+
+**Counters.** Keep appliances out of the `candidates`/`permitted` tallies
+(`probes.py:205`) so `VCF-PROBE-NOTHING-PERMITTED`'s `/hosts` message stays
+true.
 
 Out of scope until the inventory models them: VCF Operations, Automation, VIDB
 and the licence server.
 
 ## Severity
 
-Unchanged from rev 3, which was sound: severity stays fixed in the catalogue —
-**contradictions are `error`** (forward mismatch, reverse mismatch, wrong
-suffix), **absences are `warning`** (no A, no PTR, nothing answering) — and
-strictness is the caller's choice via `--fail-on {warning,error}`, which
-changes the **CLI exit code only**. `Result.valid` keeps its current meaning and
-never shifts under a flag; the MCP surface needs no change. Default `warning`,
-because probing is already opt-in.
+**Applies to new codes only.** Existing codes keep their catalogue severities —
+in particular `VCF-PROBE-NO-REVERSE-DNS` stays `error`. Re-severitying it would
+flip `Result.valid` (`findings.py:37`) for every existing user, which is not a
+change this work is entitled to make.
+
+For new codes: **contradictions are `error`** (forward mismatch, reverse
+mismatch), **absences are `warning`**.
+
+`--fail-on {warning,error}` changes the **CLI exit code only**; `Result.valid`
+keeps its meaning and the MCP surface is untouched. **Default `error`** — that
+is today's behaviour (`cli.py:8`, `cli.py:208`), and `--fail-on` applies to all
+findings, so defaulting to `warning` would change the exit contract for every
+user of a tool whose probing is opt-in. Rev 4's earlier justification had this
+backwards.
 
 ## Explicitly deferred, with the reason
 
@@ -100,8 +161,8 @@ own validation, which runs before anything is deployed:
   warning above. If this returns, rev 3's containment analysis applies in full
   and should be re-read first: the nameserver is a destination taken from an
   untrusted document.
-- **Multi-PTR ambiguity, wildcard-zone detection, nameserver disagreement,
-  CNAME reporting.** Real DNS pathologies, but the Installer's DNS Resolution
+- **Multi-PTR ambiguity, wildcard-zone detection, nameserver disagreement.**
+  (CNAME handling is no longer deferred — see §3.) Real DNS pathologies, but the Installer's DNS Resolution
   check sees them against the same environment, and our pre-Installer window is
   not where they bite.
 - **`VCF-PROBE-ADDRESS-IN-USE` and the brownfield inversion.** Unimplementable
