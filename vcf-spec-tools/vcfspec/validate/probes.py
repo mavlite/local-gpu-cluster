@@ -45,6 +45,7 @@ import inspect
 import ipaddress
 import socket
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..findings import Finding, Result
@@ -142,19 +143,35 @@ def _default_connector(host: str, port: int, timeout: float) -> bool:
         return False
 
 
-def _address_strings(value: object) -> list[str]:
-    """The string entries of a sequence of addresses, or [] for anything else.
+def _address_strings(value: object) -> list[str] | None:
+    """The string entries of an iterable of addresses, or None if `value`
+    is not a shape that can mean "a collection of addresses" at all.
 
     Used for BOTH sides of the resolver-vantage comparison: the declared
     `dns.nameservers` (which a schema-invalid document may make a scalar
     or a dict) and the injected reader's return value (which a caller may
-    make anything at all). A bare string is refused rather than iterated,
-    because iterating "10.50.10.5" yields its characters and renders as
-    `1, 0, ., 5, 0, ...` in a message the operator has to act on.
+    make anything at all).
+
+    `str` and `bytes` are refused rather than iterated: iterating
+    "10.50.10.5" yields its characters and renders as `1, 0, ., 5, 0, ...`
+    in a message the operator has to act on. A mapping is refused because
+    iterating one yields its keys, which is the same garbling wearing a
+    different hat. Anything else iterable is accepted -- a set, a
+    frozenset, a generator -- because `lambda: {line.split()[1] for line
+    in handle}` is an entirely natural way to write this reader and the
+    seam's return type is documented nowhere, so a caller cannot be said
+    to have broken a contract they were never given.
+
+    None (refused) is distinct from [] (an iterable that held no strings),
+    because the two deserve different treatment: the caller's seam is
+    broken in the first case and merely empty in the second.
     """
-    if isinstance(value, (list, tuple)):
-        return [x for x in value if isinstance(x, str)]
-    return []
+    if isinstance(value, (str, bytes, bytearray)) or isinstance(value, Mapping):
+        return None
+    try:
+        return [x for x in value if isinstance(x, str)]   # type: ignore[union-attr]
+    except TypeError:
+        return None          # not iterable at all
 
 
 def _dns_name(value: object) -> str:
@@ -399,7 +416,9 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
     resolving perfectly, systemd-resolved always shows 127.0.0.53, and
     Windows has no resolv.conf at all.
     """
-    declared = _address_strings(_mapping(inventory.get("dns")).get("nameservers"))
+    # A wrong-typed nameservers section is silently skipped, not reported:
+    # that is a schema-invalid DOCUMENT, and the rules layer already says so.
+    declared = _address_strings(_mapping(inventory.get("dns")).get("nameservers")) or []
     if not declared:
         return []          # nothing declared, nothing to compare against
     try:
@@ -426,6 +445,19 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
     # return value. One function both sides call is the fix that does not
     # need a fourth.
     runner = _address_strings(reader_answer)
+    if runner is None:
+        # The reader DID answer -- the answer was a shape that cannot mean
+        # "a collection of addresses". Discarding it silently would leave
+        # the operator with no vantage-point note and no reason for its
+        # absence, which is this module's condemned pattern: a seam that
+        # cannot keep its promise fails in the reassuring direction. The
+        # resolver seam already reports its own wrong-shaped answer this
+        # way; so does this one.
+        return [finding_for("VCF-PROBE-UNKNOWN", "/dns/nameservers",
+                            target=_RESOLV_CONF,
+                            reason="the resolver configuration reader returned "
+                                   f"{type(reader_answer).__name__}, which is not "
+                                   "a collection of addresses")]
     if not runner or set(runner) & set(declared):
         return []
     return [finding_for("VCF-PROBE-RESOLVER-MISMATCH", "/dns/nameservers",

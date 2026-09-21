@@ -1327,18 +1327,33 @@ def test_an_absent_subdomain_still_means_the_bare_name(inventory):
 # pair and not the other -- short/subdomain, declared/runner, call/return --
 # so both sides now go through one _address_strings().
 @pytest.mark.parametrize("answer", [5, object(), [["a"]], (1, 2), "10.50.10.5",
-                                    {"a": "10.50.10.5"}, None, True])
+                                    {"a": "10.50.10.5"}, None, True, b"10.50.10.5"])
 def test_a_wrong_typed_reader_answer_never_escapes_or_garbles(inventory, answer):
     result = run_probes(inventory, CONFIG,
                         resolver=lambda n, wr=False, wc=False: None,
                         connector=lambda *_: True,
                         resolv_conf_reader=lambda: answer)
     assert isinstance(result, Result)
-    # The string case is the one that used to render as "1, 0, ., 5, 0, ..."
-    # in a message the operator has to act on.
-    for finding in result.findings:
-        assert "1, 0, ." not in finding.message
-        assert "1, 0, ." not in finding.fix
+    # Not just the string case: ANY fragment of the answer that is not a
+    # string must stay out of the operator's message. Asserting only on
+    # "1, 0, ." let a dict answer render as "came from a" and a (1, 2)
+    # answer as "came from 1, 2" while the test still passed -- the same
+    # garbling class the test is named for, invisible to its assertion.
+    # Scoped to the findings this seam can produce: a bare `"1" not in
+    # rendered` matches inside 10.50.10.11 and fails for the wrong reason.
+    rendered = " ".join(f.message + f.fix for f in result.findings
+                        if f.path == "/dns/nameservers")
+    assert "1, 0, ." not in rendered
+    for fragment in _non_string_fragments(answer):
+        assert fragment not in rendered, f"{fragment!r} leaked into a message"
+
+
+def _non_string_fragments(answer):
+    """How each non-string element of `answer` would render if it were
+    coerced with str() instead of being filtered out."""
+    if isinstance(answer, (str, bytes, bytearray)) or not hasattr(answer, "__iter__"):
+        return []
+    return [str(x) for x in answer if not isinstance(x, str)]
 
 
 def test_a_reader_answering_a_real_list_is_still_compared(inventory):
@@ -1375,3 +1390,58 @@ def test_a_falsy_non_callable_seam_is_refused_not_replaced_by_the_default(
     result = run_probes(inventory, CONFIG, **kwargs)
     assert "VCF-PROBE-SEAM-UNUSABLE" in result.codes
     assert touched == []
+
+
+# A reader answer that cannot mean "a collection of addresses" is REPORTED,
+# not discarded. Silently dropping it left the operator with no vantage-point
+# note and no reason for its absence -- this module's condemned pattern: a
+# seam that cannot keep its promise failing in the reassuring direction.
+@pytest.mark.parametrize("answer,typename", [("10.50.10.5", "str"), (5, "int"),
+                                             ({"a": "1.1.1.1"}, "dict"),
+                                             (None, "NoneType"), (b"x", "bytes")])
+def test_an_unusable_reader_answer_is_reported_not_silently_dropped(
+        inventory, answer, typename):
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: answer)
+    hits = [f for f in result.findings
+            if f.path == "/dns/nameservers" and f.code == "VCF-PROBE-UNKNOWN"]
+    assert len(hits) == 1
+    assert typename in hits[0].message
+
+
+# A set, a frozenset or a generator is an entirely natural way to write this
+# reader, and the seam's return type is documented nowhere -- so accepting
+# only list/tuple was a contract no caller was ever given.
+@pytest.mark.parametrize("answer", [{"1.1.1.1"}, frozenset({"1.1.1.1"}),
+                                    ("1.1.1.1",), ["1.1.1.1"]])
+def test_any_iterable_of_addresses_is_accepted(inventory, answer):
+    inventory["dns"]["nameservers"] = ["10.50.10.5"]
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: answer)
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-RESOLVER-MISMATCH"]
+    assert len(hits) == 1 and "1.1.1.1" in hits[0].message
+
+
+def test_a_generator_answer_is_accepted_and_consumed_once(inventory):
+    inventory["dns"]["nameservers"] = ["10.50.10.5"]
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: (x for x in ("1.1.1.1",)))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" in result.codes
+
+
+def test_a_wrong_typed_document_nameservers_is_still_silently_skipped(inventory):
+    """The asymmetry is deliberate: a broken SEAM is the caller's bug and is
+    reported; a wrong-typed DOCUMENT is a schema violation the rules layer
+    already reports, so probes must not duplicate it."""
+    inventory["dns"]["nameservers"] = "10.50.10.5"
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert [f for f in result.findings if f.path == "/dns/nameservers"] == []
