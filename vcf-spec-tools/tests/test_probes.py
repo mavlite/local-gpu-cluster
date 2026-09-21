@@ -108,7 +108,7 @@ def test_forward_mismatch_is_an_error(inventory):
 def test_blocked_target_is_neither_resolved_nor_contacted(inventory):
     resolved, contacted = [], []
 
-    def resolver(name, want_reverse=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         resolved.append(name)
         return None
 
@@ -121,11 +121,14 @@ def test_blocked_target_is_neither_resolved_nor_contacted(inventory):
                            "vmnics": ["vmnic0", "vmnic1"], "hardware": {}}]
     result = run_probes(inventory, CONFIG, resolver=resolver, connector=connector)
     assert "VCF-PROBE-TARGET-BLOCKED" in result.codes
-    # Nothing belonging to the blocked host -- neither its name nor its
-    # address -- reached the resolver. The appliance names are a separate
-    # path with its own gate (permits_name, then permits() on the answer)
-    # and its own tests below; they are the only thing that may appear.
-    assert set(resolved) <= appliance_names
+    # Equality, not `<=`. A subset assertion over an empty set proves
+    # nothing, and that is exactly what this became when the resolver
+    # contract grew a third argument: this fake still had two parameters,
+    # every appliance call died of TypeError inside the worker thread, and
+    # `resolved` was []. The test stayed green while checking nothing. So
+    # it now requires that the appliance names DO appear, as well as that
+    # nothing belonging to the blocked host does.
+    assert set(resolved) == appliance_names
     assert contacted == []
 
 
@@ -136,7 +139,7 @@ def test_blocked_target_resolver_is_never_invoked_even_if_it_would_raise(invento
     that raises on any call proves the seam sits in the right place: it must
     never be invoked for an off-allowlist target.
     """
-    def resolver(name, want_reverse=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         raise AssertionError("resolver must not be called for a blocked target")
 
     def connector(host, port, timeout):
@@ -214,7 +217,8 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
                                   "VCF-PROBE-TARGET-BLOCKED", "VCF-PROBE-UNKNOWN",
                                   "VCF-PROBE-NAME-BLOCKED",
                                   "VCF-PROBE-NOTHING-PERMITTED",
-                                  "VCF-PROBE-RESOLVER-MISMATCH"])
+                                  "VCF-PROBE-RESOLVER-MISMATCH",
+                                  "VCF-PROBE-RESOLVER-UNUSABLE"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
 
@@ -348,7 +352,7 @@ def tracking_resolver(calls: list):
     AssertionError from inside it is swallowed and the run still passes.
     The recorded list is what actually fails the test, so assert on it.
     """
-    def resolve(name, want_reverse=False):
+    def resolve(name, want_reverse=False, want_canonical=False):
         calls.append((name, want_reverse))
         raise AssertionError(f"resolver must not be called: {name!r}")
     return resolve
@@ -385,7 +389,7 @@ def test_no_domain_allowlist_issues_no_forward_lookup_at_all():
     zero forward lookups, not lookups of whatever the document names."""
     resolved = []
 
-    def resolver(name, want_reverse=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         resolved.append((name, want_reverse))
         return None
 
@@ -741,6 +745,11 @@ def test_a_padded_appliance_name_is_composed_from_the_stripped_value(inventory):
     subdomain = inventory["dns"]["subdomain"]
     inventory["appliances"]["vcenter"]["hostname"] = " vc01 "
     inventory["nsx"]["vipFqdn"] = "  nsx.vcf.lab.knowledgeondemand.net  "
+    # The host path composes a name too, from its own sibling line. It was
+    # fixed a round later than the other two because no test padded a host
+    # name, so the "no asked name contains a space" assertion below never
+    # looked at it.
+    inventory["hosts"][0]["name"] = " esx01 "
     asked = []
 
     def resolver(name, want_reverse=False, want_canonical=False):
@@ -751,6 +760,7 @@ def test_a_padded_appliance_name_is_composed_from_the_stripped_value(inventory):
                resolv_conf_reader=lambda: ())
     assert f"vc01.{subdomain}" in asked
     assert "nsx.vcf.lab.knowledgeondemand.net" in asked
+    assert f"esx01.{subdomain}" in asked
     assert not any(" " in name for name in asked)
 
 
@@ -851,3 +861,117 @@ def test_the_healthy_appliance_path_issues_exactly_two_lookups_per_name(inventor
     appliance_ips = {f"10.50.10.{40 + i}" for i in range(len(names))}
     appliance_calls = [n for n in calls if n in set(names) or n in appliance_ips]
     assert len(appliance_calls) == 2 * len(names)
+
+
+# --- Fix round 2: one resolver contract, no shim ----------------------------
+#
+# The appliance path always needs the third argument, so the "two-parameter
+# resolvers keep working" shim could not keep its promise: a 2-param fake
+# raised TypeError inside the worker thread, _bounded_resolve's
+# `except Exception` swallowed it, and every appliance came back as
+# VCF-PROBE-UNKNOWN "no forward DNS answer" at `info` -- non-blocking,
+# valid: true, and the round trip never ran. A check that reports success
+# while not running is the exact failure this layer exists to prevent, so
+# the shim is gone: all three arguments, every call, both paths.
+
+
+def two_parameter_resolver(name, want_reverse=False):
+    """A resolver written against the old contract. It would answer
+    everything correctly -- that is the point. The defect was never its
+    answers; it was that its arity failure was indistinguishable from a
+    zone that does not resolve."""
+    if want_reverse:
+        return "vc01.vcf.lab.knowledgeondemand.net"
+    return "10.50.10.40"
+
+
+def test_a_resolver_that_cannot_take_three_arguments_is_refused_once(inventory):
+    result = run_probes(inventory, CONFIG, resolver=two_parameter_resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-RESOLVER-UNUSABLE"]
+    assert len(hits) == 1                       # once, not once per name
+    assert hits[0].path == "/"
+    # And it is not dressed up as a DNS result: the operator is told the
+    # runner could not use the resolver, not that nine names are missing.
+    assert "VCF-PROBE-UNKNOWN" not in result.codes
+    assert result.valid is False
+
+
+def test_the_refused_resolver_is_never_called_at_all(inventory):
+    """A single up-front interface check, not a per-name discovery."""
+    calls = []
+
+    def legacy(name, want_reverse=False):
+        calls.append(name)
+        return None
+
+    run_probes(inventory, CONFIG, resolver=legacy, connector=lambda *_: True,
+               resolv_conf_reader=lambda: ())
+    assert calls == []
+
+
+def test_an_unreadable_signature_proceeds_rather_than_refusing(inventory):
+    """This is an interface check, not a security gate, so it fails OPEN.
+    A C callable -- socket.gethostbyname is exactly one, and exactly the
+    kind of thing a caller might inject -- has no signature inspect can
+    read, and refusing on that basis would break a working resolver.
+
+    `max` stands in for it here: same unreadable builtin signature, but
+    it cannot touch the network even if it were somehow called with one
+    argument, which keeps this test hermetic.
+    """
+    result = run_probes(inventory, CONFIG, resolver=max,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert "VCF-PROBE-RESOLVER-UNUSABLE" not in result.codes
+
+
+def test_the_interface_check_does_not_gate_anything_else(inventory):
+    """permits()/permits_name() remain the only gates that decide whether
+    a probe happens. A resolver that passes the interface check is not
+    thereby permitted anything."""
+    result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
+    assert "VCF-PROBE-RESOLVER-UNUSABLE" not in result.codes
+    assert set(result.codes) == {"VCF-PROBE-TARGET-BLOCKED",
+                                 "VCF-PROBE-NAME-BLOCKED",
+                                 "VCF-PROBE-NOTHING-PERMITTED"}
+
+
+# --- Fix round 2: the appliance path says what actually happened ------------
+
+def test_a_malformed_forward_answer_is_not_called_a_missing_answer(inventory):
+    """The resolver DID answer; the answer was the wrong shape. This is
+    the message an operator sees when a zone tries to smuggle extra names
+    into the accept-set, so calling it "no forward DNS answer" misdescribes
+    the one case that matters most.
+    """
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (name, "attacker-owned.evil.example", "10.50.10.40")
+        return None
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    messages = [f.message for f in result.findings
+                if f.path.startswith("/appliances") and f.code == "VCF-PROBE-UNKNOWN"]
+    assert messages
+    assert all("no forward DNS answer" not in m for m in messages)
+    assert any("pair" in m for m in messages)
+
+
+def test_a_forward_answer_with_no_address_says_so(inventory):
+    """(canonical, None) used to render "Refused to probe None: outside
+    the configured allowlist." It failed closed, which was right, but the
+    text told the operator nothing true."""
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (name, None)
+        return None
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    appliance = [f for f in result.findings if f.path.startswith("/appliances")]
+    assert appliance
+    assert all("no address" in f.message for f in appliance)
+    assert not any("Refused to probe None" in f.message for f in result.findings)
