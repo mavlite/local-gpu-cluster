@@ -395,3 +395,14 @@ def test_kickstart_and_sddcspec_agree_about_the_network(inventory):
         # The SddcSpec carries the short name; the kickstart needs the FQDN
         # the same subdomain composes. Both come from one field.
         assert f"--hostname={host_spec['hostname']}." in body
+
+
+def test_the_manifest_warns_that_the_hash_and_password_must_match(out):
+    """esxRoot and esxRootHash are two representations of one password and
+    nothing in the toolchain holds either value, so nothing can check they
+    agree. A divergence installs the host cleanly and then fails
+    commissioning on credentials -- the expensive shape. Saying so is the
+    only mitigation available.
+    """
+    assert "esxRoot and esxRootHash MUST be the same password" in out.manifest
+    assert "openssl passwd -6 -salt" in out.manifest
