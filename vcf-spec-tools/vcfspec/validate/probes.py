@@ -249,13 +249,28 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
     resolving perfectly, systemd-resolved always shows 127.0.0.53, and
     Windows has no resolv.conf at all.
     """
-    declared = [str(x) for x in (_mapping(inventory.get("dns")).get("nameservers") or [])
-                if isinstance(x, str)]
+    # A wrong-typed nameservers section is skipped, not iterated: on a
+    # schema-invalid document it may be a bare string, and iterating a
+    # string yields its characters -- "10.50.10.5" becomes a "declared"
+    # list of ('1', '0', '.', '5', '0', ...), which is exactly the kind of
+    # garbled operator-facing message this package's rules never produce.
+    raw_nameservers = _mapping(inventory.get("dns")).get("nameservers")
+    if not isinstance(raw_nameservers, (list, tuple)):
+        raw_nameservers = ()
+    declared = [str(x) for x in raw_nameservers if isinstance(x, str)]
     if not declared:
         return []          # nothing declared, nothing to compare against
     try:
         runner = reader()
-    except OSError as exc:
+    except Exception as exc:
+        # resolv_conf_reader is a caller-injected callable -- a public
+        # keyword parameter, same as resolver/connector -- so the
+        # exception type it raises is not this module's to assume. Caught
+        # broadly for the same reason _bounded_resolve catches Exception
+        # rather than OSError: api.py's invariant is that nothing here
+        # ever lets an exception reach the caller. type(exc).__name__
+        # only, never str(exc): redact() is a pattern masker, not a
+        # sanitizer, and an OSError message carries a filesystem path.
         return [finding_for("VCF-PROBE-UNKNOWN", "/dns/nameservers",
                             target=_RESOLV_CONF,
                             reason=f"resolver configuration unreadable ({type(exc).__name__})")]

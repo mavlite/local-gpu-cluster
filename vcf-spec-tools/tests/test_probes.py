@@ -257,6 +257,47 @@ def test_no_declared_nameservers_means_nothing_to_compare(inventory):
     assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
 
 
+def test_a_bare_string_nameservers_is_skipped_not_iterated_as_characters(inventory):
+    """On a schema-invalid document dns.nameservers may be a scalar string.
+    Iterating it directly yields its characters, so a "declared" list of
+    ('1', '0', '.', '5', '0', ...) would reach the operator-facing message.
+    A wrong-typed section is skipped, never garbled.
+    """
+    inventory["dns"]["nameservers"] = "10.50.10.5"
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+    assert not any("','" in f.message or "1, 0, ." in f.message
+                   for f in result.findings)
+
+
+def test_a_dict_nameservers_is_skipped_not_iterated_as_its_keys(inventory):
+    inventory["dns"]["nameservers"] = {"primary": "10.50.10.5"}
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+    assert not any("primary" in f.message for f in result.findings)
+
+
+def test_a_reader_raising_something_other_than_oserror_still_yields_unknown(inventory):
+    """resolv_conf_reader is a public keyword parameter, so the exception it
+    raises is not this module's to assume. A reader raising ValueError must
+    still come back as an ordinary Result carrying one VCF-PROBE-UNKNOWN,
+    never an exception escaping run_probes -- the same discipline
+    _bounded_resolve already applies to the resolver/connector seams.
+    """
+    def boom():
+        raise ValueError("not a resolv.conf line")
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True, resolv_conf_reader=boom)
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-UNKNOWN"
+            and f.path == "/dns/nameservers"]
+    assert len(hits) == 1
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+
+
 def test_the_reader_is_not_built_at_import_or_as_a_default(monkeypatch):
     # The real reader touches the filesystem. Importing this module, and
     # calling run_probes with probes that never need it, must not.
@@ -268,6 +309,14 @@ def test_the_reader_is_not_built_at_import_or_as_a_default(monkeypatch):
     import importlib
     import vcfspec.validate.probes as probes_module
     importlib.reload(probes_module)
+    assert not any("resolv.conf" in str(p) for p in opened)
+
+    # Extended: a real run_probes call, on a document that declares no
+    # nameservers at all, must not need the reader either -- pin the
+    # behaviour, not just the module-load check above.
+    no_nameservers = {"dns": {"subdomain": "vcf.lab.knowledgeondemand.net"},
+                      "hosts": []}
+    probes_module.run_probes(no_nameservers, ProbeConfig())
     assert not any("resolv.conf" in str(p) for p in opened)
 
 
