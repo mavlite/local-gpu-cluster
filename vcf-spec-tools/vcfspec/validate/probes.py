@@ -142,6 +142,21 @@ def _default_connector(host: str, port: int, timeout: float) -> bool:
         return False
 
 
+def _address_strings(value: object) -> list[str]:
+    """The string entries of a sequence of addresses, or [] for anything else.
+
+    Used for BOTH sides of the resolver-vantage comparison: the declared
+    `dns.nameservers` (which a schema-invalid document may make a scalar
+    or a dict) and the injected reader's return value (which a caller may
+    make anything at all). A bare string is refused rather than iterated,
+    because iterating "10.50.10.5" yields its characters and renders as
+    `1, 0, ., 5, 0, ...` in a message the operator has to act on.
+    """
+    if isinstance(value, (list, tuple)):
+        return [x for x in value if isinstance(x, str)]
+    return []
+
+
 def _dns_name(value: object) -> str:
     """Normalise a DNS name for comparison. Resolvers return a trailing dot
     and arbitrary case; neither is a difference, and treating either as one
@@ -384,19 +399,11 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
     resolving perfectly, systemd-resolved always shows 127.0.0.53, and
     Windows has no resolv.conf at all.
     """
-    # A wrong-typed nameservers section is skipped, not iterated: on a
-    # schema-invalid document it may be a bare string, and iterating a
-    # string yields its characters -- "10.50.10.5" becomes a "declared"
-    # list of ('1', '0', '.', '5', '0', ...), which is exactly the kind of
-    # garbled operator-facing message this package's rules never produce.
-    raw_nameservers = _mapping(inventory.get("dns")).get("nameservers")
-    if not isinstance(raw_nameservers, (list, tuple)):
-        raw_nameservers = ()
-    declared = [str(x) for x in raw_nameservers if isinstance(x, str)]
+    declared = _address_strings(_mapping(inventory.get("dns")).get("nameservers"))
     if not declared:
         return []          # nothing declared, nothing to compare against
     try:
-        runner = reader()
+        reader_answer = reader()
     except Exception as exc:
         # resolv_conf_reader is a caller-injected callable -- a public
         # keyword parameter, same as resolver/connector -- so the
@@ -409,6 +416,16 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
         return [finding_for("VCF-PROBE-UNKNOWN", "/dns/nameservers",
                             target=_RESOLV_CONF,
                             reason=f"resolver configuration unreadable ({type(exc).__name__})")]
+    # The same coercion as `declared`, and for the same reason. Guarding
+    # the reader's CALL while consuming its RETURN VALUE unguarded left
+    # `set(runner)` raising TypeError straight out of run_probes on
+    # `lambda: 5`, and a string return iterating per character into the
+    # operator's message -- the exact garbling the declared side already
+    # refused. Three separate fixes on this branch guarded one half of a
+    # pair and left the other: short/subdomain, declared/runner, call/
+    # return value. One function both sides call is the fix that does not
+    # need a fourth.
+    runner = _address_strings(reader_answer)
     if not runner or set(runner) & set(declared):
         return []
     return [finding_for("VCF-PROBE-RESOLVER-MISMATCH", "/dns/nameservers",
@@ -417,9 +434,16 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
 
 def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
                connector=None, *, resolv_conf_reader=None) -> Result:
-    resolve = resolver or _default_resolver
-    connect = connector or _default_connector
-    read_resolvers = resolv_conf_reader or _default_resolv_conf_reader
+    # `is None`, not `or`: `connector or _default_connector` silently
+    # replaces any FALSY non-callable -- [], 0, "" -- with the real
+    # network-touching default, so it never reached _unusable_reason and
+    # the README's promise that a non-callable "is reported once and
+    # probes nothing" was false for exactly the values least likely to be
+    # deliberate. Only an omitted seam gets the default.
+    resolve = _default_resolver if resolver is None else resolver
+    connect = _default_connector if connector is None else connector
+    read_resolvers = (_default_resolv_conf_reader if resolv_conf_reader is None
+                      else resolv_conf_reader)
     # _mapping, not `or {}`: `or {}` only rescues a falsy dns section. A
     # scalar or a list -- both of which a schema-invalid document really
     # produces, e.g. `dns: vcf.lab.example.net` written without the nested

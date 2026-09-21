@@ -1319,3 +1319,59 @@ def test_an_absent_subdomain_still_means_the_bare_name(inventory):
                resolver=resolver, connector=lambda *_: True,
                resolv_conf_reader=lambda: ())
     assert "esx01" in asked
+
+
+# The reader seam's CALL was guarded while its RETURN VALUE was consumed
+# unguarded, so `set(runner)` raised TypeError straight out of run_probes.
+# That is the third time on this branch that a guard covered one half of a
+# pair and not the other -- short/subdomain, declared/runner, call/return --
+# so both sides now go through one _address_strings().
+@pytest.mark.parametrize("answer", [5, object(), [["a"]], (1, 2), "10.50.10.5",
+                                    {"a": "10.50.10.5"}, None, True])
+def test_a_wrong_typed_reader_answer_never_escapes_or_garbles(inventory, answer):
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: answer)
+    assert isinstance(result, Result)
+    # The string case is the one that used to render as "1, 0, ., 5, 0, ..."
+    # in a message the operator has to act on.
+    for finding in result.findings:
+        assert "1, 0, ." not in finding.message
+        assert "1, 0, ." not in finding.fix
+
+
+def test_a_reader_answering_a_real_list_is_still_compared(inventory):
+    """The guard must not silence the check it protects."""
+    inventory["dns"]["nameservers"] = ["10.50.10.5"]
+    result = run_probes(inventory, CONFIG,
+                        resolver=lambda n, wr=False, wc=False: None,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-RESOLVER-MISMATCH"]
+    assert len(hits) == 1 and "1.1.1.1" in hits[0].message
+
+
+# `connector or _default_connector` silently swapped any FALSY non-callable
+# for the real network-touching default, so [] / 0 / "" never reached the
+# usability check and the README's "reported once and probes nothing" was
+# false for exactly the values least likely to be deliberate.
+@pytest.mark.parametrize("seam,value", [("resolver", 0), ("resolver", []),
+                                        ("connector", []), ("connector", ""),
+                                        ("resolv_conf_reader", ""),
+                                        ("resolv_conf_reader", 0)])
+def test_a_falsy_non_callable_seam_is_refused_not_replaced_by_the_default(
+        inventory, seam, value, monkeypatch):
+    import socket as _socket
+    touched = []
+    for name in ("gethostbyname", "gethostbyaddr", "gethostbyname_ex",
+                 "getaddrinfo", "create_connection"):
+        monkeypatch.setattr(_socket, name,
+                            lambda *a, **k: touched.append(1), raising=False)
+    kwargs = {"resolver": lambda n, wr=False, wc=False: None,
+              "connector": lambda *_: True,
+              "resolv_conf_reader": lambda: ()}
+    kwargs[seam] = value
+    result = run_probes(inventory, CONFIG, **kwargs)
+    assert "VCF-PROBE-SEAM-UNUSABLE" in result.codes
+    assert touched == []
