@@ -357,6 +357,11 @@
                 "description": "CPU model designation (e.g. '7945HX'), used only to build the cpuid.brandstring workaround for provisioning.hostWorkarounds: 'consumer-amd' (rendered as 'AMD EPYC <cpuModel>'). Not consulted anywhere else. When omitted, a generic EPYC model string is used instead.",
                 "type": "string",
                 "minLength": 1
+              },
+              "bootDiskClaimedByVsan": {
+                "description": "Whether bootDisk is *currently* a claimed vSAN ESA member -- true only when this is a rebuild of a host whose boot disk a previous install gave to vSAN. Controls whether the kickstart's `install` line carries `--overwritevsan`. The tool cannot infer this: it never reads the disk, so the operator must say so. Get it wrong either way and the install fails, not just misconfigures -- both are real, verified against ESX 9.1.1: with the flag on a disk vSAN never claimed, the installer aborts with '--overwritevsan specified but disk <id> is not claimed by vSAN'; without it on a disk vSAN did claim, the install aborts because the existing vSAN partition blocks it. Defaults to false because a fresh disk -- the common case, and the one this inventory's example hosts describe -- is the greenfield install, not a rebuild.",
+                "type": "boolean",
+                "default": false
               }
             }
           },

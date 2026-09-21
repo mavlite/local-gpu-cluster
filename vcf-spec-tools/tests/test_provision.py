@@ -160,15 +160,45 @@ def test_a_stable_device_identifier_is_accepted(inventory, selector):
 
 def test_the_install_line_never_contradicts_itself(out):
     """--novmfsondisk and --overwritevmfs were emitted together. Only one
-    survives, and --overwritevsan is mandatory for a rebuild: a device the
-    previous install gave to vSAN otherwise fails the install outright.
+    survives. --overwritevsan is absent here because the example inventory
+    describes a greenfield install (hardware.bootDiskClaimedByVsan defaults
+    to false) -- see test_overwritevsan_* below for the conditional itself.
     """
     line = [ln for ln in out.kickstarts["ks-esx01.cfg"].splitlines()
             if ln.startswith("install ")][0]
     assert "--overwritevmfs" in line
-    assert "--overwritevsan" in line
+    assert "--overwritevsan" not in line
     assert "--novmfsondisk" not in line
     assert "--disk=--firstdisk" not in line
+
+
+def test_overwritevsan_is_absent_by_default(out):
+    """A fresh disk that vSAN never claimed: --overwritevsan makes ESX 9.1.1
+    abort the install with 'is not claimed by vSAN', so a greenfield host
+    (hardware.bootDiskClaimedByVsan unset, the default) must not carry it.
+    """
+    line = [ln for ln in out.kickstarts["ks-esx01.cfg"].splitlines()
+            if ln.startswith("install ")][0]
+    assert "--overwritevsan" not in line
+
+
+def test_overwritevsan_is_present_when_the_boot_disk_was_a_vsan_member(inventory):
+    """A rebuild of a host whose boot disk a previous install gave to vSAN:
+    without --overwritevsan the existing vSAN partition fails the install
+    just as hard as the flag does on a fresh disk. Only the operator knows
+    which state the disk is actually in, hence the explicit declaration.
+    """
+    doc = copy.deepcopy(inventory)
+    doc["hosts"][0]["hardware"]["bootDiskClaimedByVsan"] = True
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    line = [ln for ln in out.kickstarts["ks-esx01.cfg"].splitlines()
+            if ln.startswith("install ")][0]
+    assert "--overwritevsan" in line
+    assert "--overwritevmfs" in line
+    # Neighbours were not asked for it and must not get it.
+    line2 = [ln for ln in out.kickstarts["ks-esx02.cfg"].splitlines()
+             if ln.startswith("install ")][0]
+    assert "--overwritevsan" not in line2
 
 
 # --- 4. certificates --------------------------------------------------------

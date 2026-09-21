@@ -79,15 +79,35 @@ Two genuinely new decisions, both per host, both currently unexpressible:
   names (`mpx.…`, `vmhbaN:C0:T0:L0`) are refused too: they are assigned at boot
   in discovery order and do not survive a reboot or a drive swap.
 
-  The install line is `--disk=<id> --overwritevmfs --overwritevsan`.
+  The install line is `--disk=<id> --overwritevmfs[ --overwritevsan]`.
   `--overwritevmfs` and `--novmfsondisk` read as a contradictory pair and only
   one survives: with no BMC the only failure that costs a physical visit is an
   install that stops and waits, and without `--overwritevmfs` a reinstall onto
   a disk that already carries a VMFS aborts. `--novmfsondisk` buys nothing but
   the absence of a local datastore, which is cosmetic and removable over SSH.
-  `--overwritevsan` is there for the same reason: a device the previous install
-  gave to vSAN otherwise fails the install outright, and that is the normal
-  state of a lab host being rebuilt.
+
+  `--overwritevsan` is **conditional**, not unconditional -- an earlier version
+  of this tool emitted it always, reasoning that a device a previous install
+  gave to vSAN would otherwise fail the install outright. That reasoning is
+  correct, but it is only half the story, and running the generated kickstart
+  against a real ESX 9.1.1 installer on a fresh disk found the other half the
+  hard way. Verbatim from the console:
+
+  ```
+  install --overwritevsan specified but disk t10.ATA_____QEMU_HARDDISK___________________________ESX01BOOT___________ is not claimed by vSAN.
+  ```
+
+  So both directions are real failures, not a theoretical concern in one of
+  them: `--overwritevsan` present on a disk vSAN has never claimed aborts the
+  install with the message above; `--overwritevsan` absent on a disk a
+  previous install *did* give to vSAN aborts it too, because the existing vSAN
+  partition blocks the install. The flag has to match the disk's actual
+  on-host state, which this tool cannot know at generation time -- it never
+  reads the disk. `hardware.bootDiskClaimedByVsan` (default `false`) is the
+  operator's declaration of that state: true only for a rebuild of a host
+  whose boot disk vSAN previously claimed. The default keeps a greenfield
+  install -- the common case, and the one the example inventory describes --
+  working, which is the case the unconditional flag broke.
 
 Two more per-host device fields, added with the `%firstboot` port:
 
