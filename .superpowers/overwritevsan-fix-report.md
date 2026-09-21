@@ -1,6 +1,7 @@
 # --overwritevsan fix report
 
-**Status:** fixed, not committed (no commit made; awaiting instruction).
+**Status:** fixed and committed.
+**Commit SHA:** 0de77383299f08833c8073924361bcfd5c8b1439
 
 **Test summary:** `cd vcf-spec-tools && python -m pytest -q` -> 498 passed (496 baseline + 2 new). Mutation test performed: reverted `overwritevsan_opt` to unconditional `" --overwritevsan"`, reran `test_provision.py` -> 3 tests failed as expected, then restored the fix and reconfirmed 498 passing.
 
