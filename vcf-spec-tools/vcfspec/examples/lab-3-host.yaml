@@ -11,8 +11,10 @@ ntp:
   servers: [10.50.10.5]
 networks:
   management: {vlan: 1610, subnet: 10.50.10.0/24, gateway: 10.50.10.1, mtu: 1500}
-  vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000}
-  vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000}
+  vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000,
+               pool: {start: 10.50.11.20, end: 10.50.11.30}}
+  vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000,
+               pool: {start: 10.50.12.20, end: 10.50.12.30}}
 nsx:
   vipFqdn: nsx.vcf.lab.knowledgeondemand.net
   managers: [nsx01]

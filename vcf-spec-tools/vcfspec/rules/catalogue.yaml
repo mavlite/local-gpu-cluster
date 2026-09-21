@@ -182,6 +182,27 @@ VCF-NET-DUPLICATE-IP:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
   summary: "IP {ip} is used more than once ({where})."
   fix: "Give every host a unique address."
+VCF-NET-IP-POOL-MISSING:
+  severity: error
+  source: docs
+  source_url: ""
+  # Verbatim from a real VCF 9.1.1 Installer POST /v1/sddcs/validations
+  # response: MISSING_INCLUSION_RANGE failed the Deployment Specification
+  # check for both VMOTION and VSAN, and every downstream check (DNS
+  # Resolution, Network Configuration, Capacity Calculation) was skipped
+  # because this one failed first.
+  summary: "Network '{purpose}' has no IP pool. The VCF Installer's Deployment Specification check fails this with MISSING_INCLUSION_RANGE: 'Inclusion Range not provided for network {purpose_upper}'."
+  fix: "Provide Inclusion Range for network {purpose_upper} in the input specification: add pool.start and pool.end under networks.{purpose}, sized for at least one address per host."
+VCF-NET-IP-POOL-TOO-SMALL:
+  severity: error
+  source: docs
+  source_url: ""
+  # Verbatim remediation from the same Installer response: "Insufficient IP
+  # Addresses provided for the IP Pool that supports the {NETWORK} network.
+  # Provided {n}, Required {m}." and "(IP Addresses ending with 0 and 255
+  # are ignored)". Each host needs one vmk on vmotion and one on vsan.
+  summary: "Insufficient IP Addresses provided for the IP Pool that supports the {purpose_upper} network. Provided {size}, Required {hosts}."
+  fix: "Widen networks.{purpose}.pool to cover at least {hosts} usable addresses. The Installer ignores addresses ending in .0 and .255, so a pool only reaching {hosts} by counting those is still too small."
 VCF-NSX-TEP-POOL-TOO-SMALL:
   severity: warning
   source: docs

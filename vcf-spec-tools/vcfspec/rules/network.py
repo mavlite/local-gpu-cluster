@@ -16,6 +16,17 @@ from .coerce import as_network as _network
 TEP_MTU_MIN = 1600
 TEPS_PER_HOST = 2
 
+# VCF 9.1.1 Installer's own `POST /v1/sddcs/validations` Deployment
+# Specification check demands an IP pool (`includeIpAddressRanges`) for
+# these two networks -- one vmk per host, per network -- and rejects the
+# spec with NOT_ENOUGH_IPS / MISSING_INCLUSION_RANGE when it is missing or
+# undersized. Management does not need one: hosts carry mgmtIp individually.
+IP_POOL_REQUIRED_PURPOSES = ("vmotion", "vsan")
+
+# The Installer's own remediation text: "Insufficient IP Addresses ...
+# (IP Addresses ending with 0 and 255 are ignored)".
+_EXCLUDED_LAST_OCTETS = (0, 255)
+
 
 def check_networks(inventory: dict) -> Result:
     networks = _usable_networks(inventory)
@@ -26,6 +37,7 @@ def check_networks(inventory: dict) -> Result:
     findings += _mtu_rules(inventory)
     findings += _host_rules(inventory, networks)
     findings += _tep_pool_rules(inventory)
+    findings += _ip_pool_rules(inventory)
     return Result(tuple(findings))
 
 
@@ -138,3 +150,51 @@ def _tep_pool_rules(inventory: dict) -> list[Finding]:
         return [finding_for("VCF-NSX-TEP-POOL-TOO-SMALL", "/nsx/tepPool/ranges",
                             size=size, hosts=hosts, needed=needed)]
     return []
+
+
+def _usable_pool_size(start, end) -> int:
+    """Addresses in [start, end], excluding any ending in .0 or .255 --
+    the VCF Installer ignores both when it counts a pool's supply."""
+    start_int, end_int = int(start), int(end)
+    if end_int < start_int:
+        return 0
+    total = end_int - start_int + 1
+    for last_octet in _EXCLUDED_LAST_OCTETS:
+        total -= _count_congruent(start_int, end_int, 256, last_octet)
+    return total
+
+
+def _count_congruent(low: int, high: int, modulus: int, remainder: int) -> int:
+    """How many integers in [low, high] are congruent to remainder mod modulus.
+
+    Closed-form on purpose: a pool's start/end are schema-valid addresses
+    but nothing bounds how far apart they are, and this runs on
+    caller-supplied documents -- iterating address-by-address would let a
+    single 0.0.0.0-255.255.255.255 pool spin for billions of steps.
+    """
+    first = low + ((remainder - low) % modulus)
+    if first > high:
+        return 0
+    return (high - first) // modulus + 1
+
+
+def _ip_pool_rules(inventory: dict) -> list[Finding]:
+    out: list[Finding] = []
+    networks = _mapping(inventory.get("networks"))
+    hosts = len(inventory.get("hosts") or [])
+    for purpose in IP_POOL_REQUIRED_PURPOSES:
+        entry = _mapping(networks.get(purpose))
+        if not entry:
+            continue  # absent/malformed network; other rules cover its shape
+        pool = _mapping(entry.get("pool"))
+        start, end = _address(pool.get("start")), _address(pool.get("end"))
+        if start is None or end is None:
+            out.append(finding_for("VCF-NET-IP-POOL-MISSING", f"/networks/{purpose}/pool",
+                                   purpose=purpose, purpose_upper=purpose.upper()))
+            continue
+        size = _usable_pool_size(start, end)
+        if hosts and size < hosts:
+            out.append(finding_for("VCF-NET-IP-POOL-TOO-SMALL", f"/networks/{purpose}/pool",
+                                   purpose=purpose, purpose_upper=purpose.upper(),
+                                   size=size, hosts=hosts))
+    return out
