@@ -21,8 +21,17 @@ until after the query that is itself the leak. So names are gated by their
 own policy: ProbeConfig.domain_allowlist, a list of permitted DNS suffixes,
 checked by permits_name() before any forward lookup. It **fails closed** --
 with no configured suffix, no forward lookup is issued at all, and each
-name becomes a VCF-PROBE-NAME-BLOCKED finding instead of a query. The
-reverse lookup needs no such gate: it takes the already-allowlisted IP.
+name becomes a VCF-PROBE-NAME-BLOCKED finding instead of a query.
+
+For a **host**, the reverse lookup needs no further gate: it takes the
+mgmtIp, an address the operator declared and permits() already cleared.
+The **appliance** names have no declared address at all -- pre-Installer
+the appliances do not exist -- so the only address in play is whatever
+the A record says, chosen by whoever controls the zone. permits() is
+therefore applied to the *resolved* address before anything downstream of
+the forward answer happens, and an appliance is never connected to on any
+path: a 443 probe of a machine that does not exist yet is guaranteed
+noise, and it would open a TCP session to an address nobody declared.
 
 The real resolver and connector touch the network, so they are never built
 at import time or as a default-argument value (both are evaluated once, at
@@ -91,8 +100,21 @@ class ProbeConfig:
         return False
 
 
-def _default_resolver(name: str, want_reverse: bool = False):
+def _default_resolver(name: str, want_reverse: bool = False,
+                      want_aliases: bool = False):
+    """Forward, reverse, or the name's canonical name plus its aliases.
+
+    The third mode exists because gethostbyname() follows a CNAME silently
+    and gethostbyaddr()[0] hands back the *canonical* name, so a CNAME'd
+    appliance looks like a reverse mismatch on a perfectly healthy lab.
+    gethostbyname_ex() is the only stdlib call that reports the alias
+    chain, so it is how the round-trip check learns the other names the
+    queried one legitimately answers to.
+    """
     try:
+        if want_aliases:
+            canonical, aliases, _ = socket.gethostbyname_ex(name)
+            return (canonical, *aliases)
         return socket.gethostbyaddr(name)[0] if want_reverse else socket.gethostbyname(name)
     except OSError:
         return None
@@ -114,7 +136,8 @@ def _dns_name(value: object) -> str:
     return str(value).strip().rstrip(".").lower()
 
 
-def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
+def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
+                     want_aliases: bool = False):
     """Call resolve(name, want_reverse), but never wait past timeout_s.
 
     socket.gethostbyname/gethostbyaddr (the default resolver, and any
@@ -134,7 +157,12 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
 
     def worker():
         try:
-            box[0] = resolve(name, want_reverse)
+            # The third argument is passed only when it is needed, so a
+            # two-parameter resolver -- every fake written before the
+            # alias mode existed, and any caller-supplied one -- keeps
+            # working unchanged.
+            box[0] = (resolve(name, want_reverse, want_aliases) if want_aliases
+                      else resolve(name, want_reverse))
         except Exception:
             box[0] = None
 
@@ -142,6 +170,57 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
     thread.start()
     thread.join(timeout_s)
     return None if thread.is_alive() else box[0]
+
+
+# Appliance names, by field. Never inferred from a value's shape: rules
+# run on schema-invalid documents, so "it has a dot in it" proves nothing
+# about whether a field holds a short name or an FQDN. The split below is
+# the inventory schema's own: nsx.managers[], appliances.vcenter.hostname
+# and appliances.sddcManager.hostname are $defs/shortname, while
+# nsx.vipFqdn, vsp.platformFqdn and vsp.instanceFqdn are free-form names
+# that are already fully qualified.
+def _appliance_targets(inventory: dict, subdomain: str) -> list[tuple[str, str, bool]]:
+    """(json pointer, fqdn, ptr_required) for each appliance name declared.
+
+    ptr_required is False for the VIP-like names: the NSX VIP and the VSP
+    platform name front pools, so a missing PTR is not a defect there.
+    """
+    appliances = _mapping(inventory.get("appliances"))
+    nsx = _mapping(inventory.get("nsx"))
+    vsp = _mapping(appliances.get("vsp"))
+    out: list[tuple[str, str, bool]] = []
+
+    def compose(short: object) -> str | None:
+        if not isinstance(short, str) or not short.strip():
+            return None
+        return f"{short}.{subdomain}" if subdomain else short
+
+    for pointer, value, ptr_required in (
+        ("/appliances/vcenter/hostname",
+         compose(_mapping(appliances.get("vcenter")).get("hostname")), True),
+        ("/appliances/sddcManager/hostname",
+         compose(_mapping(appliances.get("sddcManager")).get("hostname")), True),
+    ):
+        if value:
+            out.append((pointer, value, ptr_required))
+    # A wrong-typed managers section is skipped, not iterated: enumerate()
+    # over a bare string would happily yield its characters as names.
+    managers = nsx.get("managers")
+    if not isinstance(managers, (list, tuple)):
+        managers = ()
+    for index, manager in enumerate(managers):
+        composed = compose(manager)
+        if composed:
+            out.append((f"/nsx/managers/{index}", composed, True))
+    # Already fully qualified -- appending the subdomain again is the bug.
+    for pointer, value, ptr_required in (
+        ("/nsx/vipFqdn", nsx.get("vipFqdn"), False),
+        ("/appliances/vsp/platformFqdn", vsp.get("platformFqdn"), False),
+        ("/appliances/vsp/instanceFqdn", vsp.get("instanceFqdn"), True),
+    ):
+        if isinstance(value, str) and value.strip():
+            out.append((pointer, value, ptr_required))
+    return out
 
 
 _RESOLV_CONF = "/etc/resolv.conf"
@@ -234,6 +313,56 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         if not connect(ip, ESX_PORT, config.timeout_s):
             findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
                                         reason=f"no TCP {ESX_PORT} response"))
+
+    # The appliance names. Three things separate this loop from the host
+    # loop above, and all three are containment properties, not polish:
+    #
+    #   * It never touches `candidates`/`permitted`. Those count hosts, and
+    #     VCF-PROBE-NOTHING-PERMITTED's message says "the N host(s) in this
+    #     document" -- an appliance inflating that count makes the message
+    #     a lie and, worse, can hide the all-blocked case.
+    #   * It never calls connect(). Pre-Installer these appliances do not
+    #     exist, so a 443 probe is guaranteed noise; and the address came
+    #     from the zone rather than from the operator, so connecting would
+    #     mean opening a TCP session to somewhere nobody declared.
+    #   * config.permits() gates the *resolved* address. A host is gated on
+    #     the mgmtIp the operator wrote down; an appliance declares no
+    #     address at all, so the only address in play is the one whoever
+    #     controls the zone put in the A record. Nothing downstream of the
+    #     forward answer -- not the reverse lookup, not anything else --
+    #     may happen before that address has been checked.
+    for pointer, fqdn, ptr_required in _appliance_targets(inventory, subdomain):
+        if not config.permits_name(fqdn):
+            findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", pointer, name=fqdn))
+            continue
+        resolved = _bounded_resolve(resolve, fqdn, False, config.timeout_s)
+        if resolved is None:
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
+                                        reason="no forward DNS answer"))
+            continue
+        if not config.permits(resolved):
+            findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", pointer,
+                                        target=resolved))
+            continue
+        reverse = _bounded_resolve(resolve, resolved, True, config.timeout_s)
+        if reverse is None:
+            if ptr_required:
+                findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", pointer,
+                                            ip=resolved, fqdn=fqdn))
+            continue
+        # gethostbyname() follows a CNAME silently and gethostbyaddr()[0]
+        # returns the canonical name, so on a lab where the appliance name
+        # is an alias the PTR legitimately names something else. Accept the
+        # queried name or any name it answers to; only a third name is a
+        # mismatch.
+        names = {_dns_name(fqdn)}
+        aliases = _bounded_resolve(resolve, fqdn, False, config.timeout_s,
+                                   want_aliases=True)
+        if isinstance(aliases, (tuple, list)):
+            names |= {_dns_name(alias) for alias in aliases}
+        if _dns_name(reverse) not in names:
+            findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", pointer,
+                                        ip=resolved, resolved=reverse, fqdn=fqdn))
 
     findings.extend(_resolver_vantage_point(inventory, read_resolvers))
 

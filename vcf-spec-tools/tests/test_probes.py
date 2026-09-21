@@ -13,18 +13,64 @@ CONFIG = ProbeConfig(allowlist=("10.50.0.0/16",),
                      domain_allowlist=("vcf.lab.knowledgeondemand.net",))
 
 
-def resolver_for(answers):
-    def resolve(name, want_reverse=False):
+def resolver_for(answers, aliases=None):
+    """A fake resolver over a dict of {(name, want_reverse): answer}.
+
+    The third mode answers the alias query. Its default is `(name,)` --
+    the name is its own canonical name with no aliases -- which is what a
+    zone without CNAMEs returns, so a test that does not care about
+    aliases does not have to say so.
+    """
+    aliases = aliases or {}
+
+    def resolve(name, want_reverse=False, want_aliases=False):
+        if want_aliases:
+            return aliases.get(name, (name,))
         return answers.get((name, want_reverse))
     return resolve
 
 
+def appliance_fqdns(inventory) -> tuple[str, ...]:
+    """Every appliance name the probe layer will ask about.
+
+    Composed the way probes.py composes them: by *field*, never by
+    inspecting the value for a dot. vipFqdn/platformFqdn/instanceFqdn are
+    already fully qualified; vcenter.hostname, sddcManager.hostname and
+    nsx.managers[] are short names that take the subdomain.
+    """
+    subdomain = inventory["dns"]["subdomain"]
+    appliances = inventory.get("appliances") or {}
+    nsx = inventory.get("nsx") or {}
+    vsp = appliances.get("vsp") or {}
+    short = [(appliances.get("vcenter") or {}).get("hostname"),
+             (appliances.get("sddcManager") or {}).get("hostname"),
+             *(nsx.get("managers") or ())]
+    qualified = [nsx.get("vipFqdn"), vsp.get("platformFqdn"), vsp.get("instanceFqdn")]
+    return tuple([f"{name}.{subdomain}" for name in short if name]
+                 + [name for name in qualified if name])
+
+
 def all_good(inventory):
+    """A healthy lab: forward, reverse and alias answers for every host
+    **and** every appliance name.
+
+    One helper, not a host-only one plus an appliance-aware twin. The
+    moment appliances are probed, a host-only fake makes
+    test_clean_environment_produces_no_findings red for a reason that has
+    nothing to do with a defect, and the honest fix is to make the fake
+    describe the whole environment rather than to weaken the assertion.
+    """
     answers = {}
     for host in inventory["hosts"]:
         fqdn = f"{host['name']}.vcf.lab.knowledgeondemand.net"
         answers[(fqdn, False)] = host["mgmtIp"]
         answers[(host["mgmtIp"], True)] = fqdn
+    # Distinct addresses, inside the same allowlisted /16: two names
+    # sharing one address would make each one's PTR the other's mismatch.
+    for offset, fqdn in enumerate(appliance_fqdns(inventory)):
+        ip = f"10.50.10.{40 + offset}"
+        answers[(fqdn, False)] = ip
+        answers[(ip, True)] = fqdn
     return resolver_for(answers)
 
 
@@ -67,11 +113,17 @@ def test_blocked_target_is_neither_resolved_nor_contacted(inventory):
         contacted.append(host)
         return True
 
+    appliance_names = set(appliance_fqdns(inventory))
     inventory["hosts"] = [{"name": "evil", "mgmtIp": "8.8.8.8",
                            "vmnics": ["vmnic0", "vmnic1"], "hardware": {}}]
     result = run_probes(inventory, CONFIG, resolver=resolver, connector=connector)
     assert "VCF-PROBE-TARGET-BLOCKED" in result.codes
-    assert resolved == [] and contacted == []
+    # Nothing belonging to the blocked host -- neither its name nor its
+    # address -- reached the resolver. The appliance names are a separate
+    # path with its own gate (permits_name, then permits() on the answer)
+    # and its own tests below; they are the only thing that may appear.
+    assert set(resolved) <= appliance_names
+    assert contacted == []
 
 
 def test_blocked_target_resolver_is_never_invoked_even_if_it_would_raise(inventory):
@@ -108,7 +160,11 @@ def test_empty_allowlist_blocks_everything(inventory):
     result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
                         connector=lambda *_: True,
                         resolv_conf_reader=lambda: ("10.50.10.5",))
+    # The hosts are stopped by the IP gate. The appliances have no declared
+    # address for that gate to read, so the empty *domain* allowlist is what
+    # stops them -- one refusal per appliance name, before any lookup.
     assert set(result.codes) == {"VCF-PROBE-TARGET-BLOCKED",
+                                 "VCF-PROBE-NAME-BLOCKED",
                                  "VCF-PROBE-NOTHING-PERMITTED"}
 
 
@@ -134,10 +190,14 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
     elapsed = time.monotonic() - start
 
     assert isinstance(result, Result)
-    # Two resolve() calls per host (forward + reverse), each bounded by
-    # timeout_s -- elapsed should sit near ~2*timeout_s, nowhere near the
-    # resolver's 5s sleep.
-    assert elapsed < 2.0
+    # Two resolve() calls for the one host (forward + reverse) plus one
+    # forward per appliance name -- the appliance forward answer is None,
+    # so no reverse or alias call follows it. Every one of them is bounded
+    # by timeout_s, so elapsed sits near calls*timeout_s. A single
+    # unbounded call would alone blow past this, since the resolver
+    # sleeps 5s.
+    calls = 2 + len(appliance_fqdns(inventory))
+    assert elapsed < calls * config.timeout_s + 1.0
     assert "VCF-PROBE-UNKNOWN" in result.codes
 
 
@@ -330,7 +390,14 @@ def test_an_allowlist_matching_no_host_is_a_blocking_finding(inventory):
                                     domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
                         resolver=tracking_resolver(calls),
                         connector=lambda *_: True)
-    assert calls == []
+    # No host name and no host address reached the resolver. The appliance
+    # names did: an IP allowlist cannot gate a name (that is this module's
+    # whole thesis), so they are gated by permits_name, and it is their
+    # *answer* that permits() then gates.
+    host_targets = ({f"{h['name']}.vcf.lab.knowledgeondemand.net"
+                     for h in inventory["hosts"]}
+                    | {h["mgmtIp"] for h in inventory["hosts"]})
+    assert not (host_targets & {name for name, _ in calls})
     assert "VCF-PROBE-NOTHING-PERMITTED" in result.codes
     assert result.valid is False
 
@@ -400,3 +467,146 @@ def test_reverse_dns_match_is_case_and_trailing_dot_insensitive(inventory):
     result = run_probes(inventory, CONFIG, resolver=resolver_for(answers),
                         connector=lambda *_: True)
     assert "VCF-PROBE-REVERSE-MISMATCH" not in result.codes
+
+
+# --- The appliance names ----------------------------------------------------
+#
+# Four things make an appliance different from a host, and all four are
+# defects if missed:
+#
+#   (a) A host is gated on `mgmtIp`, an address the *operator* declared. An
+#       appliance declares no address, so that gate cannot fire and the
+#       address comes from whoever controls the zone. permits_name() gates
+#       the forward lookup, and permits() must then gate the answer before
+#       anything else is done with it.
+#   (b) An appliance is never connected to. Pre-Installer it does not exist,
+#       so a 443 probe is guaranteed noise -- and it would be a TCP
+#       connection to an address we did not choose.
+#   (c) Composition is by field name. Three of the six fields already hold
+#       an FQDN; appending the subdomain to those queries
+#       nsx.vcf.lab.knowledgeondemand.net.vcf.lab.knowledgeondemand.net.
+#       Never decide this by looking for a dot in the value: these rules run
+#       on schema-invalid documents, so a value's shape proves nothing.
+#   (d) gethostbyaddr() returns the CANONICAL name, and appliance names are
+#       the ones most likely to be CNAMEs, so the reverse answer must be
+#       accepted against the queried name or any of its aliases.
+
+
+def test_short_names_are_composed_and_fqdns_are_not(inventory):
+    asked = []
+
+    def resolver(name, want_reverse=False, want_aliases=False):
+        asked.append(name)
+        return None
+
+    run_probes(inventory, CONFIG, resolver=resolver, connector=lambda *_: True,
+               resolv_conf_reader=lambda: ())
+    # The NSX VIP is already an FQDN. Composing it again is the bug.
+    assert "nsx.vcf.lab.knowledgeondemand.net" in asked
+    assert not any(n.count("vcf.lab.knowledgeondemand.net") > 1 for n in asked)
+
+
+def test_clean_environment_with_appliances_produces_no_findings(inventory):
+    """Zero findings, *and* the appliance names were really asked about.
+
+    Both halves matter: without the second assertion this test would pass
+    just as happily against a probe layer that ignores appliances
+    completely, which is exactly the state this task starts from.
+    """
+    asked = []
+    healthy = all_good(inventory)
+
+    def resolver(name, want_reverse=False, want_aliases=False):
+        asked.append(name)
+        return healthy(name, want_reverse, want_aliases)
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
+    assert result.findings == ()
+    assert set(appliance_fqdns(inventory)) <= set(asked)
+
+
+def test_an_appliance_is_never_connected_to(inventory):
+    contacted = []
+    run_probes(inventory, CONFIG, resolver=all_good(inventory),
+               connector=lambda host, port, timeout: (contacted.append(host), True)[1],
+               resolv_conf_reader=lambda: ())
+    host_ips = {h["mgmtIp"] for h in inventory["hosts"]}
+    assert set(contacted) <= host_ips
+
+
+def test_an_appliance_resolving_outside_the_allowlist_is_blocked(inventory):
+    # The zone -- not the operator -- chose this address. It must not be
+    # reverse-resolved and must not be connected to.
+    reversed_names, contacted = [], []
+
+    def resolver(name, want_reverse=False, want_aliases=False):
+        if want_reverse:
+            reversed_names.append(name)
+            return None
+        return "203.0.113.9"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda h, p, t: (contacted.append(h), True)[1],
+                        resolv_conf_reader=lambda: ())
+    assert "203.0.113.9" not in reversed_names
+    assert "203.0.113.9" not in contacted
+    assert "VCF-PROBE-TARGET-BLOCKED" in result.codes
+
+
+def test_a_cname_alias_is_not_a_reverse_mismatch(inventory):
+    # gethostbyaddr returns the CANONICAL name. Without alias handling this
+    # flags a valid lab at `error` and fails the whole document.
+    def resolver(name, want_reverse=False, want_aliases=False):
+        if want_aliases:
+            return ("vcenter-real.vcf.lab.knowledgeondemand.net", name)
+        if want_reverse:
+            return "vcenter-real.vcf.lab.knowledgeondemand.net"
+        return "10.50.10.40"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    mism = [f for f in result.findings if f.code == "VCF-PROBE-REVERSE-MISMATCH"
+            and f.path.startswith("/appliances")]
+    assert mism == []
+
+
+def test_a_genuine_reverse_mismatch_on_an_appliance_is_still_reported(inventory):
+    def resolver(name, want_reverse=False, want_aliases=False):
+        if want_aliases:
+            return (name,)
+        if want_reverse:
+            return "someone-else.vcf.lab.knowledgeondemand.net"
+        return "10.50.10.40"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert any(f.code == "VCF-PROBE-REVERSE-MISMATCH" and f.path.startswith("/appliances")
+               for f in result.findings)
+
+
+def test_vip_like_names_are_exempt_from_requiring_a_ptr(inventory):
+    def resolver(name, want_reverse=False, want_aliases=False):
+        if want_aliases:
+            return (name,)
+        return None if want_reverse else "10.50.10.40"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    no_ptr = {f.path for f in result.findings if f.code == "VCF-PROBE-NO-REVERSE-DNS"}
+    assert "/nsx/vipFqdn" not in no_ptr
+    assert "/appliances/vsp/platformFqdn" not in no_ptr
+    assert "/appliances/vcenter/hostname" in no_ptr
+
+
+def test_appliances_do_not_count_toward_nothing_permitted(inventory):
+    # Every host blocked, appliances resolvable: the /hosts message must
+    # still fire and still say "none of the N hosts".
+    blocked = ProbeConfig(allowlist=("203.0.113.0/24",),
+                          domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    result = run_probes(inventory, blocked, resolver=all_good(inventory),
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    hit = [f for f in result.findings if f.code == "VCF-PROBE-NOTHING-PERMITTED"]
+    assert len(hit) == 1 and hit[0].path == "/hosts"
+    assert str(len(inventory["hosts"])) in hit[0].message

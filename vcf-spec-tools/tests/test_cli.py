@@ -213,12 +213,22 @@ def test_probe_with_no_allowlist_domain_defaults_to_resolving_nothing(
     assert captured["probe_config"].domain_allowlist == ()
 
 
-def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(capsys):
+def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(
+        monkeypatch, capsys):
     """The exact reproduction: a valid, non-empty allowlist that matches
     none of the example lab's hosts. The CLI refuses an *empty* allowlist
     for precisely this reason, and this case used to exit 0 with
     valid: true, layers_run including "probes", and zero lookups made.
+
+    The host IP allowlist matches nothing, so no host is looked up -- but
+    an IP allowlist cannot gate a *name*, so the appliance names are gated
+    by --allowlist-domain instead and really would be resolved here. This
+    test is about an exit code, not about DNS, so the real resolver is
+    replaced: leaving it in place made the suite issue six live queries
+    against the lab zone and took twelve seconds to do it.
     """
+    from vcfspec.validate import probes
+    monkeypatch.setattr(probes, "_default_resolver", lambda *a, **k: None)
     exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
                       "--allowlist", "203.0.113.0/24",
                       "--allowlist-domain", "vcf.lab.knowledgeondemand.net"])
