@@ -38,16 +38,25 @@ appliances:
     poolStart: 10.50.10.100
     poolEnd: 10.50.10.115
     internalCidr: 198.18.0.0/15
+provisioning:
+  bootServerUrl: http://10.50.10.5/esx
+  esxVersion: 9.1.1.0
 hosts:
   - name: esx01
+    provisioningMac: bc:24:11:00:0a:01
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.11
     vmnics: [vmnic0, vmnic1]
     hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
   - name: esx02
+    provisioningMac: bc:24:11:00:0a:02
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.12
     vmnics: [vmnic0, vmnic1]
     hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
   - name: esx03
+    provisioningMac: bc:24:11:00:0a:03
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.13
     vmnics: [vmnic0, vmnic1]
     hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}

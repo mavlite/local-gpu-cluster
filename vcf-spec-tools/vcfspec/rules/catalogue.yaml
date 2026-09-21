@@ -290,3 +290,27 @@ VCF-PROBE-UNKNOWN:
   source_url: ""
   summary: "Could not probe {target}: {reason}."
   fix: "Re-run from a host on the management network to confirm."
+VCF-PROV-NO-BOOT-SERVER:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No provisioning.bootServerUrl, so a booting host has nowhere to fetch its kickstart."
+  fix: "Add provisioning.bootServerUrl pointing at the HTTP server that serves the boot artifacts."
+VCF-PROV-NO-MGMT-NETWORK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "networks.management needs a usable subnet and gateway before a kickstart can set static addressing."
+  fix: "Give networks.management a CIDR subnet and a gateway."
+VCF-PROV-NO-MAC:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} has no provisioningMac, so it cannot be given a per-MAC boot config."
+  fix: "Record the MAC of the NIC that UEFI HTTP boots. It is how a booting host finds its own kickstart."
+VCF-PROV-NO-BOOT-DISK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} has no bootDisk, so the install target is undefined."
+  fix: "Name the install device explicitly. Relying on first-disk ordering risks installing over the vSAN device."
