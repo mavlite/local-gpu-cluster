@@ -294,7 +294,7 @@ def test_the_manifest_gives_the_dhcp_handover(out):
     never mentioned DHCP at all, so the mechanism had no starting point.
     """
     assert "option 67" in out.manifest
-    assert "http://10.50.10.5/esx/mboot.efi" in out.manifest
+    assert "http://10.50.10.5/esx/bootx64.efi" in out.manifest
     assert "HTTPClient" in out.manifest
     assert "option 60" in out.manifest
 
@@ -500,3 +500,14 @@ def test_no_workaround_requested_is_byte_identical_to_before_this_feature(invent
     for token in ("cpuid.brandstring", "disable_apichv", "entropySources",
                   "Vsan2ZdomCompZstd"):
         assert token not in body
+
+
+def test_the_manifest_names_the_loader_that_is_actually_on_the_iso(out):
+    """Broadcom's docs say "bootx64.efi"; the ESX 9.1.1 ISO has no such file.
+    The UEFI loader ships as EFI/BOOT/BOOTX64.EFI, and MBOOT.C32 is the BIOS
+    variant -- an operator who copies the file that looks right by name gets
+    a host that will not boot. Verified against build 25714478.
+    """
+    assert "BOOTX64.EFI" in out.manifest
+    assert "MBOOT.C32" in out.manifest          # names the decoy explicitly
+    assert "bootx64.efi" in out.manifest        # and option 67 agrees
