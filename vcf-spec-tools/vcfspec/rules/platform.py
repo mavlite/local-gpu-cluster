@@ -18,6 +18,7 @@ from .tables import (AUTO_RAID_OVERHEAD, ESX_HOST_RAM_OVERHEAD_GB, STACK_RAM_GB,
 def check_platform(inventory: dict) -> Result:
     findings: list[Finding] = []
     findings += _naming_rules(inventory)
+    findings += _local_suffix_rules(inventory)
     findings += _vsp_rules(inventory)
     findings += _capacity_rules(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
@@ -36,6 +37,7 @@ def _named_values(inventory: dict) -> list[tuple[str, str]]:
     appliances = _mapping(inventory.get("appliances"))
     vsp = _mapping(appliances.get("vsp"))
     for pointer, value in (
+        ("/dns/subdomain", _mapping(inventory.get("dns")).get("subdomain")),
         ("/nsx/vipFqdn", nsx.get("vipFqdn")),
         ("/appliances/vsp/platformFqdn", vsp.get("platformFqdn")),
         ("/appliances/vsp/instanceFqdn", vsp.get("instanceFqdn")),
@@ -60,9 +62,40 @@ def _naming_rules(inventory: dict) -> list[Finding]:
         if value != value.lower():
             out.append(finding_for("VCF-NAME-NOT-LOWERCASE", pointer,
                                    value=value, where=pointer))
-        if "." in value and domain and not value.lower().endswith(f".{domain}"):
+        if ("." in value and domain and value.lower() != domain
+                and not value.lower().endswith(f".{domain}")):
             out.append(finding_for("VCF-NAME-WRONG-DOMAIN", pointer,
                                    value=value, domain=domain))
+    return out
+
+
+_LOCAL_SUFFIX = ".local"
+
+# Only these carry the restriction. VCF Operations, vCenter, NSX and SDDC
+# Manager still allow .local during the transition window, so a rule that
+# flagged them would reject a supported design -- which is exactly what an
+# earlier draft of this rule did.
+_VSP_NAME_POINTERS = (
+    "/dns/subdomain",
+    "/appliances/vsp/platformFqdn",
+    "/appliances/vsp/instanceFqdn",
+)
+
+
+def _local_suffix_rules(inventory: dict) -> list[Finding]:
+    """Flag .local on the VSP names, reporting the subdomain when it is the
+    source rather than each name composed from it."""
+    named = dict(_named_values(inventory))
+    subdomain = str(named.get("/dns/subdomain", "")).lower().rstrip(".")
+    if subdomain.endswith(_LOCAL_SUFFIX):
+        return [finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", "/dns/subdomain",
+                            value=named["/dns/subdomain"], where="/dns/subdomain")]
+    out = []
+    for pointer in _VSP_NAME_POINTERS:
+        value = named.get(pointer)
+        if isinstance(value, str) and value.lower().rstrip(".").endswith(_LOCAL_SUFFIX):
+            out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", pointer,
+                                   value=value, where=pointer))
     return out
 
 

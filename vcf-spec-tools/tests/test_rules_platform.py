@@ -1,5 +1,5 @@
 import pytest
-from vcfspec.findings import BLOCKING
+from vcfspec.findings import BLOCKING, Severity
 from vcfspec.rules import load_catalogue
 from vcfspec.rules.platform import check_platform
 
@@ -149,6 +149,59 @@ def test_uppercase_fqdn_field_is_an_error(make_inventory):
 def test_fqdn_outside_the_dns_subdomain_is_a_warning(make_inventory):
     doc = make_inventory(**{"nsx.vipFqdn": "nsx.other.local"})
     assert "VCF-NAME-WRONG-DOMAIN" in check_platform(doc).codes
+
+
+def test_local_suffix_on_vsp_platform_fqdn_is_a_warning(make_inventory):
+    doc = make_inventory(**{"appliances.vsp.platformFqdn": "vcf-vsp.lab.local"})
+    result = check_platform(doc)
+    hits = [f for f in result.findings if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert [f.path for f in hits] == ["/appliances/vsp/platformFqdn"]
+    assert hits[0].severity is Severity.WARNING
+
+
+def test_local_subdomain_is_reported_once_at_its_source(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "vcf-vsp.vcf.lab.local"
+    doc["appliances"]["vsp"]["instanceFqdn"] = "vcf-vsp-i.vcf.lab.local"
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    # One finding, at the one-line fix -- not three naming the symptom.
+    assert [f.path for f in hits] == ["/dns/subdomain"]
+
+
+def test_local_is_not_flagged_on_the_components_that_still_allow_it(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.example.net"})
+    doc["appliances"]["vcenter"]["hostname"] = "vcenter.corp.local"
+    doc["appliances"]["sddcManager"]["hostname"] = "sddc.corp.local"
+    doc["nsx"]["vipFqdn"] = "nsx.corp.local"
+    doc["hosts"][0]["name"] = "esx01.corp.local"
+    codes = check_platform(doc).codes
+    assert "VCF-NAME-VSP-LOCAL-SUFFIX" not in codes
+
+
+def test_sso_domain_is_exempt(make_inventory):
+    # vsphere.local is an identity namespace, not a DNS domain, and is the
+    # correct value. A rule that flagged it would be telling the operator to
+    # break a working deployment.
+    doc = make_inventory(**{"appliances.vcenter.ssoDomain": "vsphere.local"})
+    assert "VCF-NAME-VSP-LOCAL-SUFFIX" not in check_platform(doc).codes
+
+
+def test_subdomain_itself_is_not_reported_as_the_wrong_domain(make_inventory):
+    # Adding /dns/subdomain to _named_values() puts the subdomain through
+    # the WRONG-DOMAIN check, where `value.endswith("." + domain)` is false
+    # for value == domain. Guard it, or every document gains a finding.
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.example.net"})
+    wrong = [f for f in check_platform(doc).findings
+             if f.code == "VCF-NAME-WRONG-DOMAIN"]
+    assert [f.path for f in wrong if f.path == "/dns/subdomain"] == []
+
+
+def test_uppercase_subdomain_is_still_caught(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "VCF.lab.example.net"})
+    lower = [f for f in check_platform(doc).findings
+             if f.code == "VCF-NAME-NOT-LOWERCASE" and f.path == "/dns/subdomain"]
+    assert len(lower) == 1
 
 
 def test_vsp_pool_smaller_than_twelve_is_an_error(make_inventory):

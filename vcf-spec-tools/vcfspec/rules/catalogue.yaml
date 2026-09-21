@@ -401,3 +401,9 @@ VCF-PROV-SSH-KEY-NOT-PUBLIC:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
   summary: "provisioning.sshPublicKey is not a recognised OpenSSH public key."
   fix: "Give the one-line contents of a .pub file (ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp* followed by the base64 blob). Not a private key, not a path, and not a ${reference}: this value is written verbatim into a kickstart published over unauthenticated HTTP, so it is refused unless it is visibly a public key."
+VCF-NAME-VSP-LOCAL-SUFFIX:
+  severity: warning
+  source: docs
+  source_url: https://blogs.vmware.com/cloud-foundation/2026/04/17/bridging-the-local-gap-a-split-domain-design-for-vmware-cloud-foundation-deployment/
+  summary: "'{value}' at {where} uses the .local suffix, which the VCF Management Services platform does not support."
+  fix: "Use a routable suffix for the VSP names. This is a warning, not an error: VCF Operations, vCenter, NSX and SDDC Manager still allow .local during the transition window -- only VCF Identity Broker, VCF Automation and vSphere Supervisor dropped it, and those three run on the VSP platform. Correcting dns.subdomain fixes the composed names in one edit."
