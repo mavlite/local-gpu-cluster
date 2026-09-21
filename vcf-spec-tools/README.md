@@ -90,6 +90,17 @@ $ echo $?
 | `1` | The document is invalid — a structured finding explains why — or an internal error was caught and reported as one. |
 | `2` | Usage error: bad CLI arguments, a path that doesn't exist or isn't readable, or `--probe` without `--allowlist`. This is deliberately distinct from `1`: a file that exists and parses but is a bad spec is not a usage error. |
 
+`validate` also accepts `--fail-on {warning,error}`, default `error`. It
+widens what counts as a failing run: with `--fail-on warning`, exit `1` if
+*any* finding is `warning` severity or above, not just `error`/`critical`.
+Default `error` is today's behaviour — unchanged unless you pass the flag.
+**It only ever moves the exit code.** The JSON on stdout is identical
+either way; a document with only `warning` findings still reports
+`"valid": true`, because `Result.valid` means "no `critical`/`error`
+finding" regardless of `--fail-on`. Use this in a CI gate that wants to
+block on, say, `VCF-NAME-VSP-LOCAL-SUFFIX` (a `warning`) without changing
+what the payload asserts about the document itself.
+
 Both `validate` and `render` also accept `--input-kind {inventory,sddc_spec}`
 to force the document kind instead of relying on auto-detection — the CLI
 equivalent of the MCP server's `input_kind` argument on `vcf_validate_spec`
@@ -245,12 +256,35 @@ $ echo $?
    Management Services (VCFMS) pool's size and placement, and capacity
    against the mandatory 9.1 appliance stack — including memory tiering
    and Auto-RAID storage overhead, and what is left with one host in
-   maintenance.
+   maintenance. Also `.local` on the VCF Management Services (VSP) names
+   (`VCF-NAME-VSP-LOCAL-SUFFIX`, `warning`): `dns.subdomain` and the two
+   VSP FQDNs, `appliances.vsp.platformFqdn` and `.instanceFqdn`, and
+   **only those** — never vCenter, NSX, SDDC Manager or `hosts[].name`.
+   That scope is deliberately narrow, not an oversight: VMware's
+   split-domain design still permits `.local` on the rest during a
+   transition window, and only VCF Identity Broker, VCF Automation and
+   vSphere Supervisor actually lost support for it — all three run on the
+   VSP platform, which is exactly what this rule's three pointers cover.
+   `appliances.vcenter.ssoDomain` is untouched by this rule and is
+   correctly `vsphere.local` by default: it names an identity namespace,
+   not a DNS domain, so it was never a candidate. Read this before
+   "fixing" a `.local` vCenter or NSX name — that is a supported design,
+   not a bug this tool is telling you about.
 3. **Probes** (opt-in, CLI only) — forward/reverse DNS and TCP-443
    reachability for each host, run only against CIDRs the operator
    explicitly allowlists with `--allowlist`, and resolving only names
    under a DNS suffix they explicitly allowlist with `--allowlist-domain`.
-   Real output, run from a machine that is not on the example's
+   **Appliance names are probed too** — vCenter, SDDC Manager, the NSX
+   managers, the NSX VIP and the two VSP names
+   (`appliances.vsp.platformFqdn`/`.instanceFqdn`). The short names
+   (vCenter, SDDC Manager, NSX managers) are composed with
+   `dns.subdomain`, the same as a host; the three FQDN fields
+   (`nsx.vipFqdn`, `vsp.platformFqdn`, `vsp.instanceFqdn`) are already
+   fully qualified and used as-is. `nsx.vipFqdn` and `vsp.platformFqdn`
+   are VIP-like — they front a pool rather than one machine — so a
+   missing PTR for either is not reported as a defect; the other four
+   names still require one. Real output, run from a machine that is not
+   on the example's
    `10.50.10.0/24` lab network, so every host in it is
    reachable-in-principle (inside the allowlist) but not actually
    resolvable from here:
@@ -310,6 +344,48 @@ $ echo $?
      clean exit `0` with `probes` in `layers_run` and zero lookups made.
      Partial blocking is legitimate and is *not* this case: the permitted
      hosts are really probed and the verdict stands on their results.
+   - **An appliance is never connected to, on any path.** Pre-Installer
+     none of these appliances exist yet, so a 443 probe of one would be
+     guaranteed noise — and unlike a host, an appliance declares no
+     address of its own; the only address in play is whatever the zone's
+     A record says, chosen by whoever controls that zone, not the
+     operator. So the resolved address is checked against `--allowlist`
+     before anything else happens with it, and **a resolved address
+     outside the allowlist is refused, not followed** —
+     `VCF-PROBE-TARGET-BLOCKED`, the same as a blocked host, with no
+     reverse lookup and no connection attempt. This is the same
+     "the query is the exfiltration channel" logic that gates host names
+     by `--allowlist-domain`, applied one step further down the chain: an
+     IP allowlist alone cannot gate an address you only learn about after
+     the query that reveals it, so the address is gated the moment it is
+     known and before anything downstream of it runs.
+
+   Running `--probe --allowlist ...` **without** `--allowlist-domain`
+   fails closed on appliance names exactly like it does on host names:
+   expect one `VCF-PROBE-NAME-BLOCKED` warning per appliance name, in
+   addition to one per host — six extra warnings on a document with
+   vCenter, SDDC Manager, two NSX managers, the NSX VIP and both VSP
+   names, even though nothing is actually broken. That is correct,
+   fail-closed behaviour, not a regression: an IP allowlist cannot gate a
+   name, because the DNS query is itself the exfiltration channel, so
+   every unresolved name is accounted for individually rather than
+   folded into one summary line. Pass `--allowlist-domain` with your
+   lab's real suffix to make the count meaningful.
+
+   A separate, `info`-level note can show up alongside any of the above:
+   `VCF-PROBE-RESOLVER-MISMATCH` fires when the answers above did not
+   come from any of the nameservers `dns.nameservers` declares — the
+   probe layer always resolves through the machine's own configured
+   resolver, never through the document's declared nameservers directly,
+   so this is a provenance note, not a failure. It is `info`, not a
+   higher severity, because it is expected background noise on most
+   setups: a corporate or lab forwarder trips it while still resolving
+   the zone correctly, `systemd-resolved` reports only `127.0.0.53`
+   regardless of what it actually forwards to, and Windows has no
+   `/etc/resolv.conf` at all (that case instead surfaces as
+   `VCF-PROBE-UNKNOWN` on `/dns/nameservers`, since the comparison can't
+   run). Re-run from the management network if you need certainty that
+   the declared nameservers themselves produced these answers.
 
 ## Credentials
 
