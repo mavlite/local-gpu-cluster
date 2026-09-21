@@ -62,6 +62,7 @@ hosts:
     hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
 credentials:
   esxRoot: ${esx_root}
+  esxRootHash: ${esx_root_hash}
   vcenterRoot: ${vcenter_root}
   ssoAdmin: ${sso_admin}
   nsxAdmin: ${nsx_admin}

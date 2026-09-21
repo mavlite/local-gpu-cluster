@@ -314,3 +314,33 @@ VCF-PROV-NO-BOOT-DISK:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
   summary: "Host {host} has no bootDisk, so the install target is undefined."
   fix: "Name the install device explicitly. Relying on first-disk ordering risks installing over the vSAN device."
+VCF-PROV-NO-ESX-BOOT-CFG:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No ESX boot.cfg was supplied, so no UEFI boot configs were generated."
+  fix: "Copy the ESX ISO contents to the boot server, then pass that directory's own boot.cfg content as esx_boot_cfg. It carries the modules=, build= and updated= lines that only the ISO knows; a synthesised boot.cfg cannot boot."
+VCF-PROV-NO-ROOT-HASH:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No credentials.esxRootHash, so the kickstart has no root password to set."
+  fix: "Add credentials.esxRootHash as a ${reference} (e.g. ${esx_root_hash}) resolving to a SHA-512 crypt hash. Generate one with: openssl passwd -6. The kickstart is published over unauthenticated HTTP, so it must carry a hash and never a password."
+VCF-PROV-BOOT-DISK-FIRSTDISK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} selects its boot disk with '{selector}'. --firstdisk orders by driver and PCI enumeration, not by size or role, so it can select the vSAN ESA device and repartition it."
+  fix: "Name a stable device identifier instead: /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list."
+VCF-PROV-BOOT-DISK-RUNTIME-NAME:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} selects its boot disk by the runtime name '{selector}'. mpx and vmhbaN:C0:T0:L0 names are assigned at boot in discovery order and are not stable across reboots or hardware changes."
+  fix: "Name a stable device identifier instead: /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list."
+VCF-PROV-BOOT-DISK-NOT-STABLE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} names its boot disk as '{selector}', which is not a stable device identifier."
+  fix: "Use /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list. With no BMC, an install that picks the wrong device destroys the vSAN member and costs a physical visit."

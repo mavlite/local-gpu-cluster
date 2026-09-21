@@ -378,6 +378,11 @@
           "description": "ESX build to provision. Defaults to the VCF 9.1.1 commissioning target.",
           "type": "string",
           "default": "9.1.1.0"
+        },
+        "installerPayloadUrl": {
+          "description": "URL of the directory holding the unpacked ESX ISO contents, which boot.cfg's prefix= must point at. This is not the kickstart directory. Defaults to <bootServerUrl>/esx-<esxVersion>.",
+          "type": "string",
+          "pattern": "^https?://"
         }
       }
     }
