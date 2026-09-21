@@ -372,18 +372,22 @@ $ echo $?
    folded into one summary line. Pass `--allowlist-domain` with your
    lab's real suffix to make the count meaningful.
 
-   If you call `validate_document()` from Python and inject your own
-   `resolver` or `connector`, one more code is reachable:
-   `VCF-PROBE-SEAM-UNUSABLE` at `error`. Both seams are called with three
-   positional arguments — `resolve(name, want_reverse, want_canonical)`
-   and `connect(host, port, timeout)` — and a callable that cannot accept
-   them, or a value that is not callable at all, is reported once and
-   probes nothing. It is an `error` rather than a quiet skip for the
-   reason this whole layer exists: a resolver's `TypeError` is caught
-   alongside every genuine resolution failure, so the alternative is a
-   run that reports every name in the document as unresolvable, at
-   `info`, and still says `valid: true`. The CLI and the MCP server never
-   inject either seam, so neither can produce this.
+   One more code is reachable only from Python, by calling
+   `run_probes()` directly and injecting your own seam:
+   `VCF-PROBE-SEAM-UNUSABLE` at `error`. (`validate_document()` takes no
+   seam arguments — it always calls `run_probes()` with the real
+   resolver, connector and resolver-configuration reader — so neither it,
+   nor the CLI, nor the MCP server can produce this.) Each seam is
+   checked against the call it will actually receive:
+   `resolve(name, want_reverse, want_canonical)`,
+   `connect(host, port, timeout)` and a zero-argument reader. A value
+   that is not callable, or a callable whose readable signature cannot
+   accept that call, is reported once and probes nothing. It is an
+   `error` rather than a quiet skip for the reason this whole layer
+   exists: a resolver's `TypeError` is caught alongside every genuine
+   resolution failure, so the alternative is a run that reports every
+   name in the document as unresolvable, at `info`, and still says
+   `valid: true`.
 
    A separate, `info`-level note can show up alongside any of the above:
    `VCF-PROBE-RESOLVER-MISMATCH` fires when the answers above did not

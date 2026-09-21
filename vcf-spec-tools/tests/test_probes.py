@@ -1154,3 +1154,168 @@ def test_the_vantage_point_note_still_fires_when_lookups_happened(inventory):
                         connector=lambda *_: True,
                         resolv_conf_reader=lambda: ("1.1.1.1",))
     assert "VCF-PROBE-RESOLVER-MISMATCH" in result.codes
+
+
+# --- Fix round 4: calling out is guarded; deciding permission is not --------
+#
+# "Nothing escapes run_probes" survived three rounds as a claim about the
+# *seams* -- is the callable callable, does it take the right arguments --
+# and that was never the whole of it. _unusable_reason cannot know what a
+# callable does once called, and connect() runs on this thread with
+# nothing catching it, so any connector that raises escapes. It did not
+# even need an injected seam to reach: `mgmtIp: 171051531` is a legal
+# YAML integer that ipaddress.ip_address() accepts, so permits() cleared
+# it, and socket.create_connection((171051531, 443)) raised TypeError --
+# which _default_connector does not catch, because it catches OSError.
+#
+# The rule this settles: every call that produces DATA is guarded, and no
+# call that decides PERMISSION ever is. Wrapping permits()/permits_name()
+# in a swallow would convert a gate failure into a pass, which is the one
+# thing this module must never do.
+
+
+def test_a_raising_connector_becomes_a_finding_not_an_escape(inventory):
+    def connector(host, port, timeout):
+        raise TypeError("str, bytes or integer expected")
+
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=connector, resolv_conf_reader=lambda: ())
+    assert isinstance(result, Result)
+    # Reported as what it is, not as a closed port: "the connector blew
+    # up" and "nothing answered on 443" are different facts about the lab.
+    assert any(f.code == "VCF-PROBE-UNKNOWN" and "connector" in f.message
+               for f in result.findings)
+    # Never the exception's own text -- see
+    # test_no_finding_ever_echoes_an_injected_callables_exception_text.
+    assert not any("str, bytes or integer expected" in f.message
+                   for f in result.findings)
+
+
+def test_a_connector_raising_a_non_oserror_still_lets_the_rest_of_the_run_finish(inventory):
+    """One exploding probe must not cost the other hosts their checks."""
+    def connector(host, port, timeout):
+        raise RuntimeError("boom")
+
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=connector, resolv_conf_reader=lambda: ())
+    unknown = [f for f in result.findings if f.code == "VCF-PROBE-UNKNOWN"]
+    assert len(unknown) == len(inventory["hosts"])
+
+
+def test_an_integer_mgmt_ip_is_normalised_before_it_is_used(inventory):
+    """171051531 is 10.50.10.11 written as a plain YAML integer.
+    permits() accepts it, because ipaddress.ip_address() does -- so every
+    step after the gate has to agree with the gate. Before this, the raw
+    int went to create_connection() (TypeError, escaping), to
+    gethostbyaddr() (TypeError, swallowed, surfacing as a spurious
+    VCF-PROBE-NO-REVERSE-DNS at `error`) and into the forward comparison
+    `resolved != ip`, where a string never equals an int, for a spurious
+    VCF-PROBE-FORWARD-MISMATCH. A crash and two wrong findings, from one
+    document value the allowlist had already approved.
+    """
+    inventory["hosts"] = [{"name": "esx01", "mgmtIp": 171051531,
+                           "vmnics": ["vmnic0"], "hardware": {}}]
+    # Host path only: the appliance names have their own tests, and a
+    # fake that answered for them too would be describing a second
+    # environment this test has no opinion about.
+    inventory.pop("appliances", None)
+    inventory.pop("nsx", None)
+    contacted, reversed_names = [], []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_reverse:
+            reversed_names.append(name)
+            return "esx01.vcf.lab.knowledgeondemand.net"
+        return "10.50.10.11"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda h, p, t: (contacted.append(h), True)[1],
+                        resolv_conf_reader=lambda: ())
+    assert contacted == ["10.50.10.11"]
+    assert reversed_names == ["10.50.10.11"]
+    # ...and therefore none of the three spurious outcomes.
+    assert result.findings == ()
+
+
+def test_normalising_does_not_widen_what_the_allowlist_accepts(inventory):
+    """The address is canonicalised *after* permits() has cleared it,
+    never before. A padded or malformed value still fails the gate."""
+    blocked = []
+    for bad in (" 10.50.10.11 ", "010.050.010.011", "10.50.10.11/32", "not-an-ip"):
+        inventory["hosts"] = [{"name": "esx01", "mgmtIp": bad,
+                               "vmnics": ["vmnic0"], "hardware": {}}]
+        result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                            connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        blocked.append("VCF-PROBE-TARGET-BLOCKED" in result.codes)
+    assert all(blocked)
+
+
+# --- Fix round 4: the reader is a seam too ----------------------------------
+
+def test_a_reader_that_is_not_callable_blames_the_caller_not_the_file(inventory):
+    """`resolv_conf_reader=5` used to report "Could not probe
+    /etc/resolv.conf: resolver configuration unreadable (TypeError)" --
+    the file is fine; the caller passed an int. Nothing escaped and
+    nothing leaked, so this is only a truthfulness fix, but a finding
+    that names the wrong culprit sends an operator to the wrong place.
+    """
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True, resolv_conf_reader=5)
+    assert "VCF-PROBE-SEAM-UNUSABLE" in result.codes
+    assert not any("/etc/resolv.conf" in f.message for f in result.findings)
+
+
+def test_a_working_reader_is_not_refused(inventory):
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
+    assert "VCF-PROBE-SEAM-UNUSABLE" not in result.codes
+    assert result.findings == ()
+
+
+# --- Fix round 4: the subdomain half of the composition guard ---------------
+
+def test_a_wrong_typed_subdomain_composes_no_name_at_all(inventory):
+    """_compose_name guarded `short` but not `subdomain`, while its
+    docstring claimed the two callers no longer stayed out of step on
+    validity. `dns.subdomain: {"a": 1}` composed "esx01.{'a': 1}".
+    permits_name() refuses it, so nothing escaped -- but it is the same
+    garbled-value class, on the other half of the same function.
+    """
+    for broken in ({"a": 1}, 42, ["x"]):
+        inventory["dns"] = {"subdomain": broken}
+        asked = []
+
+        def resolver(name, want_reverse=False, want_canonical=False):
+            asked.append(name)
+            return None
+
+        result = run_probes(inventory, CONFIG, resolver=resolver,
+                            connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        # The garbled name must not reach the resolver -- and, because
+        # permits_name() refuses it first, the place it actually surfaced
+        # was the VCF-PROBE-NAME-BLOCKED *message*. Assert on both, or
+        # this test passes while the operator still reads
+        # "Refused to resolve esx01.{'a': 1}".
+        seen = asked + [f.message for f in result.findings]
+        assert not any("{" in text or "[" in text for text in seen)
+        assert not any("esx01.42" in text for text in seen)
+        # The host is still accounted for rather than silently dropped.
+        assert any(f.path == "/hosts/0" for f in result.findings)
+
+
+def test_an_absent_subdomain_still_means_the_bare_name(inventory):
+    """A falsy subdomain has always meant "no suffix", and still does --
+    the new guard must not turn that into a refusal."""
+    inventory["dns"] = {"subdomain": ""}
+    asked = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        asked.append(name)
+        return None
+
+    run_probes(inventory, ProbeConfig(allowlist=("10.50.0.0/16",),
+                                      domain_allowlist=("esx01",)),
+               resolver=resolver, connector=lambda *_: True,
+               resolv_conf_reader=lambda: ())
+    assert "esx01" in asked

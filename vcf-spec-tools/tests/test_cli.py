@@ -347,3 +347,54 @@ def test_fail_on_is_rejected_for_render(tmp_path, capsys):
     path = _write(tmp_path, _valid_inventory())
     exit_code = main(["render", str(path), "--fail-on", "warning"])
     assert exit_code == 2
+
+
+def test_an_integer_mgmt_ip_does_not_crash_the_cli(tmp_path, capsys, monkeypatch):
+    """The reviewer's reproduction, end to end at the surface they used.
+
+    `mgmtIp: 171051531` is 10.50.10.11 written as a YAML integer.
+    ipaddress.ip_address() accepts it, so ProbeConfig.permits() cleared
+    the host, and socket.create_connection((171051531, 443)) then raised
+    TypeError -- which _default_connector does not catch, because it
+    catches OSError. The exception left run_probes, crossed api.py's
+    deliberately unwrapped call, and the CLI printed
+    "internal error (TypeError)" with an empty layers_run and zero
+    findings: the misleading-empty-result shape this layer exists to
+    prevent, reachable from one line of YAML.
+    """
+    from vcfspec.validate import probes
+
+    contacted = []
+
+    def fake_connector(host, port, timeout):
+        # Stands in for socket.create_connection, and is type-strict in
+        # exactly the way that matters: given a non-string host it raises
+        # TypeError, which is what _default_connector's `except OSError`
+        # does not catch. Keeping that behaviour is what makes this an
+        # end-to-end reproduction rather than a test of normalisation
+        # alone -- remove both the guard and the normalisation and this
+        # test sees the real "internal error (TypeError)" output.
+        contacted.append(host)
+        if not isinstance(host, str):
+            raise TypeError(f"str, bytes or integer expected, not {type(host).__name__}")
+        return False
+
+    monkeypatch.setattr(probes, "_default_resolver", lambda *a, **k: None)
+    monkeypatch.setattr(probes, "_default_connector", fake_connector)
+
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = doc["hosts"][:1]
+    doc["hosts"][0]["mgmtIp"] = 171051531
+    path = tmp_path / "int-ip.yaml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+    exit_code = main(["validate", str(path), "--probe",
+                      "--allowlist", "10.50.10.0/24",
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net"])
+    captured = capsys.readouterr()
+    assert "internal error" not in captured.err
+    payload = json.loads(captured.out)
+    assert exit_code in (0, 1)
+    assert "probes" in payload["layers_run"]
+    # The connector was handed the canonical string, not the raw integer.
+    assert contacted == ["10.50.10.11"]

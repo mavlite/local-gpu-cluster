@@ -194,11 +194,12 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
     return None if thread.is_alive() else box[0]
 
 
-def _unusable_reason(seam: object) -> str | None:
+def _unusable_reason(seam: object, *sample_args: object) -> str | None:
     """Why this injected seam cannot be used, or None if it can be.
 
-    resolver and connector are both called with exactly three positional
-    arguments, so one check serves both.
+    `sample_args` is a representative call: resolver and connector take
+    three positional arguments, resolv_conf_reader takes none, and the
+    check is simply whether the callable can be called that way.
 
     Two failure shapes, and they are not the same:
 
@@ -233,10 +234,39 @@ def _unusable_reason(seam: object) -> str | None:
         # escape hands the caller a traceback.
         return None                    # unreadable -- proceed, do not refuse
     try:
-        signature.bind("argument", False, False)
+        signature.bind(*sample_args)
     except TypeError:
-        return "cannot be called with three positional arguments"
+        return (f"cannot be called with {len(sample_args)} positional "
+                f"argument{'' if len(sample_args) == 1 else 's'}")
     return None
+
+
+def _guarded_connect(connect, host: str, port: int, timeout: float):
+    """connect(), but a raising connector is data, not an escape.
+
+    True/False are the connector's own answer. None means it raised --
+    which is a different fact from "nothing answered on that port", and
+    is reported as such, because an operator who reads "no TCP 443
+    response" will go and look at the lab rather than at their code.
+
+    This is the counterpart of _bounded_resolve's `except Exception`, and
+    it closes the same hole one level up. _unusable_reason can only ask
+    whether a seam is callable with the right arity; it cannot know what
+    the call does. The default connector is not exempt: it catches
+    OSError, so `create_connection((171051531, 443))` -- a legal YAML
+    integer that ipaddress.ip_address(), and therefore permits(),
+    accepts -- raised TypeError straight out of run_probes and through
+    api.py's unwrapped call.
+
+    Note what is NOT wrapped like this: config.permits() and
+    config.permits_name(). A call that produces data is guarded; a call
+    that decides permission never is, because "it raised, carry on" is
+    indistinguishable from "it said yes".
+    """
+    try:
+        return bool(connect(host, port, timeout))
+    except Exception:
+        return None
 
 
 def _compose_name(short: object, subdomain: object) -> str | None:
@@ -265,7 +295,16 @@ def _compose_name(short: object, subdomain: object) -> str | None:
         return None
     if not subdomain:              # preserves the original `if subdomain`
         return head                # test: None and "" both mean "no suffix"
-    tail = subdomain.strip() if isinstance(subdomain, str) else f"{subdomain}"
+    if not isinstance(subdomain, str):
+        # The other half of the same guard, and it took one round longer
+        # to arrive: a truthy non-string subdomain composed
+        # "esx01.{'a': 1}", which permits_name() refuses -- so it never
+        # left the process, but it did reach the operator, inside the
+        # VCF-PROBE-NAME-BLOCKED message. A falsy one still means "no
+        # suffix" above; only a subdomain that is present and unusable
+        # lands here, and there is no name to compose from it.
+        return None
+    tail = subdomain.strip()
     return f"{head}.{tail}" if tail else head
 
 
@@ -399,8 +438,12 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
     # with nothing catching it, so an unusable connector raises straight
     # out of run_probes, through api.py's unwrapped call, to the caller.
     # Refuse once, name the seam and the reason, and probe nothing.
-    for seam_name, seam in (("resolver", resolve), ("connector", connect)):
-        reason = _unusable_reason(seam)
+    for seam_name, seam, sample in (
+        ("resolver", resolve, ("argument", False, False)),
+        ("connector", connect, ("argument", 0, 0.0)),
+        ("resolver configuration reader", read_resolvers, ()),
+    ):
+        reason = _unusable_reason(seam, *sample)
         if reason is not None:
             return Result((finding_for("VCF-PROBE-SEAM-UNUSABLE", "/",
                                        seam=seam_name, reason=reason),))
@@ -427,6 +470,27 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", path, target=ip))
             continue
         permitted += 1
+        # permits() cleared this value, so ipaddress.ip_address() parsed
+        # it -- but it parses more spellings than the rest of the layer
+        # understands, and `mgmtIp: 171051531` is a legal YAML integer it
+        # reads as 10.50.10.11. Every step after the gate has to agree
+        # with the gate, so the canonical string is what gets used from
+        # here on: the raw int otherwise went to create_connection()
+        # (TypeError, escaping), to gethostbyaddr() (TypeError, swallowed
+        # into a spurious VCF-PROBE-NO-REVERSE-DNS at `error`) and into
+        # `resolved != ip`, where a string never equals an int, for a
+        # spurious VCF-PROBE-FORWARD-MISMATCH.
+        #
+        # This canonicalises AFTER the gate and never before it. permits()
+        # is unchanged and still refuses " 10.50.10.11 ", "010.050.010.011"
+        # and anything else it does not parse; normalising first would
+        # have widened the allowlist, which is the one thing this may not
+        # do. The try is belt-and-braces for a subclassed ProbeConfig
+        # whose permits() does not imply ip_address() succeeds.
+        try:
+            probe_ip = str(ipaddress.ip_address(ip))
+        except (TypeError, ValueError):
+            probe_ip = ip
         # _compose_name, not an f-string: it strips both parts and
         # rejects a name that is not usable as one. This sibling of the
         # appliance path composed " esx01 .lab.example.net" from a padded
@@ -441,8 +505,9 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             # message this guard exists to prevent. The schema layer is
             # what says the name is missing; this says why the probe
             # could not run.
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
-                                        reason="host name is missing or not a string"))
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
+                                        reason="no usable DNS name: check the host's "
+                                               "name and dns.subdomain"))
             continue
         # The name gate sits here, before the lookup, for the same reason
         # the IP gate sits before connect(): the query IS the leak, so
@@ -454,22 +519,27 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             if resolved is None:
                 findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
                                             reason="no forward DNS answer"))
-            elif resolved != ip:
+            elif resolved != probe_ip:
                 findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
-                                            fqdn=fqdn, resolved=resolved, expected=ip))
-        reverse = lookup(ip, True)
+                                            fqdn=fqdn, resolved=resolved,
+                                            expected=probe_ip))
+        reverse = lookup(probe_ip, True)
         if reverse is None:
-            findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path, ip=ip,
-                                        fqdn=fqdn))
+            findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path,
+                                        ip=probe_ip, fqdn=fqdn))
         elif _dns_name(reverse) != _dns_name(fqdn):
             # A PTR that exists but names a different host is worse than a
             # missing one: it looks healthy and VCF fails obscurely on the
             # disagreement. Checking only that reverse returned *something*
             # is why this went undetected until the tool met real dnsmasq.
             findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", path,
-                                        ip=ip, resolved=reverse, fqdn=fqdn))
-        if not connect(ip, ESX_PORT, config.timeout_s):
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
+                                        ip=probe_ip, resolved=reverse, fqdn=fqdn))
+        reachable = _guarded_connect(connect, probe_ip, ESX_PORT, config.timeout_s)
+        if reachable is None:
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
+                                        reason="the connector raised"))
+        elif not reachable:
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
                                         reason=f"no TCP {ESX_PORT} response"))
 
     # The appliance names. Three things separate this loop from the host
