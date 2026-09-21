@@ -83,19 +83,36 @@ _VSP_NAME_POINTERS = (
 
 
 def _local_suffix_rules(inventory: dict) -> list[Finding]:
-    """Flag .local on the VSP names, reporting the subdomain when it is the
-    source rather than each name composed from it."""
+    """Flag .local on the VSP names.
+
+    A VSP name is suppressed only when it is actually composed from an
+    already-flagged dns.subdomain (fixing dns.subdomain fixes that name
+    too, in one edit -- what the catalogue fix text promises). A name that
+    ends in .local for its own, unrelated reason -- not because it is built
+    on the declared subdomain -- keeps its own finding at its own pointer:
+    correcting dns.subdomain would not fix it.
+    """
     named = dict(_named_values(inventory))
     subdomain = str(named.get("/dns/subdomain", "")).lower().rstrip(".")
-    if subdomain.endswith(_LOCAL_SUFFIX):
-        return [finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", "/dns/subdomain",
-                            value=named["/dns/subdomain"], where="/dns/subdomain")]
-    out = []
+    subdomain_is_local = subdomain.endswith(_LOCAL_SUFFIX)
+    out: list[Finding] = []
+    if subdomain_is_local:
+        out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", "/dns/subdomain",
+                               value=named["/dns/subdomain"], where="/dns/subdomain"))
     for pointer in _VSP_NAME_POINTERS:
+        if pointer == "/dns/subdomain":
+            continue
         value = named.get(pointer)
-        if isinstance(value, str) and value.lower().rstrip(".").endswith(_LOCAL_SUFFIX):
-            out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", pointer,
-                                   value=value, where=pointer))
+        if not isinstance(value, str):
+            continue
+        normalized = value.lower().rstrip(".")
+        if not normalized.endswith(_LOCAL_SUFFIX):
+            continue
+        if subdomain_is_local and (normalized == subdomain
+                                    or normalized.endswith(f".{subdomain}")):
+            continue  # composed from the already-flagged subdomain
+        out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", pointer,
+                               value=value, where=pointer))
     return out
 
 

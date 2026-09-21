@@ -204,6 +204,27 @@ def test_uppercase_subdomain_is_still_caught(make_inventory):
     assert len(lower) == 1
 
 
+def test_a_local_name_not_composed_from_the_subdomain_is_reported_on_its_own(make_inventory):
+    # legacy-vsp.otherco.local is .local for its own reason -- it is not
+    # built on dns.subdomain, so correcting dns.subdomain would not fix it.
+    # It must keep its own finding, separate from the subdomain's.
+    doc = make_inventory(**{"dns.subdomain": "corp.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "legacy-vsp.otherco.local"
+    doc["appliances"]["vsp"]["instanceFqdn"] = "inst.corp.local"
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert sorted(f.path for f in hits) == sorted(
+        ["/dns/subdomain", "/appliances/vsp/platformFqdn"])
+
+
+def test_suppression_comparison_is_case_and_trailing_dot_robust(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "CORP.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "vsp.corp.local."
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert [f.path for f in hits] == ["/dns/subdomain"]
+
+
 def test_vsp_pool_smaller_than_twelve_is_an_error(make_inventory):
     doc = make_inventory(**{"appliances.vsp.poolEnd": "10.50.10.107"})
     assert "VCF-VSP-POOL-TOO-SMALL" in check_platform(doc).codes
