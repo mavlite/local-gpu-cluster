@@ -278,3 +278,72 @@ def test_render_input_kind_forces_wrong_kind_rejection_not_misdetection(capsys):
 def test_render_input_kind_rejects_an_unrecognised_value(capsys):
     exit_code = main(["render", str(EXAMPLE_PATH), "--input-kind", "bogus"])
     assert exit_code == 2
+
+
+# --- --fail-on: the exit code follows a chosen severity threshold, but the
+# reported `valid` field never moves. ---
+
+def _write(tmp_path, doc):
+    path = tmp_path / "doc.yaml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    return path
+
+
+def _valid_inventory():
+    return yaml.safe_load(TEXT)
+
+
+def _inventory_with_a_warning():
+    """The example inventory, with the VSP platform FQDN moved outside the
+    declared dns.subdomain -- triggers VCF-NAME-WRONG-DOMAIN, which is a
+    `warning` in the catalogue, and introduces no schema error (platformFqdn
+    is a free-form string, unlike the vcenter/sddcManager shortname fields).
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["appliances"]["vsp"]["platformFqdn"] = "platform.wrong-domain.example"
+    return doc
+
+
+def test_inventory_with_a_warning_really_has_one_and_no_error(tmp_path, capsys):
+    # Guard against a vacuous test: confirm the fixture actually carries a
+    # warning and nothing at error/critical, so the two tests below are
+    # exercising the flag rather than passing by accident.
+    path = _write(tmp_path, _inventory_with_a_warning())
+    main(["validate", str(path)])
+    payload = json.loads(capsys.readouterr().out)
+    severities = {f["severity"] for f in payload["findings"]}
+    assert "warning" in severities
+    assert "VCF-NAME-WRONG-DOMAIN" in {f["code"] for f in payload["findings"]}
+    assert not (severities & {"error", "critical"})
+
+
+def test_fail_on_defaults_to_error(tmp_path, capsys):
+    # A document whose worst finding is a warning still exits 0 by default.
+    path = _write(tmp_path, _inventory_with_a_warning())
+    assert main(["validate", str(path)]) == 0
+
+
+def test_fail_on_warning_makes_a_warning_exit_nonzero(tmp_path, capsys):
+    path = _write(tmp_path, _inventory_with_a_warning())
+    assert main(["validate", str(path), "--fail-on", "warning"]) == 1
+
+
+def test_fail_on_does_not_change_the_reported_validity(tmp_path, capsys):
+    path = _write(tmp_path, _inventory_with_a_warning())
+    main(["validate", str(path), "--fail-on", "warning"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True      # exit code moved; the verdict did not
+
+
+def test_fail_on_is_rejected_for_render(tmp_path, capsys):
+    # --fail-on is only added to the validate subparser (Step 3), so
+    # argparse itself rejects it on render as an unrecognised argument.
+    # main() -> int is a contract for programmatic callers (see
+    # test_bogus_flag_returns_two_instead_of_raising above): argparse's
+    # own SystemExit(2) is caught inside main() and returned as 2, never
+    # raised out to the caller -- so this asserts on the return value,
+    # like its --input-kind sibling below, rather than on a raised
+    # SystemExit.
+    path = _write(tmp_path, _valid_inventory())
+    exit_code = main(["render", str(path), "--fail-on", "warning"])
+    assert exit_code == 2

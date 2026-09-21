@@ -9,7 +9,11 @@ Exit codes are the scripting contract:
   1 -- the document is invalid (a structured finding explains why), OR an
        exception escaped the layers below this CLI. api.py promises that
        never happens, but this is the last line of defence, and it must
-       never let a traceback reach the operator.
+       never let a traceback reach the operator. `validate --fail-on
+       warning` widens what counts as failing here to include `warning`
+       findings (default is `error`, today's behaviour). It only ever
+       moves the exit code -- the `valid` field in the JSON payload keeps
+       its historical meaning and does not change with `--fail-on`.
   2 -- usage error: bad arguments, or a path that cannot be read as a file
        (missing, a directory, unreadable). This is deliberately distinct
        from "1": a file that exists and parses but is malformed VCF input
@@ -80,6 +84,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "itself the exfiltration channel.")
     validate.add_argument("--probe-timeout", type=float, default=2.0,
                           help="Per-probe socket timeout in seconds.")
+    validate.add_argument(
+        "--fail-on", choices=("warning", "error"), default="error",
+        help="Lowest severity that makes the process exit non-zero. "
+             "Default 'error', which is the historical behaviour: the "
+             "exit code follows Result.valid. This changes the exit code "
+             "only -- the reported `valid` field keeps its meaning, so a "
+             "document that is valid still reports valid: true.")
 
     render = sub.add_parser("render", help="Render an inventory into a VCF SDDC spec.")
     render.add_argument("path", type=Path)
@@ -205,6 +216,10 @@ def main(argv: list[str] | None = None) -> int:
 
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")
+    if args.command == "validate" and args.fail_on == "warning":
+        severities = {f.get("severity") for f in result.get("findings", ())}
+        if severities & {"warning", "error", "critical"}:
+            return 1
     return 0 if result["valid"] else 1
 
 
