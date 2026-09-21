@@ -152,7 +152,8 @@ def _dns_name(value: object) -> str:
 
 def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
                      want_canonical: bool = False):
-    """Call resolve(name, want_reverse), but never wait past timeout_s.
+    """Call resolve(name, want_reverse, want_canonical), but never wait
+    past timeout_s.
 
     socket.gethostbyname/gethostbyaddr (the default resolver, and any
     caller-supplied one) do not honour socket.setdefaulttimeout reliably
@@ -193,43 +194,75 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
     return None if thread.is_alive() else box[0]
 
 
-def _accepts_three_arguments(resolve) -> bool:
-    """Can this callable be called as resolve(name, want_reverse, want_canonical)?
+def _unusable_reason(seam: object) -> str | None:
+    """Why this injected seam cannot be used, or None if it can be.
 
-    This is an **interface** check, not a security gate, and it fails
-    OPEN on purpose: a callable whose signature cannot be read -- a
-    builtin or any C callable, of which socket.gethostbyname is one --
-    returns True and is used. permits() and permits_name() remain the
-    only things that decide whether a probe may happen; nothing here may
-    ever widen or narrow them.
+    resolver and connector are both called with exactly three positional
+    arguments, so one check serves both.
 
-    It exists because _bounded_resolve deliberately swallows everything
-    the resolver raises, so a resolver of the wrong arity would otherwise
-    be reported as a document full of unresolvable names rather than as
-    what it is: a runner that cannot use the resolver it was handed.
+    Two failure shapes, and they are not the same:
+
+    * **Not callable at all.** Refused outright. This is the one that
+      matters, because the arity branch below fails open and a
+      non-callable would sail through it -- inspect.signature(5) raises
+      TypeError, which is indistinguishable from "unreadable signature".
+      Every subsequent call would then raise inside _bounded_resolve's
+      worker, be swallowed with every other resolver failure, and the run
+      would report a document of unresolvable names and stay valid: the
+      same silent pass a two-parameter resolver used to produce, reached
+      by a different wrong type.
+    * **Callable but the wrong arity.** Also refused -- but only when the
+      signature can actually be read. An unreadable signature (a builtin
+      or any C callable, of which socket.gethostbyname is one) is not
+      evidence of anything, so it proceeds.
+
+    This is an **interface** check, never a security gate. permits() and
+    permits_name() remain the only things that decide whether a probe may
+    happen; nothing here may widen or narrow them.
     """
+    if not callable(seam):
+        return f"not callable ({type(seam).__name__})"
     try:
-        signature = inspect.signature(resolve)
-    except (TypeError, ValueError):
-        return True                    # unreadable -- proceed, do not refuse
+        signature = inspect.signature(seam)
+    except Exception:
+        # Anything the object's __signature__ chooses to raise lands
+        # here. The exception type an injected callable raises is not
+        # this module's to assume -- the same reason
+        # _resolver_vantage_point catches Exception around its reader --
+        # and api.py calls run_probes without a wrapper, so letting one
+        # escape hands the caller a traceback.
+        return None                    # unreadable -- proceed, do not refuse
     try:
-        signature.bind("name", False, False)
+        signature.bind("argument", False, False)
     except TypeError:
-        return False
-    return True
+        return "cannot be called with three positional arguments"
+    return None
 
 
-def _compose_name(short: object, subdomain: object) -> str:
-    """`short.subdomain`, built from the *stripped* parts.
+def _compose_name(short: object, subdomain: object) -> str | None:
+    """`short.subdomain`, or None when `short` is not a usable name.
 
-    Stripping is load-bearing: permits_name() strips before matching, so
-    `name: " esx01 "` composes a name the gate permits and the resolver
-    is then asked for with a space inside the label. The host path and
-    the appliance path each compose names, they were written separately,
-    and they drifted -- the appliance one was fixed a round before this
-    one. One definition, used by both, is what stops that recurring.
+    Both halves of that are shared, and the second half is why this
+    returns Optional. An earlier version unified only the *stripping*,
+    and the two callers stayed out of step on *validity*: the appliance
+    path rejected non-strings and blanks, the host path did not. So
+    `hosts[0].name: null` asked the resolver for
+    "None.lab.example.net", and `name: ""` asked for ".lab.example.net"
+    -- which permits_name() permits, because ".suffix".endswith(".suffix")
+    is true. Nothing escaped containment, but a finding naming
+    `None.lab.example.net` is not something an operator can act on, and
+    it is the same garbled-value class already fixed for dns.nameservers
+    and nsx.managers.
+
+    Stripping is load-bearing for the same reason: permits_name() strips
+    before matching, so " esx01 " composes a name the gate permits and
+    the resolver is then asked for with a space inside the label.
     """
-    head = short.strip() if isinstance(short, str) else f"{short}"
+    if not isinstance(short, str):
+        return None
+    head = short.strip()
+    if not head:
+        return None
     if not subdomain:              # preserves the original `if subdomain`
         return head                # test: None and "" both mean "no suffix"
     tail = subdomain.strip() if isinstance(subdomain, str) else f"{subdomain}"
@@ -254,16 +287,13 @@ def _appliance_targets(inventory: dict, subdomain: str) -> list[tuple[str, str, 
     vsp = _mapping(appliances.get("vsp"))
     out: list[tuple[str, str, bool]] = []
 
-    def compose(short: object) -> str | None:
-        if not isinstance(short, str) or not short.strip():
-            return None
-        return _compose_name(short, subdomain)
-
     for pointer, value, ptr_required in (
         ("/appliances/vcenter/hostname",
-         compose(_mapping(appliances.get("vcenter")).get("hostname")), True),
+         _compose_name(_mapping(appliances.get("vcenter")).get("hostname"),
+                       subdomain), True),
         ("/appliances/sddcManager/hostname",
-         compose(_mapping(appliances.get("sddcManager")).get("hostname")), True),
+         _compose_name(_mapping(appliances.get("sddcManager")).get("hostname"),
+                       subdomain), True),
     ):
         if value:
             out.append((pointer, value, ptr_required))
@@ -273,7 +303,7 @@ def _appliance_targets(inventory: dict, subdomain: str) -> list[tuple[str, str, 
     if not isinstance(managers, (list, tuple)):
         managers = ()
     for index, manager in enumerate(managers):
-        composed = compose(manager)
+        composed = _compose_name(manager, subdomain)
         if composed:
             out.append((f"/nsx/managers/{index}", composed, True))
     # Already fully qualified -- appending the subdomain again is the bug.
@@ -360,17 +390,32 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
     subdomain = _mapping(inventory.get("dns")).get("subdomain", "")
     findings: list[Finding] = []
 
-    # One interface check, before any lookup. _bounded_resolve swallows
-    # everything the resolver raises -- which is what keeps a wedged or
-    # exploding resolver from reaching the caller -- so without this a
-    # resolver of the wrong arity is reported as a document full of
-    # unresolvable names at `info`, and the run passes. Refuse once, say
-    # what is actually wrong, and probe nothing.
-    if not _accepts_three_arguments(resolve):
-        return Result((finding_for("VCF-PROBE-RESOLVER-UNUSABLE", "/",
-                                   resolver=getattr(resolve, "__name__", repr(resolve))),))
+    # One usability check per injected seam, before any lookup.
+    # _bounded_resolve swallows everything the resolver raises -- which
+    # is what keeps a wedged or exploding resolver from reaching the
+    # caller -- so without this an unusable resolver is reported as a
+    # document full of unresolvable names at `info`, and the run passes.
+    # connect() has the opposite failure: it is called on this thread
+    # with nothing catching it, so an unusable connector raises straight
+    # out of run_probes, through api.py's unwrapped call, to the caller.
+    # Refuse once, name the seam and the reason, and probe nothing.
+    for seam_name, seam in (("resolver", resolve), ("connector", connect)):
+        reason = _unusable_reason(seam)
+        if reason is not None:
+            return Result((finding_for("VCF-PROBE-SEAM-UNUSABLE", "/",
+                                       seam=seam_name, reason=reason),))
 
-    candidates = permitted = 0
+    candidates = permitted = lookups = 0
+
+    def lookup(name: str, want_reverse: bool, want_canonical: bool = False):
+        """_bounded_resolve, counting. The count is what lets the
+        vantage-point note stay silent when no answer was ever obtained:
+        "Probe answers came from 1.1.1.1" is a claim about answers, and
+        with every target blocked there are none to have a provenance."""
+        nonlocal lookups
+        lookups += 1
+        return _bounded_resolve(resolve, name, want_reverse, config.timeout_s,
+                                want_canonical)
 
     for index, host in enumerate(inventory.get("hosts") or []):
         if not isinstance(host, dict):
@@ -382,25 +427,37 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", path, target=ip))
             continue
         permitted += 1
-        # _compose_name, not an f-string: it strips both parts. See
-        # LOW-1 -- this sibling of the appliance path composed
-        # " esx01 .lab.example.net" from a padded host name, which
-        # permits_name() permits because it strips before matching.
+        # _compose_name, not an f-string: it strips both parts and
+        # rejects a name that is not usable as one. This sibling of the
+        # appliance path composed " esx01 .lab.example.net" from a padded
+        # host name (permits_name() permits it, because it strips before
+        # matching) and "None.lab.example.net" from a null one.
         fqdn = _compose_name(name, subdomain)
+        if fqdn is None:
+            # No usable name: no forward query to issue, and nothing for
+            # a PTR to be compared against. Reporting the host is the
+            # point -- it is not silently dropped -- but reporting it
+            # against a name assembled out of `None` is the garbled
+            # message this guard exists to prevent. The schema layer is
+            # what says the name is missing; this says why the probe
+            # could not run.
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
+                                        reason="host name is missing or not a string"))
+            continue
         # The name gate sits here, before the lookup, for the same reason
         # the IP gate sits before connect(): the query IS the leak, so
         # filtering its answer afterwards is already too late.
         if not config.permits_name(fqdn):
             findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", path, name=fqdn))
         else:
-            resolved = _bounded_resolve(resolve, fqdn, False, config.timeout_s)
+            resolved = lookup(fqdn, False)
             if resolved is None:
                 findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
                                             reason="no forward DNS answer"))
             elif resolved != ip:
                 findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
                                             fqdn=fqdn, resolved=resolved, expected=ip))
-        reverse = _bounded_resolve(resolve, ip, True, config.timeout_s)
+        reverse = lookup(ip, True)
         if reverse is None:
             findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path, ip=ip,
                                         fqdn=fqdn))
@@ -440,8 +497,7 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         # address the allowlist must clear, and the canonical name that
         # will certify that address's PTR. Asking twice would let a zone
         # answer the two questions inconsistently.
-        answer = _bounded_resolve(resolve, fqdn, False, config.timeout_s,
-                                  want_canonical=True)
+        answer = lookup(fqdn, False, want_canonical=True)
         if answer is None:
             findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
                                         reason="no forward DNS answer"))
@@ -470,7 +526,7 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", pointer,
                                         target=resolved))
             continue
-        reverse = _bounded_resolve(resolve, resolved, True, config.timeout_s)
+        reverse = lookup(resolved, True)
         if reverse is None:
             if ptr_required:
                 findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", pointer,
@@ -499,7 +555,9 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", pointer,
                                         ip=resolved, resolved=reverse, fqdn=fqdn))
 
-    findings.extend(_resolver_vantage_point(inventory, read_resolvers))
+    # Only when at least one answer was actually obtained: see lookup().
+    if lookups:
+        findings.extend(_resolver_vantage_point(inventory, read_resolvers))
 
     # An operator who asked for probes and got none must not be handed a
     # pass. VCF-PROBE-TARGET-BLOCKED is per-host and `warning`, which is

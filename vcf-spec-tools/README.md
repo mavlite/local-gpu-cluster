@@ -364,13 +364,26 @@ $ echo $?
    fails closed on appliance names exactly like it does on host names:
    expect one `VCF-PROBE-NAME-BLOCKED` warning per appliance name, in
    addition to one per host — six extra warnings on a document with
-   vCenter, SDDC Manager, two NSX managers, the NSX VIP and both VSP
+   vCenter, SDDC Manager, one NSX manager, the NSX VIP and both VSP
    names, even though nothing is actually broken. That is correct,
    fail-closed behaviour, not a regression: an IP allowlist cannot gate a
    name, because the DNS query is itself the exfiltration channel, so
    every unresolved name is accounted for individually rather than
    folded into one summary line. Pass `--allowlist-domain` with your
    lab's real suffix to make the count meaningful.
+
+   If you call `validate_document()` from Python and inject your own
+   `resolver` or `connector`, one more code is reachable:
+   `VCF-PROBE-SEAM-UNUSABLE` at `error`. Both seams are called with three
+   positional arguments — `resolve(name, want_reverse, want_canonical)`
+   and `connect(host, port, timeout)` — and a callable that cannot accept
+   them, or a value that is not callable at all, is reported once and
+   probes nothing. It is an `error` rather than a quiet skip for the
+   reason this whole layer exists: a resolver's `TypeError` is caught
+   alongside every genuine resolution failure, so the alternative is a
+   run that reports every name in the document as unresolvable, at
+   `info`, and still says `valid: true`. The CLI and the MCP server never
+   inject either seam, so neither can produce this.
 
    A separate, `info`-level note can show up alongside any of the above:
    `VCF-PROBE-RESOLVER-MISMATCH` fires when the answers above did not
@@ -385,7 +398,23 @@ $ echo $?
    `/etc/resolv.conf` at all (that case instead surfaces as
    `VCF-PROBE-UNKNOWN` on `/dns/nameservers`, since the comparison can't
    run). Re-run from the management network if you need certainty that
-   the declared nameservers themselves produced these answers.
+   the declared nameservers themselves produced these answers. It is
+   reported only when at least one lookup was actually made: with every
+   target blocked there are no answers for it to describe the provenance
+   of.
+
+### Behaviour change: an uppercase `dns.subdomain` now fails
+
+`dns.subdomain` is now checked as one of the names the deployment
+publishes, which puts it through the pre-existing `VCF-NAME-NOT-LOWERCASE`
+rule at `error`. A document declaring `dns.subdomain: VCF.lab.example.net`
+therefore reports `valid: false` and exits `1` where it previously passed.
+
+This is deliberate and it is the only change in this release that can
+flip a previously valid document to invalid. VCF rejects uppercase FQDNs,
+and the subdomain is composed into every host and appliance name the
+deployment publishes, so an uppercase one was never going to deploy — it
+simply was not being checked. Lowercase the value to fix it.
 
 ## Credentials
 

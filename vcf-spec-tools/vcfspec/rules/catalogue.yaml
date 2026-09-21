@@ -305,12 +305,12 @@ VCF-PROBE-NOTHING-PERMITTED:
   source_url: ""
   summary: "Probes were requested, but the allowlist permitted none of the {count} host(s) in this document, so no host was checked."
   fix: "Correct --allowlist so it covers the management network these hosts are on, or drop --probe. A non-empty allowlist that matches no host checks exactly as much as no allowlist at all."
-VCF-PROBE-RESOLVER-UNUSABLE:
+VCF-PROBE-SEAM-UNUSABLE:
   severity: error
   source: docs
   source_url: ""
-  summary: "Probes were requested, but the injected resolver ({resolver}) cannot be called as resolve(name, want_reverse, want_canonical), so nothing was probed."
-  fix: "Give the resolver all three parameters. The third asks for a combined forward answer -- (canonical name, primary address) from a single lookup -- which the appliance round-trip check requires. This is reported rather than tolerated because the alternative is silent: the resolver's TypeError is caught alongside every other resolver failure, and every name would be reported as unresolvable while the run still passed."
+  summary: "Probes were requested, but the injected {seam} is unusable ({reason}), so nothing was probed."
+  fix: "Pass a callable taking three positional arguments: resolve(name, want_reverse, want_canonical) or connect(host, port, timeout). The resolver's third argument asks for a combined forward answer -- (canonical name, primary address) from a single lookup -- which the appliance round-trip check requires. This is reported rather than tolerated because the alternative is silent: an unusable resolver's TypeError is caught alongside every other resolver failure, so every name would be reported as unresolvable while the run still passed. Only a caller injecting its own resolver or connector can see this; the CLI and the MCP server never do."
 VCF-PROBE-UNKNOWN:
   severity: info
   source: docs

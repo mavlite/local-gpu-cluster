@@ -197,7 +197,14 @@ def test_subdomain_itself_is_not_reported_as_the_wrong_domain(make_inventory):
     assert [f.path for f in wrong if f.path == "/dns/subdomain"] == []
 
 
-def test_uppercase_subdomain_is_still_caught(make_inventory):
+def test_uppercase_subdomain_is_a_lowercase_violation(make_inventory):
+    """Not "still": before /dns/subdomain joined _named_values() nothing
+    checked the subdomain's case at all, so this is new behaviour, not a
+    preserved one. It is the branch's one deliberate change to
+    Result.valid -- a document with an uppercase dns.subdomain passed on
+    main and fails here -- and it is correct: VCF rejects uppercase FQDNs,
+    and the subdomain composes into every name the deployment publishes.
+    """
     doc = make_inventory(**{"dns.subdomain": "VCF.lab.example.net"})
     lower = [f for f in check_platform(doc).findings
              if f.code == "VCF-NAME-NOT-LOWERCASE" and f.path == "/dns/subdomain"]
@@ -256,3 +263,22 @@ def test_vsp_internal_cidr_colliding_with_a_network_is_an_error(make_inventory):
     "VCF-LIC-EVALUATION"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
+
+
+def test_a_bare_local_subdomain_is_flagged_like_a_dotted_one(make_inventory):
+    """`.endswith(".local")` misses a subdomain that IS "local": a
+    single-label zone is unusual but legal to write, and it is the same
+    unsupported mDNS namespace the dotted form is rejected for.
+    """
+    doc = make_inventory(**{"dns.subdomain": "local"})
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX" and f.path == "/dns/subdomain"]
+    assert len(hits) == 1
+
+
+def test_a_name_merely_ending_in_the_letters_local_is_not_flagged(make_inventory):
+    """Whole labels, not characters -- the same distinction permits_name()
+    makes. "nonlocal" and "mylocal.example.net" are ordinary names."""
+    doc = make_inventory(**{"dns.subdomain": "nonlocal"})
+    assert not [f for f in check_platform(doc).findings
+                if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]

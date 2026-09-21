@@ -218,7 +218,7 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
                                   "VCF-PROBE-NAME-BLOCKED",
                                   "VCF-PROBE-NOTHING-PERMITTED",
                                   "VCF-PROBE-RESOLVER-MISMATCH",
-                                  "VCF-PROBE-RESOLVER-UNUSABLE"])
+                                  "VCF-PROBE-SEAM-UNUSABLE"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
 
@@ -594,7 +594,11 @@ def test_an_appliance_is_never_connected_to(inventory):
                connector=lambda host, port, timeout: (contacted.append(host), True)[1],
                resolv_conf_reader=lambda: ())
     host_ips = {h["mgmtIp"] for h in inventory["hosts"]}
-    assert set(contacted) <= host_ips
+    # Equality, not `<=`. A subset assertion is satisfied by an empty set,
+    # so on its own it cannot tell "no appliance was contacted" from "the
+    # run contacted nothing at all" -- the shape that had already hollowed
+    # out test_blocked_target_is_neither_resolved_nor_contacted.
+    assert set(contacted) == host_ips
 
 
 def test_an_appliance_resolving_outside_the_allowlist_is_blocked(inventory):
@@ -817,14 +821,26 @@ def test_a_legitimate_cname_is_still_not_a_reverse_mismatch(inventory):
     gethostbyaddr() returns the CANONICAL name, so a CNAME'd appliance
     inside the operator's own zone round-trips to a different string.
     """
-    result = run_probes(inventory, CONFIG,
-                        resolver=canonical_resolver(
-                            "vcenter-real.vcf.lab.knowledgeondemand.net",
-                            "10.50.10.40",
-                            "vcenter-real.vcf.lab.knowledgeondemand.net"),
+    calls = []
+    zone = canonical_resolver("vcenter-real.vcf.lab.knowledgeondemand.net",
+                              "10.50.10.40",
+                              "vcenter-real.vcf.lab.knowledgeondemand.net")
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse, want_canonical))
+        return zone(name, want_reverse, want_canonical)
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
                         connector=lambda *_: True, resolv_conf_reader=lambda: ())
     assert [f for f in result.findings if f.code == "VCF-PROBE-REVERSE-MISMATCH"
             and f.path.startswith("/appliances")] == []
+    # An absence assertion needs a lower bound, or it passes just as
+    # happily when the round trip never ran -- which is exactly how this
+    # test's predecessor went vacuous. Both legs must really have been
+    # walked for the vCenter name.
+    vcenter = f"vc01.{inventory['dns']['subdomain']}"
+    assert (vcenter, False, True) in calls        # combined forward
+    assert ("10.50.10.40", True, False) in calls  # reverse on the answer
 
 
 def test_a_canonical_name_outside_the_domain_allowlist_certifies_nothing(inventory):
@@ -888,7 +904,7 @@ def two_parameter_resolver(name, want_reverse=False):
 def test_a_resolver_that_cannot_take_three_arguments_is_refused_once(inventory):
     result = run_probes(inventory, CONFIG, resolver=two_parameter_resolver,
                         connector=lambda *_: True, resolv_conf_reader=lambda: ())
-    hits = [f for f in result.findings if f.code == "VCF-PROBE-RESOLVER-UNUSABLE"]
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-SEAM-UNUSABLE"]
     assert len(hits) == 1                       # once, not once per name
     assert hits[0].path == "/"
     # And it is not dressed up as a DNS result: the operator is told the
@@ -922,7 +938,7 @@ def test_an_unreadable_signature_proceeds_rather_than_refusing(inventory):
     """
     result = run_probes(inventory, CONFIG, resolver=max,
                         connector=lambda *_: True, resolv_conf_reader=lambda: ())
-    assert "VCF-PROBE-RESOLVER-UNUSABLE" not in result.codes
+    assert "VCF-PROBE-SEAM-UNUSABLE" not in result.codes
 
 
 def test_the_interface_check_does_not_gate_anything_else(inventory):
@@ -932,7 +948,7 @@ def test_the_interface_check_does_not_gate_anything_else(inventory):
     result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
                         connector=lambda *_: True,
                         resolv_conf_reader=lambda: ("10.50.10.5",))
-    assert "VCF-PROBE-RESOLVER-UNUSABLE" not in result.codes
+    assert "VCF-PROBE-SEAM-UNUSABLE" not in result.codes
     assert set(result.codes) == {"VCF-PROBE-TARGET-BLOCKED",
                                  "VCF-PROBE-NAME-BLOCKED",
                                  "VCF-PROBE-NOTHING-PERMITTED"}
@@ -975,3 +991,166 @@ def test_a_forward_answer_with_no_address_says_so(inventory):
     assert appliance
     assert all("no address" in f.message for f in appliance)
     assert not any("Refused to probe None" in f.message for f in result.findings)
+
+
+# --- Fix round 3: the injected seams -----------------------------------------
+#
+# resolver, connector and resolv_conf_reader are all caller-supplied
+# callables. What they do, what they raise and whether they are callables
+# at all is not this module's to assume -- and api.py calls run_probes
+# without a wrapper, so anything that escapes here reaches the caller as a
+# traceback. Two rules, and both have now been broken once each: nothing
+# escapes, and an unusable seam is *reported*, never quietly turned into
+# "the document's names do not resolve".
+
+
+class _SignatureExplodes:
+    """A callable whose signature cannot even be asked for.
+
+    Not hypothetical: any object can define __signature__, and a property
+    that raises is exactly the shape a wrapper/proxy object produces when
+    the thing it wraps is not yet available.
+    """
+
+    @property
+    def __signature__(self):
+        raise RuntimeError("signature unavailable")
+
+    def __call__(self, name, want_reverse=False, want_canonical=False):
+        return None
+
+
+def test_a_resolver_whose_signature_raises_does_not_escape(inventory):
+    """inspect.signature can raise anything the object's __signature__
+    raises. Catching only (TypeError, ValueError) let a RuntimeError out
+    of run_probes, through api.py's unwrapped call, to the caller.
+    """
+    result = run_probes(inventory, CONFIG, resolver=_SignatureExplodes(),
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert isinstance(result, Result)
+    # And it fails OPEN: an unreadable signature is not evidence of a bad
+    # resolver, so the callable is used rather than refused.
+    assert "VCF-PROBE-SEAM-UNUSABLE" not in result.codes
+
+
+def test_a_resolver_that_is_not_callable_is_refused_not_silently_tolerated(inventory):
+    """The arity check alone let this through: inspect.signature(5) raises
+    TypeError, the check failed open, every call then raised TypeError
+    inside the worker thread, _bounded_resolve swallowed it, and the run
+    reported a document of unresolvable names and stayed valid. That is
+    the same silent pass a two-parameter resolver used to produce, reached
+    by a different wrong type.
+    """
+    result = run_probes(inventory, CONFIG, resolver=5,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert "VCF-PROBE-SEAM-UNUSABLE" in result.codes
+    assert "VCF-PROBE-UNKNOWN" not in result.codes
+    assert result.valid is False
+
+
+def test_a_connector_that_is_not_callable_is_refused_too(inventory):
+    """Same seam, same reasoning. A non-callable connector raised
+    TypeError straight out of run_probes, because connect() -- unlike
+    resolve() -- is called on the calling thread with nothing catching it.
+    """
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=5, resolv_conf_reader=lambda: ())
+    assert isinstance(result, Result)
+    assert "VCF-PROBE-SEAM-UNUSABLE" in result.codes
+    assert result.valid is False
+
+
+def test_no_finding_ever_echoes_an_injected_callables_exception_text(inventory):
+    """redact() is a pattern masker, not a sanitizer, so an exception
+    message is never safe to render: it carries filesystem paths and
+    whatever else the raiser put in it. The module already says this in a
+    comment at the one place it matters; this is the assertion that keeps
+    it true.
+    """
+    secret = "/etc/shadow leaked"
+
+    def boom():
+        raise ValueError(secret)
+
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True, resolv_conf_reader=boom)
+    # Non-vacuous: the reader really was called and really did fail.
+    assert "VCF-PROBE-UNKNOWN" in result.codes
+    assert any("ValueError" in f.message for f in result.findings)
+    for finding in result.findings:
+        assert secret not in finding.message
+        assert secret not in (finding.fix or "")
+
+
+# --- Fix round 3: a host name that is not a usable name ----------------------
+
+def test_an_unusable_host_name_is_never_composed_into_a_query(inventory):
+    """`_compose_name` promised one definition of composition for both
+    paths, but only stripping was shared: the appliance path also rejected
+    non-strings and blanks, and the host path did not. So `name: null`
+    asked the resolver for "None.vcf.lab.knowledgeondemand.net" and
+    `name: ""` asked for ".vcf.lab.knowledgeondemand.net" -- which
+    permits_name() permits, because ".suffix".endswith(".suffix") is True.
+
+    Nothing escapes containment, but this is the garbled-value class this
+    module has now hardened for dns.nameservers and nsx.managers, and a
+    finding naming `None.lab.example.net` is not a message anyone can act
+    on.
+    """
+    subdomain = inventory["dns"]["subdomain"]
+    for broken in ("", "   ", None, 42):
+        inventory["hosts"] = [{"name": broken, "mgmtIp": "10.50.10.11",
+                               "vmnics": ["vmnic0"], "hardware": {}}]
+        asked = []
+
+        def resolver(name, want_reverse=False, want_canonical=False):
+            asked.append(name)
+            return None
+
+        result = run_probes(inventory, CONFIG, resolver=resolver,
+                            connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        assert f"None.{subdomain}" not in asked
+        assert f".{subdomain}" not in asked
+        assert f"42.{subdomain}" not in asked
+        assert not any(name.startswith(".") for name in asked)
+        # And the host is accounted for, not silently dropped.
+        assert any(f.path == "/hosts/0" for f in result.findings)
+
+
+def test_a_usable_host_name_still_resolves(inventory):
+    """The guard must not be a blanket refusal."""
+    asked = []
+    healthy = all_good(inventory)
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        asked.append(name)
+        return healthy(name, want_reverse, want_canonical)
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
+    assert result.findings == ()
+    assert f"esx01.{inventory['dns']['subdomain']}" in asked
+
+
+# --- Fix round 3: provenance about answers that exist ------------------------
+
+def test_the_vantage_point_note_is_silent_when_no_lookup_was_made(inventory):
+    """"Probe answers came from 1.1.1.1" is a claim about answers. With
+    every target blocked there are no answers, so the note describes
+    nothing that happened.
+    """
+    inventory["hosts"] = []
+    inventory.pop("appliances", None)
+    inventory.pop("nsx", None)
+    result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+
+
+def test_the_vantage_point_note_still_fires_when_lookups_happened(inventory):
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" in result.codes

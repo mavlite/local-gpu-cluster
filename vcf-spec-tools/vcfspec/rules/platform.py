@@ -71,6 +71,18 @@ def _naming_rules(inventory: dict) -> list[Finding]:
 
 _LOCAL_SUFFIX = ".local"
 
+
+def _is_local(name: str) -> bool:
+    """True for the mDNS namespace, on whole labels.
+
+    `.endswith(".local")` alone misses a single-label zone written as
+    `local` -- unusual, but legal to write and the same unsupported
+    namespace. Matching whole labels is also what keeps `nonlocal` and
+    `mylocal.example.net` out of it: the same segment-versus-character
+    distinction permits_name() makes for DNS suffixes.
+    """
+    return name == "local" or name.endswith(_LOCAL_SUFFIX)
+
 # Only these carry the restriction. VCF Operations, vCenter, NSX and SDDC
 # Manager still allow .local during the transition window, so a rule that
 # flagged them would reject a supported design -- which is exactly what an
@@ -94,7 +106,7 @@ def _local_suffix_rules(inventory: dict) -> list[Finding]:
     """
     named = dict(_named_values(inventory))
     subdomain = str(named.get("/dns/subdomain", "")).lower().rstrip(".")
-    subdomain_is_local = subdomain.endswith(_LOCAL_SUFFIX)
+    subdomain_is_local = _is_local(subdomain)
     out: list[Finding] = []
     if subdomain_is_local:
         out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", "/dns/subdomain",
@@ -106,7 +118,7 @@ def _local_suffix_rules(inventory: dict) -> list[Finding]:
         if not isinstance(value, str):
             continue
         normalized = value.lower().rstrip(".")
-        if not normalized.endswith(_LOCAL_SUFFIX):
+        if not _is_local(normalized):
             continue
         if subdomain_is_local and (normalized == subdomain
                                     or normalized.endswith(f".{subdomain}")):
