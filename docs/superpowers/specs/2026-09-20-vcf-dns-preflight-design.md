@@ -121,8 +121,23 @@ documents.
 `gethostbyaddr()[0]` returns the *canonical* name (`probes.py:95`), so a CNAME'd
 appliance alias produces `VCF-PROBE-REVERSE-MISMATCH` at `error` on a perfectly
 valid lab. Appliance names are the ones most likely to be aliases, so extending
-round-trip probing to them makes this bite. No new dependency: compare against
-the alias list from `gethostbyname_ex`, same stdlib call.
+round-trip probing to them makes this bite.
+
+Accept **the queried name and the canonical name, and nothing else**, and
+require the canonical name to pass `permits_name()` before it may certify a
+PTR. Take both the address and the canonical name from a single
+`gethostbyname_ex`-style answer, so the address that passed `permits()` and the
+name that vouches for its PTR are answers to the same question.
+
+> **Corrected during implementation, 2026-09-21.** This section first said
+> *"compare against the alias list from `gethostbyname_ex`"*. That is wrong and
+> must not be restored. The alias list is supplied by the **forward** zone, so
+> accepting it lets whoever controls that zone nominate the PTR they want
+> accepted — a resolver answering `aliases=(name, "attacker.example")` with
+> `PTR="attacker.example"` produced **zero** mismatch findings. The round trip
+> exists to confirm two *independent* zones agree; an accept-set the forward
+> zone can extend makes it unfalsifiable. The canonical name alone fixes the
+> CNAME defect, which is all this section ever needed.
 
 **PTR exemption.** `nsx.vipFqdn` and `appliances.vsp.platformFqdn` are both
 VIP-like — the VSP platform's addresses come from `vsp.poolStart..poolEnd` — so
@@ -141,6 +156,16 @@ and the licence server.
 in particular `VCF-PROBE-NO-REVERSE-DNS` stays `error`. Re-severitying it would
 flip `Result.valid` (`findings.py:37`) for every existing user, which is not a
 change this work is entitled to make.
+
+> **One declared exception, 2026-09-21.** Adding `/dns/subdomain` to
+> `_named_values()` (§1) necessarily puts it through the pre-existing
+> `VCF-NAME-NOT-LOWERCASE` check, which is `error`. So
+> `dns.subdomain: "VCF.lab.example.net"` — previously caught nowhere — now
+> makes a document invalid. That is a `Result.valid` change for existing
+> documents, and this section otherwise forbids one. It is taken deliberately:
+> VCF does reject uppercase FQDNs, `dns.subdomain` composes into every name the
+> deployment publishes, and a document carrying it was always going to fail at
+> deploy time. It must be called out in the README rather than discovered.
 
 For new codes: **contradictions are `error`** (forward mismatch, reverse
 mismatch), **absences are `warning`**.
