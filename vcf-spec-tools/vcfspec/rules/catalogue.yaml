@@ -311,6 +311,12 @@ VCF-PROBE-UNKNOWN:
   source_url: ""
   summary: "Could not probe {target}: {reason}."
   fix: "Re-run from a host on the management network to confirm."
+VCF-PROBE-RESOLVER-MISMATCH:
+  severity: info
+  source: docs
+  source_url: ""
+  summary: "Probe answers came from {runner}, which is none of the declared nameservers ({declared})."
+  fix: "This is not necessarily wrong -- a forwarder can resolve the lab zone correctly, systemd-resolved reports only 127.0.0.53, and Windows has no resolv.conf at all. It tells you the answers above were not obtained from the DNS the deployment will use. Re-run from the management network to be certain."
 VCF-PROV-NO-BOOT-SERVER:
   severity: error
   source: docs

@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from vcfspec.findings import Result
+from vcfspec.findings import Result, Severity
 from vcfspec.rules import load_catalogue
 from vcfspec.validate.probes import ProbeConfig, run_probes
 
@@ -29,8 +29,14 @@ def all_good(inventory):
 
 
 def test_clean_environment_produces_no_findings(inventory):
+    # inventory declares dns.nameservers: ["10.50.10.5"]; inject a reader
+    # that agrees with it so the resolver-vantage check stays silent and
+    # this assertion tests what it says it tests, not the runner's own
+    # /etc/resolv.conf (which does not even exist on every platform this
+    # suite runs on).
     result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
-                        connector=lambda *_: True)
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
     assert result.findings == ()
 
 
@@ -96,8 +102,12 @@ def test_unreachable_target_is_info_not_failure(inventory):
 
 
 def test_empty_allowlist_blocks_everything(inventory):
+    # Exact-set assertion below, so the resolver-vantage check needs a
+    # reader that agrees with the inventory's declared nameserver -- same
+    # reasoning as test_clean_environment_produces_no_findings.
     result = run_probes(inventory, ProbeConfig(), resolver=all_good(inventory),
-                        connector=lambda *_: True)
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
     assert set(result.codes) == {"VCF-PROBE-TARGET-BLOCKED",
                                  "VCF-PROBE-NOTHING-PERMITTED"}
 
@@ -135,9 +145,70 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
                                   "VCF-PROBE-FORWARD-MISMATCH",
                                   "VCF-PROBE-TARGET-BLOCKED", "VCF-PROBE-UNKNOWN",
                                   "VCF-PROBE-NAME-BLOCKED",
-                                  "VCF-PROBE-NOTHING-PERMITTED"])
+                                  "VCF-PROBE-NOTHING-PERMITTED",
+                                  "VCF-PROBE-RESOLVER-MISMATCH"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
+
+
+# --- VCF-PROBE-RESOLVER-MISMATCH: the vantage-point note --------------------
+#
+# Rev 3's answer was to query the declared nameservers directly, which needs
+# dnspython and drags in the whole containment problem this module exists to
+# solve. Rev 4 reports the mismatch instead: it compares the runner's own
+# resolver configuration (read from /etc/resolv.conf) against what the
+# inventory declared, and says nothing stronger than "these answers came
+# from somewhere else" -- info, not error, because a corporate forwarder or
+# systemd-resolved trips this while resolving perfectly.
+
+def test_resolver_mismatch_is_info_and_fires_once(inventory):
+    inventory["dns"]["nameservers"] = ["10.50.10.5"]
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    hits = [f for f in result.findings if f.code == "VCF-PROBE-RESOLVER-MISMATCH"]
+    assert len(hits) == 1                      # once per run, not once per host
+    assert hits[0].severity is Severity.INFO
+    assert hits[0].path == "/dns/nameservers"
+
+
+def test_no_mismatch_when_a_declared_nameserver_is_in_use(inventory):
+    inventory["dns"]["nameservers"] = ["10.50.10.5", "10.50.10.6"]
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.6",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+
+
+def test_unreadable_resolv_conf_is_unknown_not_mismatch(inventory):
+    def boom():
+        raise OSError("no such file")
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True, resolv_conf_reader=boom)
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+    assert "VCF-PROBE-UNKNOWN" in result.codes
+
+
+def test_no_declared_nameservers_means_nothing_to_compare(inventory):
+    inventory["dns"].pop("nameservers", None)
+    result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("1.1.1.1",))
+    assert "VCF-PROBE-RESOLVER-MISMATCH" not in result.codes
+
+
+def test_the_reader_is_not_built_at_import_or_as_a_default(monkeypatch):
+    # The real reader touches the filesystem. Importing this module, and
+    # calling run_probes with probes that never need it, must not.
+    import builtins
+    opened = []
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open",
+                        lambda *a, **k: (opened.append(a[0]), real_open(*a, **k))[1])
+    import importlib
+    import vcfspec.validate.probes as probes_module
+    importlib.reload(probes_module)
+    assert not any("resolv.conf" in str(p) for p in opened)
 
 
 # --- The axis the existing containment tests never varied -------------------
@@ -242,7 +313,8 @@ def test_a_permitted_name_on_an_allowlisted_ip_still_resolves(inventory):
     """The gate must not be a blanket refusal: the whole point is that a
     correctly configured run still does the work."""
     result = run_probes(inventory, CONFIG, resolver=all_good(inventory),
-                        connector=lambda *_: True)
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
     assert result.findings == ()
 
 

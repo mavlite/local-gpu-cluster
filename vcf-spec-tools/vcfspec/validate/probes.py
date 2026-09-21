@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 from ..findings import Finding, Result
 from ..rules import finding_for
+from ..rules.coerce import as_mapping as _mapping
 
 ESX_PORT = 443
 
@@ -143,10 +144,53 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float):
     return None if thread.is_alive() else box[0]
 
 
+_RESOLV_CONF = "/etc/resolv.conf"
+
+
+def _default_resolv_conf_reader() -> tuple[str, ...]:
+    """The runner's configured resolver addresses, in file order.
+
+    Raises OSError when the file is absent or unreadable (Windows, a
+    minimal container) -- the caller turns that into VCF-PROBE-UNKNOWN.
+    """
+    found = []
+    with open(_RESOLV_CONF, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.split("#", 1)[0].split()
+            if len(parts) >= 2 and parts[0] == "nameserver":
+                found.append(parts[1])
+    return tuple(found)
+
+
+def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
+    """Compare the runner's own resolver configuration against what the
+    inventory declared, and say nothing stronger than "these answers came
+    from somewhere else". This is a note about provenance, not a defect --
+    a corporate resolver that forwards the lab zone trips this while
+    resolving perfectly, systemd-resolved always shows 127.0.0.53, and
+    Windows has no resolv.conf at all.
+    """
+    declared = [str(x) for x in (_mapping(inventory.get("dns")).get("nameservers") or [])
+                if isinstance(x, str)]
+    if not declared:
+        return []          # nothing declared, nothing to compare against
+    try:
+        runner = reader()
+    except OSError as exc:
+        return [finding_for("VCF-PROBE-UNKNOWN", "/dns/nameservers",
+                            target=_RESOLV_CONF,
+                            reason=f"resolver configuration unreadable ({type(exc).__name__})")]
+    if not runner or set(runner) & set(declared):
+        return []
+    return [finding_for("VCF-PROBE-RESOLVER-MISMATCH", "/dns/nameservers",
+                        runner=", ".join(runner), declared=", ".join(declared))]
+
+
 def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
-               connector=None) -> Result:
+               connector=None, *, resolv_conf_reader=None) -> Result:
     resolve = resolver or _default_resolver
     connect = connector or _default_connector
+    read_resolvers = resolv_conf_reader or _default_resolv_conf_reader
     subdomain = (inventory.get("dns") or {}).get("subdomain", "")
     findings: list[Finding] = []
 
@@ -190,6 +234,8 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         if not connect(ip, ESX_PORT, config.timeout_s):
             findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=ip,
                                         reason=f"no TCP {ESX_PORT} response"))
+
+    findings.extend(_resolver_vantage_point(inventory, read_resolvers))
 
     # An operator who asked for probes and got none must not be handed a
     # pass. VCF-PROBE-TARGET-BLOCKED is per-host and `warning`, which is
