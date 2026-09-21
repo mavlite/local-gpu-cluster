@@ -101,20 +101,33 @@ class ProbeConfig:
 
 
 def _default_resolver(name: str, want_reverse: bool = False,
-                      want_aliases: bool = False):
-    """Forward, reverse, or the name's canonical name plus its aliases.
+                      want_canonical: bool = False):
+    """Forward, reverse, or a combined forward answer for the round trip.
 
-    The third mode exists because gethostbyname() follows a CNAME silently
-    and gethostbyaddr()[0] hands back the *canonical* name, so a CNAME'd
-    appliance looks like a reverse mismatch on a perfectly healthy lab.
-    gethostbyname_ex() is the only stdlib call that reports the alias
-    chain, so it is how the round-trip check learns the other names the
-    queried one legitimately answers to.
+    The third mode returns `(canonical name, primary address)` -- or None
+    when the name does not resolve -- both taken from ONE
+    gethostbyname_ex() answer.
+
+    It returns the canonical name because gethostbyname() follows a CNAME
+    silently while gethostbyaddr()[0] hands back the *canonical* name, so
+    a CNAME'd appliance looks like a reverse mismatch on a perfectly
+    healthy lab. It deliberately does NOT return the alias list:
+    gethostbyname_ex()'s aliases are the forward zone's own claims about
+    which other names it answers to, and the round-trip check exists to
+    confirm that the forward and reverse zones -- two separate
+    authorities -- agree. Letting the forward zone nominate the PTR it
+    wants accepted makes the check unfalsifiable, which is worse than not
+    running it, because it still reports success.
+
+    It returns the address from the same answer so that the address the
+    allowlist clears and the canonical name that certifies that address's
+    PTR are two halves of one reply, not answers to two questions a zone
+    is free to answer differently.
     """
     try:
-        if want_aliases:
-            canonical, aliases, _ = socket.gethostbyname_ex(name)
-            return (canonical, *aliases)
+        if want_canonical:
+            canonical, _aliases, addresses = socket.gethostbyname_ex(name)
+            return (canonical, addresses[0]) if addresses else None
         return socket.gethostbyaddr(name)[0] if want_reverse else socket.gethostbyname(name)
     except OSError:
         return None
@@ -137,7 +150,7 @@ def _dns_name(value: object) -> str:
 
 
 def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
-                     want_aliases: bool = False):
+                     want_canonical: bool = False):
     """Call resolve(name, want_reverse), but never wait past timeout_s.
 
     socket.gethostbyname/gethostbyaddr (the default resolver, and any
@@ -159,9 +172,9 @@ def _bounded_resolve(resolve, name: str, want_reverse: bool, timeout_s: float,
         try:
             # The third argument is passed only when it is needed, so a
             # two-parameter resolver -- every fake written before the
-            # alias mode existed, and any caller-supplied one -- keeps
+            # combined mode existed, and any caller-supplied one -- keeps
             # working unchanged.
-            box[0] = (resolve(name, want_reverse, want_aliases) if want_aliases
+            box[0] = (resolve(name, want_reverse, want_canonical) if want_canonical
                       else resolve(name, want_reverse))
         except Exception:
             box[0] = None
@@ -191,9 +204,17 @@ def _appliance_targets(inventory: dict, subdomain: str) -> list[tuple[str, str, 
     out: list[tuple[str, str, bool]] = []
 
     def compose(short: object) -> str | None:
-        if not isinstance(short, str) or not short.strip():
+        # Compose from the *stripped* value. Testing `short.strip()` for
+        # truthiness and then composing `short` meant `hostname: " vc01 "`
+        # produced " vc01 .lab.example.net" -- a name permits_name()
+        # permits, because it strips before matching, and which then goes
+        # to the resolver with a space inside the label.
+        if not isinstance(short, str):
             return None
-        return f"{short}.{subdomain}" if subdomain else short
+        cleaned = short.strip()
+        if not cleaned:
+            return None
+        return f"{cleaned}.{subdomain}" if subdomain else cleaned
 
     for pointer, value, ptr_required in (
         ("/appliances/vcenter/hostname",
@@ -218,8 +239,10 @@ def _appliance_targets(inventory: dict, subdomain: str) -> list[tuple[str, str, 
         ("/appliances/vsp/platformFqdn", vsp.get("platformFqdn"), False),
         ("/appliances/vsp/instanceFqdn", vsp.get("instanceFqdn"), True),
     ):
+        # Same stripping rule as compose(), for the same reason: these
+        # were tested with .strip() and then appended without it.
         if isinstance(value, str) and value.strip():
-            out.append((pointer, value, ptr_required))
+            out.append((pointer, value.strip(), ptr_required))
     return out
 
 
@@ -285,7 +308,13 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
     resolve = resolver or _default_resolver
     connect = connector or _default_connector
     read_resolvers = resolv_conf_reader or _default_resolv_conf_reader
-    subdomain = (inventory.get("dns") or {}).get("subdomain", "")
+    # _mapping, not `or {}`: `or {}` only rescues a falsy dns section. A
+    # scalar or a list -- both of which a schema-invalid document really
+    # produces, e.g. `dns: vcf.lab.example.net` written without the nested
+    # key -- is truthy and has no .get(), so this raised AttributeError
+    # through api.py's unguarded run_probes call and reached the operator
+    # as a traceback rather than a finding.
+    subdomain = _mapping(inventory.get("dns")).get("subdomain", "")
     findings: list[Finding] = []
 
     candidates = permitted = 0
@@ -350,11 +379,17 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         if not config.permits_name(fqdn):
             findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", pointer, name=fqdn))
             continue
-        resolved = _bounded_resolve(resolve, fqdn, False, config.timeout_s)
-        if resolved is None:
+        # One forward query, carrying both halves of the answer: the
+        # address the allowlist must clear, and the canonical name that
+        # will certify that address's PTR. Asking twice would let a zone
+        # answer the two questions inconsistently.
+        answer = _bounded_resolve(resolve, fqdn, False, config.timeout_s,
+                                  want_canonical=True)
+        if not (isinstance(answer, (tuple, list)) and len(answer) == 2):
             findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
                                         reason="no forward DNS answer"))
             continue
+        canonical, resolved = answer
         if not config.permits(resolved):
             findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", pointer,
                                         target=resolved))
@@ -367,14 +402,23 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
             continue
         # gethostbyname() follows a CNAME silently and gethostbyaddr()[0]
         # returns the canonical name, so on a lab where the appliance name
-        # is an alias the PTR legitimately names something else. Accept the
-        # queried name or any name it answers to; only a third name is a
-        # mismatch.
+        # is an alias the PTR legitimately names something else. The
+        # canonical name, and only it, is therefore accepted alongside the
+        # queried name -- never the forward answer's alias list, which is
+        # the forward zone's own claim about which names it answers to. A
+        # check the checked party can satisfy by asserting it is not a
+        # check: with the alias list accepted, a zone returning
+        # aliases=(fqdn, "attacker.example") and PTR="attacker.example"
+        # produced zero findings on any input.
+        #
+        # And the canonical name must clear permits_name() itself. A name
+        # outside the operator's --allowlist-domain is not evidence about
+        # the operator's zone, so it certifies nothing; without this gate
+        # the forward zone could still nominate any PTR it liked, just via
+        # the canonical slot instead of the alias list.
         names = {_dns_name(fqdn)}
-        aliases = _bounded_resolve(resolve, fqdn, False, config.timeout_s,
-                                   want_aliases=True)
-        if isinstance(aliases, (tuple, list)):
-            names |= {_dns_name(alias) for alias in aliases}
+        if config.permits_name(canonical):
+            names.add(_dns_name(canonical))
         if _dns_name(reverse) not in names:
             findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", pointer,
                                         ip=resolved, resolved=reverse, fqdn=fqdn))

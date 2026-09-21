@@ -13,19 +13,21 @@ CONFIG = ProbeConfig(allowlist=("10.50.0.0/16",),
                      domain_allowlist=("vcf.lab.knowledgeondemand.net",))
 
 
-def resolver_for(answers, aliases=None):
+def resolver_for(answers, canonical=None):
     """A fake resolver over a dict of {(name, want_reverse): answer}.
 
-    The third mode answers the alias query. Its default is `(name,)` --
-    the name is its own canonical name with no aliases -- which is what a
-    zone without CNAMEs returns, so a test that does not care about
-    aliases does not have to say so.
+    The third mode answers the single combined forward query the appliance
+    path issues: `(canonical name, primary address)`, or None when the
+    name does not resolve. The default canonical name is the queried name
+    itself -- what a zone with no CNAME returns -- so a test that does not
+    care about canonicalisation does not have to say so.
     """
-    aliases = aliases or {}
+    canonical = canonical or {}
 
-    def resolve(name, want_reverse=False, want_aliases=False):
-        if want_aliases:
-            return aliases.get(name, (name,))
+    def resolve(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            address = answers.get((name, False))
+            return None if address is None else (canonical.get(name, name), address)
         return answers.get((name, want_reverse))
     return resolve
 
@@ -51,8 +53,9 @@ def appliance_fqdns(inventory) -> tuple[str, ...]:
 
 
 def all_good(inventory):
-    """A healthy lab: forward, reverse and alias answers for every host
-    **and** every appliance name.
+    """A healthy lab: forward, reverse and combined-forward answers for
+    every host **and** every appliance name. Every name is its own
+    canonical name here -- no CNAMEs.
 
     One helper, not a host-only one plus an appliance-aware twin. The
     moment appliances are probed, a host-only fake makes
@@ -180,7 +183,12 @@ def test_dns_resolution_is_bounded_by_timeout(inventory):
     config = ProbeConfig(allowlist=("10.50.0.0/16",), timeout_s=0.2,
                          domain_allowlist=("vcf.lab.knowledgeondemand.net",))
 
-    def slow_resolver(name, want_reverse=False):
+    def slow_resolver(name, want_reverse=False, want_canonical=False):
+        # Accepts the third parameter deliberately. A two-parameter fake
+        # would make the appliance path raise TypeError inside the worker
+        # thread, return None instantly, and quietly stop being bounded by
+        # anything -- so this test would pass while testing the host path
+        # alone.
         time.sleep(5)
         return None
 
@@ -544,7 +552,7 @@ def test_reverse_dns_match_is_case_and_trailing_dot_insensitive(inventory):
 def test_short_names_are_composed_and_fqdns_are_not(inventory):
     asked = []
 
-    def resolver(name, want_reverse=False, want_aliases=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         asked.append(name)
         return None
 
@@ -565,9 +573,9 @@ def test_clean_environment_with_appliances_produces_no_findings(inventory):
     asked = []
     healthy = all_good(inventory)
 
-    def resolver(name, want_reverse=False, want_aliases=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         asked.append(name)
-        return healthy(name, want_reverse, want_aliases)
+        return healthy(name, want_reverse, want_canonical)
 
     result = run_probes(inventory, CONFIG, resolver=resolver,
                         connector=lambda *_: True,
@@ -590,11 +598,11 @@ def test_an_appliance_resolving_outside_the_allowlist_is_blocked(inventory):
     # reverse-resolved and must not be connected to.
     reversed_names, contacted = [], []
 
-    def resolver(name, want_reverse=False, want_aliases=False):
+    def resolver(name, want_reverse=False, want_canonical=False):
         if want_reverse:
             reversed_names.append(name)
             return None
-        return "203.0.113.9"
+        return (name, "203.0.113.9") if want_canonical else "203.0.113.9"
 
     result = run_probes(inventory, CONFIG, resolver=resolver,
                         connector=lambda h, p, t: (contacted.append(h), True)[1],
@@ -604,27 +612,18 @@ def test_an_appliance_resolving_outside_the_allowlist_is_blocked(inventory):
     assert "VCF-PROBE-TARGET-BLOCKED" in result.codes
 
 
-def test_a_cname_alias_is_not_a_reverse_mismatch(inventory):
-    # gethostbyaddr returns the CANONICAL name. Without alias handling this
-    # flags a valid lab at `error` and fails the whole document.
-    def resolver(name, want_reverse=False, want_aliases=False):
-        if want_aliases:
-            return ("vcenter-real.vcf.lab.knowledgeondemand.net", name)
-        if want_reverse:
-            return "vcenter-real.vcf.lab.knowledgeondemand.net"
-        return "10.50.10.40"
-
-    result = run_probes(inventory, CONFIG, resolver=resolver,
-                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
-    mism = [f for f in result.findings if f.code == "VCF-PROBE-REVERSE-MISMATCH"
-            and f.path.startswith("/appliances")]
-    assert mism == []
+#
+# The CNAME case lives in test_a_legitimate_cname_is_still_not_a_reverse_mismatch
+# under "Fix round 1", together with the two tests that pin what the
+# accept-set may NOT contain. The version that used to sit here returned
+# the queried name as the *address*, so the appliance was target-blocked
+# before the comparison and the test passed without ever reaching it.
 
 
 def test_a_genuine_reverse_mismatch_on_an_appliance_is_still_reported(inventory):
-    def resolver(name, want_reverse=False, want_aliases=False):
-        if want_aliases:
-            return (name,)
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (name, "10.50.10.40")
         if want_reverse:
             return "someone-else.vcf.lab.knowledgeondemand.net"
         return "10.50.10.40"
@@ -636,9 +635,9 @@ def test_a_genuine_reverse_mismatch_on_an_appliance_is_still_reported(inventory)
 
 
 def test_vip_like_names_are_exempt_from_requiring_a_ptr(inventory):
-    def resolver(name, want_reverse=False, want_aliases=False):
-        if want_aliases:
-            return (name,)
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (name, "10.50.10.40")
         return None if want_reverse else "10.50.10.40"
 
     result = run_probes(inventory, CONFIG, resolver=resolver,
@@ -659,3 +658,196 @@ def test_appliances_do_not_count_toward_nothing_permitted(inventory):
     hit = [f for f in result.findings if f.code == "VCF-PROBE-NOTHING-PERMITTED"]
     assert len(hit) == 1 and hit[0].path == "/hosts"
     assert str(len(inventory["hosts"])) in hit[0].message
+
+
+# --- Fix round 1 ------------------------------------------------------------
+
+def test_a_wrong_typed_dns_section_does_not_raise(inventory):
+    """`dns: "vcf.lab.example.net"` is schema-invalid, and these rules run
+    on schema-invalid documents. `(inventory.get("dns") or {}).get(...)`
+    raised AttributeError straight through api.py's unguarded run_probes
+    call, so a mistyped one-line section reached the operator as a
+    traceback instead of a finding.
+    """
+    healthy = all_good(inventory)
+    for broken in ("vcf.lab.knowledgeondemand.net", ["vcf.lab.knowledgeondemand.net"], 7):
+        inventory["dns"] = broken
+        result = run_probes(inventory, CONFIG, resolver=healthy,
+                            connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        assert isinstance(result, Result)
+
+
+def test_a_wrong_typed_dns_section_does_not_raise_through_validate_document():
+    """The same defect at the surface that would actually show it: the
+    orchestrator does not wrap run_probes, so anything raised there is the
+    caller's traceback, not a finding.
+    """
+    import copy
+    import json
+
+    from vcfspec.api import validate_document
+    from vcfspec.inventory import load_example
+
+    doc = copy.deepcopy(load_example())
+    doc["dns"] = "vcf.lab.knowledgeondemand.net"
+    out = validate_document(json.dumps(doc), probe_config=ProbeConfig())
+    # Non-vacuous: the probe layer really ran over the broken document.
+    assert "probes" in out["layers_run"]
+    assert isinstance(out["findings"], list)
+
+
+def test_a_wrong_typed_managers_section_is_skipped_not_iterated(inventory):
+    """enumerate() over a bare string yields its *characters*, so
+    `managers: "nsx01"` becomes five document-derived forward queries --
+    n.<subdomain>, s.<subdomain>, x.<subdomain>, 0.<subdomain>,
+    1.<subdomain> -- every one of them inside the allowlisted suffix, and
+    so every one of them really sent.
+    """
+    subdomain = inventory["dns"]["subdomain"]
+    for broken in ("nsx01", {"0": "nsx01"}, 3):
+        inventory["nsx"]["managers"] = broken
+        asked = []
+
+        def resolver(name, want_reverse=False, want_canonical=False):
+            asked.append(name)
+            return None
+
+        result = run_probes(inventory, CONFIG, resolver=resolver,
+                            connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        assert f"n.{subdomain}" not in asked
+        assert not any(f.path.startswith("/nsx/managers/") for f in result.findings)
+
+    # A list whose *elements* are wrong-typed keeps the good ones.
+    inventory["nsx"]["managers"] = [42, None, {"a": 1}, "nsx01"]
+    asked = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        asked.append(name)
+        return None
+
+    run_probes(inventory, CONFIG, resolver=resolver, connector=lambda *_: True,
+               resolv_conf_reader=lambda: ())
+    assert f"nsx01.{subdomain}" in asked
+    assert f"42.{subdomain}" not in asked
+
+
+def test_a_padded_appliance_name_is_composed_from_the_stripped_value(inventory):
+    """`hostname: " vc01 "` composed unstripped gives " vc01 .<subdomain>",
+    which permits_name happily permits (it strips before matching) and
+    which then goes to the resolver with an embedded space in the label.
+    The already-qualified fields had the same bug: they were tested with
+    .strip() and appended without it.
+    """
+    subdomain = inventory["dns"]["subdomain"]
+    inventory["appliances"]["vcenter"]["hostname"] = " vc01 "
+    inventory["nsx"]["vipFqdn"] = "  nsx.vcf.lab.knowledgeondemand.net  "
+    asked = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        asked.append(name)
+        return None
+
+    run_probes(inventory, CONFIG, resolver=resolver, connector=lambda *_: True,
+               resolv_conf_reader=lambda: ())
+    assert f"vc01.{subdomain}" in asked
+    assert "nsx.vcf.lab.knowledgeondemand.net" in asked
+    assert not any(" " in name for name in asked)
+
+
+# --- The round-trip check must stay falsifiable -----------------------------
+#
+# The forward zone and the reverse zone are two separate authorities, and
+# this check exists to confirm they agree. Accepting the forward answer's
+# whole alias list handed the forward zone a way to name the PTR it wanted
+# accepted -- one party certifying its own answer, which is not a check at
+# all. Only the canonical name is accepted, and only when that name is
+# itself inside the operator's --allowlist-domain.
+
+
+def canonical_resolver(canonical, address, ptr):
+    """A zone answering: name -> (canonical, address), address -> ptr."""
+    def resolve(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (canonical, address)
+        if want_reverse:
+            return ptr
+        return address
+    return resolve
+
+
+def test_a_forward_answer_cannot_smuggle_extra_names_into_the_accept_set(inventory):
+    """The demonstration from review: a forward zone that lists the PTR it
+    wants accepted among the queried name's aliases made the round-trip
+    check produce zero findings on any input.
+
+    The fix was structural -- the forward mode no longer returns an alias
+    list at all -- so the attack can only be expressed here as the *shape*
+    of the answer: `(canonical, *aliases, address)`, which is what the
+    first implementation consumed. Nothing in an over-long answer may
+    reach the accept-set, and the outcome that must never occur is
+    silence: whatever this document is, the appliance either round-trips
+    or is reported.
+    """
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return (name, "attacker-owned.evil.example", "10.50.10.40")
+        if want_reverse:
+            return "attacker-owned.evil.example"
+        return "10.50.10.40"
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    reported = {f.path for f in result.findings}
+    assert "/appliances/vcenter/hostname" in reported
+    assert "/appliances/sddcManager/hostname" in reported
+
+
+def test_a_legitimate_cname_is_still_not_a_reverse_mismatch(inventory):
+    """The defect this mode was added for, and the only one it may cure:
+    gethostbyaddr() returns the CANONICAL name, so a CNAME'd appliance
+    inside the operator's own zone round-trips to a different string.
+    """
+    result = run_probes(inventory, CONFIG,
+                        resolver=canonical_resolver(
+                            "vcenter-real.vcf.lab.knowledgeondemand.net",
+                            "10.50.10.40",
+                            "vcenter-real.vcf.lab.knowledgeondemand.net"),
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert [f for f in result.findings if f.code == "VCF-PROBE-REVERSE-MISMATCH"
+            and f.path.startswith("/appliances")] == []
+
+
+def test_a_canonical_name_outside_the_domain_allowlist_certifies_nothing(inventory):
+    """A canonical name the operator never allowlisted is not evidence
+    about the operator's zone, so it must not suppress the mismatch."""
+    result = run_probes(inventory, CONFIG,
+                        resolver=canonical_resolver("elsewhere.evil.example",
+                                                    "10.50.10.40",
+                                                    "elsewhere.evil.example"),
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert any(f.code == "VCF-PROBE-REVERSE-MISMATCH" and f.path.startswith("/appliances")
+               for f in result.findings)
+
+
+def test_the_healthy_appliance_path_issues_exactly_two_lookups_per_name(inventory):
+    """One forward -- which carries the canonical name and the address in
+    a single answer -- and one reverse. A third query is not just waste:
+    it opens a window in which the address that passed permits() and the
+    name that certifies its PTR are answers to two different questions,
+    which a zone is free to answer inconsistently.
+    """
+    calls = []
+    healthy = all_good(inventory)
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append(name)
+        return healthy(name, want_reverse, want_canonical)
+
+    result = run_probes(inventory, CONFIG, resolver=resolver,
+                        connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ("10.50.10.5",))
+    assert result.findings == ()
+    names = appliance_fqdns(inventory)
+    appliance_ips = {f"10.50.10.{40 + i}" for i in range(len(names))}
+    appliance_calls = [n for n in calls if n in set(names) or n in appliance_ips]
+    assert len(appliance_calls) == 2 * len(names)
