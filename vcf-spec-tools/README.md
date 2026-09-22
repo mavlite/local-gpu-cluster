@@ -389,6 +389,25 @@ $ echo $?
    name in the document as unresolvable, at `info`, and still says
    `valid: true`.
 
+   The arity check cannot police a **return** shape, so `resolve()`'s is
+   documented here instead: `want_canonical=True` must return a
+   `(canonical name, address)` pair, or `None` when the name does not
+   resolve; `want_reverse=True` returns a name; a plain forward call
+   returns an address. Both the host and the appliance paths now issue
+   the combined call, so a resolver that accepts `want_canonical` and
+   ignores it — returning a bare address — is reported as
+   `VCF-PROBE-UNKNOWN` for every name, not silently tolerated.
+
+   One thing `run_probes()` does **not** guard is the `ProbeConfig` it is
+   given. The injected seams are guarded everywhere, so nothing they
+   raise escapes; but `permits()` and `permits_name()` are never wrapped,
+   because "it raised, carry on" is indistinguishable from "it said
+   yes" — and a gate failure read as a pass turns a closed allowlist into
+   an open one. A `ProbeConfig` **subclass** whose gates raise will
+   therefore propagate out of `run_probes()` by design. The stock
+   `ProbeConfig`, which is all the CLI and the MCP server ever construct,
+   cannot raise.
+
    A separate, `info`-level note can show up alongside any of the above:
    `VCF-PROBE-RESOLVER-MISMATCH` fires when the answers above did not
    come from any of the nameservers `dns.nameservers` declares — the
@@ -431,9 +450,20 @@ hands back the *canonical* name, so the round trip compared
 
 Hosts now accept the canonical name alongside the queried name, exactly
 as appliance names already did — the two probe paths had drifted, and
-this closes that gap. Only a document that CNAMEs a host name changes
-verdict, and only from `error` to clean; nothing that passed before now
-fails.
+this closes that gap. For any document validated through the CLI, the
+MCP server or `validate_document()`, the only verdict that changes is a
+CNAME'd host name going from `error` to clean; nothing that passed
+before now fails.
+
+**If you inject your own resolver, this is a breaking change.** The host
+forward call changed from `resolve(fqdn, False, False)`, which returned a
+bare address, to `resolve(fqdn, False, True)`, which must return a
+`(canonical name, address)` pair — the same call the appliance names
+already made. A three-argument resolver that accepts `want_canonical` and
+then *ignores* it was previously valid for hosts and now returns the
+wrong shape, which is reported as `VCF-PROBE-UNKNOWN` ("forward answer
+was not a (canonical name, address) pair") for every host. Return the
+pair, or `None` when the name does not resolve.
 
 Two limits are worth knowing, because they are what keep the check a
 check:

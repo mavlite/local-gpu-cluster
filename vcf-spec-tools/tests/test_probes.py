@@ -1707,38 +1707,56 @@ def test_the_host_forward_answer_is_still_compared_against_the_declared_ip(inven
 # The module's stated rule is that every call producing DATA is guarded and
 # no call deciding PERMISSION ever is, "because 'it raised, carry on' is
 # indistinguishable from 'it said yes'". Mutation testing found that rule
-# had no test: wrapping config.permits_name() in
-# `try: ... except Exception: allowed = True` inside _round_trip left all
-# 638 tests green. The two below close that, one per gate.
+# had no test at all: wrapping config.permits_name() in
+# `try: ... except Exception: allowed = True` inside _round_trip left the
+# whole suite green.
 #
-# Both assert the exception PROPAGATES. That is the deliberate design, and
-# it is not in tension with "nothing escapes run_probes": that promise is
-# about the caller-INJECTED seams -- resolver, connector, resolv_conf_reader
-# -- whose behaviour this module cannot assume. ProbeConfig is the
-# operator's own policy object, and a policy that cannot answer must stop
-# the run, never be read as an allow.
+# There are FIVE permission-gate call sites, and each needs its own test.
+# Pinning a subset is not "mostly pinned": the first round of these tests
+# covered two of the five, and the three left bare included the host's own
+# permits_name(fqdn) -- the gate the module's opening docstring exists for,
+# whose failure sends the forward query that IS the exfiltration channel.
+#
+# Two rules for every test below, both learned the hard way here:
+#
+#   * The gate must raise NARROWLY -- at one call site and no other.
+#     A ProbeConfig that raises on every name raises at whichever gate the
+#     code reaches first, so `pytest.raises` is satisfied by a call site
+#     the test is not about, while the site it claims to pin sits wrapped
+#     and unnoticed. That is what made the first version of
+#     test_a_raising_name_gate_... vacuous, and it is now deleted rather
+#     than kept alongside its narrow sibling.
+#   * `pytest.raises` alone is NOT enough. It says an exception escaped;
+#     it says nothing about what the run did before it. Each test also
+#     asserts the ABSENCE OF THE QUERY the swallowed gate would have let
+#     through -- which is the thing that actually matters, and the
+#     assertion that goes red when the gate is wrapped.
+#
+# All of these assert the exception PROPAGATES. That is deliberate, and it
+# narrows invariant 8 from "no exception escapes run_probes" to "no
+# exception FROM AN INJECTED SEAM escapes": resolver, connector and
+# resolv_conf_reader are caller-supplied and their behaviour is not this
+# module's to assume, so they are guarded. ProbeConfig is the operator's
+# own policy object, and a policy that cannot answer must stop the run
+# rather than be interpreted. The exemption is stated in probes.py beside
+# the rule itself, not only here.
 
 
-class _RaisingNameGate(ProbeConfig):
-    """A ProbeConfig whose NAME gate is broken. Subclassing is the only way
-    to express this: permits_name() is the thing under test, so it cannot
-    be injected."""
+def appliances_only(inventory):
+    """The example inventory with no hosts, so the appliance gates are the
+    only permission calls the run can make.
 
-    def permits_name(self, fqdn: object) -> bool:
-        raise RuntimeError("the name gate is broken")
+    Without this, a host-bearing document reaches the host gates first and
+    an appliance-gate test can be satisfied by a host-path raise -- the
+    same wrong-call-site trap the narrowness rule exists to prevent.
+    """
+    inventory["hosts"] = []
+    return inventory
 
 
 class _GateRaisingOnTheCanonical(ProbeConfig):
-    """permits_name() answers normally for the queried name and raises ONLY
-    for the canonical one.
-
-    That narrowness is the whole point. A gate that raises on every name
-    raises at the host path's own `permits_name(fqdn)` call, long before
-    the round trip -- so a `pytest.raises` around it passes whatever
-    _round_trip does, which is how the first version of this test went
-    vacuous while a wrapped gate sat there unnoticed. Raising only on the
-    canonical name makes _round_trip's call the only one that can throw.
-    """
+    """permits_name() raises ONLY for the canonical name -> pins the gate
+    inside _round_trip (probes.py:498)."""
 
     def permits_name(self, fqdn: object) -> bool:
         if fqdn == "attacker-owned.evil.example":
@@ -1746,13 +1764,55 @@ class _GateRaisingOnTheCanonical(ProbeConfig):
         return super().permits_name(fqdn)
 
 
+class _GateRaisingOnTheHostName(ProbeConfig):
+    """permits_name() raises ONLY for the queried host fqdn -> pins the
+    host's own name gate (probes.py:566).
+
+    It answers normally for every other name, including the canonical one,
+    so that under the wrap-the-gate mutation the run continues past this
+    site and reaches _round_trip's gate WITHOUT raising there. Otherwise
+    the unwrapped canonical gate would raise and satisfy pytest.raises on
+    behalf of the site under test -- exactly the vacuity this file has
+    now produced twice.
+    """
+
+    def permits_name(self, fqdn: object) -> bool:
+        if fqdn == "esx01.vcf.lab.knowledgeondemand.net":
+            raise RuntimeError("the host name gate is broken")
+        return super().permits_name(fqdn)
+
+
+class _GateRaisingOnTheApplianceName(ProbeConfig):
+    """permits_name() raises ONLY for the first appliance name -> pins the
+    appliance name gate (probes.py:651)."""
+
+    def permits_name(self, fqdn: object) -> bool:
+        if fqdn == "vc01.vcf.lab.knowledgeondemand.net":
+            raise RuntimeError("the appliance name gate is broken")
+        return super().permits_name(fqdn)
+
+
+class _GateRaisingOnTheResolvedAddress(ProbeConfig):
+    """permits() raises ONLY for the address an appliance's forward answer
+    carried -> pins the appliance address gate (probes.py:679)."""
+
+    def permits(self, ip: object) -> bool:
+        if ip == "10.50.10.40":
+            raise RuntimeError("the resolved address gate is broken")
+        return super().permits(ip)
+
+
 class _RaisingAddressGate(ProbeConfig):
+    """permits() raises on any address. Used only against a host-only
+    document, where the host IP gate (probes.py:522) is the sole permits()
+    call the run can reach."""
+
     def permits(self, ip: object) -> bool:
         raise RuntimeError("the address gate is broken")
 
 
 def test_a_raising_gate_on_the_canonical_name_is_not_read_as_an_allow(inventory):
-    """The gate inside _round_trip, pinned on its own.
+    """probes.py:498 -- the gate inside _round_trip.
 
     Wrapping it in `except Exception: allowed = True` makes the forward
     zone's canonical name certify its own PTR whenever the gate fails --
@@ -1769,30 +1829,151 @@ def test_a_raising_gate_on_the_canonical_name_is_not_read_as_an_allow(inventory)
                    connector=lambda *_: True, resolv_conf_reader=lambda: ())
 
 
-def test_a_raising_name_gate_stops_the_run_rather_than_certifying_anything(inventory):
-    """A swallowed permission gate converts a gate failure into a pass,
-    which is the one thing this module must never do. If this ever starts
-    returning a Result instead of raising, check that permits_name() has
-    not been wrapped in a try/except somewhere on the way.
+def test_a_raising_host_name_gate_never_lets_the_forward_query_out(inventory):
+    """probes.py:566 -- the host's own permits_name(fqdn), and the
+    consequential one.
+
+    This is the gate the module's opening docstring exists for. Swallowed,
+    a host whose composed fqdn is outside --allowlist-domain gets a forward
+    query issued for it, and that query IS the exfiltration channel: the
+    label reaches whatever nameserver is authoritative for it. So the
+    assertion that matters is not that something raised -- it is that no
+    forward query was ever sent.
     """
-    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
-                     "attacker-owned.evil.example", "attacker-owned.evil.example")
-    config = _RaisingNameGate(allowlist=("10.50.0.0/16",),
-                              domain_allowlist=("vcf.lab.knowledgeondemand.net",))
-    with pytest.raises(RuntimeError, match="the name gate is broken"):
-        run_probes(one_host(inventory), config, resolver=zone,
+    calls = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse))
+        # A canonical name distinct from the queried one, so that under the
+        # mutation this run sails past :566 and does NOT raise at :498.
+        if want_canonical:
+            return ("esx01-real.vcf.lab.knowledgeondemand.net", "10.50.10.11")
+        return "esx01-real.vcf.lab.knowledgeondemand.net" if want_reverse else None
+
+    config = _GateRaisingOnTheHostName(
+        allowlist=("10.50.0.0/16",),
+        domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the host name gate is broken"):
+        run_probes(one_host(inventory), config, resolver=resolver,
                    connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    # The point of the whole gate: nothing was asked of the resolver.
+    assert [name for name, reverse in calls if not reverse] == []
 
 
-def test_a_raising_address_gate_stops_the_run_rather_than_permitting_the_host(inventory):
-    """The same rule on the IP gate. Swallowing this one would probe a
-    target the allowlist never cleared."""
+def test_a_raising_appliance_name_gate_never_lets_the_forward_query_out(inventory):
+    """probes.py:651 -- the appliance name gate, same shape as :566.
+
+    Appliance-only document, so no host gate can raise first and stand in
+    for this one.
+    """
+    calls = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse))
+        if want_canonical:
+            return ("vc01-real.vcf.lab.knowledgeondemand.net", "10.50.10.40")
+        return "vc01-real.vcf.lab.knowledgeondemand.net" if want_reverse else None
+
+    config = _GateRaisingOnTheApplianceName(
+        allowlist=("10.50.0.0/16",),
+        domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the appliance name gate is broken"):
+        run_probes(appliances_only(inventory), config, resolver=resolver,
+                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert "vc01.vcf.lab.knowledgeondemand.net" not in [n for n, _ in calls]
+
+
+def test_a_raising_resolved_address_gate_never_reverse_resolves_the_answer(inventory):
+    """probes.py:679 -- permits() on the address an appliance's forward
+    answer carried.
+
+    An appliance declares no address, so this address came from whoever
+    controls the zone. Swallowed, the run reverse-resolves an address the
+    allowlist never cleared -- the one thing this gate exists to stop.
+    """
+    calls = []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse))
+        if want_canonical:
+            return ("vc01-real.vcf.lab.knowledgeondemand.net", "10.50.10.40")
+        return "vc01-real.vcf.lab.knowledgeondemand.net" if want_reverse else None
+
+    config = _GateRaisingOnTheResolvedAddress(
+        allowlist=("10.50.0.0/16",),
+        domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the resolved address gate is broken"):
+        run_probes(appliances_only(inventory), config, resolver=resolver,
+                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    # The forward query was legitimate -- the name passed its own gate.
+    # The REVERSE lookup on the zone-chosen address is what must not happen.
+    assert [name for name, reverse in calls if reverse] == []
+
+
+def test_a_raising_host_address_gate_neither_resolves_nor_connects(inventory):
+    """probes.py:522 -- the host IP gate, the first thing a host meets.
+
+    The document is host-only, so this is the sole permits() call the run
+    can reach and no other site can raise on its behalf. Swallowed, the
+    host is treated as allowlisted and gets the full treatment: forward
+    query, reverse query and a TCP 443 connection to an address the
+    operator never cleared. All three absences are asserted, because
+    "it raised" on its own would not notice any of them.
+    """
+    calls, contacted = [], []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse))
+        return ("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11") \
+            if want_canonical else None
+
     config = _RaisingAddressGate(allowlist=("10.50.0.0/16",),
                                  domain_allowlist=("vcf.lab.knowledgeondemand.net",))
     with pytest.raises(RuntimeError, match="the address gate is broken"):
-        run_probes(one_host(inventory), config,
-                   resolver=lambda n, wr=False, wc=False: None,
-                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+        run_probes(one_host(inventory), config, resolver=resolver,
+                   connector=lambda h, p, t: (contacted.append(h), True)[1],
+                   resolv_conf_reader=lambda: ())
+    assert calls == []
+    assert contacted == []
+
+
+def test_a_host_forward_answer_carrying_no_address_says_so(inventory):
+    """`(canonical, None)` is the one genuinely NEW input shape the
+    combined mode created on the host path, and its first message was
+    dishonest.
+
+    The old host path's forward answer was a bare address, so a `None`
+    there meant "no forward DNS answer" and was reported as such. In a
+    well-formed pair, `None` in the address slot is a different fact --
+    the zone answered, and the answer carried no address -- but it fell
+    through to the address comparison and surfaced as
+    VCF-PROBE-FORWARD-MISMATCH "... resolves to None", which is the
+    garbled-operator-message class this module keeps paying for. The
+    appliance path already had a dedicated branch; the host path now has
+    the same one.
+
+    No security consequence: `resolved` gates nothing on the host path,
+    which is gated on the operator-declared mgmtIp. This is truthfulness.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "esx01.vcf.lab.knowledgeondemand.net",
+                     "esx01.vcf.lab.knowledgeondemand.net")
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_canonical:
+            return ("esx01.vcf.lab.knowledgeondemand.net", None)
+        return zone(name, want_reverse, want_canonical)
+
+    result = run_probes(one_host(inventory), CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert "VCF-PROBE-FORWARD-MISMATCH" not in result.codes
+    assert not any("None" in f.message for f in result.findings)
+    hit = [f for f in result.findings
+           if f.code == "VCF-PROBE-UNKNOWN" and "carried no address" in f.message]
+    assert len(hit) == 1 and hit[0].path == "/hosts/0"
+    # The rest of the host's checks still ran: the reverse lookup does not
+    # depend on the forward answer, only on the declared mgmtIp.
+    assert "VCF-PROBE-NO-REVERSE-DNS" not in result.codes
 
 
 def test_a_host_forward_answer_carrying_no_canonical_still_round_trips(inventory):

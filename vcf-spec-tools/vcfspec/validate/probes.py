@@ -295,6 +295,19 @@ def _guarded_connect(connect, host: str, port: int, timeout: float):
     config.permits_name(). A call that produces data is guarded; a call
     that decides permission never is, because "it raised, carry on" is
     indistinguishable from "it said yes".
+
+    **So "no exception escapes run_probes" has one exemption, and this is
+    where it is stated.** The promise is about the caller-INJECTED seams
+    -- resolver, connector, resolv_conf_reader -- whose behaviour this
+    module cannot assume and which are therefore guarded everywhere they
+    are called. ProbeConfig is not one of them: it is the operator's own
+    policy object, constructed by the CLI, and a policy that cannot
+    answer must STOP the run rather than be interpreted. A ProbeConfig
+    subclass whose permits()/permits_name() raises will propagate out of
+    run_probes, by design. That is the only way a gate failure stays
+    distinguishable from a gate answering "yes"; swallowing it would
+    convert a broken allowlist into an open one. Five call sites, one per
+    gate, each pinned by its own test in tests/test_probes.py.
     """
     try:
         return bool(connect(host, port, timeout))
@@ -591,7 +604,23 @@ def _probe_host(host: dict, path: str, subdomain: object, config: ProbeConfig,
                                                "(canonical name, address) pair"))
         else:
             canonical, resolved = answer
-            if resolved != probe_ip:
+            if not isinstance(resolved, str) or not resolved.strip():
+                # A well-formed pair whose address slot is empty. This is
+                # the one genuinely new input shape the combined mode
+                # created here: the old host path's forward answer was a
+                # bare address, so a `None` there meant "no forward DNS
+                # answer" and was reported as such. Inside a pair it means
+                # something else -- the zone answered and the answer
+                # carried no address -- and letting it fall through to the
+                # comparison below produced "... resolves to None", which
+                # is the garbled-operator-message class this module keeps
+                # paying for. Nothing is gated on `resolved` here (the host
+                # is gated on the operator-declared mgmtIp), so this is a
+                # truthfulness fix, and it is the same branch the
+                # appliance path already had.
+                findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
+                                            reason="forward answer carried no address"))
+            elif resolved != probe_ip:
                 findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
                                             fqdn=fqdn, resolved=resolved,
                                             expected=probe_ip))
