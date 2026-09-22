@@ -22,6 +22,7 @@ import yaml
 
 from .findings import Finding, Result, Severity
 from .inventory import REFERENCE_RE
+from .rules.coerce import as_mapping as _mapping
 from .rules.coerce import as_sequence
 from .schema import DEFAULT_VERSION, resolve_version
 
@@ -44,6 +45,39 @@ def _credential(creds: dict, name: str) -> str:
             f"credential '{name}' must be a ${{reference}} (e.g. ${{{name}}}); "
             "refusing to render a literal value.")
     return value
+
+
+def _sddc_manager_spec(appliances: dict, creds: dict) -> dict:
+    """SddcManagerSpec, with the extra fields an *existing* deployment needs.
+
+    When the VCF Installer appliance is itself the SDDC Manager -- which it is
+    whenever the SDDC Manager OVA was deployed as the Installer -- a spec that
+    names that same hostname is asking the Installer to deploy itself. A real
+    9.1.1 Installer fails three whole checks on that: DNS Resolution
+    (DUPLICATE_FQDN, DUPLICATE_IP_ADDRESS) and Network Configuration
+    (IP_NOT_IN_USE), plus an EXISTING_SDDC warning. Setting
+    useExistingDeployment cleared all three, measured 2026-09-22.
+
+    The Installer then demands credentials it does not need for a fresh
+    deployment: submitting useExistingDeployment with only rootPassword is
+    refused outright with QUICK_START_VALIDATION_FAILED, "Empty local user
+    password specified in SDDC Manager specification". So localUserPassword
+    and sshPassword are emitted alongside it. SddcManagerSpec also declares
+    sslThumbprint ("Need to be populated when using existing"), which this
+    does not emit: the Installer accepted the spec without one, and inventing
+    a field the tool cannot verify is how a spec acquires a value nobody
+    checked.
+    """
+    manager = _mapping(appliances.get("sddcManager"))
+    spec = {
+        "hostname": manager.get("hostname", ""),
+        "rootPassword": _credential(creds, "sddcManagerRoot"),
+    }
+    if manager.get("useExistingDeployment") is True:
+        spec["useExistingDeployment"] = True
+        spec["localUserPassword"] = _credential(creds, "sddcManagerLocalUser")
+        spec["sshPassword"] = _credential(creds, "sddcManagerSsh")
+    return spec
 
 
 # Only these three are real VCF network types for this shape. TEP traffic is
@@ -123,10 +157,7 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
         "networkSpecs": [_network_spec(purpose, networks[purpose])
                          for purpose in NETWORK_ORDER if purpose in networks],
         "vcenterSpec": _vcenter_spec(appliances, creds, default),
-        "sddcManagerSpec": {
-            "hostname": (appliances.get("sddcManager") or {}).get("hostname", ""),
-            "rootPassword": _credential(creds, "sddcManagerRoot"),
-        },
+        "sddcManagerSpec": _sddc_manager_spec(appliances, creds),
         "hostSpecs": [_host_spec(host, creds)
                       for host in as_sequence(inventory.get("hosts"))],
     }

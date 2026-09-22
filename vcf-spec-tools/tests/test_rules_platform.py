@@ -282,3 +282,36 @@ def test_a_name_merely_ending_in_the_letters_local_is_not_flagged(make_inventory
     doc = make_inventory(**{"dns.subdomain": "nonlocal"})
     assert not [f for f in check_platform(doc).findings
                 if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+
+
+def test_existing_sddc_manager_requires_its_extra_credentials(make_inventory):
+    """A real 9.1.1 Installer refuses the whole spec before running any check
+    when useExistingDeployment is set without localUserPassword, so this has
+    to be caught here rather than discovered by a round trip."""
+    doc = make_inventory(**{"appliances.sddcManager.useExistingDeployment": True})
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS"]
+    assert {f.message.split("credentials.")[1].split(" ")[0] for f in hits} == \
+        {"sddcManagerLocalUser", "sddcManagerSsh"}
+    assert all(f.severity is Severity.ERROR for f in hits)
+
+
+def test_the_credentials_rule_is_silent_when_they_are_declared(make_inventory):
+    doc = make_inventory(**{"appliances.sddcManager.useExistingDeployment": True})
+    doc["credentials"]["sddcManagerLocalUser"] = "${sddcm_local}"
+    doc["credentials"]["sddcManagerSsh"] = "${sddcm_ssh}"
+    assert "VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS" not in check_platform(doc).codes
+
+
+def test_the_credentials_rule_does_not_fire_for_a_fresh_deployment(inventory):
+    """The default inventory deploys a new SDDC Manager and must stay clean --
+    the extra credentials are required only when importing an existing one."""
+    assert "VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS" not in check_platform(inventory).codes
+
+
+def test_a_wrong_typed_use_existing_flag_is_not_treated_as_true(make_inventory):
+    """Only the boolean true means import. A truthy string arriving from a
+    schema-invalid document must not silently demand credentials."""
+    for value in ("yes", 1, "true", {}, []):
+        doc = make_inventory(**{"appliances.sddcManager.useExistingDeployment": value})
+        assert "VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS" not in check_platform(doc).codes

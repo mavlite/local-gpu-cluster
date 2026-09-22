@@ -21,6 +21,7 @@ def check_platform(inventory: dict) -> Result:
     findings += _naming_rules(inventory)
     findings += _local_suffix_rules(inventory)
     findings += _vsp_rules(inventory)
+    findings += _existing_sddc_manager_rules(inventory)
     findings += _capacity_rules(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
     return Result(tuple(findings))
@@ -122,6 +123,25 @@ def _local_suffix_rules(inventory: dict) -> list[Finding]:
         out.append(finding_for("VCF-NAME-VSP-LOCAL-SUFFIX", pointer,
                                value=value, where=pointer))
     return out
+
+
+# Importing an existing SDDC Manager needs two credentials a fresh deployment
+# does not. The Installer does not merely warn about the omission -- it refuses
+# the whole spec before running any check, so catching it here is the
+# difference between a finding and a wasted round trip.
+_EXISTING_SDDCM_CREDENTIALS = ("sddcManagerLocalUser", "sddcManagerSsh")
+
+
+def _existing_sddc_manager_rules(inventory: dict) -> list[Finding]:
+    manager = _mapping(_mapping(inventory.get("appliances")).get("sddcManager"))
+    if manager.get("useExistingDeployment") is not True:
+        return []
+    creds = _mapping(inventory.get("credentials"))
+    return [finding_for("VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS",
+                        "/appliances/sddcManager/useExistingDeployment",
+                        missing=name)
+            for name in _EXISTING_SDDCM_CREDENTIALS
+            if not isinstance(creds.get(name), str) or not creds.get(name)]
 
 
 def _vsp_rules(inventory: dict) -> list[Finding]:

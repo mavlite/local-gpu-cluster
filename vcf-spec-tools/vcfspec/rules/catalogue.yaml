@@ -419,3 +419,9 @@ VCF-NAME-VSP-LOCAL-SUFFIX:
   source_url: https://blogs.vmware.com/cloud-foundation/2026/04/17/bridging-the-local-gap-a-split-domain-design-for-vmware-cloud-foundation-deployment/
   summary: "'{value}' at {where} uses the .local suffix, which the VCF Management Services platform does not support."
   fix: "Use a routable suffix for the VSP names. This is a warning, not an error: VCF Operations, vCenter, NSX and SDDC Manager still allow .local during the transition window -- only VCF Identity Broker, VCF Automation and vSphere Supervisor dropped it, and those three run on the VSP platform. Correcting dns.subdomain fixes the composed names in one edit."
+VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS:
+  severity: error
+  source: docs
+  source_url: ""
+  summary: "appliances.sddcManager.useExistingDeployment is set, but credentials.{missing} is not declared."
+  fix: "Declare credentials.{missing} as a ${reference}. Importing an existing SDDC Manager needs credentials a fresh deployment does not: a real 9.1.1 Installer refuses the spec outright with QUICK_START_VALIDATION_FAILED, 'Empty local user password specified in SDDC Manager specification'. Measured 2026-09-22."

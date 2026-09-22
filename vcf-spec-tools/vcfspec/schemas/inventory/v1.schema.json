@@ -253,6 +253,10 @@
           "properties": {
             "hostname": {
               "$ref": "#/$defs/shortname"
+            },
+            "useExistingDeployment": {
+              "type": "boolean",
+              "description": "Import the SDDC Manager that already exists instead of deploying a new one. Set this when the VCF Installer appliance IS the SDDC Manager: otherwise the spec asks the Installer to deploy itself, and validation fails DNS Resolution and Network Configuration with DUPLICATE_FQDN, DUPLICATE_IP_ADDRESS and IP_NOT_IN_USE. Requires the sddcManagerLocalUser and sddcManagerSsh credentials."
             }
           }
         },
@@ -415,7 +419,9 @@
           "type": "array",
           "default": [],
           "items": {
-            "enum": ["consumer-amd"]
+            "enum": [
+              "consumer-amd"
+            ]
           }
         }
       }
