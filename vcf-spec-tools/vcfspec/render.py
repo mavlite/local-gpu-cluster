@@ -22,6 +22,7 @@ import yaml
 
 from .findings import Finding, Result, Severity
 from .inventory import REFERENCE_RE
+from .rules.coerce import as_sequence
 from .schema import DEFAULT_VERSION, resolve_version
 
 DEFAULTS_DIR = Path(__file__).resolve().parent / "defaults"
@@ -117,8 +118,8 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
         "ceipEnabled": default("ceipEnabled"),
         "skipEsxThumbprintValidation": default("skipEsxThumbprintValidation"),
         "dnsSpec": {"subdomain": subdomain,
-                    "nameservers": list(dns.get("nameservers", []))},
-        "ntpServers": list((inventory.get("ntp") or {}).get("servers", [])),
+                    "nameservers": as_sequence(dns.get("nameservers"))},
+        "ntpServers": as_sequence((inventory.get("ntp") or {}).get("servers")),
         "networkSpecs": [_network_spec(purpose, networks[purpose])
                          for purpose in NETWORK_ORDER if purpose in networks],
         "vcenterSpec": _vcenter_spec(appliances, creds, default),
@@ -127,7 +128,7 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
             "rootPassword": _credential(creds, "sddcManagerRoot"),
         },
         "hostSpecs": [_host_spec(host, creds)
-                      for host in inventory.get("hosts") or []],
+                      for host in as_sequence(inventory.get("hosts"))],
     }
 
     if nsx:
@@ -179,7 +180,7 @@ def _vcenter_spec(appliances: dict, creds: dict, default) -> dict:
 def _nsxt_spec(nsx: dict, creds: dict, default) -> dict:
     pool = nsx.get("tepPool") or {}
     spec = {
-        "nsxtManagers": [{"hostname": name} for name in nsx.get("managers", [])],
+        "nsxtManagers": [{"hostname": name} for name in as_sequence(nsx.get("managers"))],
         "vipFqdn": nsx.get("vipFqdn", ""),
         "nsxtManagerSize": nsx.get("size") or default("nsxSize"),
         "rootNsxtManagerPassword": _credential(creds, "nsxAdmin"),

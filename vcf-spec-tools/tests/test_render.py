@@ -185,3 +185,46 @@ def test_render_refuses_a_literal_credential(inventory):
     with pytest.raises(InsecureCredentialError) as excinfo:
         render(inventory)
     assert "Sup3rSecret!" not in str(excinfo.value)
+
+
+# render() is called straight from api.render_document(), and a wrong-typed
+# scalar used to be iterated character by character INTO THE RETURNED SPEC:
+# nsx.managers as a string produced 24 phantom managers, nameservers became
+# ['1','0','.','5',...]. Nothing raised -- a string is iterable -- so api.py's
+# broad except never fired, the garbled lists passed the vendored-schema
+# verify step, and `spec` was returned rather than withheld. api.py's own
+# docstring names that risk: "an operator (or an agent) pipes .spec into a
+# file and never reads the findings."
+@pytest.mark.parametrize("section,key,pointer", [
+    ("nsx", "managers", ("nsxtSpec", "nsxtManagers")),
+    ("dns", "nameservers", ("dnsSpec", "nameservers")),
+    ("ntp", "servers", ("ntpServers",)),
+])
+@pytest.mark.parametrize("scalar", ["a-string-value", 5, True, {"a": 1}])
+def test_a_wrong_typed_sequence_never_reaches_the_rendered_spec(
+        make_inventory, section, key, pointer, scalar):
+    doc = make_inventory(**{f"{section}.{key}": scalar})
+    spec, _ = render(doc)
+    node = spec
+    for step in pointer:
+        node = node[step]
+    # Empty, not a per-character explosion and not the raw scalar.
+    assert node == [], f"{section}.{key}={scalar!r} rendered as {node!r}"
+
+
+@pytest.mark.parametrize("scalar", ["esx01", 5, True])
+def test_a_wrong_typed_hosts_field_renders_no_host_specs(make_inventory, scalar):
+    doc = make_inventory(**{"hosts": scalar})
+    spec, _ = render(doc)
+    assert spec["hostSpecs"] == []
+
+
+def test_a_valid_document_renders_exactly_what_it_did_before(inventory):
+    """The coercion must be invisible to every well-formed document -- it is
+    a guard on malformed input, not a change to the rendering."""
+    spec, _ = render(inventory)
+    assert spec["dnsSpec"]["nameservers"] == inventory["dns"]["nameservers"]
+    assert spec["ntpServers"] == inventory["ntp"]["servers"]
+    assert len(spec["hostSpecs"]) == len(inventory["hosts"])
+    assert [m["hostname"] for m in spec["nsxtSpec"]["nsxtManagers"]] == \
+        inventory["nsx"]["managers"]
