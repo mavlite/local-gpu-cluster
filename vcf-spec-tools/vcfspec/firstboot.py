@@ -57,8 +57,14 @@ esxcli system maintenanceMode set -e true
 """
 
 _SERVICES = """\
-# SSH: the operator's only way in on a host with no BMC, and how VCF reaches
-# it during commissioning.
+# SSH: the operator's only way in on a host with no BMC.
+#
+# NOT for VCF's benefit. An earlier version of this comment claimed SSH is
+# "how VCF reaches it during commissioning"; that is wrong. Observed
+# 2026-09-22: a VCF Installer validation run turned SSH off on all three
+# hosts without rebooting them -- its Security Configuration check disables
+# it. VCF reaches the host over 443/902 and the hostd SDK, which is also why
+# a host with SSH shut still passes VCF's host-connect check.
 #
 # All three commands are needed, and the third is the one that was missing.
 # enable_ssh/start_ssh change the RUNNING state; the service's startup POLICY
