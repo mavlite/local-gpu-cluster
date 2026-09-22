@@ -465,6 +465,232 @@ def _resolver_vantage_point(inventory: dict, reader) -> list[Finding]:
                         runner=", ".join(runner), declared=", ".join(declared))]
 
 
+def _round_trip(config: ProbeConfig, fqdn: str, reverse: object,
+                canonical: object = None) -> bool:
+    """True when the PTR agrees with the forward side of the round trip.
+
+    gethostbyname() follows a CNAME silently and gethostbyaddr()[0]
+    returns the *canonical* name, so on a lab where the name is an alias
+    the PTR legitimately names something else. The canonical name, and
+    only it, is therefore accepted alongside the queried name -- never
+    the forward answer's alias list, which is the forward zone's own
+    claim about which names it answers to. A check the checked party can
+    satisfy by asserting it is not a check: with the alias list accepted,
+    a zone returning aliases=(fqdn, "attacker.example") and
+    PTR="attacker.example" produced zero findings on any input.
+
+    And the canonical name must clear permits_name() itself. A name
+    outside the operator's --allowlist-domain is not evidence about the
+    operator's zone, so it certifies nothing; without this gate the
+    forward zone could still nominate any PTR it liked, just via the
+    canonical slot instead of the alias list.
+
+    `canonical` is optional because there is a real case with no
+    canonical name to offer: a host whose *name* was blocked issued no
+    forward query at all, yet still reverse-resolves its
+    operator-declared address. Then the queried name is the whole
+    accept-set, exactly as before this mode existed. permits_name()
+    refuses a non-string, so None needs no separate guard -- but it is
+    spelled out, because "no canonical" and "a canonical that failed the
+    gate" must both narrow the accept-set rather than widen it.
+    """
+    names = {_dns_name(fqdn)}
+    if canonical is not None and config.permits_name(canonical):
+        names.add(_dns_name(canonical))
+    return _dns_name(reverse) in names
+
+
+def _probe_host(host: dict, path: str, subdomain: object, config: ProbeConfig,
+                lookup, connect) -> tuple[bool, list[Finding]]:
+    """One host's checks: `(was it permitted, findings)`.
+
+    The bool is returned rather than counted here on purpose. The
+    `candidates`/`permitted` tallies belong to run_probes, because
+    VCF-PROBE-NOTHING-PERMITTED is a statement about the document as a
+    whole; a helper that reached out and mutated a caller's counter is
+    how the two loops drift apart, which is the defect this extraction
+    exists to close.
+
+    The gate itself stays here, ahead of every lookup and the connect:
+    a host is gated by permits() on the mgmtIp -- an address the
+    *operator* declared -- and a DNS query for an attacker-chosen name is
+    itself the exfiltration channel, so filtering answers afterwards is
+    already too late.
+    """
+    findings: list[Finding] = []
+    name, ip = host.get("name", ""), host.get("mgmtIp", "")
+    if not config.permits(ip):
+        return False, [finding_for("VCF-PROBE-TARGET-BLOCKED", path, target=ip)]
+    # permits() cleared this value, so ipaddress.ip_address() parsed
+    # it -- but it parses more spellings than the rest of the layer
+    # understands, and `mgmtIp: 171051531` is a legal YAML integer it
+    # reads as 10.50.10.11. Every step after the gate has to agree
+    # with the gate, so the canonical string is what gets used from
+    # here on: the raw int otherwise went to create_connection()
+    # (TypeError, escaping), to gethostbyaddr() (TypeError, swallowed
+    # into a spurious VCF-PROBE-NO-REVERSE-DNS at `error`) and into
+    # `resolved != ip`, where a string never equals an int, for a
+    # spurious VCF-PROBE-FORWARD-MISMATCH.
+    #
+    # This canonicalises AFTER the gate and never before it. permits()
+    # is unchanged and still refuses " 10.50.10.11 ", "010.050.010.011"
+    # and anything else it does not parse; normalising first would
+    # have widened the allowlist, which is the one thing this may not
+    # do. The try is belt-and-braces for a subclassed ProbeConfig
+    # whose permits() does not imply ip_address() succeeds.
+    try:
+        probe_ip = str(ipaddress.ip_address(ip))
+    except (TypeError, ValueError):
+        probe_ip = ip
+    # _compose_name, not an f-string: it strips both parts and
+    # rejects a name that is not usable as one. This sibling of the
+    # appliance path composed " esx01 .lab.example.net" from a padded
+    # host name (permits_name() permits it, because it strips before
+    # matching) and "None.lab.example.net" from a null one.
+    fqdn = _compose_name(name, subdomain)
+    if fqdn is None:
+        # No usable name: no forward query to issue, and nothing for
+        # a PTR to be compared against. Reporting the host is the
+        # point -- it is not silently dropped -- but reporting it
+        # against a name assembled out of `None` is the garbled
+        # message this guard exists to prevent. The schema layer is
+        # what says the name is missing; this says why the probe
+        # could not run.
+        return True, [finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
+                                  reason="no usable DNS name: check the host's "
+                                         "name and dns.subdomain")]
+    # The name gate sits here, before the lookup, for the same reason
+    # the IP gate sits before connect(): the query IS the leak, so
+    # filtering its answer afterwards is already too late.
+    canonical = None
+    if not config.permits_name(fqdn):
+        findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", path, name=fqdn))
+    else:
+        # One forward query in the same combined shape the appliance
+        # path uses, carrying both halves of one answer: the address
+        # that is compared against the *declared* mgmtIp, and the
+        # canonical name that may certify that address's PTR. The host
+        # path used to ask for the address alone, so a lab that CNAMEs
+        # esx01 got VCF-PROBE-REVERSE-MISMATCH at `error` on a
+        # perfectly healthy zone -- the same defect already fixed for
+        # appliances, left behind because the two loops were
+        # near-duplicates that drifted.
+        answer = lookup(fqdn, False, want_canonical=True)
+        if answer is None:
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
+                                        reason="no forward DNS answer"))
+        elif not (isinstance(answer, (tuple, list)) and len(answer) == 2):
+            # The resolver DID answer -- the answer was the wrong shape.
+            # This is what an operator sees when a zone tries to smuggle
+            # extra names into the accept-set, so it must not be dressed
+            # up as a name that simply did not resolve. `canonical`
+            # stays None, so the round trip below narrows to the queried
+            # name rather than trusting half of a malformed reply.
+            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
+                                        reason="forward answer was not a "
+                                               "(canonical name, address) pair"))
+        else:
+            canonical, resolved = answer
+            if resolved != probe_ip:
+                findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
+                                            fqdn=fqdn, resolved=resolved,
+                                            expected=probe_ip))
+    # Unconditional, and deliberately NOT coupled to the name gate above.
+    # A host whose name is blocked still gets its reverse lookup and its
+    # connect: probe_ip was declared by the operator and already cleared
+    # by permits(), so it carries nothing to exfiltrate and is
+    # independently useful. It simply has no canonical name to offer.
+    reverse = lookup(probe_ip, True)
+    if reverse is None:
+        findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path,
+                                    ip=probe_ip, fqdn=fqdn))
+    elif not _round_trip(config, fqdn, reverse, canonical):
+        # A PTR that exists but names a different host is worse than a
+        # missing one: it looks healthy and VCF fails obscurely on the
+        # disagreement. Checking only that reverse returned *something*
+        # is why this went undetected until the tool met real dnsmasq.
+        findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", path,
+                                    ip=probe_ip, resolved=reverse, fqdn=fqdn))
+    reachable = _guarded_connect(connect, probe_ip, ESX_PORT, config.timeout_s)
+    if reachable is None:
+        findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
+                                    reason="the connector raised"))
+    elif not reachable:
+        findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
+                                    reason=f"no TCP {ESX_PORT} response"))
+    return True, findings
+
+
+def _probe_appliance(pointer: str, fqdn: str, ptr_required: bool,
+                     config: ProbeConfig, lookup) -> list[Finding]:
+    """One appliance name's checks.
+
+    Three things separate this from _probe_host, and all three are
+    containment properties, not polish:
+
+      * It takes no connector, and there is nothing here to give one to.
+        Pre-Installer these appliances do not exist, so a 443 probe is
+        guaranteed noise; and the address came from the zone rather than
+        from the operator, so connecting would mean opening a TCP session
+        to somewhere nobody declared. The absent parameter is the
+        enforcement: "never connected to on any path" is not a line of
+        code that can be deleted by accident, it is a capability this
+        function was never handed.
+      * It returns findings only -- no permitted flag. Appliances stay
+        out of the candidates/permitted tallies, because
+        VCF-PROBE-NOTHING-PERMITTED's message says "the N host(s) in this
+        document"; an appliance inflating that count makes the message a
+        lie and, worse, can hide the all-blocked case.
+      * config.permits() gates the *resolved* address. A host is gated on
+        the mgmtIp the operator wrote down; an appliance declares no
+        address at all, so the only address in play is the one whoever
+        controls the zone put in the A record. Nothing downstream of the
+        forward answer -- not the reverse lookup, not anything else --
+        may happen before that address has been checked.
+    """
+    if not config.permits_name(fqdn):
+        return [finding_for("VCF-PROBE-NAME-BLOCKED", pointer, name=fqdn)]
+    # One forward query, carrying both halves of the answer: the
+    # address the allowlist must clear, and the canonical name that
+    # will certify that address's PTR. Asking twice would let a zone
+    # answer the two questions inconsistently.
+    answer = lookup(fqdn, False, want_canonical=True)
+    if answer is None:
+        return [finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
+                            reason="no forward DNS answer")]
+    if not (isinstance(answer, (tuple, list)) and len(answer) == 2):
+        # The resolver DID answer -- the answer was the wrong shape.
+        # This is what an operator sees when a zone tries to smuggle
+        # extra names into the accept-set, so it must not be dressed
+        # up as a name that simply did not resolve.
+        return [finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
+                            reason="forward answer was not a "
+                                   "(canonical name, address) pair")]
+    canonical, resolved = answer
+    if not isinstance(resolved, str) or not resolved.strip():
+        # Fails closed either way -- permits(None) is False -- but
+        # "Refused to probe None: outside the configured allowlist"
+        # told the operator nothing true about what happened.
+        return [finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
+                            reason="forward answer carried no address")]
+    # NB: `resolved`, not `resolved.strip()`. permits() rejects a
+    # padded address, and that is the direction to fail in; stripping
+    # here would widen what the allowlist accepts.
+    if not config.permits(resolved):
+        return [finding_for("VCF-PROBE-TARGET-BLOCKED", pointer, target=resolved)]
+    reverse = lookup(resolved, True)
+    if reverse is None:
+        # ptr_required is False for the VIP-like names: the NSX VIP and
+        # the VSP platform name front pools, so a missing PTR is not a
+        # defect there.
+        return ([finding_for("VCF-PROBE-NO-REVERSE-DNS", pointer,
+                             ip=resolved, fqdn=fqdn)] if ptr_required else [])
+    if not _round_trip(config, fqdn, reverse, canonical):
+        return [finding_for("VCF-PROBE-REVERSE-MISMATCH", pointer,
+                            ip=resolved, resolved=reverse, fqdn=fqdn)]
+    return []
+
+
 def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
                connector=None, *, resolv_conf_reader=None) -> Result:
     # `is None`, not `or`: `connector or _default_connector` silently
@@ -521,166 +747,23 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         if not isinstance(host, dict):
             continue
         candidates += 1
-        name, ip = host.get("name", ""), host.get("mgmtIp", "")
-        path = f"/hosts/{index}"
-        if not config.permits(ip):
-            findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", path, target=ip))
-            continue
-        permitted += 1
-        # permits() cleared this value, so ipaddress.ip_address() parsed
-        # it -- but it parses more spellings than the rest of the layer
-        # understands, and `mgmtIp: 171051531` is a legal YAML integer it
-        # reads as 10.50.10.11. Every step after the gate has to agree
-        # with the gate, so the canonical string is what gets used from
-        # here on: the raw int otherwise went to create_connection()
-        # (TypeError, escaping), to gethostbyaddr() (TypeError, swallowed
-        # into a spurious VCF-PROBE-NO-REVERSE-DNS at `error`) and into
-        # `resolved != ip`, where a string never equals an int, for a
-        # spurious VCF-PROBE-FORWARD-MISMATCH.
-        #
-        # This canonicalises AFTER the gate and never before it. permits()
-        # is unchanged and still refuses " 10.50.10.11 ", "010.050.010.011"
-        # and anything else it does not parse; normalising first would
-        # have widened the allowlist, which is the one thing this may not
-        # do. The try is belt-and-braces for a subclassed ProbeConfig
-        # whose permits() does not imply ip_address() succeeds.
-        try:
-            probe_ip = str(ipaddress.ip_address(ip))
-        except (TypeError, ValueError):
-            probe_ip = ip
-        # _compose_name, not an f-string: it strips both parts and
-        # rejects a name that is not usable as one. This sibling of the
-        # appliance path composed " esx01 .lab.example.net" from a padded
-        # host name (permits_name() permits it, because it strips before
-        # matching) and "None.lab.example.net" from a null one.
-        fqdn = _compose_name(name, subdomain)
-        if fqdn is None:
-            # No usable name: no forward query to issue, and nothing for
-            # a PTR to be compared against. Reporting the host is the
-            # point -- it is not silently dropped -- but reporting it
-            # against a name assembled out of `None` is the garbled
-            # message this guard exists to prevent. The schema layer is
-            # what says the name is missing; this says why the probe
-            # could not run.
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
-                                        reason="no usable DNS name: check the host's "
-                                               "name and dns.subdomain"))
-            continue
-        # The name gate sits here, before the lookup, for the same reason
-        # the IP gate sits before connect(): the query IS the leak, so
-        # filtering its answer afterwards is already too late.
-        if not config.permits_name(fqdn):
-            findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", path, name=fqdn))
-        else:
-            resolved = lookup(fqdn, False)
-            if resolved is None:
-                findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=fqdn,
-                                            reason="no forward DNS answer"))
-            elif resolved != probe_ip:
-                findings.append(finding_for("VCF-PROBE-FORWARD-MISMATCH", path,
-                                            fqdn=fqdn, resolved=resolved,
-                                            expected=probe_ip))
-        reverse = lookup(probe_ip, True)
-        if reverse is None:
-            findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", path,
-                                        ip=probe_ip, fqdn=fqdn))
-        elif _dns_name(reverse) != _dns_name(fqdn):
-            # A PTR that exists but names a different host is worse than a
-            # missing one: it looks healthy and VCF fails obscurely on the
-            # disagreement. Checking only that reverse returned *something*
-            # is why this went undetected until the tool met real dnsmasq.
-            findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", path,
-                                        ip=probe_ip, resolved=reverse, fqdn=fqdn))
-        reachable = _guarded_connect(connect, probe_ip, ESX_PORT, config.timeout_s)
-        if reachable is None:
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
-                                        reason="the connector raised"))
-        elif not reachable:
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", path, target=probe_ip,
-                                        reason=f"no TCP {ESX_PORT} response"))
+        # The helper reports whether the host cleared permits(); the tally
+        # is kept here, because VCF-PROBE-NOTHING-PERMITTED is a statement
+        # about the document rather than about any one host. A helper that
+        # reached out and mutated this counter is how the two loops drift.
+        allowed, host_findings = _probe_host(host, f"/hosts/{index}", subdomain,
+                                             config, lookup, connect)
+        if allowed:
+            permitted += 1
+        findings.extend(host_findings)
 
-    # The appliance names. Three things separate this loop from the host
-    # loop above, and all three are containment properties, not polish:
-    #
-    #   * It never touches `candidates`/`permitted`. Those count hosts, and
-    #     VCF-PROBE-NOTHING-PERMITTED's message says "the N host(s) in this
-    #     document" -- an appliance inflating that count makes the message
-    #     a lie and, worse, can hide the all-blocked case.
-    #   * It never calls connect(). Pre-Installer these appliances do not
-    #     exist, so a 443 probe is guaranteed noise; and the address came
-    #     from the zone rather than from the operator, so connecting would
-    #     mean opening a TCP session to somewhere nobody declared.
-    #   * config.permits() gates the *resolved* address. A host is gated on
-    #     the mgmtIp the operator wrote down; an appliance declares no
-    #     address at all, so the only address in play is the one whoever
-    #     controls the zone put in the A record. Nothing downstream of the
-    #     forward answer -- not the reverse lookup, not anything else --
-    #     may happen before that address has been checked.
+    # The appliance names. `connect` is deliberately not passed: an
+    # appliance is never connected to on any path, and the surest way to
+    # keep that true through future edits is for the function that probes
+    # one to have no connector to call.
     for pointer, fqdn, ptr_required in _appliance_targets(inventory, subdomain):
-        if not config.permits_name(fqdn):
-            findings.append(finding_for("VCF-PROBE-NAME-BLOCKED", pointer, name=fqdn))
-            continue
-        # One forward query, carrying both halves of the answer: the
-        # address the allowlist must clear, and the canonical name that
-        # will certify that address's PTR. Asking twice would let a zone
-        # answer the two questions inconsistently.
-        answer = lookup(fqdn, False, want_canonical=True)
-        if answer is None:
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
-                                        reason="no forward DNS answer"))
-            continue
-        if not (isinstance(answer, (tuple, list)) and len(answer) == 2):
-            # The resolver DID answer -- the answer was the wrong shape.
-            # This is what an operator sees when a zone tries to smuggle
-            # extra names into the accept-set, so it must not be dressed
-            # up as a name that simply did not resolve.
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
-                                        reason="forward answer was not a "
-                                               "(canonical name, address) pair"))
-            continue
-        canonical, resolved = answer
-        if not isinstance(resolved, str) or not resolved.strip():
-            # Fails closed either way -- permits(None) is False -- but
-            # "Refused to probe None: outside the configured allowlist"
-            # told the operator nothing true about what happened.
-            findings.append(finding_for("VCF-PROBE-UNKNOWN", pointer, target=fqdn,
-                                        reason="forward answer carried no address"))
-            continue
-        # NB: `resolved`, not `resolved.strip()`. permits() rejects a
-        # padded address, and that is the direction to fail in; stripping
-        # here would widen what the allowlist accepts.
-        if not config.permits(resolved):
-            findings.append(finding_for("VCF-PROBE-TARGET-BLOCKED", pointer,
-                                        target=resolved))
-            continue
-        reverse = lookup(resolved, True)
-        if reverse is None:
-            if ptr_required:
-                findings.append(finding_for("VCF-PROBE-NO-REVERSE-DNS", pointer,
-                                            ip=resolved, fqdn=fqdn))
-            continue
-        # gethostbyname() follows a CNAME silently and gethostbyaddr()[0]
-        # returns the canonical name, so on a lab where the appliance name
-        # is an alias the PTR legitimately names something else. The
-        # canonical name, and only it, is therefore accepted alongside the
-        # queried name -- never the forward answer's alias list, which is
-        # the forward zone's own claim about which names it answers to. A
-        # check the checked party can satisfy by asserting it is not a
-        # check: with the alias list accepted, a zone returning
-        # aliases=(fqdn, "attacker.example") and PTR="attacker.example"
-        # produced zero findings on any input.
-        #
-        # And the canonical name must clear permits_name() itself. A name
-        # outside the operator's --allowlist-domain is not evidence about
-        # the operator's zone, so it certifies nothing; without this gate
-        # the forward zone could still nominate any PTR it liked, just via
-        # the canonical slot instead of the alias list.
-        names = {_dns_name(fqdn)}
-        if config.permits_name(canonical):
-            names.add(_dns_name(canonical))
-        if _dns_name(reverse) not in names:
-            findings.append(finding_for("VCF-PROBE-REVERSE-MISMATCH", pointer,
-                                        ip=resolved, resolved=reverse, fqdn=fqdn))
+        findings.extend(_probe_appliance(pointer, fqdn, ptr_required,
+                                         config, lookup))
 
     # Only when at least one answer was actually obtained: see lookup().
     if lookups:

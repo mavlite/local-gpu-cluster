@@ -420,6 +420,44 @@ and the subdomain is composed into every host and appliance name the
 deployment publishes, so an uppercase one was never going to deploy — it
 simply was not being checked. Lowercase the value to fix it.
 
+### Behaviour change: a CNAME'd host name is no longer a reverse mismatch
+
+If `hosts[].name` composes to a name that is a **CNAME**, the host used to
+report `VCF-PROBE-REVERSE-MISMATCH` at `error` on a perfectly healthy
+zone. `gethostbyname()` follows a CNAME silently, but `gethostbyaddr()`
+hands back the *canonical* name, so the round trip compared
+`esx01.vcf.lab.example.net` against a PTR legitimately naming
+`esx01-real.vcf.lab.example.net` and called the disagreement a defect.
+
+Hosts now accept the canonical name alongside the queried name, exactly
+as appliance names already did — the two probe paths had drifted, and
+this closes that gap. Only a document that CNAMEs a host name changes
+verdict, and only from `error` to clean; nothing that passed before now
+fails.
+
+Two limits are worth knowing, because they are what keep the check a
+check:
+
+- **The canonical name must itself be inside `--allowlist-domain`.** A
+  canonical name the operator never allowlisted is not evidence about the
+  operator's zone, so it certifies nothing and the mismatch is still
+  reported. Otherwise whoever controls the forward zone could nominate
+  the very name that makes the round trip pass, and a check the checked
+  party can satisfy by asserting it is not a check is worse than no check
+  at all — it still reports success.
+- **Only the canonical name, never the alias list.** The forward zone's
+  aliases are its own claims about which names it answers to. The round
+  trip exists to confirm that the forward and reverse zones — two
+  separate authorities — agree, so the accept-set may not be one the
+  forward zone can extend.
+
+A PTR naming neither the queried name nor the allowlisted canonical name
+is still `VCF-PROBE-REVERSE-MISMATCH`, and a host whose *name* is blocked
+by `--allowlist-domain` issues no forward query at all, so it has no
+canonical name to offer and is compared against the queried name alone —
+its reverse lookup and its TCP 443 check still run, because the `mgmtIp`
+was declared by the operator and is independently useful.
+
 ## Credentials
 
 Credential fields hold references such as `${esx_root}`, never secrets.

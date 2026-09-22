@@ -1243,7 +1243,14 @@ def test_an_integer_mgmt_ip_is_normalised_before_it_is_used(inventory):
         if want_reverse:
             reversed_names.append(name)
             return "esx01.vcf.lab.knowledgeondemand.net"
-        return "10.50.10.11"
+        # The combined answer, not a bare address. This fake accepted the
+        # third argument and then ignored it, which was harmless only
+        # while the host path still asked the two-value question; now that
+        # both paths ask the combined one it is the same contract drift
+        # the module documents elsewhere -- a fake that answers the wrong
+        # shape, reported as "forward answer was not a (canonical name,
+        # address) pair". Nothing about what this test asserts changed.
+        return (name, "10.50.10.11") if want_canonical else "10.50.10.11"
 
     result = run_probes(inventory, CONFIG, resolver=resolver,
                         connector=lambda h, p, t: (contacted.append(h), True)[1],
@@ -1462,3 +1469,246 @@ def test_a_wrong_typed_document_nameservers_is_still_silently_skipped(inventory)
                         connector=lambda *_: True,
                         resolv_conf_reader=lambda: ("1.1.1.1",))
     assert [f for f in result.findings if f.path == "/dns/nameservers"] == []
+
+
+# --- Followup B: the host path gets the appliance path's CNAME acceptance ----
+#
+# The host and appliance loops were near-duplicates, and they had already
+# drifted: the appliance path accepted a canonical name when comparing the
+# PTR and the host path did not. So a lab that CNAMEs `esx01` got
+# VCF-PROBE-REVERSE-MISMATCH at `error` on a perfectly healthy zone --
+# gethostbyname() follows the CNAME silently while gethostbyaddr()[0] hands
+# back the *canonical* name. That is the exact defect already fixed for
+# appliances.
+#
+# The host forward lookup now uses the same combined mode the appliances
+# use, so both paths have one forward-call shape: ONE gethostbyname_ex-style
+# answer carrying the address (compared against the operator-declared
+# mgmtIp) and the canonical name (which feeds the round trip). The canonical
+# must itself pass permits_name() before it may certify a PTR -- whoever
+# controls the forward zone must not be able to nominate the name that makes
+# the round trip pass, or the check stops being falsifiable, which is worse
+# than not running it because it still reports success.
+
+
+def host_zone(fqdn, address, canonical, ptr):
+    """A zone answering for ONE host name: the combined forward answer
+    `(canonical, address)`, and `ptr` for the reverse of `address`.
+
+    Anything else resolves to None, so a test using this makes no claim
+    about an environment it did not describe.
+    """
+    def resolve(name, want_reverse=False, want_canonical=False):
+        if want_reverse:
+            return ptr if name == address else None
+        if name != fqdn:
+            return None
+        return (canonical, address) if want_canonical else address
+    return resolve
+
+
+def one_host(inventory, name="esx01", ip="10.50.10.11"):
+    """The example inventory reduced to a single host, appliances removed.
+
+    Removing them is what keeps the assertions below about the host path:
+    with the appliance names still present every one of them would also
+    report, and a `/hosts/0`-shaped absence assertion would be reading a
+    list full of other people's findings.
+    """
+    inventory["hosts"] = [{"name": name, "mgmtIp": ip,
+                           "vmnics": ["vmnic0"], "hardware": {}}]
+    inventory.pop("appliances", None)
+    inventory.pop("nsx", None)
+    return inventory
+
+
+def test_a_legitimate_cname_on_a_host_is_not_a_reverse_mismatch(inventory):
+    """The defect: `esx01` is a CNAME for `esx01-real`, both inside the
+    operator's own zone, and the PTR names the canonical one. Before this
+    the host path compared the PTR against the queried name alone and
+    reported VCF-PROBE-REVERSE-MISMATCH at `error` on a healthy lab.
+    """
+    calls = []
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "esx01-real.vcf.lab.knowledgeondemand.net",
+                     "esx01-real.vcf.lab.knowledgeondemand.net")
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse, want_canonical))
+        return zone(name, want_reverse, want_canonical)
+
+    result = run_probes(one_host(inventory), CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    # An absence assertion needs a lower bound, or it passes just as
+    # happily when the round trip never ran -- the way five tests on this
+    # branch went vacuous. BOTH legs must really have been walked, and the
+    # forward one must have been the combined shape, or the canonical name
+    # was never in play and this test proves nothing about it.
+    assert ("esx01.vcf.lab.knowledgeondemand.net", False, True) in calls
+    assert ("10.50.10.11", True, False) in calls
+    assert result.findings == ()
+
+
+def test_a_host_canonical_name_outside_the_domain_allowlist_certifies_nothing(inventory):
+    """The falsifiability gate, on the host path. A canonical name the
+    operator never allowlisted is not evidence about the operator's zone,
+    so it must not be allowed to suppress the mismatch -- otherwise
+    whoever controls the forward zone simply names the PTR they want
+    accepted in the canonical slot.
+    """
+    calls = []
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "attacker-owned.evil.example", "attacker-owned.evil.example")
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse, want_canonical))
+        return zone(name, want_reverse, want_canonical)
+
+    result = run_probes(one_host(inventory), CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    # Same lower bound: the comparison has to have been reached.
+    assert ("10.50.10.11", True, False) in calls
+    assert [f.path for f in result.findings
+            if f.code == "VCF-PROBE-REVERSE-MISMATCH"] == ["/hosts/0"]
+    assert result.valid is False
+
+
+def test_a_host_forward_answer_cannot_smuggle_extra_names_into_the_accept_set(inventory):
+    """The appliance path's attack, aimed at the host path now that it
+    consumes the same combined answer: an over-long answer whose extra
+    entry is the PTR the zone wants accepted. The outcome that must never
+    occur is silence.
+    """
+    def resolver(name, want_reverse=False, want_canonical=False):
+        if want_reverse:
+            return "attacker-owned.evil.example"
+        if want_canonical:
+            return (name, "attacker-owned.evil.example", "10.50.10.11")
+        return "10.50.10.11"
+
+    result = run_probes(one_host(inventory), CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert "/hosts/0" in {f.path for f in result.findings}
+    # And the smuggled name certified nothing: the round trip still ran
+    # and still disagreed.
+    assert "VCF-PROBE-REVERSE-MISMATCH" in result.codes
+
+
+def test_a_genuine_reverse_mismatch_on_a_host_is_still_reported(inventory):
+    """The cure must not be a blanket acceptance. A PTR that names neither
+    the queried name nor the canonical name is still the defect this check
+    was built for -- found against real dnsmasq.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "esx01-real.vcf.lab.knowledgeondemand.net",
+                     "impostor.vcf.lab.knowledgeondemand.net")
+    result = run_probes(one_host(inventory), CONFIG, resolver=zone,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert [f.path for f in result.findings
+            if f.code == "VCF-PROBE-REVERSE-MISMATCH"] == ["/hosts/0"]
+
+
+def test_the_host_forward_lookup_asks_one_combined_question(inventory):
+    """One forward and one reverse, and the forward carries both halves.
+    Asking the canonical name and the address separately would open a
+    window in which the address compared against mgmtIp and the name that
+    certifies its PTR are answers to two questions a zone is free to
+    answer differently -- the reason the appliance path was built this way.
+    """
+    calls = []
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "esx01.vcf.lab.knowledgeondemand.net",
+                     "esx01.vcf.lab.knowledgeondemand.net")
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse, want_canonical))
+        return zone(name, want_reverse, want_canonical)
+
+    result = run_probes(one_host(inventory), CONFIG, resolver=resolver,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert result.findings == ()
+    assert calls == [("esx01.vcf.lab.knowledgeondemand.net", False, True),
+                     ("10.50.10.11", True, False)]
+
+
+def test_a_host_with_a_blocked_name_still_reverses_connects_and_round_trips(inventory):
+    """Invariant: a host whose NAME is blocked still gets its reverse
+    lookup and its connect. The mgmtIp was declared by the operator and
+    permits() already cleared it, so it carries nothing to exfiltrate and
+    is independently useful -- the forward query is the only thing the
+    domain allowlist may suppress.
+
+    And with no forward query there is no canonical name, so the round
+    trip falls back to the queried name alone, exactly as before. A PTR
+    naming it is therefore still a pass, not a mismatch.
+    """
+    calls, contacted = [], []
+
+    def resolver(name, want_reverse=False, want_canonical=False):
+        calls.append((name, want_reverse, want_canonical))
+        return "esx01.exfil.attacker.example" if want_reverse else None
+
+    inventory = one_host(inventory)
+    inventory["dns"]["subdomain"] = "exfil.attacker.example"
+    result = run_probes(inventory,
+                        ProbeConfig(allowlist=("10.50.0.0/16",),
+                                    domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
+                        resolver=resolver,
+                        connector=lambda h, p, t: (contacted.append(h), True)[1],
+                        resolv_conf_reader=lambda: ())
+    assert "VCF-PROBE-NAME-BLOCKED" in result.codes
+    # No forward query was issued -- the name gate stopped it -- but the
+    # reverse lookup and the connect both still happened.
+    assert calls == [("10.50.10.11", True, False)]
+    assert contacted == ["10.50.10.11"]
+    # ...and the PTR, which names the queried name, still round-trips.
+    assert "VCF-PROBE-REVERSE-MISMATCH" not in result.codes
+
+
+def test_a_blocked_host_name_cannot_have_its_ptr_certified_by_a_canonical(inventory):
+    """The other half of the fallback: with no forward query there is no
+    canonical to accept, so a PTR naming anything other than the queried
+    name is still a mismatch. Defaulting the missing canonical to "accept
+    whatever came back" would silently retire the check for every host
+    whose name is outside the domain allowlist.
+    """
+    def resolver(name, want_reverse=False, want_canonical=False):
+        return "somewhere-else.vcf.lab.knowledgeondemand.net" if want_reverse else None
+
+    inventory = one_host(inventory)
+    inventory["dns"]["subdomain"] = "exfil.attacker.example"
+    result = run_probes(inventory,
+                        ProbeConfig(allowlist=("10.50.0.0/16",),
+                                    domain_allowlist=("vcf.lab.knowledgeondemand.net",)),
+                        resolver=resolver, connector=lambda *_: True,
+                        resolv_conf_reader=lambda: ())
+    assert [f.path for f in result.findings
+            if f.code == "VCF-PROBE-REVERSE-MISMATCH"] == ["/hosts/0"]
+
+
+def test_the_host_forward_answer_is_still_compared_against_the_declared_ip(inventory):
+    """The address half of the combined answer keeps its old job: it is
+    compared against the mgmtIp the operator declared, not against
+    anything else the zone said. Moving to the combined mode must not
+    quietly drop VCF-PROBE-FORWARD-MISMATCH.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.99.99",
+                     "esx01.vcf.lab.knowledgeondemand.net",
+                     "esx01.vcf.lab.knowledgeondemand.net")
+    result = run_probes(one_host(inventory), CONFIG, resolver=zone,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    hit = [f for f in result.findings if f.code == "VCF-PROBE-FORWARD-MISMATCH"]
+    assert len(hit) == 1 and hit[0].path == "/hosts/0"
+    assert "10.50.10.11" in hit[0].message and "10.50.99.99" in hit[0].message
+
+
+def test_a_host_forward_answer_carrying_no_canonical_still_round_trips(inventory):
+    """A resolver whose combined answer pairs a null canonical with a real
+    address is not a reason to stop checking: permits_name(None) is False,
+    so the accept-set narrows to the queried name rather than widening.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     None, "esx01.vcf.lab.knowledgeondemand.net")
+    result = run_probes(one_host(inventory), CONFIG, resolver=zone,
+                        connector=lambda *_: True, resolv_conf_reader=lambda: ())
+    assert result.findings == ()

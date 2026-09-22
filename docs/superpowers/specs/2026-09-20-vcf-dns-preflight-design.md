@@ -129,6 +129,23 @@ PTR. Take both the address and the canonical name from a single
 `gethostbyname_ex`-style answer, so the address that passed `permits()` and the
 name that vouches for its PTR are answers to the same question.
 
+> **Extended to hosts, 2026-09-21 (followup B).** This section scopes CNAME
+> handling to appliance names, on the reasoning that they are the ones most
+> likely to be aliases. That reasoning was about *likelihood*, never about
+> correctness, and the defect is identical on a host: `gethostbyaddr()[0]`
+> returns the canonical name whatever kind of record was queried, so a lab
+> that CNAMEs `esx01` got `VCF-PROBE-REVERSE-MISMATCH` at `error` on a
+> healthy zone. Hosts now use the same combined `gethostbyname_ex`-style
+> forward answer, so both paths have one forward-call shape: the address
+> compares against the declared `mgmtIp`, and the canonical name feeds the
+> shared round trip. Every constraint below applies unchanged — the
+> canonical name must pass `permits_name()` before it may certify a PTR,
+> and the alias list is still never accepted. A host whose name is blocked
+> issues no forward query, so it has no canonical name and is compared
+> against the queried name alone. The two probe loops had already drifted
+> on exactly this point; they are now one extracted `_round_trip()` that
+> neither path can drift from again.
+
 > **Corrected during implementation, 2026-09-21.** This section first said
 > *"compare against the alias list from `gethostbyname_ex`"*. That is wrong and
 > must not be restored. The alias list is supplied by the **forward** zone, so
