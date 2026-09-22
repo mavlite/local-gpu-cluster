@@ -194,8 +194,18 @@ def _nsxt_spec(nsx: dict, creds: dict, default) -> dict:
             "subnets": [{
                 "cidr": pool.get("cidr", ""),
                 "gateway": pool.get("gateway", ""),
-                "ipAddressPoolRanges": [{"start": r["start"], "end": r["end"]}
-                                        for r in pool.get("ranges", [])],
+                # as_sequence and a dict filter, for the same reason as every
+                # other document sequence here -- but note this one already
+                # failed *safely*: r["start"] on a string element raised, and
+                # api.py's broad except withheld the spec. Coercing keeps that
+                # outcome (an empty ipAddressPoolRanges fails the vendored
+                # schema's minItems, so the spec is still withheld) while
+                # replacing a generic VCF-RENDER-FAILED with a VCF-SCHEMA
+                # finding that names the offending field.
+                "ipAddressPoolRanges": [{"start": r.get("start", ""),
+                                         "end": r.get("end", "")}
+                                        for r in as_sequence(pool.get("ranges"))
+                                        if isinstance(r, dict)],
             }],
         }
     return spec

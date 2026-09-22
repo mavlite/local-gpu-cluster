@@ -228,3 +228,41 @@ def test_a_valid_document_renders_exactly_what_it_did_before(inventory):
     assert len(spec["hostSpecs"]) == len(inventory["hosts"])
     assert [m["hostname"] for m in spec["nsxtSpec"]["nsxtManagers"]] == \
         inventory["nsx"]["managers"]
+
+
+# The ninth site, found by re-deriving the list rather than trusting the
+# eight the brief enumerated. Unlike the other four this one already failed
+# SAFELY -- r["start"] on a string element raised and api.py withheld the
+# spec -- so the fix is about diagnostics, not containment: the spec is still
+# withheld (an empty ipAddressPoolRanges fails the vendored schema's minItems)
+# but the operator now gets VCF-SCHEMA naming the field instead of a generic
+# VCF-RENDER-FAILED carrying only an exception class name.
+@pytest.mark.parametrize("ranges", ["10.50.60.10-10.50.60.20", 5, True,
+                                    {"start": "a", "end": "b"},
+                                    ["not-a-dict"], [{"start": "x"}]])
+def test_a_malformed_tep_pool_ranges_never_raises_out_of_render(
+        make_inventory, ranges):
+    doc = make_inventory(**{"nsx.tepPool.ranges": ranges})
+    spec, _ = render(doc)           # must not raise
+    pool = spec["nsxtSpec"]["ipAddressPoolSpec"]["subnets"][0]
+    assert isinstance(pool["ipAddressPoolRanges"], list)
+    for entry in pool["ipAddressPoolRanges"]:
+        assert set(entry) == {"start", "end"}
+
+
+def test_a_malformed_tep_pool_ranges_still_withholds_the_spec(make_inventory):
+    """Coercing must not turn a withheld spec into a returned one: an empty
+    range list fails the vendored schema, which is what keeps it withheld."""
+    from vcfspec.api import render_document
+    import yaml
+    doc = make_inventory(**{"nsx.tepPool.ranges": "10.50.60.10-10.50.60.20"})
+    result = render_document(yaml.safe_dump(doc))
+    assert result.get("spec") is None
+    assert "VCF-SCHEMA" in {f["code"] for f in result["findings"]}
+
+
+def test_valid_tep_pool_ranges_render_unchanged(inventory):
+    spec, _ = render(inventory)
+    rendered = spec["nsxtSpec"]["ipAddressPoolSpec"]["subnets"][0]["ipAddressPoolRanges"]
+    assert rendered == [{"start": r["start"], "end": r["end"]}
+                        for r in inventory["nsx"]["tepPool"]["ranges"]]
