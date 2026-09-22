@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from ..findings import Finding, Result
 from ..rules import finding_for
 from ..rules.coerce import as_mapping as _mapping
+from ..rules.coerce import as_sequence as _sequence
 
 ESX_PORT = 443
 
@@ -516,7 +517,7 @@ def run_probes(inventory: dict, config: ProbeConfig, resolver=None,
         return _bounded_resolve(resolve, name, want_reverse, config.timeout_s,
                                 want_canonical)
 
-    for index, host in enumerate(inventory.get("hosts") or []):
+    for index, host in enumerate(_sequence(inventory.get("hosts"))):
         if not isinstance(host, dict):
             continue
         candidates += 1

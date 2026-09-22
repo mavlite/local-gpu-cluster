@@ -11,6 +11,7 @@ from . import finding_for
 from .coerce import as_address as _address
 from .coerce import as_mapping as _mapping
 from .coerce import as_network as _network
+from .coerce import as_sequence as _sequence
 from .tables import (AUTO_RAID_OVERHEAD, ESX_HOST_RAM_OVERHEAD_GB, STACK_RAM_GB,
                      STACK_STORAGE_GB, TB_TO_GB, VSP_POOL_MIN)
 
@@ -23,11 +24,6 @@ def check_platform(inventory: dict) -> Result:
     findings += _capacity_rules(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
     return Result(tuple(findings))
-
-
-def _sequence(value: object) -> list:
-    """Return value when it is a list, else an empty one."""
-    return value if isinstance(value, list) else []
 
 
 def _named_values(inventory: dict) -> list[tuple[str, str]]:

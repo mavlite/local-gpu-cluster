@@ -541,3 +541,82 @@ def test_the_manifest_names_the_loader_that_is_actually_on_the_iso(out):
     assert "BOOTX64.EFI" in out.manifest
     assert "MBOOT.C32" in out.manifest          # names the decoy explicitly
     assert "bootx64.efi" in out.manifest        # and option 67 agrees
+
+
+# --- A scalar where dns.nameservers / ntp.servers / provisioning.hostWork-
+# arounds should be a sequence must never raise, and must never be iterated
+# character-by-character. Before this fix, `[str(x) for x in (value or [])]`
+# only rescued a falsy scalar -- a truthy string sailed straight into the
+# comprehension and was split into its individual characters, which is the
+# exact garbling class already fixed for dns.nameservers, nsx.managers and
+# the resolver-config reader in validate/probes.py.
+
+def test_hosts_as_a_scalar_never_raises_and_yields_no_artifacts(inventory):
+    """render_provisioning() has its own `for index, host in
+    enumerate(inventory.get("hosts") or [])` loop, distinct from the rule
+    modules' -- a truthy non-iterable `hosts` sailed through the `or []`
+    idiom here too and raised straight out of the renderer with no findings
+    at all, which is worse than a finding: `render_provisioning` doesn't
+    catch exceptions the way api.py's render_document does.
+    """
+    doc = copy.deepcopy(inventory)
+    doc["hosts"] = 5
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    assert out.kickstarts == {}
+    assert out.boot_configs == {}
+
+
+def test_dns_nameservers_as_a_scalar_never_raises_and_is_treated_as_absent(inventory):
+    doc = copy.deepcopy(inventory)
+    doc["dns"]["nameservers"] = "10.50.10.5"
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    line = [ln for ln in out.kickstarts["ks-esx01.cfg"].splitlines()
+            if ln.startswith("network")][0]
+    assert "--nameserver=" in line
+    # Absent, not garbled into one --nameserver= per character of the string.
+    assert "--nameserver=1,0,.,5" not in line
+    # The option's value is everything between "--nameserver=" and the next
+    # space -- empty here, not a garbled per-character list.
+    nameserver_value = line.split("--nameserver=", 1)[1].split(" ", 1)[0]
+    assert nameserver_value == ""
+
+
+def test_ntp_servers_as_a_scalar_never_raises_and_is_treated_as_absent(inventory):
+    doc = copy.deepcopy(inventory)
+    doc["ntp"]["servers"] = "pool.ntp.org"
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    line = [ln for ln in body.splitlines() if "esxcli system ntp set" in ln][0]
+    assert line.strip() == "esxcli system ntp set --enabled=yes"
+    # Absent, not one --server= per character of the string.
+    assert "--server=p" not in body
+    assert "--server=" not in line
+
+
+def test_host_workarounds_as_a_string_scalar_never_raises_and_is_treated_as_absent(inventory):
+    doc = copy.deepcopy(inventory)
+    doc["provisioning"]["hostWorkarounds"] = "consumer-amd"
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    # A scalar is absent, so the workaround block never turns on -- not
+    # "on, but keyed off a garbled single-character comparison".
+    assert "cpuid.brandstring" not in body
+    assert "disable_apichv" not in body
+
+
+def test_host_workarounds_as_a_truthy_non_iterable_scalar_never_raises(inventory):
+    """`provisioning.hostWorkarounds: 5` is what actually distinguishes the
+    fix from `or []` here: the only place host_workarounds is read
+    downstream (firstboot.workarounds_block's `"consumer-amd" in
+    host_workarounds` check) can't tell an empty list from a list of
+    characters that never happens to equal "consumer-amd" -- so the string
+    case above passes even with the bug still in place. A non-iterable
+    truthy scalar is the one shape that actually still raises under
+    `or []` (`for x in (5 or [])` -> TypeError), so it is the mutation-
+    sensitive case for this call site.
+    """
+    doc = copy.deepcopy(inventory)
+    doc["provisioning"]["hostWorkarounds"] = 5
+    out = render_provisioning(doc, ISO_BOOT_CFG)
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert "cpuid.brandstring" not in body

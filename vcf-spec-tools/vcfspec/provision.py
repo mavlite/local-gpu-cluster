@@ -34,6 +34,7 @@ from .firstboot import (MAX_TIER_RATIO_PCT, MIN_TIER_RATIO_PCT,
 from .render import InsecureCredentialError
 from .inventory import REFERENCE_RE
 from .rules import finding_for
+from .rules.coerce import as_sequence as _sequence
 
 DEFAULT_ESX_VERSION = "9.1.1.0"
 
@@ -407,16 +408,16 @@ def render_provisioning(inventory: dict,
 
     dns = _mapping(inventory.get("dns"))
     subdomain = str(dns.get("subdomain", "")).strip(".")
-    nameserver_list = [str(x) for x in (dns.get("nameservers") or [])]
+    nameserver_list = [str(x) for x in _sequence(dns.get("nameservers"))]
     nameservers = ",".join(nameserver_list)
     # The boot-time option is documented as a single address, and a comma list
     # is not. One resolver is all the installer needs to fetch the kickstart;
     # the kickstart line below carries the full list for the installed host.
     boot_nameserver = nameserver_list[0] if nameserver_list else ""
-    ntp = [str(x) for x in (_mapping(inventory.get("ntp")).get("servers") or [])]
+    ntp = [str(x) for x in _sequence(_mapping(inventory.get("ntp")).get("servers"))]
     ntp_opts = " ".join(f"--server={x}" for x in ntp)
 
-    host_workarounds = [str(x) for x in (prov.get("hostWorkarounds") or [])]
+    host_workarounds = [str(x) for x in _sequence(prov.get("hostWorkarounds"))]
 
     # vmk0 and vSwitch0 take the MANAGEMENT MTU, never nsx.fabricMtu -- see
     # the block comment in firstboot.py. A missing or malformed value leaves
@@ -444,7 +445,7 @@ def render_provisioning(inventory: dict,
     vlan_opt = f" --vlanid={vlan}" if tagged else ""
     vlan_boot = f" vlanid={vlan}" if tagged else ""
 
-    for index, host in enumerate(inventory.get("hosts") or []):
+    for index, host in enumerate(_sequence(inventory.get("hosts"))):
         host = _mapping(host)
         name, path = host.get("name", ""), f"/hosts/{index}"
         mac = str(host.get("provisioningMac", "")).lower()

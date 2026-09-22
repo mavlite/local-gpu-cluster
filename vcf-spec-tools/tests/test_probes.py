@@ -493,6 +493,23 @@ def test_a_document_with_no_hosts_at_all_is_not_reported_as_all_blocked():
     assert result.findings == ()
 
 
+def test_a_wrong_typed_hosts_field_never_raises():
+    """`hosts` has its own `enumerate(inventory.get("hosts") or [])` loop
+    here, separate from the one in rules/network.py and rules/platform.py
+    -- a truthy non-iterable value (an int, `True`) sailed through the
+    `or []` idiom here too and raised straight out of run_probes(), which
+    api.py's validate_document() does not wrap in a try/except (it relies
+    on this module's own documented promise that nothing here ever lets an
+    exception reach the caller).
+    """
+    result = run_probes({"dns": {"subdomain": "vcf.lab.knowledgeondemand.net"},
+                         "hosts": 5},
+                        CONFIG, resolver=tracking_resolver([]),
+                        connector=lambda *_: True)
+    assert isinstance(result, Result)
+    assert result.findings == ()
+
+
 def test_reverse_dns_pointing_at_a_different_host_is_a_finding(inventory):
     """A PTR that exists but names someone else is the failure this tool was
     built for: VCF validates both directions, and a RouterOS-style

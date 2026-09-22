@@ -12,6 +12,7 @@ from . import finding_for
 from .coerce import as_address as _address
 from .coerce import as_mapping as _mapping
 from .coerce import as_network as _network
+from .coerce import as_sequence as _sequence
 
 TEP_MTU_MIN = 1600
 TEPS_PER_HOST = 2
@@ -112,7 +113,7 @@ def _host_rules(inventory: dict, networks: dict) -> list[Finding]:
     out: list[Finding] = []
     mgmt = networks.get("management")
     seen: dict[str, list[str]] = defaultdict(list)
-    for index, host in enumerate(inventory.get("hosts") or []):
+    for index, host in enumerate(_sequence(inventory.get("hosts"))):
         if not isinstance(host, dict):
             continue
         ip, name = host.get("mgmtIp"), host.get("name", f"hosts[{index}]")
@@ -136,7 +137,7 @@ def _tep_pool_rules(inventory: dict) -> list[Finding]:
     ranges = pool.get("ranges")
     if not isinstance(ranges, list):
         ranges = []
-    hosts = len(inventory.get("hosts") or [])
+    hosts = len(_sequence(inventory.get("hosts")))
     size = 0
     for entry in ranges:
         if not isinstance(entry, dict):
@@ -181,7 +182,7 @@ def _count_congruent(low: int, high: int, modulus: int, remainder: int) -> int:
 def _ip_pool_rules(inventory: dict) -> list[Finding]:
     out: list[Finding] = []
     networks = _mapping(inventory.get("networks"))
-    hosts = len(inventory.get("hosts") or [])
+    hosts = len(_sequence(inventory.get("hosts")))
     for purpose in IP_POOL_REQUIRED_PURPOSES:
         entry = _mapping(networks.get(purpose))
         if not entry:
