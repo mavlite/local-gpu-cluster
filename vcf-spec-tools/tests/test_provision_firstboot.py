@@ -467,3 +467,29 @@ def test_the_firstboot_block_runs_in_the_order_the_host_needs(out):
     positions = [body.index(step) for step in steps]
     assert positions == sorted(positions), [
         step for step, _ in sorted(zip(steps, positions), key=lambda p: p[1])]
+
+
+def test_ssh_is_persisted_across_the_reboot_this_file_performs(out):
+    """enable_ssh/start_ssh set the RUNNING state; the startup POLICY is
+    separate and defaults to off. %firstboot ends by rebooting, so without
+    `chkconfig SSH on` the host comes back with SSH shut.
+
+    Observed on all three lab hosts 2026-09-22: port 22 refused while ICMP,
+    TLS and the hostd SDK all answered, so it did not present as an SSH
+    fault -- it surfaced as VCF's host-connect check failing during
+    commissioning.
+    """
+    body = out.kickstarts["ks-esx01.cfg"]
+    assert "chkconfig SSH on" in body
+    # Order matters: the policy must be set before the reboot at the end.
+    assert body.index("chkconfig SSH on") < body.index("shutdown reboot")
+
+
+def test_ssh_enable_start_and_policy_are_all_three_present(out):
+    """Any one of these alone leaves a gap: policy without start means no SSH
+    until the next boot, start without policy means none after it."""
+    body = out.kickstarts["ks-esx01.cfg"]
+    for command in ("vim-cmd hostsvc/enable_ssh",
+                    "vim-cmd hostsvc/start_ssh",
+                    "chkconfig SSH on"):
+        assert body.count(command) == 1, f"{command!r} not emitted exactly once"

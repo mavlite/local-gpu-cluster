@@ -59,8 +59,18 @@ esxcli system maintenanceMode set -e true
 _SERVICES = """\
 # SSH: the operator's only way in on a host with no BMC, and how VCF reaches
 # it during commissioning.
+#
+# All three commands are needed, and the third is the one that was missing.
+# enable_ssh/start_ssh change the RUNNING state; the service's startup POLICY
+# is separate and defaults to off. This block is followed by a reboot, so
+# without chkconfig the host comes back with SSH shut -- which is exactly what
+# happened on all three lab hosts, and it fails VCF's host-connect check
+# during commissioning while ICMP and the SDK still answer, so it does not
+# look like an SSH problem. Verified on a live 9.1.1 host: the chkconfig line
+# below is what makes `chkconfig --list` report the service on after a reboot.
 vim-cmd hostsvc/enable_ssh
 vim-cmd hostsvc/start_ssh
+chkconfig SSH on
 # Enabling SSH raises a permanent host warning. On one host that is cosmetic;
 # on three it is three standing yellow alarms in vCenter that hide real ones.
 # NOT enabling the ESXi Shell, which Lam's script does alongside this: with no
