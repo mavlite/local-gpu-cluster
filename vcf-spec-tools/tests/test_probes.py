@@ -1702,6 +1702,99 @@ def test_the_host_forward_answer_is_still_compared_against_the_declared_ip(inven
     assert "10.50.10.11" in hit[0].message and "10.50.99.99" in hit[0].message
 
 
+# --- Followup B: a gate is never wrapped in a guard -------------------------
+#
+# The module's stated rule is that every call producing DATA is guarded and
+# no call deciding PERMISSION ever is, "because 'it raised, carry on' is
+# indistinguishable from 'it said yes'". Mutation testing found that rule
+# had no test: wrapping config.permits_name() in
+# `try: ... except Exception: allowed = True` inside _round_trip left all
+# 638 tests green. The two below close that, one per gate.
+#
+# Both assert the exception PROPAGATES. That is the deliberate design, and
+# it is not in tension with "nothing escapes run_probes": that promise is
+# about the caller-INJECTED seams -- resolver, connector, resolv_conf_reader
+# -- whose behaviour this module cannot assume. ProbeConfig is the
+# operator's own policy object, and a policy that cannot answer must stop
+# the run, never be read as an allow.
+
+
+class _RaisingNameGate(ProbeConfig):
+    """A ProbeConfig whose NAME gate is broken. Subclassing is the only way
+    to express this: permits_name() is the thing under test, so it cannot
+    be injected."""
+
+    def permits_name(self, fqdn: object) -> bool:
+        raise RuntimeError("the name gate is broken")
+
+
+class _GateRaisingOnTheCanonical(ProbeConfig):
+    """permits_name() answers normally for the queried name and raises ONLY
+    for the canonical one.
+
+    That narrowness is the whole point. A gate that raises on every name
+    raises at the host path's own `permits_name(fqdn)` call, long before
+    the round trip -- so a `pytest.raises` around it passes whatever
+    _round_trip does, which is how the first version of this test went
+    vacuous while a wrapped gate sat there unnoticed. Raising only on the
+    canonical name makes _round_trip's call the only one that can throw.
+    """
+
+    def permits_name(self, fqdn: object) -> bool:
+        if fqdn == "attacker-owned.evil.example":
+            raise RuntimeError("the canonical gate is broken")
+        return super().permits_name(fqdn)
+
+
+class _RaisingAddressGate(ProbeConfig):
+    def permits(self, ip: object) -> bool:
+        raise RuntimeError("the address gate is broken")
+
+
+def test_a_raising_gate_on_the_canonical_name_is_not_read_as_an_allow(inventory):
+    """The gate inside _round_trip, pinned on its own.
+
+    Wrapping it in `except Exception: allowed = True` makes the forward
+    zone's canonical name certify its own PTR whenever the gate fails --
+    a gate failure converted into a pass, on the exact code path the
+    extraction newly shares between hosts and appliances.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "attacker-owned.evil.example", "attacker-owned.evil.example")
+    config = _GateRaisingOnTheCanonical(
+        allowlist=("10.50.0.0/16",),
+        domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the canonical gate is broken"):
+        run_probes(one_host(inventory), config, resolver=zone,
+                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+
+
+def test_a_raising_name_gate_stops_the_run_rather_than_certifying_anything(inventory):
+    """A swallowed permission gate converts a gate failure into a pass,
+    which is the one thing this module must never do. If this ever starts
+    returning a Result instead of raising, check that permits_name() has
+    not been wrapped in a try/except somewhere on the way.
+    """
+    zone = host_zone("esx01.vcf.lab.knowledgeondemand.net", "10.50.10.11",
+                     "attacker-owned.evil.example", "attacker-owned.evil.example")
+    config = _RaisingNameGate(allowlist=("10.50.0.0/16",),
+                              domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the name gate is broken"):
+        run_probes(one_host(inventory), config, resolver=zone,
+                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+
+
+def test_a_raising_address_gate_stops_the_run_rather_than_permitting_the_host(inventory):
+    """The same rule on the IP gate. Swallowing this one would probe a
+    target the allowlist never cleared."""
+    config = _RaisingAddressGate(allowlist=("10.50.0.0/16",),
+                                 domain_allowlist=("vcf.lab.knowledgeondemand.net",))
+    with pytest.raises(RuntimeError, match="the address gate is broken"):
+        run_probes(one_host(inventory), config,
+                   resolver=lambda n, wr=False, wc=False: None,
+                   connector=lambda *_: True, resolv_conf_reader=lambda: ())
+
+
 def test_a_host_forward_answer_carrying_no_canonical_still_round_trips(inventory):
     """A resolver whose combined answer pairs a null canonical with a real
     address is not a reason to stop checking: permits_name(None) is False,
