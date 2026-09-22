@@ -21,7 +21,7 @@ SECRET = "VMw@re123!Real"
 
 SDDC_SPEC = {
     "sddcId": "lab01",
-    "dnsSpec": {"subdomain": "lab.local", "nameservers": ["10.0.0.1"]},
+    "dnsSpec": {"subdomain": "vcf.lab.knowledgeondemand.net", "nameservers": ["10.0.0.1"]},
     "networkSpecs": [],
     "vcenterSpec": {"vcenterHostname": "vc01",
                     "rootVcenterPassword": "${vcenter_root}",

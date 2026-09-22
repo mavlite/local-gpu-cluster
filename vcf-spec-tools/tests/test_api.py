@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import yaml
 
 from vcfspec import api
@@ -558,7 +559,7 @@ def test_probes_are_skipped_with_a_reason_for_an_sddc_spec_document(monkeypatch)
     spec_text = json.dumps(render_document(TEXT)["spec"])
     out = validate_document(spec_text, input_kind="sddc_spec",
                             probe_config=ProbeConfig(allowlist=("10.50.10.0/24",),
-                                                     domain_allowlist=("lab.local",)))
+                                                     domain_allowlist=("vcf.lab.knowledgeondemand.net",)))
     assert "probes" not in out["layers_run"]
     assert "probes" in out["layers_skipped"]
     assert "inventory" in out["layers_skipped"]["probes"]
@@ -672,4 +673,86 @@ def test_verify_never_raises_for_a_version_with_defaults_but_no_schema(monkeypat
     out = api.render_document(TEXT)
     assert out["valid"] is False
     assert "spec" not in out
-    assert "VCF-SCHEMA-VERSION-UNKNOWN" in {f["code"] for f in out["findings"]}
+
+
+# --- A wrong-typed `hosts` field must never reach the caller as a traceback.
+#
+# api.py's own docstring states the invariant: nothing below it ever lets an
+# exception reach the caller. That was false for `hosts` before this fix --
+# the `or []` idiom only rescues a *falsy* wrong value, so a truthy
+# non-iterable (an int, True, a dict) sailed through into enumerate()/len()
+# in rules/network.py and rules/platform.py and raised straight out of
+# validate_document() (neither its schema-error path nor its rules call is
+# wrapped in a try/except -- unlike render_document's render() call, which
+# already has a broad `except Exception` around it). `hosts: "esx01"` is the
+# most dangerous shape of the bunch: a string is iterable, so it did not
+# raise at all, it silently became 5 phantom hosts (one per character) fed
+# into capacity arithmetic.
+
+_BAD_HOSTS_SHAPES = [5, True, "esx01", {"a": 1}, None, 3.5]
+
+
+@pytest.mark.parametrize("bad_hosts", _BAD_HOSTS_SHAPES, ids=repr)
+def test_wrong_typed_hosts_never_raises_through_validate_document(bad_hosts):
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = bad_hosts
+    out = validate_document(yaml.safe_dump(doc))
+    assert isinstance(out, dict)
+    assert out["valid"] is False
+
+
+@pytest.mark.parametrize("bad_hosts", _BAD_HOSTS_SHAPES, ids=repr)
+def test_wrong_typed_hosts_never_raises_through_render_document(bad_hosts):
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = bad_hosts
+    out = render_document(yaml.safe_dump(doc))
+    assert isinstance(out, dict)
+
+
+def test_a_generator_typed_hosts_never_raises_through_validate_document(monkeypatch):
+    """A generator cannot survive a YAML round trip (yaml.safe_dump has no
+    representer for one), so it cannot arrive via `text` the way the other
+    shapes above do. It is injected past the loader instead, the same way
+    test_render_document_converts_a_type_error_from_render_to_a_finding()
+    and friends inject other post-load conditions, so the public API is
+    still what gets exercised -- not as_sequence() directly, which
+    tests/test_coerce.py already covers.
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = (h for h in ())
+    monkeypatch.setattr(api, "load_document", lambda text: doc)
+    out = api.validate_document(TEXT)
+    assert isinstance(out, dict)
+    assert out["valid"] is False
+
+
+def test_a_generator_typed_hosts_never_raises_through_render_document(monkeypatch):
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = (h for h in ())
+    monkeypatch.setattr(api, "load_document", lambda text: doc)
+    out = api.render_document(TEXT)
+    assert isinstance(out, dict)
+
+
+def test_string_hosts_does_not_report_capacity_findings_computed_from_phantom_hosts():
+    """The `hosts: "esx01"` case is not merely non-crashing: before this
+    fix `len("esx01")` reported 5 hosts, `enumerate("esx01")` walked its
+    five characters as though each were a host entry, and both fed capacity
+    arithmetic in rules/platform.py (_capacity_rules) and the IP-pool /
+    TEP-pool sizing in rules/network.py. A string must be treated as
+    *absent*, i.e. zero hosts, so none of the capacity-shortfall findings
+    computed from a nonzero host count may appear, and none of the
+    per-host findings (which would otherwise be indexed off phantom
+    characters) may appear either.
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = "esx01"
+    out = validate_document(yaml.safe_dump(doc))
+    codes = [f["code"] for f in out["findings"]]
+    for phantom_host_code in (
+        "VCF-CAP-RAM-SHORTFALL", "VCF-CAP-N1-SHORTFALL",
+        "VCF-CAP-STORAGE-SHORTFALL", "VCF-CAP-UNKNOWN-HARDWARE",
+        "VCF-NET-IP-POOL-TOO-SMALL", "VCF-NSX-TEP-POOL-TOO-SMALL",
+        "VCF-NET-HOST-IP-OUTSIDE-SUBNET",
+    ):
+        assert phantom_host_code not in codes

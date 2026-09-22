@@ -108,7 +108,7 @@ def test_nsx_carries_managers_vip_and_tep_pool(inventory):
     spec, _ = render(inventory)
     nsxt = spec["nsxtSpec"]
     assert nsxt["nsxtManagers"] == [{"hostname": "nsx01"}]
-    assert nsxt["vipFqdn"] == "nsx.lab.local"
+    assert nsxt["vipFqdn"] == "nsx.vcf.lab.knowledgeondemand.net"
     assert nsxt["transportVlanId"] == 1613
     subnet = nsxt["ipAddressPoolSpec"]["subnets"][0]
     assert subnet["cidr"] == "10.50.13.0/24"
@@ -119,8 +119,8 @@ def test_nsx_carries_managers_vip_and_tep_pool(inventory):
 def test_vsp_cluster_uses_an_iprange_pool(inventory):
     spec, _ = render(inventory)
     vsp = spec["vspClusterSpec"]
-    assert vsp["platformFqdn"] == "vcf.lab.local"
-    assert vsp["instanceFqdn"] == "lab01.lab.local"
+    assert vsp["platformFqdn"] == "platform.vcf.lab.knowledgeondemand.net"
+    assert vsp["instanceFqdn"] == "lab01.vcf.lab.knowledgeondemand.net"
     assert vsp["ipv4Pool"] == {"ipRange": {"startIpAddress": "10.50.10.100",
                                            "endIpAddress": "10.50.10.115"}}
 
@@ -185,3 +185,84 @@ def test_render_refuses_a_literal_credential(inventory):
     with pytest.raises(InsecureCredentialError) as excinfo:
         render(inventory)
     assert "Sup3rSecret!" not in str(excinfo.value)
+
+
+# render() is called straight from api.render_document(), and a wrong-typed
+# scalar used to be iterated character by character INTO THE RETURNED SPEC:
+# nsx.managers as a string produced 24 phantom managers, nameservers became
+# ['1','0','.','5',...]. Nothing raised -- a string is iterable -- so api.py's
+# broad except never fired, the garbled lists passed the vendored-schema
+# verify step, and `spec` was returned rather than withheld. api.py's own
+# docstring names that risk: "an operator (or an agent) pipes .spec into a
+# file and never reads the findings."
+@pytest.mark.parametrize("section,key,pointer", [
+    ("nsx", "managers", ("nsxtSpec", "nsxtManagers")),
+    ("dns", "nameservers", ("dnsSpec", "nameservers")),
+    ("ntp", "servers", ("ntpServers",)),
+])
+@pytest.mark.parametrize("scalar", ["a-string-value", 5, True, {"a": 1}])
+def test_a_wrong_typed_sequence_never_reaches_the_rendered_spec(
+        make_inventory, section, key, pointer, scalar):
+    doc = make_inventory(**{f"{section}.{key}": scalar})
+    spec, _ = render(doc)
+    node = spec
+    for step in pointer:
+        node = node[step]
+    # Empty, not a per-character explosion and not the raw scalar.
+    assert node == [], f"{section}.{key}={scalar!r} rendered as {node!r}"
+
+
+@pytest.mark.parametrize("scalar", ["esx01", 5, True])
+def test_a_wrong_typed_hosts_field_renders_no_host_specs(make_inventory, scalar):
+    doc = make_inventory(**{"hosts": scalar})
+    spec, _ = render(doc)
+    assert spec["hostSpecs"] == []
+
+
+def test_a_valid_document_renders_exactly_what_it_did_before(inventory):
+    """The coercion must be invisible to every well-formed document -- it is
+    a guard on malformed input, not a change to the rendering."""
+    spec, _ = render(inventory)
+    assert spec["dnsSpec"]["nameservers"] == inventory["dns"]["nameservers"]
+    assert spec["ntpServers"] == inventory["ntp"]["servers"]
+    assert len(spec["hostSpecs"]) == len(inventory["hosts"])
+    assert [m["hostname"] for m in spec["nsxtSpec"]["nsxtManagers"]] == \
+        inventory["nsx"]["managers"]
+
+
+# The ninth site, found by re-deriving the list rather than trusting the
+# eight the brief enumerated. Unlike the other four this one already failed
+# SAFELY -- r["start"] on a string element raised and api.py withheld the
+# spec -- so the fix is about diagnostics, not containment: the spec is still
+# withheld (an empty ipAddressPoolRanges fails the vendored schema's minItems)
+# but the operator now gets VCF-SCHEMA naming the field instead of a generic
+# VCF-RENDER-FAILED carrying only an exception class name.
+@pytest.mark.parametrize("ranges", ["10.50.60.10-10.50.60.20", 5, True,
+                                    {"start": "a", "end": "b"},
+                                    ["not-a-dict"], [{"start": "x"}]])
+def test_a_malformed_tep_pool_ranges_never_raises_out_of_render(
+        make_inventory, ranges):
+    doc = make_inventory(**{"nsx.tepPool.ranges": ranges})
+    spec, _ = render(doc)           # must not raise
+    pool = spec["nsxtSpec"]["ipAddressPoolSpec"]["subnets"][0]
+    assert isinstance(pool["ipAddressPoolRanges"], list)
+    for entry in pool["ipAddressPoolRanges"]:
+        assert set(entry) == {"start", "end"}
+
+
+def test_a_malformed_tep_pool_ranges_still_withholds_the_spec(make_inventory):
+    """Coercing must not turn a withheld spec into a returned one: an empty
+    range list fails the vendored schema, which is what keeps it withheld."""
+    from vcfspec.api import render_document
+    import yaml
+    doc = make_inventory(**{"nsx.tepPool.ranges": "10.50.60.10-10.50.60.20"})
+    result = render_document(yaml.safe_dump(doc))
+    assert result.get("spec") is None
+    assert "VCF-SCHEMA" in {f["code"] for f in result["findings"]}
+
+
+def test_valid_tep_pool_ranges_render_unchanged(inventory):
+    spec, _ = render(inventory)
+    rendered = spec["nsxtSpec"]["ipAddressPoolSpec"]["subnets"][0]["ipAddressPoolRanges"]
+    assert rendered == [{"start": r["start"], "end": r["end"]}
+                        for r in inventory["nsx"]["tepPool"]["ranges"]]

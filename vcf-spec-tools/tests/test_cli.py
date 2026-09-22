@@ -193,10 +193,10 @@ def test_allowlist_domain_is_threaded_through_to_probeconfig(monkeypatch, capsys
     monkeypatch.setattr(cli, "validate_document", fake_validate_document)
     exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
                       "--allowlist", "10.50.10.0/24",
-                      "--allowlist-domain", "lab.local",
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net",
                       "--allowlist-domain", "lab2.local"])
     assert exit_code == 0
-    assert captured["probe_config"].domain_allowlist == ("lab.local", "lab2.local")
+    assert captured["probe_config"].domain_allowlist == ("vcf.lab.knowledgeondemand.net", "lab2.local")
 
 
 def test_probe_with_no_allowlist_domain_defaults_to_resolving_nothing(
@@ -213,15 +213,25 @@ def test_probe_with_no_allowlist_domain_defaults_to_resolving_nothing(
     assert captured["probe_config"].domain_allowlist == ()
 
 
-def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(capsys):
+def test_probe_with_an_allowlist_matching_nothing_does_not_exit_zero(
+        monkeypatch, capsys):
     """The exact reproduction: a valid, non-empty allowlist that matches
     none of the example lab's hosts. The CLI refuses an *empty* allowlist
     for precisely this reason, and this case used to exit 0 with
     valid: true, layers_run including "probes", and zero lookups made.
+
+    The host IP allowlist matches nothing, so no host is looked up -- but
+    an IP allowlist cannot gate a *name*, so the appliance names are gated
+    by --allowlist-domain instead and really would be resolved here. This
+    test is about an exit code, not about DNS, so the real resolver is
+    replaced: leaving it in place made the suite issue six live queries
+    against the lab zone and took twelve seconds to do it.
     """
+    from vcfspec.validate import probes
+    monkeypatch.setattr(probes, "_default_resolver", lambda *a, **k: None)
     exit_code = main(["validate", str(EXAMPLE_PATH), "--probe",
                       "--allowlist", "203.0.113.0/24",
-                      "--allowlist-domain", "lab.local"])
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net"])
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 1
     assert payload["valid"] is False
@@ -268,3 +278,123 @@ def test_render_input_kind_forces_wrong_kind_rejection_not_misdetection(capsys):
 def test_render_input_kind_rejects_an_unrecognised_value(capsys):
     exit_code = main(["render", str(EXAMPLE_PATH), "--input-kind", "bogus"])
     assert exit_code == 2
+
+
+# --- --fail-on: the exit code follows a chosen severity threshold, but the
+# reported `valid` field never moves. ---
+
+def _write(tmp_path, doc):
+    path = tmp_path / "doc.yaml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    return path
+
+
+def _valid_inventory():
+    return yaml.safe_load(TEXT)
+
+
+def _inventory_with_a_warning():
+    """The example inventory, with the VSP platform FQDN moved outside the
+    declared dns.subdomain -- triggers VCF-NAME-WRONG-DOMAIN, which is a
+    `warning` in the catalogue, and introduces no schema error (platformFqdn
+    is a free-form string, unlike the vcenter/sddcManager shortname fields).
+    """
+    doc = yaml.safe_load(TEXT)
+    doc["appliances"]["vsp"]["platformFqdn"] = "platform.wrong-domain.example"
+    return doc
+
+
+def test_inventory_with_a_warning_really_has_one_and_no_error(tmp_path, capsys):
+    # Guard against a vacuous test: confirm the fixture actually carries a
+    # warning and nothing at error/critical, so the two tests below are
+    # exercising the flag rather than passing by accident.
+    path = _write(tmp_path, _inventory_with_a_warning())
+    main(["validate", str(path)])
+    payload = json.loads(capsys.readouterr().out)
+    severities = {f["severity"] for f in payload["findings"]}
+    assert "warning" in severities
+    assert "VCF-NAME-WRONG-DOMAIN" in {f["code"] for f in payload["findings"]}
+    assert not (severities & {"error", "critical"})
+
+
+def test_fail_on_defaults_to_error(tmp_path, capsys):
+    # A document whose worst finding is a warning still exits 0 by default.
+    path = _write(tmp_path, _inventory_with_a_warning())
+    assert main(["validate", str(path)]) == 0
+
+
+def test_fail_on_warning_makes_a_warning_exit_nonzero(tmp_path, capsys):
+    path = _write(tmp_path, _inventory_with_a_warning())
+    assert main(["validate", str(path), "--fail-on", "warning"]) == 1
+
+
+def test_fail_on_does_not_change_the_reported_validity(tmp_path, capsys):
+    path = _write(tmp_path, _inventory_with_a_warning())
+    main(["validate", str(path), "--fail-on", "warning"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True      # exit code moved; the verdict did not
+
+
+def test_fail_on_is_rejected_for_render(tmp_path, capsys):
+    # --fail-on is only added to the validate subparser (Step 3), so
+    # argparse itself rejects it on render as an unrecognised argument.
+    # main() -> int is a contract for programmatic callers (see
+    # test_bogus_flag_returns_two_instead_of_raising above): argparse's
+    # own SystemExit(2) is caught inside main() and returned as 2, never
+    # raised out to the caller -- so this asserts on the return value,
+    # like its --input-kind sibling below, rather than on a raised
+    # SystemExit.
+    path = _write(tmp_path, _valid_inventory())
+    exit_code = main(["render", str(path), "--fail-on", "warning"])
+    assert exit_code == 2
+
+
+def test_an_integer_mgmt_ip_does_not_crash_the_cli(tmp_path, capsys, monkeypatch):
+    """The reviewer's reproduction, end to end at the surface they used.
+
+    `mgmtIp: 171051531` is 10.50.10.11 written as a YAML integer.
+    ipaddress.ip_address() accepts it, so ProbeConfig.permits() cleared
+    the host, and socket.create_connection((171051531, 443)) then raised
+    TypeError -- which _default_connector does not catch, because it
+    catches OSError. The exception left run_probes, crossed api.py's
+    deliberately unwrapped call, and the CLI printed
+    "internal error (TypeError)" with an empty layers_run and zero
+    findings: the misleading-empty-result shape this layer exists to
+    prevent, reachable from one line of YAML.
+    """
+    from vcfspec.validate import probes
+
+    contacted = []
+
+    def fake_connector(host, port, timeout):
+        # Stands in for socket.create_connection, and is type-strict in
+        # exactly the way that matters: given a non-string host it raises
+        # TypeError, which is what _default_connector's `except OSError`
+        # does not catch. Keeping that behaviour is what makes this an
+        # end-to-end reproduction rather than a test of normalisation
+        # alone -- remove both the guard and the normalisation and this
+        # test sees the real "internal error (TypeError)" output.
+        contacted.append(host)
+        if not isinstance(host, str):
+            raise TypeError(f"str, bytes or integer expected, not {type(host).__name__}")
+        return False
+
+    monkeypatch.setattr(probes, "_default_resolver", lambda *a, **k: None)
+    monkeypatch.setattr(probes, "_default_connector", fake_connector)
+
+    doc = yaml.safe_load(TEXT)
+    doc["hosts"] = doc["hosts"][:1]
+    doc["hosts"][0]["mgmtIp"] = 171051531
+    path = tmp_path / "int-ip.yaml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+    exit_code = main(["validate", str(path), "--probe",
+                      "--allowlist", "10.50.10.0/24",
+                      "--allowlist-domain", "vcf.lab.knowledgeondemand.net"])
+    captured = capsys.readouterr()
+    assert "internal error" not in captured.err
+    payload = json.loads(captured.out)
+    assert exit_code in (0, 1)
+    assert "probes" in payload["layers_run"]
+    # The connector was handed the canonical string, not the raw integer.
+    assert contacted == ["10.50.10.11"]

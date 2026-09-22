@@ -1,5 +1,5 @@
 import pytest
-from vcfspec.findings import BLOCKING
+from vcfspec.findings import BLOCKING, Severity
 from vcfspec.rules import load_catalogue
 from vcfspec.rules.platform import check_platform
 
@@ -79,6 +79,50 @@ def test_capacity_rules_source_never_reads_hardware_cores():
     assert "'cores'" not in inspect.getsource(platform._capacity_rules)
 
 
+def test_reference_lab_declares_the_workaround_its_tiering_needs(inventory):
+    """The example lab is consumer Ryzen hardware and already relies on
+    memoryTieringGb for N-1 (see test_memory_tiering_clears_the_n1_shortfall).
+    It must also declare the workaround that makes tiering actually work, or
+    the capacity plan is counting RAM that will not be there.
+    """
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" not in check_platform(inventory).codes
+
+
+def test_tiering_without_the_consumer_amd_workaround_is_a_finding(inventory):
+    """This is the rule the whole feature exists for: memoryTieringGb > 0
+    declared, but 'consumer-amd' not requested -- tiering is claimed on
+    hardware that (per the spec) needs a workaround to make it function, and
+    the workaround was never asked for.
+    """
+    inventory["provisioning"]["hostWorkarounds"] = []
+    result = check_platform(inventory)
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" in result.codes
+    assert result.valid is False   # error severity: this is not a warning
+    # Reported per host, not once for the whole document.
+    tiering_findings = [f for f in result.findings
+                        if f.code == "VCF-CAP-TIERING-NEEDS-WORKAROUND"]
+    assert len(tiering_findings) == 3
+    assert tiering_findings[0].path == "/hosts/0/hardware/memoryTieringGb"
+
+
+def test_no_provisioning_workarounds_field_at_all_is_still_a_finding(inventory):
+    """hostWorkarounds is optional; its absence must read the same as an
+    empty list, not silently skip the check.
+    """
+    del inventory["provisioning"]["hostWorkarounds"]
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" in check_platform(inventory).codes
+
+
+def test_zero_tiering_needs_no_workaround(inventory):
+    """A host with no declared tiering has nothing for the workaround to
+    protect, so its absence is not a finding.
+    """
+    inventory["provisioning"]["hostWorkarounds"] = []
+    for host in inventory["hosts"]:
+        host["hardware"]["memoryTieringGb"] = 0
+    assert "VCF-CAP-TIERING-NEEDS-WORKAROUND" not in check_platform(inventory).codes
+
+
 def test_missing_vsan_capacity_is_a_shortfall_not_a_silent_pass(inventory):
     for host in inventory["hosts"]:
         host["hardware"].pop("vsanDeviceTb", None)
@@ -98,13 +142,94 @@ def test_uppercase_host_name_is_an_error(inventory):
 
 
 def test_uppercase_fqdn_field_is_an_error(make_inventory):
-    doc = make_inventory(**{"nsx.vipFqdn": "NSX.lab.local"})
+    doc = make_inventory(**{"nsx.vipFqdn": "NSX.vcf.lab.knowledgeondemand.net"})
     assert "VCF-NAME-NOT-LOWERCASE" in check_platform(doc).codes
 
 
 def test_fqdn_outside_the_dns_subdomain_is_a_warning(make_inventory):
     doc = make_inventory(**{"nsx.vipFqdn": "nsx.other.local"})
     assert "VCF-NAME-WRONG-DOMAIN" in check_platform(doc).codes
+
+
+def test_local_suffix_on_vsp_platform_fqdn_is_a_warning(make_inventory):
+    doc = make_inventory(**{"appliances.vsp.platformFqdn": "vcf-vsp.lab.local"})
+    result = check_platform(doc)
+    hits = [f for f in result.findings if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert [f.path for f in hits] == ["/appliances/vsp/platformFqdn"]
+    assert hits[0].severity is Severity.WARNING
+
+
+def test_local_subdomain_is_reported_once_at_its_source(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "vcf-vsp.vcf.lab.local"
+    doc["appliances"]["vsp"]["instanceFqdn"] = "vcf-vsp-i.vcf.lab.local"
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    # One finding, at the one-line fix -- not three naming the symptom.
+    assert [f.path for f in hits] == ["/dns/subdomain"]
+
+
+def test_local_is_not_flagged_on_the_components_that_still_allow_it(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.example.net"})
+    doc["appliances"]["vcenter"]["hostname"] = "vcenter.corp.local"
+    doc["appliances"]["sddcManager"]["hostname"] = "sddc.corp.local"
+    doc["nsx"]["vipFqdn"] = "nsx.corp.local"
+    doc["hosts"][0]["name"] = "esx01.corp.local"
+    codes = check_platform(doc).codes
+    assert "VCF-NAME-VSP-LOCAL-SUFFIX" not in codes
+
+
+def test_sso_domain_is_exempt(make_inventory):
+    # vsphere.local is an identity namespace, not a DNS domain, and is the
+    # correct value. A rule that flagged it would be telling the operator to
+    # break a working deployment.
+    doc = make_inventory(**{"appliances.vcenter.ssoDomain": "vsphere.local"})
+    assert "VCF-NAME-VSP-LOCAL-SUFFIX" not in check_platform(doc).codes
+
+
+def test_subdomain_itself_is_not_reported_as_the_wrong_domain(make_inventory):
+    # Adding /dns/subdomain to _named_values() puts the subdomain through
+    # the WRONG-DOMAIN check, where `value.endswith("." + domain)` is false
+    # for value == domain. Guard it, or every document gains a finding.
+    doc = make_inventory(**{"dns.subdomain": "vcf.lab.example.net"})
+    wrong = [f for f in check_platform(doc).findings
+             if f.code == "VCF-NAME-WRONG-DOMAIN"]
+    assert [f.path for f in wrong if f.path == "/dns/subdomain"] == []
+
+
+def test_uppercase_subdomain_is_a_lowercase_violation(make_inventory):
+    """Not "still": before /dns/subdomain joined _named_values() nothing
+    checked the subdomain's case at all, so this is new behaviour, not a
+    preserved one. It is the branch's one deliberate change to
+    Result.valid -- a document with an uppercase dns.subdomain passed on
+    main and fails here -- and it is correct: VCF rejects uppercase FQDNs,
+    and the subdomain composes into every name the deployment publishes.
+    """
+    doc = make_inventory(**{"dns.subdomain": "VCF.lab.example.net"})
+    lower = [f for f in check_platform(doc).findings
+             if f.code == "VCF-NAME-NOT-LOWERCASE" and f.path == "/dns/subdomain"]
+    assert len(lower) == 1
+
+
+def test_a_local_name_not_composed_from_the_subdomain_is_reported_on_its_own(make_inventory):
+    # legacy-vsp.otherco.local is .local for its own reason -- it is not
+    # built on dns.subdomain, so correcting dns.subdomain would not fix it.
+    # It must keep its own finding, separate from the subdomain's.
+    doc = make_inventory(**{"dns.subdomain": "corp.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "legacy-vsp.otherco.local"
+    doc["appliances"]["vsp"]["instanceFqdn"] = "inst.corp.local"
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert sorted(f.path for f in hits) == sorted(
+        ["/dns/subdomain", "/appliances/vsp/platformFqdn"])
+
+
+def test_suppression_comparison_is_case_and_trailing_dot_robust(make_inventory):
+    doc = make_inventory(**{"dns.subdomain": "CORP.local"})
+    doc["appliances"]["vsp"]["platformFqdn"] = "vsp.corp.local."
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]
+    assert [f.path for f in hits] == ["/dns/subdomain"]
 
 
 def test_vsp_pool_smaller_than_twelve_is_an_error(make_inventory):
@@ -134,6 +259,26 @@ def test_vsp_internal_cidr_colliding_with_a_network_is_an_error(make_inventory):
     "VCF-NAME-NOT-LOWERCASE", "VCF-NAME-WRONG-DOMAIN", "VCF-VSP-POOL-TOO-SMALL",
     "VCF-VSP-POOL-CROSSES-SUBNET", "VCF-VSP-INTERNAL-CIDR-COLLISION",
     "VCF-CAP-RAM-SHORTFALL", "VCF-CAP-N1-SHORTFALL", "VCF-CAP-STORAGE-SHORTFALL",
-    "VCF-CAP-UNKNOWN-HARDWARE", "VCF-LIC-EVALUATION"])
+    "VCF-CAP-UNKNOWN-HARDWARE", "VCF-CAP-TIERING-NEEDS-WORKAROUND",
+    "VCF-LIC-EVALUATION"])
 def test_codes_exist_in_catalogue(code):
     assert code in load_catalogue()
+
+
+def test_a_bare_local_subdomain_is_flagged_like_a_dotted_one(make_inventory):
+    """`.endswith(".local")` misses a subdomain that IS "local": a
+    single-label zone is unusual but legal to write, and it is the same
+    unsupported mDNS namespace the dotted form is rejected for.
+    """
+    doc = make_inventory(**{"dns.subdomain": "local"})
+    hits = [f for f in check_platform(doc).findings
+            if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX" and f.path == "/dns/subdomain"]
+    assert len(hits) == 1
+
+
+def test_a_name_merely_ending_in_the_letters_local_is_not_flagged(make_inventory):
+    """Whole labels, not characters -- the same distinction permits_name()
+    makes. "nonlocal" and "mylocal.example.net" are ordinary names."""
+    doc = make_inventory(**{"dns.subdomain": "nonlocal"})
+    assert not [f for f in check_platform(doc).findings
+                if f.code == "VCF-NAME-VSP-LOCAL-SUFFIX"]

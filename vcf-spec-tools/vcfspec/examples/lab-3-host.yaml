@@ -5,16 +5,18 @@ instance:
   sddcId: lab01
   vcfVersion: 9.1.1.0
 dns:
-  subdomain: lab.local
+  subdomain: vcf.lab.knowledgeondemand.net
   nameservers: [10.50.10.5]
 ntp:
   servers: [10.50.10.5]
 networks:
   management: {vlan: 1610, subnet: 10.50.10.0/24, gateway: 10.50.10.1, mtu: 1500}
-  vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000}
-  vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000}
+  vmotion:    {vlan: 1611, subnet: 10.50.11.0/24, gateway: 10.50.11.1, mtu: 9000,
+               pool: {start: 10.50.11.20, end: 10.50.11.30}}
+  vsan:       {vlan: 1612, subnet: 10.50.12.0/24, gateway: 10.50.12.1, mtu: 9000,
+               pool: {start: 10.50.12.20, end: 10.50.12.30}}
 nsx:
-  vipFqdn: nsx.lab.local
+  vipFqdn: nsx.vcf.lab.knowledgeondemand.net
   managers: [nsx01]
   size: medium
   transportVlanId: 1613
@@ -33,26 +35,64 @@ appliances:
   vcenter: {hostname: vc01, size: small, ssoDomain: vsphere.local}
   sddcManager: {hostname: sddcm01}
   vsp:
-    platformFqdn: vcf.lab.local
-    instanceFqdn: lab01.lab.local
+    platformFqdn: platform.vcf.lab.knowledgeondemand.net
+    instanceFqdn: lab01.vcf.lab.knowledgeondemand.net
     poolStart: 10.50.10.100
     poolEnd: 10.50.10.115
     internalCidr: 198.18.0.0/15
+provisioning:
+  bootServerUrl: http://10.50.10.5/esx
+  esxVersion: 9.1.1.0
+  # Minisforum 795S7 is a consumer Ryzen 9 7945HX host, not EPYC or Intel --
+  # see docs/superpowers/specs/2026-09-21-esx-provisioning-design.md.
+  hostWorkarounds: [consumer-amd]
 hosts:
   - name: esx01
+    provisioningMac: bc:24:11:00:0a:01
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.11
     vmnics: [vmnic0, vmnic1]
-    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+    # Three NVMe devices, three roles, and no two of them the same: the
+    # install overwrites bootDisk, vSAN ESA claims vsanDevice, and
+    # `esxcli memtier enable` consumes memoryTieringDevice whole.
+    # See VCF-PROV-DEVICE-COLLISION.
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
   - name: esx02
+    provisioningMac: bc:24:11:00:0a:02
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.12
     vmnics: [vmnic0, vmnic1]
-    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
   - name: esx03
+    provisioningMac: bc:24:11:00:0a:03
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 10.50.10.13
     vmnics: [vmnic0, vmnic1]
-    hardware: {cores: 16, ramGb: 96, vsanDeviceTb: 4, memoryTieringGb: 96}
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
 credentials:
   esxRoot: ${esx_root}
+  esxRootHash: ${esx_root_hash}
   vcenterRoot: ${vcenter_root}
   ssoAdmin: ${sso_admin}
   nsxAdmin: ${nsx_admin}

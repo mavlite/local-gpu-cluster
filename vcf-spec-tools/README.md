@@ -90,6 +90,17 @@ $ echo $?
 | `1` | The document is invalid — a structured finding explains why — or an internal error was caught and reported as one. |
 | `2` | Usage error: bad CLI arguments, a path that doesn't exist or isn't readable, or `--probe` without `--allowlist`. This is deliberately distinct from `1`: a file that exists and parses but is a bad spec is not a usage error. |
 
+`validate` also accepts `--fail-on {warning,error}`, default `error`. It
+widens what counts as a failing run: with `--fail-on warning`, exit `1` if
+*any* finding is `warning` severity or above, not just `error`/`critical`.
+Default `error` is today's behaviour — unchanged unless you pass the flag.
+**It only ever moves the exit code.** The JSON on stdout is identical
+either way; a document with only `warning` findings still reports
+`"valid": true`, because `Result.valid` means "no `critical`/`error`
+finding" regardless of `--fail-on`. Use this in a CI gate that wants to
+block on, say, `VCF-NAME-VSP-LOCAL-SUFFIX` (a `warning`) without changing
+what the payload asserts about the document itself.
+
 Both `validate` and `render` also accept `--input-kind {inventory,sddc_spec}`
 to force the document kind instead of relying on auto-detection — the CLI
 equivalent of the MCP server's `input_kind` argument on `vcf_validate_spec`
@@ -245,26 +256,49 @@ $ echo $?
    Management Services (VCFMS) pool's size and placement, and capacity
    against the mandatory 9.1 appliance stack — including memory tiering
    and Auto-RAID storage overhead, and what is left with one host in
-   maintenance.
+   maintenance. Also `.local` on the VCF Management Services (VSP) names
+   (`VCF-NAME-VSP-LOCAL-SUFFIX`, `warning`): `dns.subdomain` and the two
+   VSP FQDNs, `appliances.vsp.platformFqdn` and `.instanceFqdn`, and
+   **only those** — never vCenter, NSX, SDDC Manager or `hosts[].name`.
+   That scope is deliberately narrow, not an oversight: VMware's
+   split-domain design still permits `.local` on the rest during a
+   transition window, and only VCF Identity Broker, VCF Automation and
+   vSphere Supervisor actually lost support for it — all three run on the
+   VSP platform, which is exactly what this rule's three pointers cover.
+   `appliances.vcenter.ssoDomain` is untouched by this rule and is
+   correctly `vsphere.local` by default: it names an identity namespace,
+   not a DNS domain, so it was never a candidate. Read this before
+   "fixing" a `.local` vCenter or NSX name — that is a supported design,
+   not a bug this tool is telling you about.
 3. **Probes** (opt-in, CLI only) — forward/reverse DNS and TCP-443
    reachability for each host, run only against CIDRs the operator
    explicitly allowlists with `--allowlist`, and resolving only names
    under a DNS suffix they explicitly allowlist with `--allowlist-domain`.
-   Real output, run from a machine that is not on the example's
+   **Appliance names are probed too** — vCenter, SDDC Manager, the NSX
+   managers, the NSX VIP and the two VSP names
+   (`appliances.vsp.platformFqdn`/`.instanceFqdn`). The short names
+   (vCenter, SDDC Manager, NSX managers) are composed with
+   `dns.subdomain`, the same as a host; the three FQDN fields
+   (`nsx.vipFqdn`, `vsp.platformFqdn`, `vsp.instanceFqdn`) are already
+   fully qualified and used as-is. `nsx.vipFqdn` and `vsp.platformFqdn`
+   are VIP-like — they front a pool rather than one machine — so a
+   missing PTR for either is not reported as a defect; the other four
+   names still require one. Real output, run from a machine that is not
+   on the example's
    `10.50.10.0/24` lab network, so every host in it is
    reachable-in-principle (inside the allowlist) but not actually
    resolvable from here:
 
    ```
    $ python -m vcfspec.cli validate vcfspec/examples/lab-3-host.yaml \
-       --probe --allowlist 10.50.10.0/24 --allowlist-domain lab.local \
+       --probe --allowlist 10.50.10.0/24 --allowlist-domain vcf.lab.knowledgeondemand.net \
        --probe-timeout 0.5
    ...
    {
      "code": "VCF-PROBE-UNKNOWN",
      "severity": "info",
      "path": "/hosts/0",
-     "message": "Could not probe esx01.lab.local: no forward DNS answer.",
+     "message": "Could not probe esx01.vcf.lab.knowledgeondemand.net: no forward DNS answer.",
      "fix": "Re-run from a host on the management network to confirm.",
      "source": "docs",
      "source_url": ""
@@ -273,7 +307,7 @@ $ echo $?
      "code": "VCF-PROBE-NO-REVERSE-DNS",
      "severity": "error",
      "path": "/hosts/0",
-     "message": "No reverse DNS record for 10.50.10.11 (esx01.lab.local).",
+     "message": "No reverse DNS record for 10.50.10.11 (esx01.vcf.lab.knowledgeondemand.net).",
      "fix": "Add a PTR record; VCF validates forward and reverse for every host.",
      "source": "docs",
      "source_url": "https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/deployment/deploying-a-new-vmware-cloud-foundation-or-vmware-vsphere-foundation-private-cloud-/preparing-your-environment.html"
@@ -302,7 +336,7 @@ $ echo $?
      suffix configured, **no forward lookup is issued at all** and each
      one is reported as `VCF-PROBE-NAME-BLOCKED`. The reverse lookup
      needs no gate — it takes the already-allowlisted IP. Suffix matching
-     is on whole labels, so `lab.local` does not permit `evil-lab.local`.
+     is on whole labels, so `vcf.lab.knowledgeondemand.net` does not permit `evil-vcf.lab.knowledgeondemand.net`.
    - **An allowlist that matches nothing is not a pass.** If probes were
      asked for and the allowlist permitted none of the document's hosts
      (`--allowlist 203.0.113.0/24` against a `10.50.10.0/24` lab), that is
@@ -310,6 +344,149 @@ $ echo $?
      clean exit `0` with `probes` in `layers_run` and zero lookups made.
      Partial blocking is legitimate and is *not* this case: the permitted
      hosts are really probed and the verdict stands on their results.
+   - **An appliance is never connected to, on any path.** Pre-Installer
+     none of these appliances exist yet, so a 443 probe of one would be
+     guaranteed noise — and unlike a host, an appliance declares no
+     address of its own; the only address in play is whatever the zone's
+     A record says, chosen by whoever controls that zone, not the
+     operator. So the resolved address is checked against `--allowlist`
+     before anything else happens with it, and **a resolved address
+     outside the allowlist is refused, not followed** —
+     `VCF-PROBE-TARGET-BLOCKED`, the same as a blocked host, with no
+     reverse lookup and no connection attempt. This is the same
+     "the query is the exfiltration channel" logic that gates host names
+     by `--allowlist-domain`, applied one step further down the chain: an
+     IP allowlist alone cannot gate an address you only learn about after
+     the query that reveals it, so the address is gated the moment it is
+     known and before anything downstream of it runs.
+
+   Running `--probe --allowlist ...` **without** `--allowlist-domain`
+   fails closed on appliance names exactly like it does on host names:
+   expect one `VCF-PROBE-NAME-BLOCKED` warning per appliance name, in
+   addition to one per host — six extra warnings on a document with
+   vCenter, SDDC Manager, one NSX manager, the NSX VIP and both VSP
+   names, even though nothing is actually broken. That is correct,
+   fail-closed behaviour, not a regression: an IP allowlist cannot gate a
+   name, because the DNS query is itself the exfiltration channel, so
+   every unresolved name is accounted for individually rather than
+   folded into one summary line. Pass `--allowlist-domain` with your
+   lab's real suffix to make the count meaningful.
+
+   One more code is reachable only from Python, by calling
+   `run_probes()` directly and injecting your own seam:
+   `VCF-PROBE-SEAM-UNUSABLE` at `error`. (`validate_document()` takes no
+   seam arguments — it always calls `run_probes()` with the real
+   resolver, connector and resolver-configuration reader — so neither it,
+   nor the CLI, nor the MCP server can produce this.) Each seam is
+   checked against the call it will actually receive:
+   `resolve(name, want_reverse, want_canonical)`,
+   `connect(host, port, timeout)` and a zero-argument reader. A value
+   that is not callable, or a callable whose readable signature cannot
+   accept that call, is reported once and probes nothing. It is an
+   `error` rather than a quiet skip for the reason this whole layer
+   exists: a resolver's `TypeError` is caught alongside every genuine
+   resolution failure, so the alternative is a run that reports every
+   name in the document as unresolvable, at `info`, and still says
+   `valid: true`.
+
+   The arity check cannot police a **return** shape, so `resolve()`'s is
+   documented here instead: `want_canonical=True` must return a
+   `(canonical name, address)` pair, or `None` when the name does not
+   resolve; `want_reverse=True` returns a name; a plain forward call
+   returns an address. Both the host and the appliance paths now issue
+   the combined call, so a resolver that accepts `want_canonical` and
+   ignores it — returning a bare address — is reported as
+   `VCF-PROBE-UNKNOWN` for every name, not silently tolerated.
+
+   One thing `run_probes()` does **not** guard is the `ProbeConfig` it is
+   given. The injected seams are guarded everywhere, so nothing they
+   raise escapes; but `permits()` and `permits_name()` are never wrapped,
+   because "it raised, carry on" is indistinguishable from "it said
+   yes" — and a gate failure read as a pass turns a closed allowlist into
+   an open one. A `ProbeConfig` **subclass** whose gates raise will
+   therefore propagate out of `run_probes()` by design. The stock
+   `ProbeConfig`, which is all the CLI and the MCP server ever construct,
+   cannot raise.
+
+   A separate, `info`-level note can show up alongside any of the above:
+   `VCF-PROBE-RESOLVER-MISMATCH` fires when the answers above did not
+   come from any of the nameservers `dns.nameservers` declares — the
+   probe layer always resolves through the machine's own configured
+   resolver, never through the document's declared nameservers directly,
+   so this is a provenance note, not a failure. It is `info`, not a
+   higher severity, because it is expected background noise on most
+   setups: a corporate or lab forwarder trips it while still resolving
+   the zone correctly, `systemd-resolved` reports only `127.0.0.53`
+   regardless of what it actually forwards to, and Windows has no
+   `/etc/resolv.conf` at all (that case instead surfaces as
+   `VCF-PROBE-UNKNOWN` on `/dns/nameservers`, since the comparison can't
+   run). Re-run from the management network if you need certainty that
+   the declared nameservers themselves produced these answers. It is
+   reported only when at least one lookup was actually made: with every
+   target blocked there are no answers for it to describe the provenance
+   of.
+
+### Behaviour change: an uppercase `dns.subdomain` now fails
+
+`dns.subdomain` is now checked as one of the names the deployment
+publishes, which puts it through the pre-existing `VCF-NAME-NOT-LOWERCASE`
+rule at `error`. A document declaring `dns.subdomain: VCF.lab.example.net`
+therefore reports `valid: false` and exits `1` where it previously passed.
+
+This is deliberate and it is the only change in this release that can
+flip a previously valid document to invalid. VCF rejects uppercase FQDNs,
+and the subdomain is composed into every host and appliance name the
+deployment publishes, so an uppercase one was never going to deploy — it
+simply was not being checked. Lowercase the value to fix it.
+
+### Behaviour change: a CNAME'd host name is no longer a reverse mismatch
+
+If `hosts[].name` composes to a name that is a **CNAME**, the host used to
+report `VCF-PROBE-REVERSE-MISMATCH` at `error` on a perfectly healthy
+zone. `gethostbyname()` follows a CNAME silently, but `gethostbyaddr()`
+hands back the *canonical* name, so the round trip compared
+`esx01.vcf.lab.example.net` against a PTR legitimately naming
+`esx01-real.vcf.lab.example.net` and called the disagreement a defect.
+
+Hosts now accept the canonical name alongside the queried name, exactly
+as appliance names already did — the two probe paths had drifted, and
+this closes that gap. For any document validated through the CLI, the
+MCP server or `validate_document()`, the only verdict that changes is a
+CNAME'd host name going from `error` to clean; nothing that passed
+before now fails.
+
+**If you inject your own resolver, this is a breaking change.** The host
+forward call changed from `resolve(fqdn, False, False)`, which returned a
+bare address, to `resolve(fqdn, False, True)`, which must return a
+`(canonical name, address)` pair — the same call the appliance names
+already made. A three-argument resolver that accepts `want_canonical` and
+then *ignores* it was previously valid for hosts and now returns the
+wrong shape, which is reported as `VCF-PROBE-UNKNOWN` ("forward answer
+was not a (canonical name, address) pair") for every host. Return the
+pair, or `None` when the name does not resolve.
+
+Two limits are worth knowing, because they are what keep the check a
+check:
+
+- **The canonical name must itself be inside `--allowlist-domain`.** A
+  canonical name the operator never allowlisted is not evidence about the
+  operator's zone, so it certifies nothing and the mismatch is still
+  reported. Otherwise whoever controls the forward zone could nominate
+  the very name that makes the round trip pass, and a check the checked
+  party can satisfy by asserting it is not a check is worse than no check
+  at all — it still reports success.
+- **Only the canonical name, never the alias list.** The forward zone's
+  aliases are its own claims about which names it answers to. The round
+  trip exists to confirm that the forward and reverse zones — two
+  separate authorities — agree, so the accept-set may not be one the
+  forward zone can extend.
+
+A PTR naming neither the queried name nor the allowlisted canonical name
+is still `VCF-PROBE-REVERSE-MISMATCH`, and a host whose *name* is blocked
+by `--allowlist-domain` issues no forward query at all, so it has no
+canonical name to offer and is compared against the queried name alone —
+its reverse lookup and its TCP 443 check still run, because the `mgmtIp`
+was declared by the operator and is independently useful.
 
 ## Credentials
 

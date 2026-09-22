@@ -2,71 +2,184 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vcfspec.invalid/inventory/v1",
   "type": "object",
-  "required": ["apiVersion", "kind", "instance", "dns", "ntp", "networks", "nsx",
-               "storage", "appliances", "hosts", "credentials"],
+  "required": [
+    "apiVersion",
+    "kind",
+    "instance",
+    "dns",
+    "ntp",
+    "networks",
+    "nsx",
+    "storage",
+    "appliances",
+    "hosts",
+    "credentials"
+  ],
   "additionalProperties": false,
   "properties": {
-    "apiVersion": {"const": "vcfspec/v1"},
-    "kind": {"const": "LabInventory"},
+    "apiVersion": {
+      "const": "vcfspec/v1"
+    },
+    "kind": {
+      "const": "LabInventory"
+    },
     "instance": {
       "type": "object",
-      "required": ["name", "sddcId", "vcfVersion"],
+      "required": [
+        "name",
+        "sddcId",
+        "vcfVersion"
+      ],
       "additionalProperties": false,
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "sddcId": {"type": "string", "minLength": 3, "maxLength": 20,
-                   "pattern": "^[a-zA-Z0-9-]+$"},
-        "vcfVersion": {"type": "string"}
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sddcId": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 20,
+          "pattern": "^[a-zA-Z0-9-]+$"
+        },
+        "vcfVersion": {
+          "type": "string"
+        }
       }
     },
     "dns": {
       "type": "object",
-      "required": ["subdomain", "nameservers"],
+      "required": [
+        "subdomain",
+        "nameservers"
+      ],
       "additionalProperties": false,
       "properties": {
-        "subdomain": {"type": "string", "minLength": 1},
-        "nameservers": {"type": "array", "minItems": 1, "maxItems": 2,
-                        "items": {"type": "string"}}
+        "subdomain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nameservers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "ntp": {
       "type": "object",
-      "required": ["servers"],
+      "required": [
+        "servers"
+      ],
       "additionalProperties": false,
-      "properties": {"servers": {"type": "array", "minItems": 1,
-                                 "items": {"type": "string"}}}
+      "properties": {
+        "servers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "networks": {
       "type": "object",
-      "required": ["management", "vmotion", "vsan"],
-      "propertyNames": {"enum": ["management", "vmotion", "vsan"]},
-      "additionalProperties": {"$ref": "#/$defs/network"}
+      "required": [
+        "management",
+        "vmotion",
+        "vsan"
+      ],
+      "propertyNames": {
+        "enum": [
+          "management",
+          "vmotion",
+          "vsan"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/network"
+      }
     },
     "nsx": {
       "type": "object",
-      "required": ["vipFqdn", "managers", "transportVlanId", "tepPool"],
+      "required": [
+        "vipFqdn",
+        "managers",
+        "transportVlanId",
+        "tepPool"
+      ],
       "additionalProperties": false,
       "properties": {
-        "vipFqdn": {"type": "string", "minLength": 1},
-        "managers": {"type": "array", "minItems": 1,
-                     "items": {"$ref": "#/$defs/shortname"}},
-        "size": {"enum": ["medium", "large", "xlarge"]},
-        "transportVlanId": {"type": "integer", "minimum": 0, "maximum": 4094},
-        "fabricMtu": {"type": "integer", "minimum": 1280, "maximum": 9190},
+        "vipFqdn": {
+          "type": "string",
+          "minLength": 1
+        },
+        "managers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/shortname"
+          }
+        },
+        "size": {
+          "enum": [
+            "medium",
+            "large",
+            "xlarge"
+          ]
+        },
+        "transportVlanId": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4094
+        },
+        "fabricMtu": {
+          "type": "integer",
+          "minimum": 1280,
+          "maximum": 9190
+        },
         "tepPool": {
           "type": "object",
-          "required": ["name", "cidr", "gateway", "ranges"],
+          "required": [
+            "name",
+            "cidr",
+            "gateway",
+            "ranges"
+          ],
           "additionalProperties": false,
           "properties": {
-            "name": {"type": "string", "pattern": "^[a-zA-Z0-9-_]+$"},
-            "cidr": {"type": "string"},
-            "gateway": {"type": "string"},
+            "name": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9-_]+$"
+            },
+            "cidr": {
+              "type": "string"
+            },
+            "gateway": {
+              "type": "string"
+            },
             "ranges": {
-              "type": "array", "minItems": 1,
-              "items": {"type": "object", "required": ["start", "end"],
-                        "additionalProperties": false,
-                        "properties": {"start": {"type": "string"},
-                                       "end": {"type": "string"}}}
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "start",
+                  "end"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "start": {
+                    "type": "string"
+                  },
+                  "end": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         }
@@ -74,89 +187,289 @@
     },
     "storage": {
       "type": "object",
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "additionalProperties": false,
       "properties": {
-        "type": {"enum": ["VSAN_ESA", "VSAN_OSA", "NFS", "VMFS_FC"]},
-        "datastoreName": {"type": "string", "maxLength": 80},
-        "failuresToTolerate": {"type": "integer", "minimum": 0, "maximum": 3}
+        "type": {
+          "enum": [
+            "VSAN_ESA",
+            "VSAN_OSA",
+            "NFS",
+            "VMFS_FC"
+          ]
+        },
+        "datastoreName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "failuresToTolerate": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
       }
     },
     "appliances": {
       "type": "object",
-      "required": ["vcenter", "sddcManager", "vsp"],
+      "required": [
+        "vcenter",
+        "sddcManager",
+        "vsp"
+      ],
       "additionalProperties": false,
       "properties": {
         "vcenter": {
-          "type": "object", "required": ["hostname"],
+          "type": "object",
+          "required": [
+            "hostname"
+          ],
           "additionalProperties": false,
-          "properties": {"hostname": {"$ref": "#/$defs/shortname"},
-                         "size": {"enum": ["tiny", "small", "medium", "large",
-                                           "xlarge"]},
-                         "ssoDomain": {"type": "string"}}
+          "properties": {
+            "hostname": {
+              "$ref": "#/$defs/shortname"
+            },
+            "size": {
+              "enum": [
+                "tiny",
+                "small",
+                "medium",
+                "large",
+                "xlarge"
+              ]
+            },
+            "ssoDomain": {
+              "type": "string"
+            }
+          }
         },
         "sddcManager": {
-          "type": "object", "required": ["hostname"],
+          "type": "object",
+          "required": [
+            "hostname"
+          ],
           "additionalProperties": false,
-          "properties": {"hostname": {"$ref": "#/$defs/shortname"}}
+          "properties": {
+            "hostname": {
+              "$ref": "#/$defs/shortname"
+            }
+          }
         },
         "vsp": {
           "type": "object",
-          "required": ["platformFqdn", "instanceFqdn", "poolStart", "poolEnd"],
+          "required": [
+            "platformFqdn",
+            "instanceFqdn",
+            "poolStart",
+            "poolEnd"
+          ],
           "additionalProperties": false,
           "properties": {
-            "platformFqdn": {"type": "string", "minLength": 1},
-            "instanceFqdn": {"type": "string", "minLength": 1},
-            "poolStart": {"type": "string"},
-            "poolEnd": {"type": "string"},
-            "internalCidr": {"enum": ["198.18.0.0/15", "240.0.0.0/15",
-                                      "250.0.0.0/15"]}
-          }
-        }
-      }
-    },
-    "hosts": {
-      "type": "array", "minItems": 1, "maxItems": 64,
-      "items": {
-        "type": "object",
-        "required": ["name", "mgmtIp", "vmnics", "hardware"],
-        "additionalProperties": false,
-        "properties": {
-          "name": {"$ref": "#/$defs/shortname"},
-          "mgmtIp": {"type": "string"},
-          "vmnics": {"type": "array", "minItems": 2, "items": {"type": "string"}},
-          "hardware": {
-            "type": "object",
-            "required": ["cores", "ramGb"],
-            "additionalProperties": false,
-            "properties": {
-              "cores": {"type": "integer", "minimum": 1},
-              "ramGb": {"type": "number", "minimum": 1},
-              "vsanDeviceTb": {"type": "number", "minimum": 0},
-              "memoryTieringGb": {"type": "number", "minimum": 0}
+            "platformFqdn": {
+              "type": "string",
+              "minLength": 1
+            },
+            "instanceFqdn": {
+              "type": "string",
+              "minLength": 1
+            },
+            "poolStart": {
+              "type": "string"
+            },
+            "poolEnd": {
+              "type": "string"
+            },
+            "internalCidr": {
+              "enum": [
+                "198.18.0.0/15",
+                "240.0.0.0/15",
+                "250.0.0.0/15"
+              ]
             }
           }
         }
       }
     },
-    "credentials": {"type": "object", "minProperties": 1}
+    "hosts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "mgmtIp",
+          "vmnics",
+          "hardware"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/shortname"
+          },
+          "mgmtIp": {
+            "type": "string"
+          },
+          "vmnics": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string"
+            }
+          },
+          "hardware": {
+            "type": "object",
+            "required": [
+              "cores",
+              "ramGb"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "cores": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "ramGb": {
+                "type": "number",
+                "minimum": 1
+              },
+              "vsanDeviceTb": {
+                "type": "number",
+                "minimum": 0
+              },
+              "memoryTieringGb": {
+                "description": "Size of the NVMe memory tier this host contributes, in GB. Read by the capacity rules AND, since the %firstboot port, emitted as the `-r` ratio of `esxcli memtier enable` (memoryTieringGb / ramGb as a percentage, which ESX accepts between 1 and 400). A value > 0 requires hardware.memoryTieringDevice: see VCF-PROV-NO-TIERING-DEVICE.",
+                "type": "number",
+                "minimum": 0
+              },
+              "memoryTieringDevice": {
+                "description": "The NVMe device `esxcli memtier enable -d` consumes for memory tiering. Same stable-identifier rule as bootDisk (/vmfs/devices/disks/t10...., eui.... or naa....), because the command consumes whatever device it is given and a runtime name points somewhere else after a reboot. Must not be the same device as bootDisk or vsanDevice: see VCF-PROV-DEVICE-COLLISION.",
+                "type": "string",
+                "minLength": 1
+              },
+              "vsanDevice": {
+                "description": "The NVMe device this host contributes to vSAN ESA, as a stable identifier. Declared so the tool can prove bootDisk and memoryTieringDevice are not it -- installing over, or tiering onto, the vSAN device destroys the cluster's data and, with no BMC, costs a drive to the rack. Optional: omit it and that check simply has less to check.",
+                "type": "string",
+                "minLength": 1
+              },
+              "cpuModel": {
+                "description": "CPU model designation (e.g. '7945HX'), used only to build the cpuid.brandstring workaround for provisioning.hostWorkarounds: 'consumer-amd' (rendered as 'AMD EPYC <cpuModel>'). Not consulted anywhere else. When omitted, a generic EPYC model string is used instead.",
+                "type": "string",
+                "minLength": 1
+              },
+              "bootDiskClaimedByVsan": {
+                "description": "Whether bootDisk is *currently* a claimed vSAN ESA member -- true only when this is a rebuild of a host whose boot disk a previous install gave to vSAN. Controls whether the kickstart's `install` line carries `--overwritevsan`. The tool cannot infer this: it never reads the disk, so the operator must say so. Get it wrong either way and the install fails, not just misconfigures -- both are real, verified against ESX 9.1.1: with the flag on a disk vSAN never claimed, the installer aborts with '--overwritevsan specified but disk <id> is not claimed by vSAN'; without it on a disk vSAN did claim, the install aborts because the existing vSAN partition blocks it. Defaults to false because a fresh disk -- the common case, and the one this inventory's example hosts describe -- is the greenfield install, not a rebuild.",
+                "type": "boolean",
+                "default": false
+              }
+            }
+          },
+          "provisioningMac": {
+            "description": "MAC of the NIC that UEFI HTTP boots. Per-MAC config is the provisioning mechanism, so this is how a booting host finds its own kickstart.",
+            "type": "string",
+            "pattern": "^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
+          },
+          "bootDisk": {
+            "description": "Kickstart disk selector for the ESX install target. Passed through uninterpreted. Name the device explicitly rather than relying on first-disk ordering: this lab has a 4 TB vSAN device that an install must never claim.",
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "credentials": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "provisioning": {
+      "description": "Properties of the provisioning environment rather than of any one host.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bootServerUrl"
+      ],
+      "properties": {
+        "bootServerUrl": {
+          "description": "Base URL the booting host fetches its kickstart from. The ESX installer does not validate TLS for ks=https, so the provisioning VLAN is the trust boundary, not the transport.",
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "esxVersion": {
+          "description": "ESX build to provision. Defaults to the VCF 9.1.1 commissioning target.",
+          "type": "string",
+          "default": "9.1.1.0"
+        },
+        "installerPayloadUrl": {
+          "description": "URL of the directory holding the unpacked ESX ISO contents, which boot.cfg's prefix= must point at. This is not the kickstart directory. Defaults to <bootServerUrl>/esx-<esxVersion>.",
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "sshPublicKey": {
+          "description": "Optional OpenSSH public key written to /etc/ssh/keys-root/authorized_keys by %firstboot, so an operator who wants key access does not have to hand-edit generated files. A public key is not a credential -- it authenticates its holder and discloses nothing to anyone who reads it off the boot server -- so a literal is allowed here where a password never is. A private key is refused outright, and anything else unrecognised raises VCF-PROV-SSH-KEY-NOT-PUBLIC and injects nothing.",
+          "type": "string",
+          "pattern": "^(?:ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com)\\s+[A-Za-z0-9+/]+={0,3}(?:\\s+[^\\s'\\\\]+)?$"
+        },
+        "hostWorkarounds": {
+          "description": "Opt-in ESX host workarounds emitted into %firstboot, one before the reboot that certificate regeneration already performs there. Empty by default, so EPYC and Intel hosts get none of this. 'consumer-amd': four settings from William Lam's VCF 9.1 comprehensive ESX configuration workarounds for lab deployments (https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html) -- (1) cpuid.brandstring set to an EPYC string in /etc/vmware/config, no reboot: without it NSX Edge/VNA deployment fails on consumer AMD because of a DPDK vendor check; (2) monitor_control.disable_apichv=TRUE in /etc/vmware/config, reboot required: without it NVMe memory tiering cannot power on VMs on AMD Ryzen; (3) esxcli entropySources=2, reboot required: Zen 4/5 entropy is otherwise slow; (4) esxcli /VSAN/Vsan2ZdomCompZstd=0, no reboot: uses LZ4 instead of Zstd, which costs less CPU on this hardware. A host that declares hardware.memoryTieringGb > 0 without 'consumer-amd' here is flagged: see VCF-CAP-TIERING-NEEDS-WORKAROUND.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "enum": ["consumer-amd"]
+          }
+        }
+      }
+    }
   },
   "$defs": {
-    "shortname": {"type": "string", "minLength": 1, "maxLength": 63,
-                  "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$"},
+    "shortname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$"
+    },
     "network": {
       "type": "object",
-      "required": ["vlan", "subnet", "gateway", "mtu"],
+      "required": [
+        "vlan",
+        "subnet",
+        "gateway",
+        "mtu"
+      ],
       "additionalProperties": false,
       "properties": {
-        "vlan": {"type": "integer", "minimum": 0, "maximum": 4094},
-        "subnet": {"type": "string"},
-        "gateway": {"type": "string"},
-        "mtu": {"type": "integer", "minimum": 1280, "maximum": 9190},
-        "pool": {"type": "object", "required": ["start", "end"],
-                 "additionalProperties": false,
-                 "properties": {"start": {"type": "string"},
-                                "end": {"type": "string"}}}
+        "vlan": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4094
+        },
+        "subnet": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer",
+          "minimum": 1280,
+          "maximum": 9190
+        },
+        "pool": {
+          "type": "object",
+          "required": [
+            "start",
+            "end"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "start": {
+              "type": "string"
+            },
+            "end": {
+              "type": "string"
+            }
+          }
+        }
       }
     }
   }

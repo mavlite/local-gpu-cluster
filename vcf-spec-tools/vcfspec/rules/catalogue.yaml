@@ -182,6 +182,27 @@ VCF-NET-DUPLICATE-IP:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-1/building-your-private-cloud-infrastructure/host-management/commission-hosts.html
   summary: "IP {ip} is used more than once ({where})."
   fix: "Give every host a unique address."
+VCF-NET-IP-POOL-MISSING:
+  severity: error
+  source: docs
+  source_url: ""
+  # Verbatim from a real VCF 9.1.1 Installer POST /v1/sddcs/validations
+  # response: MISSING_INCLUSION_RANGE failed the Deployment Specification
+  # check for both VMOTION and VSAN, and every downstream check (DNS
+  # Resolution, Network Configuration, Capacity Calculation) was skipped
+  # because this one failed first.
+  summary: "Network '{purpose}' has no IP pool. The VCF Installer's Deployment Specification check fails this with MISSING_INCLUSION_RANGE: 'Inclusion Range not provided for network {purpose_upper}'."
+  fix: "Provide Inclusion Range for network {purpose_upper} in the input specification: add pool.start and pool.end under networks.{purpose}, sized for at least one address per host."
+VCF-NET-IP-POOL-TOO-SMALL:
+  severity: error
+  source: docs
+  source_url: ""
+  # Verbatim remediation from the same Installer response: "Insufficient IP
+  # Addresses provided for the IP Pool that supports the {NETWORK} network.
+  # Provided {n}, Required {m}." and "(IP Addresses ending with 0 and 255
+  # are ignored)". Each host needs one vmk on vmotion and one on vsan.
+  summary: "Insufficient IP Addresses provided for the IP Pool that supports the {purpose_upper} network. Provided {size}, Required {hosts}."
+  fix: "Widen networks.{purpose}.pool to cover at least {hosts} usable addresses. The Installer ignores addresses ending in .0 and .255, so a pool only reaching {hosts} by counting those is still too small."
 VCF-NSX-TEP-POOL-TOO-SMALL:
   severity: warning
   source: docs
@@ -277,16 +298,124 @@ VCF-PROBE-NAME-BLOCKED:
   source: docs
   source_url: ""
   summary: "Refused to resolve {name}: outside the configured DNS name allowlist."
-  fix: "Pass --allowlist-domain with the DNS suffix your lab really uses. With none configured no forward lookup is issued at all: an IP allowlist cannot gate a name, because the query that would reveal the IP is itself the exfiltration channel."
+  fix: "Pass --allowlist-domain with the DNS suffix your lab really uses; every host and appliance name under it is then resolved. With none configured no forward lookup is issued at all, so expect one of these per name in the document: an IP allowlist cannot gate a name, because the query that would reveal the IP is itself the exfiltration channel. The appliance names (vCenter, SDDC Manager, the NSX managers and VIP, the VSP names) have no declared address for an IP allowlist to gate them by at all, so this suffix is the only containment they have."
 VCF-PROBE-NOTHING-PERMITTED:
   severity: error
   source: docs
   source_url: ""
-  summary: "Probes were requested, but the allowlist permitted none of the {count} host(s) in this document, so nothing was checked."
+  summary: "Probes were requested, but the allowlist permitted none of the {count} host(s) in this document, so no host was checked."
   fix: "Correct --allowlist so it covers the management network these hosts are on, or drop --probe. A non-empty allowlist that matches no host checks exactly as much as no allowlist at all."
+VCF-PROBE-SEAM-UNUSABLE:
+  severity: error
+  source: docs
+  source_url: ""
+  summary: "Probes were requested, but the injected {seam} is unusable ({reason}), so nothing was probed."
+  fix: "Pass a callable that accepts the call the seam receives: resolve(name, want_reverse, want_canonical), connect(host, port, timeout), or a zero-argument resolver configuration reader. The resolver's third argument asks for a combined forward answer -- (canonical name, primary address) from a single lookup -- which the appliance round-trip check requires. This is reported rather than tolerated because the alternative is silent: an unusable resolver's TypeError is caught alongside every other resolver failure, so every name would be reported as unresolvable while the run still passed. Only a caller of run_probes() injecting its own seam can see this; validate_document(), the CLI and the MCP server never do."
 VCF-PROBE-UNKNOWN:
   severity: info
   source: docs
   source_url: ""
   summary: "Could not probe {target}: {reason}."
   fix: "Re-run from a host on the management network to confirm."
+VCF-PROBE-RESOLVER-MISMATCH:
+  severity: info
+  source: docs
+  source_url: ""
+  summary: "Probe answers came from {runner}, which is none of the declared nameservers ({declared})."
+  fix: "This is not necessarily wrong -- a forwarder can resolve the lab zone correctly, systemd-resolved reports only 127.0.0.53, and Windows has no resolv.conf at all. It tells you the answers above were not obtained from the DNS the deployment will use. Re-run from the management network to be certain."
+VCF-PROV-NO-BOOT-SERVER:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No provisioning.bootServerUrl, so a booting host has nowhere to fetch its kickstart."
+  fix: "Add provisioning.bootServerUrl pointing at the HTTP server that serves the boot artifacts."
+VCF-PROV-NO-MGMT-NETWORK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "networks.management needs a usable subnet and gateway before a kickstart can set static addressing."
+  fix: "Give networks.management a CIDR subnet and a gateway."
+VCF-PROV-NO-MAC:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} has no provisioningMac, so it cannot be given a per-MAC boot config."
+  fix: "Record the MAC of the NIC that UEFI HTTP boots. It is how a booting host finds its own kickstart."
+VCF-PROV-NO-BOOT-DISK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} has no bootDisk, so the install target is undefined."
+  fix: "Name the install device explicitly. Relying on first-disk ordering risks installing over the vSAN device."
+VCF-PROV-NO-ESX-BOOT-CFG:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No ESX boot.cfg was supplied, so no UEFI boot configs were generated."
+  fix: "Copy the ESX ISO contents to the boot server, then pass that directory's own boot.cfg content as esx_boot_cfg. It carries the modules=, build= and updated= lines that only the ISO knows; a synthesised boot.cfg cannot boot."
+VCF-PROV-NO-ROOT-HASH:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "No credentials.esxRootHash, so the kickstart has no root password to set."
+  fix: "Add credentials.esxRootHash as a ${reference} (e.g. ${esx_root_hash}) resolving to a SHA-512 crypt hash. Generate one with: openssl passwd -6. The kickstart is published over unauthenticated HTTP, so it must carry a hash and never a password."
+VCF-PROV-BOOT-DISK-FIRSTDISK:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} selects its boot disk with '{selector}'. --firstdisk orders by driver and PCI enumeration, not by size or role, so it can select the vSAN ESA device and repartition it."
+  fix: "Name a stable device identifier instead: /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list."
+VCF-PROV-BOOT-DISK-RUNTIME-NAME:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} selects its boot disk by the runtime name '{selector}'. mpx and vmhbaN:C0:T0:L0 names are assigned at boot in discovery order and are not stable across reboots or hardware changes."
+  fix: "Name a stable device identifier instead: /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list."
+VCF-CAP-TIERING-NEEDS-WORKAROUND:
+  severity: error
+  source: docs
+  source_url: https://williamlam.com/2026/05/vcf-9-1-comprehensive-esx-configuration-workarounds-for-lab-deployments.html
+  summary: "Host {host} declares hardware.memoryTieringGb {tier}, but 'consumer-amd' is not in provisioning.hostWorkarounds. NVMe memory tiering cannot power on VMs on AMD Ryzen without the monitor_control.disable_apichv workaround, so the capacity plan's tiered RAM is not actually available."
+  fix: "Add 'consumer-amd' to provisioning.hostWorkarounds so %firstboot sets monitor_control.disable_apichv=\"TRUE\" in /etc/vmware/config -- or set memoryTieringGb to 0 if this host is not consumer AMD hardware."
+VCF-PROV-BOOT-DISK-NOT-STABLE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} names its boot disk as '{selector}', which is not a stable device identifier."
+  fix: "Use /vmfs/devices/disks/t10...., eui.... or naa..... Read them from a live host with: esxcli storage core device list. With no BMC, an install that picks the wrong device destroys the vSAN member and costs a physical visit."
+VCF-PROV-NO-TIERING-DEVICE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} declares hardware.memoryTieringGb {tier}, but no hardware.memoryTieringDevice, so %firstboot has no device to enable tiering on and the host will boot with DRAM only."
+  fix: "Add hardware.memoryTieringDevice naming the NVMe device reserved for tiering, as a stable identifier (/vmfs/devices/disks/t10...., eui.... or naa....). Read them from a live host with: esxcli memtier device list. Until it is there, every capacity figure that counted tiered memory is counting RAM the host will not have."
+VCF-PROV-TIERING-DEVICE-NOT-STABLE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} names its memory tiering device as '{selector}', which is not a stable device identifier, so no tiering was configured."
+  fix: "Use /vmfs/devices/disks/t10...., eui.... or naa..... mpx and vmhbaN:C0:T0:L0 names are assigned at boot in discovery order, so the device one reaches today is not the device it reaches after a reboot -- and `esxcli memtier enable` consumes whatever it is given."
+VCF-PROV-TIERING-RATIO-UNSUPPORTED:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} would need a memory tier ratio of {ratio}% ({tier} GB tier against {ram} GB DRAM), and ESX accepts 1-400%. No tiering was configured."
+  fix: "Bring hardware.memoryTieringGb and hardware.ramGb into a ratio ESX supports: the tier can be at most four times DRAM. A ratio of 0 usually means hardware.ramGb is missing or zero."
+VCF-PROV-DEVICE-COLLISION:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
+  summary: "Host {host} names the same device '{device}' as both {first} and {second}. The three roles consume the device they are given, so no artifacts were generated for this host."
+  fix: "Give each role its own device. bootDisk is installed over, vsanDevice is claimed by vSAN ESA, and memoryTieringDevice is consumed whole by `esxcli memtier enable` -- any two of them on one NVMe destroys the other's data, and with no BMC that is a drive to the rack. Read the real identifiers from a live host with: esxcli storage core device list."
+VCF-PROV-SSH-KEY-NOT-PUBLIC:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "provisioning.sshPublicKey is not a recognised OpenSSH public key."
+  fix: "Give the one-line contents of a .pub file (ssh-ed25519/ssh-rsa/ecdsa-sha2-nistp* followed by the base64 blob). Not a private key, not a path, and not a ${reference}: this value is written verbatim into a kickstart published over unauthenticated HTTP, so it is refused unless it is visibly a public key."
+VCF-NAME-VSP-LOCAL-SUFFIX:
+  severity: warning
+  source: docs
+  source_url: https://blogs.vmware.com/cloud-foundation/2026/04/17/bridging-the-local-gap-a-split-domain-design-for-vmware-cloud-foundation-deployment/
+  summary: "'{value}' at {where} uses the .local suffix, which the VCF Management Services platform does not support."
+  fix: "Use a routable suffix for the VSP names. This is a warning, not an error: VCF Operations, vCenter, NSX and SDDC Manager still allow .local during the transition window -- only VCF Identity Broker, VCF Automation and vSphere Supervisor dropped it, and those three run on the VSP platform. Correcting dns.subdomain fixes the composed names in one edit."
