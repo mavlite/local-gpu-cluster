@@ -1,0 +1,117 @@
+# VCF 9.1.1 physical lab -- 3x Minisforum 795S7 on the MikroTik CRS309.
+#
+# This is the REAL lab, not the bundled example. vcfspec/examples/lab-3-host.yaml
+# stays as it is: it mirrors the nested Proxmox lab on 10.50.10.0/24, which is
+# still live and is what the probe tests validate against.
+#
+# Addressing discovered 2026-09-24, not assumed:
+#   - CRS309-1G-8S+ (RouterOS 7.20, id IBEV-J3RM) at 192.168.6.11 routes six
+#     lab VLANs and announced them over MNDP: 10 Mgmt, 20 vMotion, 30 vSAN,
+#     40 TEP, 50 T0-uplink, 60 VM-Mgmt. All six gateways answer.
+#   - dns01 (172.16.10.150) is a Windows DC -- 53, 88, 389, 445, 3268 -- and
+#     also serves NTP on 123/udp. It is authoritative for knowledgeondemand.net
+#     and 10.16.172.in-addr.arpa.
+#   - hyp01/02/03 resolve to .145/.143/.141 with matching PTRs.
+#
+# UNVERIFIED, marked so they are not mistaken for measurements:
+#   - Appliance short names are our convention; their IPs come from DNS, not
+#     from this file, so the A/PTR pairs must exist before bring-up.
+#   - MTU per VLAN is not yet read off the CRS309. Management at 1500 and the
+#     rest at 9000 is the intent; confirm before relying on it.
+#   - The vMotion/vSAN/TEP pool ranges are chosen from unoccupied space, not
+#     read from a DHCP reservation list.
+apiVersion: vcfspec/v1
+kind: LabInventory
+instance:
+  name: lab01
+  sddcId: lab01
+  vcfVersion: 9.1.1.0
+dns:
+  subdomain: lab.knowledgeondemand.net
+  nameservers: [172.16.10.150]
+ntp:
+  servers: [172.16.10.150]
+networks:
+  management: {vlan: 10, subnet: 172.16.10.0/24, gateway: 172.16.10.1, mtu: 1500}
+  vmotion:    {vlan: 20, subnet: 172.16.20.0/24, gateway: 172.16.20.1, mtu: 9000,
+               pool: {start: 172.16.20.20, end: 172.16.20.30}}
+  vsan:       {vlan: 30, subnet: 172.16.30.0/24, gateway: 172.16.30.1, mtu: 9000,
+               pool: {start: 172.16.30.20, end: 172.16.30.30}}
+nsx:
+  vipFqdn: nsx.lab.knowledgeondemand.net
+  managers: [nsx01]
+  size: medium
+  transportVlanId: 40
+  fabricMtu: 9000
+  tepPool:
+    name: lab01-tep
+    cidr: 172.16.40.0/24
+    gateway: 172.16.40.1
+    ranges:
+      - {start: 172.16.40.20, end: 172.16.40.60}
+storage:
+  type: VSAN_ESA
+  datastoreName: vsan-lab01
+  failuresToTolerate: 1
+appliances:
+  vcenter: {hostname: vc01, size: small, ssoDomain: vsphere.local}
+  sddcManager: {hostname: sddcm01}
+  vsp:
+    platformFqdn: platform.lab.knowledgeondemand.net
+    instanceFqdn: lab01.lab.knowledgeondemand.net
+    poolStart: 172.16.10.100
+    poolEnd: 172.16.10.115
+    internalCidr: 198.18.0.0/15
+provisioning:
+  bootServerUrl: http://172.16.10.150/esx
+  esxVersion: 9.1.1.0
+  # Ryzen 9 7945HX is a consumer AMD part: NSX Edge's DPDK vendor check and
+  # NVMe memory tiering both need the /etc/vmware/config lines this emits.
+  hostWorkarounds: [consumer-amd]
+hosts:
+  - name: hyp01
+    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    mgmtIp: 172.16.10.145
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
+  - name: hyp02
+    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    mgmtIp: 172.16.10.143
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
+  - name: hyp03
+    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    mgmtIp: 172.16.10.141
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      cpuModel: 7945HX
+credentials:
+  esxRoot: ${esx_root}
+  esxRootHash: ${esx_root_hash}
+  vcenterRoot: ${vcenter_root}
+  ssoAdmin: ${sso_admin}
+  nsxAdmin: ${nsx_admin}
+  sddcManagerRoot: ${sddc_root}
