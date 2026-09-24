@@ -25,6 +25,9 @@
 #     traffic leaves the fabric -- it is reached from 192.168.6.0/24 across the
 #     CRS309 uplink, and the home side is 1500. vMotion, vSAN and TEP never
 #     leave the lab, so they take the 9000 the fabric offers.
+#   - All nine device identifiers were read off the live hosts 2026-09-24 and
+#     are distinct; every t10. string embeds that drive's own serial, so the
+#     three chassis cannot share one however identical they look.
 #   - The vMotion/vSAN/TEP pool ranges are chosen from unoccupied space, not
 #     read from a DHCP reservation list.
 #   - provisioningMac is the MAC now answering on each host's management
@@ -88,42 +91,51 @@ provisioning:
 hosts:
   - name: hyp01
     provisioningMac: "98:b7:85:22:54:a4"
-    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    # Read from the live host 2026-09-24 (esxcli storage core device list).
+    # Boot moves to the 1 TB Crucial. The host boots today from a 59 GB USB
+    # stick at mpx.vmhba32:C0:T0:L0 -- an mpx name is assigned in discovery
+    # order at boot, so it names a different device after a reshuffle, and
+    # VMware has deprecated USB/SD as a boot medium besides.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________483D124F0175A000
     mgmtIp: 172.16.10.145
     vmnics: [vmnic0, vmnic1]
     hardware:
       cores: 16
       ramGb: 96
       vsanDeviceTb: 4
-      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________9BF6F24E0175A000
       memoryTieringGb: 96
-      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________478202718C382500
       cpuModel: 7945HX
   - name: hyp02
     provisioningMac: "98:b7:85:22:65:3e"
-    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    # Read from the live host 2026-09-24. Boots today from the same 59 GB USB
+    # stick as the others; boot moves to the 1 TB Crucial.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________25A8154F0175A000
     mgmtIp: 172.16.10.143
     vmnics: [vmnic0, vmnic1]
     hardware:
       cores: 16
       ramGb: 96
       vsanDeviceTb: 4
-      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________C0B2F24E0175A000
       memoryTieringGb: 96
-      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________97EC007189382500
       cpuModel: 7945HX
   - name: hyp03
     provisioningMac: "98:b7:85:23:a4:ce"
-    bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
+    # Read from the live host 2026-09-24. Boots today from the same 59 GB USB
+    # stick as the others; boot moves to the 1 TB Crucial.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________1EA609500175A000
     mgmtIp: 172.16.10.141
     vmnics: [vmnic0, vmnic1]
     hardware:
       cores: 16
       ramGb: 96
       vsanDeviceTb: 4
-      vsanDevice: /vmfs/devices/disks/t10.NVMe____VSAN________________________4TB
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________5995F74E0175A000
       memoryTieringGb: 96
-      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________8AEC007189382500
       cpuModel: 7945HX
 credentials:
   esxRoot: ${esx_root}
