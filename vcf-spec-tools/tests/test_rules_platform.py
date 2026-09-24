@@ -14,15 +14,36 @@ def test_reference_lab_reports_evaluation_licensing(inventory):
     assert "VCF-LIC-EVALUATION" in check_platform(inventory).codes
 
 
-def test_memory_tiering_clears_the_n1_shortfall(inventory):
+def test_reference_lab_clears_n1_on_dram_alone(inventory):
+    """The 2026-09-24 design fits N-1 without tiering. It did not used to.
+
+    Against the 219 GB stack these rules were written for, N-1 offered
+    180 GB and fell short, so tiering was load-bearing and the pair of
+    tests here asserted exactly that. The design now in rules/tables.py is
+    139.25 GB, which 180 GB of DRAM clears.
+
+    Zeroing tiering rather than asserting on the reference inventory as it
+    stands: with tiering counted the assertion would hold whether or not
+    the DRAM alone were sufficient, so it would no longer test its name.
+    """
+    for host in inventory["hosts"]:
+        host["hardware"]["memoryTieringGb"] = 0
     assert "VCF-CAP-N1-SHORTFALL" not in check_platform(inventory).codes
 
 
-def test_without_tiering_the_n1_shortfall_is_reported(inventory):
+def test_n1_shortfall_is_reported_when_n1_really_is_short(inventory):
+    """72 GB hosts: 198 GB total clears the stack, 132 GB at N-1 does not.
+
+    Sized so only the N-1 rule can fire. A deeper cut would also trip
+    VCF-CAP-RAM-SHORTFALL, and a test that cannot tell the two apart is
+    not testing either.
+    """
     for host in inventory["hosts"]:
+        host["hardware"]["ramGb"] = 72
         host["hardware"]["memoryTieringGb"] = 0
     result = check_platform(inventory)
     assert "VCF-CAP-N1-SHORTFALL" in result.codes
+    assert "VCF-CAP-RAM-SHORTFALL" not in result.codes
     assert result.valid is True          # a warning, not an error
 
 

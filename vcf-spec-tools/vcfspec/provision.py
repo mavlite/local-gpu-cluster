@@ -282,10 +282,16 @@ def _tiering(hardware: dict, hw_path: str, host: str) -> tuple[str, list[Finding
     """The memory-tiering %firstboot block, or "" plus the reason it is absent.
 
     The gap that motivated the port: the inventory has declared
-    hardware.memoryTieringGb since the capacity rules were written, the lab's
-    N-1 headroom depends on it (192 GB available against a 219 GB mandatory
-    stack), and nothing ever turned tiering on. A host declares the size here
-    and the device it comes from, and both have to be there.
+    hardware.memoryTieringGb since the capacity rules were written, and
+    nothing ever turned tiering on. A host declares the size here and the
+    device it comes from, and both have to be there.
+
+    Tiering used to be load-bearing for N-1 and no longer is. Against the
+    219 GB stack this module was written for, N-1 offered 180 GB and did
+    not fit; the 2026-09-24 design in rules/tables.py is 139.25 GB, which
+    N-1 clears on DRAM alone. What tiering buys now is headroom -- and it
+    is what makes VCF Automation's +96 GB affordable if it is ever added,
+    so this stays on.
 
     Never fatal to the host's artifacts: a host with no tiering still installs
     and still commissions, it simply has less memory than the plan assumed.
