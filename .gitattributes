@@ -8,8 +8,13 @@
 #
 # Python and YAML tolerate CRLF, which is why this only ever bites the shell
 # scripts — and why it is easy to miss when the same edit "works" for .py.
+# The same reasoning reaches further than the Proxmox host. An .ipxe script is
+# parsed by iPXE out of a UEFI environment during network boot, where there is
+# no shell to be forgiving and no way to read an error that scrolls past before
+# the host resets. It is published to the depot verbatim.
 *.sh    text eol=lf
 *.py    text eol=lf
 *.yaml  text eol=lf
 *.yml   text eol=lf
 *.json  text eol=lf
+*.ipxe  text eol=lf
