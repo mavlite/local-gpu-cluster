@@ -14,8 +14,11 @@
 #   - hyp01/02/03 resolve to .145/.143/.141 with matching PTRs.
 #
 # UNVERIFIED, marked so they are not mistaken for measurements:
-#   - Appliance short names are our convention; their IPs come from DNS, not
-#     from this file, so the A/PTR pairs must exist before bring-up.
+#   - Appliance short names are NOT our convention: they are the names the
+#     previous VCF already holds in DNS (vcsa .129, operations .130, nsx .131,
+#     nsxa .132, sddc-manager .133, installer .135), reused so the existing
+#     address allocation carries over. Their IPs come from DNS, not from this
+#     file, so the A/PTR pairs must exist before bring-up.
 #   - MTU per VLAN is not yet read off the CRS309. Management at 1500 and the
 #     rest at 9000 is the intent; confirm before relying on it.
 #   - The vMotion/vSAN/TEP pool ranges are chosen from unoccupied space, not
@@ -38,8 +41,8 @@ networks:
   vsan:       {vlan: 30, subnet: 172.16.30.0/24, gateway: 172.16.30.1, mtu: 9000,
                pool: {start: 172.16.30.20, end: 172.16.30.30}}
 nsx:
-  vipFqdn: nsx.lab.knowledgeondemand.net
-  managers: [nsx01]
+  vipFqdn: nsx.lab.knowledgeondemand.net          # existing .131
+  managers: [nsxa]                               # existing .132
   size: medium
   transportVlanId: 40
   fabricMtu: 9000
@@ -54,12 +57,12 @@ storage:
   datastoreName: vsan-lab01
   failuresToTolerate: 1
 appliances:
-  vcenter: {hostname: vc01, size: small, ssoDomain: vsphere.local}
-  sddcManager: {hostname: sddcm01}
+  vcenter: {hostname: vcsa, size: small, ssoDomain: vsphere.local}   # existing .129
+  sddcManager: {hostname: sddc-manager}           # existing .133
   vsp:
     platformFqdn: platform.lab.knowledgeondemand.net
     instanceFqdn: lab01.lab.knowledgeondemand.net
-    poolStart: 172.16.10.100
+    poolStart: 172.16.10.100                     # .100-.115 free: no PTR, nothing alive
     poolEnd: 172.16.10.115
     internalCidr: 198.18.0.0/15
 provisioning:
