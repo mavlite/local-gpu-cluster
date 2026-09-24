@@ -223,8 +223,15 @@ def test_secure_boot_is_an_explicit_bios_step_in_the_manifest(out):
     certificate regeneration do not run and the host still looks installed.
     """
     assert "Secure Boot OFF" in out.manifest
-    assert "Turn Secure Boot back ON." in out.manifest
     assert "%firstboot is silently" in out.manifest
+    # It used to say "Turn Secure Boot back ON." afterwards. That was wrong
+    # for this hardware and the correction matters: the Minisforum fTPM is
+    # CRB-only and ESX requires FIFO/TIS, so re-enabling it buys no
+    # attestation at all and silently re-arms the %firstboot skip for the
+    # next rebuild. Measured on hyp01, 2026-09-24.
+    assert "Turn Secure Boot back ON." not in out.manifest
+    assert "Secure Boot stays OFF" in out.manifest
+    assert "CRB-only" in out.manifest
 
 
 # --- 6. the management NIC --------------------------------------------------
@@ -316,17 +323,54 @@ def test_the_manifest_breaks_the_reinstall_loop(out):
     # The instruction has to survive as one step, not as three lines that
     # happen to mention the right words somewhere in the file.
     after = out.manifest.split("AFTER each host installs", 1)[1]
-    assert "01-<mac>/" in after and "boot order" in after
+    assert "01-<mac>/" in after
+    # And it must say WHY removing the directory is the fix rather than
+    # reordering the boot devices: leaving the NIC first is what keeps a
+    # rebuild a server-side operation on hardware with no BMC.
+    assert "install switch" in after
+    assert "Do NOT reorder" in after
 
 
-def test_the_manifest_gives_the_dhcp_handover(out):
-    """Native UEFI HTTP boot still learns its URL from DHCP. The manifest
-    never mentioned DHCP at all, so the mechanism had no starting point.
+def test_the_manifest_describes_pxe_ipxe_http_not_uefi_http_boot(out):
+    """The manifest used to instruct UEFI HTTP Boot -- option 67 with an
+    http:// URL and option 60 HTTPClient. The BD795i SE cannot do that: the
+    HTTP Boot setup items are compiled in but suppressed unconditionally, so
+    the firmware never sends an HTTPClient vendor class and the offer is
+    ignored. Following those instructions produced a host that sat in PXE
+    with nothing answering, which is a hard failure to attribute.
     """
-    assert "option 67" in out.manifest
-    assert "http://10.50.10.5/esx/bootx64.efi" in out.manifest
-    assert "HTTPClient" in out.manifest
-    assert "option 60" in out.manifest
+    assert "HTTPClient" not in out.manifest
+    assert "option 60" not in out.manifest
+    assert "option 67" not in out.manifest
+
+    assert "next-server" in out.manifest
+    assert "boot-file-name = snponly.efi" in out.manifest
+    assert "snponly binds the firmware's own SNP" in out.manifest
+
+
+def test_the_manifest_demands_the_imgfetch_probe(out):
+    """`chain` reports success as soon as the binary loads, so `|| goto` does
+    NOT catch a missing -c config: mboot takes control, iPXE is gone, and the
+    host dies with "Fatal error: 15 (Not found)" unable to hand back to the
+    firmware. hyp01 did exactly that. Probing first is the only reason the
+    fall-through to local disk works at all, so the manifest has to say so.
+    """
+    assert "imgfetch" in out.manifest
+    assert "imgfree" in out.manifest
+    assert "Fatal error: 15" in out.manifest
+    assert "only reason the fall-through" in out.manifest
+
+
+def test_the_manifest_warns_that_pxe_is_untagged(out):
+    """PXE firmware cannot tag. With management on a tagged VLAN the DHCP
+    lands in the port's PVID and never arrives, while the installed ESX works
+    fine on the same cable because ESX tags -- so the symptom points away
+    from the cause. The fix is a provisioning VLAN, not making management
+    native.
+    """
+    assert "UNTAGGED" in out.manifest
+    assert "PROVISIONING VLAN" in out.manifest
+    assert "management never goes native" in out.manifest
 
 
 # --- unchanged guarantees ---------------------------------------------------
