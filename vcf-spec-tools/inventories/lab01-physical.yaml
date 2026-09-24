@@ -19,10 +19,18 @@
 #     nsxa .132, sddc-manager .133, installer .135), reused so the existing
 #     address allocation carries over. Their IPs come from DNS, not from this
 #     file, so the A/PTR pairs must exist before bring-up.
-#   - MTU per VLAN is not yet read off the CRS309. Management at 1500 and the
-#     rest at 9000 is the intent; confirm before relying on it.
+#   - MTU is now read off the CRS309: every VLAN is mtu=9000 l2mtu=9196.
+#     Management stays at 1500 here deliberately. The switch figure is a
+#     ceiling, not a requirement, and management is the one VCF network whose
+#     traffic leaves the fabric -- it is reached from 192.168.6.0/24 across the
+#     CRS309 uplink, and the home side is 1500. vMotion, vSAN and TEP never
+#     leave the lab, so they take the 9000 the fabric offers.
 #   - The vMotion/vSAN/TEP pool ranges are chosen from unoccupied space, not
 #     read from a DHCP reservation list.
+#   - provisioningMac is the MAC now answering on each host's management
+#     address, read from the CRS309's ARP table. If a chassis is set to HTTP
+#     boot from a different physical port, the per-MAC boot.cfg for that host
+#     is never requested and it silently falls back to a default.
 apiVersion: vcfspec/v1
 kind: LabInventory
 instance:
@@ -79,7 +87,7 @@ provisioning:
   hostWorkarounds: [consumer-amd]
 hosts:
   - name: hyp01
-    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    provisioningMac: "98:b7:85:22:54:a4"
     bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 172.16.10.145
     vmnics: [vmnic0, vmnic1]
@@ -92,7 +100,7 @@ hosts:
       memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
       cpuModel: 7945HX
   - name: hyp02
-    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    provisioningMac: "98:b7:85:22:65:3e"
     bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 172.16.10.143
     vmnics: [vmnic0, vmnic1]
@@ -105,7 +113,7 @@ hosts:
       memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____TIER______________________500G
       cpuModel: 7945HX
   - name: hyp03
-    provisioningMac: "00:00:00:00:00:00"        # UNVERIFIED -- read from the host
+    provisioningMac: "98:b7:85:23:a4:ce"
     bootDisk: /vmfs/devices/disks/t10.NVMe____BOOT________________________1TB
     mgmtIp: 172.16.10.141
     vmnics: [vmnic0, vmnic1]
