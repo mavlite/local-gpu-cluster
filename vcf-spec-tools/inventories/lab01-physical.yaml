@@ -66,7 +66,13 @@ appliances:
     poolEnd: 172.16.10.115
     internalCidr: 198.18.0.0/15
 provisioning:
-  bootServerUrl: http://172.16.10.150/esx
+  # The DC runs no HTTP. TrueNAS already serves the offline depot on the
+  # management VLAN, its webroot is the share's PROD/, and an extra PROD/esx
+  # is outside every path the depot catalogue reads -- so the boot server is
+  # that nginx rather than a second service to keep alive. Verified 200.
+  # Kickstarts land in PROD/esx/; the unpacked ISO in PROD/esx/esx-9.1.1.0/,
+  # which is where the default installerPayloadUrl points.
+  bootServerUrl: http://172.16.10.50:8080/esx
   esxVersion: 9.1.1.0
   # Ryzen 9 7945HX is a consumer AMD part: NSX Edge's DPDK vendor check and
   # NVMe memory tiering both need the /etc/vmware/config lines this emits.
