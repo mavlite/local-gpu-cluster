@@ -149,9 +149,24 @@ not testable, and this roadmap has already paid for that lesson once.**
 
 ### Where mutation lives — DECISION REQUIRED
 
-Stage 3 ships a tier module (`read-only` / `mutating` / `destructive`) enforced
-in code, registering only `read-only`, explicitly so that stage 4 does not have
-to retrofit it. Two readings are open:
+**Correction, 2026-09-24, after this spec was first committed.** An earlier
+draft of this section claimed stage 3 "ships a tier module
+(`read-only`/`mutating`/`destructive`) enforced in code, registering only
+`read-only`, explicitly so that stage 4 does not have to retrofit it." **That is
+false.** Stage 3's *design* promised it — "Tiers are enforced in a module, not in
+prompt text" — and it was never built. `ToolDef` carries `name`, `description`,
+`schema`, `handler`, `reports_valid`, `reports_layers`; grepping the package for
+a tier concept returns only memory tiering. The claim was read out of a design
+document and asserted as shipped fact without checking the code, which is the
+same defect this spec's Architecture section warns about.
+
+The consequence for the decision below: **(a) and (b) are both greenfield.** The
+"one retrofits, one does not" argument is void. The tier field is ~10 lines on
+`ToolDef` plus an assertion at registration that everything registered is
+`read-only`, and it should be built regardless of which option wins, because it
+is what lets one server stay safe as the tool count grows.
+
+Two readings are open:
 
 - **(a) A second MCP server** that registers `mutating` tools, with stage 3's
   server staying read-only. Preserves "the spec server never acts"; costs a
@@ -162,7 +177,9 @@ to retrofit it. Two readings are open:
 
 This spec assumes **(b)** until decided, because it is the option that cannot be
 wrong: a skill-driven executor can later be promoted to (a), but a mutating tool
-cannot be un-shipped. **Recommend (b) for this stage.**
+cannot be un-shipped. **Recommend (b) for this stage** — noting that the
+recommendation survives the correction above, since it never depended on the
+tier module existing, only on the asymmetry of what can be undone.
 
 ## Non-negotiable safety requirements
 
