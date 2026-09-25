@@ -356,9 +356,18 @@ Live validation and submission use the Installer API: authenticate at
 
 ## Open questions
 
-1. **Does memory tiering deliver the assumed 1:1 ratio on this hardware?** The
-   capacity maths above depends on it for the N-1 case. Confirm the supported
-   ratio and the resulting effective RAM once a host is running ESX 9.1.1.
+1. ~~**Does memory tiering deliver the assumed 1:1 ratio on this hardware?**~~
+   **ANSWERED 2026-09-24, measured on all three hosts.** `esxcli memtier status
+   get` reports `ENABLED`, `93.71GiBs (100 percent of DRAM)` on each host's own
+   Samsung MZVLB512HAJQ — so 1:1 holds and the N-1 capacity maths stands. Two
+   corrections fall out of the measurement: the licence permits **4× DRAM**
+   (`Licensed for 4.00 times of DRAM`), so ~469 GB/host is available if ever
+   needed; and the 9.1 command is `esxcli memtier enable -d <dev> -r <pct>`,
+   not the 9.0-era `Mem.TierNVMePct` plus `esxcli system tierdevice create`.
+   Tiering is no longer load-bearing for N-1 either: the right-sized 9.1.1 stack
+   is 139.25 GB against 180 GB of N-1 DRAM, so it clears unaided. See
+   `2026-09-24-vcf-bringup-execution-design.md` and the capacity table in
+   `vcfspec/rules/tables.py`.
 2. **Does `fipsEnabled` still exist in the 9.1 schema?** It is Cloud Builder-era;
    confirm against the vendored spec before exposing it as an operator input.
 3. **Which sections the Installer treats as mandatory** for this shape — resolved
