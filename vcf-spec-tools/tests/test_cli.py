@@ -398,3 +398,99 @@ def test_an_integer_mgmt_ip_does_not_crash_the_cli(tmp_path, capsys, monkeypatch
     assert "probes" in payload["layers_run"]
     # The connector was handed the canonical string, not the raw integer.
     assert contacted == ["10.50.10.11"]
+
+
+# --- vcfspec provision ------------------------------------------------------
+#
+# The surface that was missing. render_provisioning() had been tested since
+# 2026-09-21 with no caller outside the test suite: not cli.py, not api.py,
+# not any MCP tool. The kickstarts that installed three physical hosts on
+# 2026-09-24 came out of a hand-written scratchpad script, which is what an
+# unsupported path looks like in practice.
+
+def test_provision_renders_kickstarts_from_the_example(capsys):
+    assert main(["provision", str(EXAMPLE_PATH)]) == 1   # no boot.cfg supplied
+    out = json.loads(capsys.readouterr().out)
+    assert sorted(out["artifacts"]["kickstarts"]) == [
+        "ks-esx01.cfg", "ks-esx02.cfg", "ks-esx03.cfg"]
+
+
+def test_provision_without_a_boot_cfg_says_why_it_made_no_boot_configs(capsys):
+    """The kickstarts are independently useful, so this is a finding rather
+    than a refusal -- but a synthesised boot.cfg has no module list and
+    cannot boot, so the tool declines to invent one and says so."""
+    main(["provision", str(EXAMPLE_PATH)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["artifacts"]["boot_configs"] == {}
+    assert "VCF-PROV-NO-ESX-BOOT-CFG" in [f["code"] for f in out["findings"]]
+
+
+def test_provision_with_a_boot_cfg_emits_one_config_per_mac(tmp_path, capsys):
+    iso = tmp_path / "boot.cfg"
+    iso.write_text("bootstate=0\nprefix=\nkernel=/b.b00\nkernelopt=runweasel\n"
+                   "modules=/jumpstrt.gz --- /k.b00\nbuild=9.1.1-0.25714478\n"
+                   "updated=0\n", encoding="utf-8")
+    assert main(["provision", str(EXAMPLE_PATH), "--esx-boot-cfg", str(iso)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    # Keyed by path, not filename: the per-MAC mechanism is a directory name,
+    # which is what mboot.efi actually requests.
+    assert sorted(out["artifacts"]["boot_configs"]) == [
+        "01-bc-24-11-00-0a-01/boot.cfg",
+        "01-bc-24-11-00-0a-02/boot.cfg",
+        "01-bc-24-11-00-0a-03/boot.cfg"]
+
+
+def test_provision_reports_the_absent_verify_layer_rather_than_implying_one(capsys):
+    """render_document checks its output against a vendored VMware schema two
+    ways before handing it back. There is no vendored grammar for a kickstart,
+    so nothing here can play that role -- and a silent absence is exactly what
+    a reader mistakes for a pass."""
+    main(["provision", str(EXAMPLE_PATH)])
+    out = json.loads(capsys.readouterr().out)
+    assert out["layers_run"] == ["detect", "schema", "rules", "provision"]
+    assert "verify" in out["layers_skipped"]
+
+
+def test_provision_keeps_the_envelope_contract(capsys):
+    main(["provision", str(EXAMPLE_PATH)])
+    out = json.loads(capsys.readouterr().out)
+    for key in ("valid", "findings", "layers_run", "layers_skipped"):
+        assert key in out, key
+
+
+def test_an_unreadable_boot_cfg_is_a_usage_error_not_an_invalid_document(capsys):
+    """Exit 2, like every other unreadable path this CLI is handed. A file
+    that cannot be read is not the same as a document that is wrong."""
+    assert main(["provision", str(EXAMPLE_PATH),
+                 "--esx-boot-cfg", "no-such-boot.cfg"]) == 2
+    assert "no-such-boot.cfg" in capsys.readouterr().err
+
+
+def test_provision_refuses_a_document_forced_to_sddc_spec(tmp_path, capsys):
+    """An SddcSpec describes the VCF instance; provisioning describes the
+    hosts that have to exist before it.
+
+    Forcing the kind rather than hand-writing a spec that detect_kind would
+    recognise: a half-shaped spec is reported UNKNOWN (VCF-INPUT-UNRECOGNISED,
+    which already carries its own finding), so it exercises a different branch
+    than the one under test. --input-kind exists for exactly this.
+    """
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"sddcId": "x", "workflowType": "VCF"}),
+                    encoding="utf-8")
+    assert main(["provision", str(spec), "--input-kind", "sddc_spec"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "VCF-PROV-WRONG-KIND" in [f["code"] for f in out["findings"]]
+    # And nothing was rendered from it -- a refusal, not a partial result.
+    assert "artifacts" not in out
+
+
+def test_an_unrecognisable_document_is_not_silently_provisioned(tmp_path, capsys):
+    """The other branch, kept honest: a document that is neither kind must
+    not reach the renderer either."""
+    junk = tmp_path / "junk.yaml"
+    junk.write_text("colour: blue\n", encoding="utf-8")
+    assert main(["provision", str(junk)]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "VCF-INPUT-UNRECOGNISED" in [f["code"] for f in out["findings"]]
+    assert "artifacts" not in out

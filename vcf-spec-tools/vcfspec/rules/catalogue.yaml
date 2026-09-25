@@ -407,6 +407,27 @@ VCF-PROV-DEVICE-COLLISION:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
   summary: "Host {host} names the same device '{device}' as both {first} and {second}. The three roles consume the device they are given, so no artifacts were generated for this host."
   fix: "Give each role its own device. bootDisk is installed over, vsanDevice is claimed by vSAN ESA, and memoryTieringDevice is consumed whole by `esxcli memtier enable` -- any two of them on one NVMe destroys the other's data, and with no BMC that is a drive to the rack. Read the real identifiers from a live host with: esxcli storage core device list."
+# Orchestration-layer refusals for the provisioning renderer. Deliberately
+# not reusing the VCF-RENDER-* equivalents: their text names render(), and a
+# finding that blames the wrong layer sends an operator to the wrong file.
+VCF-PROV-WRONG-KIND:
+  severity: error
+  source: schema
+  source_url: ""
+  summary: "render_provisioning() only accepts a lab inventory; this document was detected as '{kind}'."
+  fix: "Provisioning artifacts are generated from a LabInventory. An already-rendered SddcSpec describes the VCF instance, not the hosts that have to exist before it."
+VCF-PROV-INSECURE-CREDENTIAL:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render_provisioning() refused to emit a credential that is not a ${reference}."
+  fix: "Use ${name} references for every credential. This matters more here than in the rendered spec: a kickstart is published to an unauthenticated HTTP server the whole provisioning VLAN can read, so it carries a SHA-512 crypt hash and never a password, and a private key pasted into provisioning.sshPublicKey is refused outright."
+VCF-PROV-FAILED:
+  severity: critical
+  source: schema
+  source_url: ""
+  summary: "render_provisioning() raised {exc_type} while building the artifacts."
+  fix: "Run validate on the same inventory; its structured findings explain what is wrong. The provisioning renderer never describes the failure itself, so it cannot echo inventory content into the message."
 VCF-PROV-SSH-KEY-NOT-PUBLIC:
   severity: error
   source: docs
