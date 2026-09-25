@@ -243,6 +243,54 @@ $ echo $?
 1
 ```
 
+## Provisioning
+
+The VCF Installer never images bare metal — ESX must already be installed and
+basic-configured before a host can be commissioned. `provision` renders the
+artifacts that close that gap, from the *same* inventory that renders the
+`SddcSpec`, so the lab is described once and the two outputs cannot disagree
+about an address:
+
+```
+$ python -m vcfspec.cli provision vcfspec/examples/lab-3-host.yaml       --esx-boot-cfg /mnt/iso/boot.cfg | jq '.artifacts | keys'
+[
+  "boot_configs",
+  "kickstarts",
+  "manifest"
+]
+```
+
+- **`kickstarts`** — one per host, keyed by filename.
+- **`boot_configs`** — keyed by *path*, not filename: the per-MAC mechanism
+  is a directory (`01-<mac>/boot.cfg`), which is what the loader actually
+  requests. A flat `boot-<mac>.cfg` is never asked for, so every host would
+  silently fall back to a default and install identically.
+- **`manifest`** — what to publish where, and the credential substitution
+  that has to happen first.
+
+`--esx-boot-cfg` is the `boot.cfg` from the installer ISO, and the CLI reads
+it so the renderer does not have to. Omit it and the kickstarts still render —
+they are independently useful — but the boot configs do not, and
+`VCF-PROV-NO-ESX-BOOT-CFG` says why: a synthesised `boot.cfg` carries no
+module list and cannot boot, so the tool declines to invent one.
+
+**Nothing is written and nothing is published.** The output is JSON on stdout;
+putting the files on a boot server and powering the hosts on are the
+operator's, and a host with no BMC needs a switched PDU for the second one
+anyway.
+
+**The root credential is a `${reference}` to a SHA-512 crypt hash, never a
+password, and substituting it is a publish-time step.** A kickstart is served
+over unauthenticated HTTP to every host on the provisioning VLAN, so a hash is
+the only acceptable thing to put in one. `esxRoot` and `esxRootHash` must be
+the same password and nothing here can check that — the tool holds neither
+value. The manifest carries the verification command.
+
+There is no `verify` layer, and `layers_skipped` says so rather than leaving a
+hole. A rendered `SddcSpec` is checked against the vendored VMware schema two
+ways before it is handed back; no vendored grammar exists for a kickstart, so
+nothing here can play that role.
+
 ## What it checks
 
 1. **Schema** — against `SddcSpec` from Broadcom's VCF Installer OpenAPI

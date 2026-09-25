@@ -33,7 +33,22 @@ maintenance window has started.
 - Sizing an environment from workload requirements.
 - Submitting the spec or running bring-up — stage 4.
 - Any live VCF API mutation. Stage 3 is read-only.
-- Bare-metal provisioning (stages 1-2).
+- ~~Bare-metal provisioning (stages 1-2).~~ **Superseded 2026-09-21.** This
+  bullet scoped *this document's tool surface*, not the package layout, and
+  it was read as the latter often enough to be worth correcting here. The
+  stage-1 design (`2026-09-21-esx-provisioning-design.md`) decided the
+  opposite deliberately, four days later, and says so in its own header
+  (**Code:** `vcf-spec-tools/`): one inventory renders both the SddcSpec and
+  the artifacts that get ESX onto bare metal, *"so the operator describes the
+  lab once and the two outputs cannot drift"*.
+  That coupling is real and runs through shared data, not through imports:
+  `hardware.memoryTieringGb` is read by the kickstart renderer *and* by the
+  N-1 capacity rule, and `VCF-CAP-TIERING-NEEDS-WORKAROUND` is a stage-3
+  capacity finding whose fix text names a stage-1 `%firstboot` line. Reviewed
+  again 2026-09-24 against the commit history — `provision.py` co-changes with
+  the inventory schema, the catalogue and the golden example, never with
+  `render.py` — and the packaging was left as it is. What was actually missing
+  was the command: see `vcfspec provision`.
 - **Supplemental NFS datastores.** The Installer configures *principal* storage
   only; adding supplemental NFS is a day-2 SDDC Manager action (natively
   supported from 9.1.1). The lab's NFS is therefore post-bring-up and out of
