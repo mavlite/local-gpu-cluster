@@ -9,6 +9,7 @@ from __future__ import annotations
 from ..findings import Finding, Result
 from . import finding_for
 from .coerce import as_address as _address
+from .devices import device_findings
 from .coerce import as_mapping as _mapping
 from .coerce import as_network as _network
 from .coerce import as_sequence as _sequence
@@ -23,6 +24,11 @@ def check_platform(inventory: dict) -> Result:
     findings += _vsp_rules(inventory)
     findings += _existing_sddc_manager_rules(inventory)
     findings += _capacity_rules(inventory)
+    # Device-identifier facts. These used to be reachable only from
+    # render_provisioning(), which nothing calls -- so an inventory naming an
+    # unstable boot disk validated clean. They are facts about the document,
+    # so they belong in the layer that judges the document.
+    findings += device_findings(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
     return Result(tuple(findings))
 

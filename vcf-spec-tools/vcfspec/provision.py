@@ -28,21 +28,30 @@ import re
 from dataclasses import dataclass
 
 from .findings import Finding, Result
-from .firstboot import (MAX_TIER_RATIO_PCT, MIN_TIER_RATIO_PCT,
-                        memory_tiering_block, render_firstboot,
+from .firstboot import (memory_tiering_block, render_firstboot,
                         workarounds_block)
 from .render import InsecureCredentialError
 from .inventory import REFERENCE_RE
 from .rules import finding_for
 from .rules.coerce import as_sequence as _sequence
+# One definition of what a safe device identifier is, shared with the rules
+# layer. These used to live here, where `vcfspec validate` could not reach
+# them -- so an inventory naming an unstable boot disk validated clean while
+# the renderer would have refused it. Importing rather than duplicating is
+# what stops the validator and the renderer disagreeing about the same fact.
+from .rules.devices import DISK_PATH_PREFIX as _DISK_PATH_PREFIX
+from .rules.devices import RUNTIME_DISK_RE as _RUNTIME_DISK_RE
+from .rules.devices import STABLE_DISK_RE as _STABLE_DISK_RE
+from .rules.devices import boot_disk_finding as _boot_disk_finding
+from .rules.devices import collision_finding as _collision_finding
+from .rules.devices import device_key as _device_key
+from .rules.devices import device_path as _device_path
+from .rules.devices import plain as _plain
+from .rules.devices import tier_ratio_pct as _tier_ratio_pct
+from .rules.devices import tiering_findings as _tiering_findings
 
 DEFAULT_ESX_VERSION = "9.1.1.0"
 
-# Where ESX exposes block devices, and the form `esxcli memtier enable -d`
-# wants. bootDisk is passed to `install --disk=` uninterpreted because the
-# installer accepts either spelling; the memtier device is normalised, because
-# that command takes a path and not a device name.
-_DISK_PATH_PREFIX = "/vmfs/devices/disks/"
 
 # A SHA-512 crypt hash, which is what `rootpw --iscrypted` wants. Deliberately
 # strict about the `$6$` prefix: `$1$` (MD5) and `$5$` (SHA-256) are accepted by
@@ -50,15 +59,6 @@ _DISK_PATH_PREFIX = "/vmfs/devices/disks/"
 # starts with `$` is almost always someone's password with a `$` in it.
 _SHA512_CRYPT_RE = re.compile(r"^\$6\$[^$:\s]+\$[./A-Za-z0-9]{86}$")
 
-# A stable device identifier: the only boot-disk form this tool will emit.
-# t10./eui./naa. are the device's own identity, reported by the device, and do
-# not move when enumeration order does.
-_STABLE_DISK_RE = re.compile(
-    r"^(?:/vmfs/devices/disks/)?(?:t10\.|eui\.|naa\.)[^\s]+$")
-# Runtime names: assigned at boot, in discovery order, by the host.
-_RUNTIME_DISK_RE = re.compile(
-    r"^(?:/vmfs/devices/disks/)?(?:mpx\.)?vmhba\d+:C\d+:T\d+:L\d+$"
-    r"|^(?:/vmfs/devices/disks/)?mpx\.", re.IGNORECASE)
 
 # An OpenSSH public key, as it appears in a .pub file: type, base64 blob, and
 # an optional comment. Deliberately strict -- this value is written verbatim
@@ -217,65 +217,6 @@ def _ssh_public_key(prov: dict) -> str:
     return text
 
 
-def _tier_ratio_pct(tier_gb: float, ram_gb: float) -> int:
-    """The `-r` percentage for `esxcli memtier enable`.
-
-    Derived rather than pinned at Lam's flat 100, because the device is
-    normally larger than the tier the inventory asks for and this is what
-    decides how much of it gets used. A non-positive ramGb yields 0, which the
-    caller's range guard rejects with a message naming both numbers -- better
-    than a ZeroDivisionError from a pure renderer.
-    """
-    if ram_gb <= 0:
-        return 0
-    return int(round(tier_gb / ram_gb * 100))
-
-
-def _device_key(selector: str) -> str:
-    """`t10.X` and `/vmfs/devices/disks/t10.X` are one device, not two."""
-    return selector[len(_DISK_PATH_PREFIX):] if selector.startswith(
-        _DISK_PATH_PREFIX) else selector
-
-
-def _device_path(selector: str) -> str:
-    """The `/vmfs/devices/disks/…` form `esxcli memtier enable -d` wants."""
-    return selector if selector.startswith(_DISK_PATH_PREFIX) else (
-        _DISK_PATH_PREFIX + selector)
-
-
-def _collision_finding(roles: list[tuple[str, str]], path: str,
-                       host: str) -> Finding | None:
-    """None when every declared device role names a different device.
-
-    `roles` is (field name, selector) for each of bootDisk, vsanDevice and
-    memoryTieringDevice that the host actually declares. Any two naming one
-    device is the expensive mistake this whole area circles: the install
-    overwrites the device it is given, vSAN ESA claims the device it is given,
-    and `esxcli memtier enable` consumes the device it is given. None of the
-    three asks whether something else is already there.
-    """
-    seen: dict[str, str] = {}
-    for field, selector in roles:
-        key = _device_key(selector)
-        if key in seen:
-            return finding_for("VCF-PROV-DEVICE-COLLISION", path, host=host,
-                               device=selector, first=seen[key], second=field)
-        seen[key] = field
-    return None
-
-
-def _boot_disk_finding(selector: str, path: str, host: str) -> Finding | None:
-    """None when `selector` is a stable device identifier, else why not."""
-    if selector.startswith("--firstdisk"):
-        return finding_for("VCF-PROV-BOOT-DISK-FIRSTDISK", path,
-                           host=host, selector=selector)
-    if _RUNTIME_DISK_RE.match(selector):
-        return finding_for("VCF-PROV-BOOT-DISK-RUNTIME-NAME", path,
-                           host=host, selector=selector)
-    if not _STABLE_DISK_RE.match(selector):
-        return finding_for("VCF-PROV-BOOT-DISK-NOT-STABLE", path,
-                           host=host, selector=selector)
-    return None
 
 
 def _tiering(hardware: dict, hw_path: str, host: str) -> tuple[str, list[Finding]]:
@@ -297,35 +238,27 @@ def _tiering(hardware: dict, hw_path: str, host: str) -> tuple[str, list[Finding
     and still commissions, it simply has less memory than the plan assumed.
     That is a finding to read, not a reason to withhold a kickstart. A device
     *collision* is different, and is handled by the caller.
+
+    Why this delegates rather than deciding for itself: the same questions are
+    asked by `vcfspec validate` through rules/devices.py, and two copies of
+    "is this device safe" is precisely how a validator comes to bless an
+    inventory the renderer would refuse. `tiering_findings` owns the answers;
+    this function owns only what to emit once they come back empty.
     """
+    reasons = _tiering_findings(hardware, hw_path, host)
+    if reasons:
+        return "", reasons
+
     tier = hardware.get("memoryTieringGb")
     tier = float(tier) if isinstance(tier, (int, float)) else 0.0
-    if tier <= 0:
+    if tier <= 0:                       # declared nothing: nothing to emit
         return "", []
     device = str(hardware.get("memoryTieringDevice") or "")
-    if not device:
-        return "", [finding_for("VCF-PROV-NO-TIERING-DEVICE", hw_path,
-                                host=host, tier=_plain(tier))]
-    # One check, not the boot disk's three: --firstdisk is not a thing
-    # `esxcli memtier enable -d` accepts, and a runtime name fails the stable
-    # pattern anyway, so a second branch for it would be unreachable.
-    if not _STABLE_DISK_RE.match(device):
-        return "", [finding_for("VCF-PROV-TIERING-DEVICE-NOT-STABLE",
-                                f"{hw_path}/memoryTieringDevice",
-                                host=host, selector=device)]
     ram = hardware.get("ramGb")
     ram = float(ram) if isinstance(ram, (int, float)) else 0.0
     ratio = _tier_ratio_pct(tier, ram)
-    if not MIN_TIER_RATIO_PCT <= ratio <= MAX_TIER_RATIO_PCT:
-        return "", [finding_for("VCF-PROV-TIERING-RATIO-UNSUPPORTED",
-                                f"{hw_path}/memoryTieringGb", host=host,
-                                ratio=ratio, tier=_plain(tier), ram=_plain(ram))]
     return memory_tiering_block(_device_path(device), ratio, tier, ram), []
 
-
-def _plain(value: float) -> str:
-    """96.0 -> "96", so a finding message reads like the inventory does."""
-    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def _rewrite_boot_cfg(iso_boot_cfg: str, prefix: str, kernelopt: str) -> str:
