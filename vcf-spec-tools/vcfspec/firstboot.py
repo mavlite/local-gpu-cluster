@@ -84,6 +84,15 @@ chkconfig SSH on
 # attack surface with no operator benefit here.
 esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1
 esxcli system ntp set --enabled=yes {ntp_opts}
+# The line above configures the server and starts the daemon; it does NOT set
+# the service's startup POLICY, and VCF validates the policy. Without this a
+# bring-up validation reports, on every host:
+#   service ntpd policy is not configured to "Start and stop with host"
+# Note this is a DIFFERENT property from the one `chkconfig ntpd on` writes:
+# after chkconfig alone the vSphere API still reports policy "off", which is
+# what VCF reads -- measured on all three hosts 2026-09-26, where chkconfig
+# said "on" and the warning persisted until setpolicy was used.
+vim-cmd hostsvc/service/setpolicy ntpd on
 
 # Rename the local VMFS datastore. Every ESX install names it "datastore1", so
 # three hosts arrive at vCenter with three datastores of the same name and

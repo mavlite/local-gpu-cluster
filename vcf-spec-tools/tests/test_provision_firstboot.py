@@ -493,3 +493,19 @@ def test_ssh_enable_start_and_policy_are_all_three_present(out):
                     "vim-cmd hostsvc/start_ssh",
                     "chkconfig SSH on"):
         assert body.count(command) == 1, f"{command!r} not emitted exactly once"
+
+
+def test_ntpd_service_policy_is_set(inventory):
+    """VCF validates the ntpd startup POLICY, not just that NTP is configured.
+
+    `chkconfig ntpd on` writes a different property: the vSphere API still
+    reports policy "off" after it, and VCF reads the API. Measured on three
+    live 9.1.1 hosts on 2026-09-26 -- chkconfig said "on" while every
+    validation run warned, until setpolicy was used.
+    """
+    from vcfspec.provision import render_provisioning
+    art = render_provisioning(inventory, None)
+    assert art.kickstarts, "no kickstarts rendered"
+    for name, text in art.kickstarts.items():
+        assert "vim-cmd hostsvc/service/setpolicy ntpd on" in text, \
+            f"{name} configures NTP but never sets the ntpd startup policy"
