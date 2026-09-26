@@ -509,3 +509,30 @@ def test_ntpd_service_policy_is_set(inventory):
     for name, text in art.kickstarts.items():
         assert "vim-cmd hostsvc/service/setpolicy ntpd on" in text, \
             f"{name} configures NTP but never sets the ntpd startup policy"
+
+
+def test_reboot_does_not_require_maintenance_mode(inventory):
+    """`esxcli system shutdown reboot` requires maintenance mode -- its own help
+    says so -- and firstboot leaves maintenance mode immediately before. Using
+    it there fails silently, the host never reboots, and hostd keeps serving the
+    certificate it read BEFORE generate-certificates ran. That mismatch killed a
+    9.1.1 bring-up at Datacenter Creation twice on 2026-09-26.
+    """
+    from vcfspec.provision import render_provisioning
+    art = render_provisioning(inventory, None)
+    assert art.kickstarts
+    for name, text in art.kickstarts.items():
+        # Only executable lines count: the fix's own comment names the broken
+        # command in order to explain it, and a naive substring check trips on
+        # that rather than on a real regression.
+        commands = [ln.strip() for ln in text.splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+        assert not any(c.startswith("esxcli system shutdown reboot")
+                       for c in commands), (
+            f"{name} uses the maintenance-mode-only reboot form after leaving "
+            "maintenance mode; it will not reboot")
+        assert "reboot" in commands, f"{name} has no bare reboot command"
+        tail = text[text.index("generate-certificates"):]
+        assert "\nreboot\n" in tail, (
+            f"{name} regenerates certificates but never reboots; hostd would "
+            "keep reporting the pre-regeneration certificate")

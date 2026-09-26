@@ -218,7 +218,23 @@ esxcli system hostname set --fqdn={fqdn}
 # commission a host that is in it, nothing below needs it, and a host that
 # reboots while still in maintenance mode comes back still in it.
 esxcli system maintenanceMode set -e false
-esxcli system shutdown reboot -d 10 -r "hostname and certificate regenerated"
+
+# `reboot`, NOT `esxcli system shutdown reboot`. Its own help says "The host
+# must be in maintenance mode", and the line above has just left maintenance
+# mode -- so the esxcli form fails silently and the host never restarts. Both
+# decisions above are individually right and together they cancelled out.
+#
+# The consequence is not a missing reboot, it is a WRONG CERTIFICATE. ESX
+# generates a cert at boot, generate-certificates above makes a second one
+# seconds later, and hostd keeps serving the first through its API while
+# rhttpproxy presents the second on the wire. The vCSA CLI installer asks the
+# API, pins that thumbprint, connects, and gets the other one:
+#   Failed to obtain vc thumbprint ... Fingerprints did not match.
+#   Expected "5e9d5b51...", got "ff1e247e..."
+# That killed a 9.1.1 bring-up at Datacenter Creation twice on 2026-09-26,
+# with two certs 18 seconds apart and a host whose uptime proved it had never
+# rebooted. Verified against esxcli's own help text on a live 9.1.1 host.
+reboot
 """
 
 # Real host CPU models never appear here: the brand string exists to fool a
