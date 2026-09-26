@@ -13,10 +13,14 @@
 #                          still permitting routing THROUGH it, because
 #                          forwarded traffic is addressed to the internet, not
 #                          to the gateway. This is why DNS must be public.
-#   OUT DROP 192.168.6.0/24 -- the LAN: this host and every inference LXC.
-#   OUT DROP 10.77.0.0/24   -- the sibling SDN vnet.
-#   OUT DROP 10.60.0.0/16   -- the production fleet VPN, same reason as VM 170.
+#   OUT DROP 10.0.0.0/8     -- this vnet, the sibling vnet, the fleet VPN and
+#                              the PVE host itself.
+#   OUT DROP 172.16.0.0/12  -- the VCF lab management network.
+#   OUT DROP 192.168.0.0/16 -- the LAN: this host and every inference LXC.
+#   OUT DROP 100.64.0.0/10  -- CGNAT / carrier space.
 #   OUT DROP 169.254.0.0/16 -- link-local and cloud metadata.
+#   Deny all private space rather than naming subnets: the enumerated form
+#   missed 172.16.0.0/12 entirely once the VCF lab appeared.
 #
 # KNOWN LIMIT: these are IPv4 rules. That is only acceptable because host IPv6
 # forwarding is off, which this script ASSERTS rather than assumes.
@@ -154,10 +158,17 @@ policy_out: ACCEPT
 
 [RULES]
 IN ACCEPT -p tcp -dport 22 # the only way in, via the host DNAT
-OUT DROP -dest ${TESTER_GW} # the PVE host itself - no host services
-OUT DROP -dest ${TESTER_LAN_CIDR} # the LAN: this host + every inference LXC
-OUT DROP -dest ${TESTER_SIBLING_CIDR} # sibling SDN vnet
-OUT DROP -dest ${TESTER_FLEET_CIDR} # production fleet VPN
+# Deny ALL private space, not an enumeration of known networks. The earlier
+# policy listed ${TESTER_LAN_CIDR}, ${TESTER_SIBLING_CIDR} and
+# ${TESTER_FLEET_CIDR} by name and so silently permitted 172.16.0.0/12 -- the
+# VCF lab management network, created after this policy was written. An
+# external tester could reach the ESXi hosts and the VCF Installer. Verified
+# open from inside the guest 2026-09-25, then closed. Enumerating what to deny
+# fails every time a network is added; denying all of RFC1918 does not.
+OUT DROP -dest 10.0.0.0/8 # RFC1918: this vnet, ${TESTER_SIBLING_CIDR}, ${TESTER_FLEET_CIDR}, the PVE host on ${TESTER_GW}
+OUT DROP -dest 172.16.0.0/12 # RFC1918: the VCF lab management network
+OUT DROP -dest 192.168.0.0/16 # RFC1918: ${TESTER_LAN_CIDR} and everything beside it
+OUT DROP -dest 100.64.0.0/10 # CGNAT / carrier space
 OUT DROP -dest 169.254.0.0/16 # link-local and cloud metadata
 EOF
 
