@@ -165,9 +165,17 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
     if nsx:
         spec["nsxtSpec"] = _nsxt_spec(nsx, creds, default)
     if storage.get("type") == "VSAN_ESA":
+        esa_config = {"enabled": True}
+        # Consumer NVMe is not on the vSAN ESA HCL, and bring-up fails
+        # VSAN_ESA_HOST_HCL_COMPATIBLE_ERROR without this. 9.1.1 supports it
+        # natively in the spec; the 9.0-era mock VIB and the domainmanager
+        # property edits are obsolete. Emitted only when the inventory asks
+        # for it -- never defaulted on, because it disables a hardware check.
+        if storage.get("skipHclAutoDiskClaim") is True:
+            esa_config["skipHclAutoDiskClaim"] = True
         spec["datastoreSpec"] = {"vsanSpec": {
             "datastoreName": storage.get("datastoreName", "vsan-datastore"),
-            "esaConfig": {"enabled": True},
+            "esaConfig": esa_config,
             "failuresToTolerate": int(storage.get("failuresToTolerate", 1)),
         }}
     vsp = appliances.get("vsp")
@@ -175,11 +183,74 @@ def render(inventory: dict, version: str = DEFAULT_VERSION) -> tuple[dict, Resul
         spec["vspClusterSpec"] = {
             "platformFqdn": vsp.get("platformFqdn", ""),
             "instanceFqdn": vsp.get("instanceFqdn", ""),
+            # fleetFqdn addresses the FLEET-level services -- fleet lifecycle,
+            # Salt RaaS, software depot -- exactly as instanceFqdn addresses the
+            # instance-level ones. It is absent from SddcVspClusterSpec.required
+            # because VCF_EXTEND must omit it, so a spec without it VALIDATES
+            # CLEAN and then fails at deploy time: the installer PATCHes
+            # {"fleetLcm":{...}} with no fqdn, SDDC Manager stores NULL, and
+            # "Deploy Lifecycle Components" dies with
+            # PUBLIC_LCM_COMPONENTS_DEPLOY_FLEET_LCM_FETCH_FAILED ~20s in.
+            # Measured against a real 9.1.1 bring-up 2026-09-26, not inferred.
+            # Required by the inventory schema for that reason: for a primary
+            # instance there is no correct spec without it.
+            "fleetFqdn": vsp.get("fleetFqdn", ""),
             "ipv4Pool": {"ipRange": {"startIpAddress": vsp.get("poolStart", ""),
                                      "endIpAddress": vsp.get("poolEnd", "")}},
             "internalClusterCidrIpv4": vsp.get("internalCidr", "198.18.0.0/15"),
         }
+    # The five sections below are what Broadcom's decision table requires for
+    # "deploy a new VCF fleet", and what this renderer previously omitted. The
+    # installer materialises an omitted section as a size-only stub rather than
+    # rejecting it, so their absence is silent until deployment fails.
+    operations = _mapping(appliances.get("operations"))
+    if operations:
+        spec["vcfOperationsSpec"] = _operations_spec(operations, creds)
+    collector = _mapping(appliances.get("operationsCollector"))
+    if collector:
+        spec["vcfOperationsCollectorSpec"] = _collector_spec(collector, creds)
+    idb = _mapping(appliances.get("identityBroker"))
+    if idb:
+        # Identity broker is mandatory on the PRIMARY instance only; a
+        # secondary instance omits vidbSpec.
+        spec["vidbSpec"] = {"hostname": idb.get("hostname", "")}
+    license_server = _mapping(appliances.get("licenseServer"))
+    if license_server:
+        spec["licenseServerSpec"] = {
+            "hostname": license_server.get("hostname", ""),
+            "useExistingDeployment": False,
+        }
     return spec, Result(tuple(findings))
+
+
+def _operations_spec(operations: dict, creds: dict) -> dict:
+    """VcfOperationsSpec. Only `nodes` is schema-required; each node requires a
+    hostname.
+
+    A single master node is the non-HA shape. Replica and data nodes exist for
+    HA and are deliberately not synthesised here: adding nodes this tool cannot
+    size against real capacity is how a spec acquires a value nobody checked.
+    """
+    return {
+        "nodes": [{
+            "hostname": operations.get("hostname", ""),
+            "rootUserPassword": _credential(creds, "operationsRoot"),
+            "type": "master",
+        }],
+        "adminUserPassword": _credential(creds, "operationsAdmin"),
+        "applianceSize": operations.get("size", ""),
+        "useExistingDeployment": False,
+    }
+
+
+def _collector_spec(collector: dict, creds: dict) -> dict:
+    """VcfOperationsCollectorSpec -- the cloud proxy / collector appliance."""
+    return {
+        "hostname": collector.get("hostname", ""),
+        "rootUserPassword": _credential(creds, "operationsCollectorRoot"),
+        "applianceSize": collector.get("size", ""),
+        "useExistingDeployment": False,
+    }
 
 
 def _network_spec(purpose: str, entry: dict) -> dict:

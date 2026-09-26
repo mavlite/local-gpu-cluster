@@ -67,15 +67,35 @@ storage:
   type: VSAN_ESA
   datastoreName: vsan-lab01
   failuresToTolerate: 1
+  # The CT4000P310 is consumer NVMe and is not on the vSAN ESA HCL;
+  # bring-up fails VSAN_ESA_HOST_HCL_COMPATIBLE_ERROR without this.
+  # Native in 9.1.1 - no mock VIB, no domainmanager property edits.
+  skipHclAutoDiskClaim: true
 appliances:
   vcenter: {hostname: vcsa, size: small, ssoDomain: vsphere.local}   # existing .129
   sddcManager: {hostname: sddc-manager}           # existing .133
   vsp:
-    platformFqdn: platform.lab.knowledgeondemand.net
-    instanceFqdn: lab01.lab.knowledgeondemand.net
-    poolStart: 172.16.10.100                     # .100-.115 free: no PTR, nothing alive
-    poolEnd: 172.16.10.115
+    platformFqdn: platform.lab.knowledgeondemand.net   # .120
+    instanceFqdn: lab01.lab.knowledgeondemand.net      # .121
+    # Fleet-level services: fleet lifecycle, Salt RaaS, software depot. Its
+    # absence is what killed the 2026-09-25 bring-up -- the spec validated
+    # clean and then failed at "Deploy Lifecycle Components".
+    fleetFqdn: fleet.lab.knowledgeondemand.net         # .116
+    # Moved off .100-.115: that range is polluted by supervisor nodes from the
+    # failed attempt, and the resume pre-validation refuses any pool holding an
+    # in-use address. .160-.189 is 30 addresses, verified 2026-09-26 to have no
+    # live host and no PTR -- and 30 is the documented recommendation (12 min).
+    poolStart: 172.16.10.160
+    poolEnd: 172.16.10.189
     internalCidr: 198.18.0.0/15
+  # Required for a new VCF fleet; hostname is the SHORT name, the Installer
+  # prefixes the subdomain. Forward and reverse DNS verified 2026-09-26.
+  # VCF Automation is deliberately absent: it wants 24 of this cluster's 48
+  # cores and is deployable later through the deferred-components path.
+  operations: {hostname: ops, size: xsmall}            # .122
+  operationsCollector: {hostname: opscollector, size: small}   # .123
+  identityBroker: {hostname: idb}                      # .124
+  licenseServer: {hostname: licsrv}                    # .134
 provisioning:
   # The DC runs no HTTP. TrueNAS already serves the offline depot on the
   # management VLAN, its webroot is the share's PROD/, and an extra PROD/esx
@@ -144,3 +164,6 @@ credentials:
   ssoAdmin: ${sso_admin}
   nsxAdmin: ${nsx_admin}
   sddcManagerRoot: ${sddc_root}
+  operationsAdmin: ${operations_admin}
+  operationsRoot: ${operations_root}
+  operationsCollectorRoot: ${operations_collector_root}

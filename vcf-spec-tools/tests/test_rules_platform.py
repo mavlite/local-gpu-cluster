@@ -254,7 +254,7 @@ def test_suppression_comparison_is_case_and_trailing_dot_robust(make_inventory):
 
 
 def test_vsp_pool_smaller_than_twelve_is_an_error(make_inventory):
-    doc = make_inventory(**{"appliances.vsp.poolEnd": "10.50.10.107"})
+    doc = make_inventory(**{"appliances.vsp.poolEnd": "10.50.10.167"})
     assert "VCF-VSP-POOL-TOO-SMALL" in check_platform(doc).codes
 
 

@@ -37,9 +37,20 @@ appliances:
   vsp:
     platformFqdn: platform.vcf.lab.knowledgeondemand.net
     instanceFqdn: lab01.vcf.lab.knowledgeondemand.net
-    poolStart: 10.50.10.100
-    poolEnd: 10.50.10.115
+    # Fleet-level services (fleet lifecycle, Salt RaaS, software depot). Omit it
+    # and the spec still validates, then fails at deploy time.
+    fleetFqdn: fleet.vcf.lab.knowledgeondemand.net
+    # >= 12 addresses, 30 recommended, and none of the three FQDNs above may
+    # fall inside the range.
+    poolStart: 10.50.10.160
+    poolEnd: 10.50.10.189
     internalCidr: 198.18.0.0/15
+  # Required for a new VCF fleet. hostname is the SHORT name; the Installer
+  # prefixes the subdomain. Each needs forward AND reverse DNS beforehand.
+  operations: {hostname: ops01, size: xsmall}
+  operationsCollector: {hostname: opscol01, size: small}
+  identityBroker: {hostname: idb01}
+  licenseServer: {hostname: lic01}
 provisioning:
   bootServerUrl: http://10.50.10.5/esx
   esxVersion: 9.1.1.0
@@ -97,3 +108,6 @@ credentials:
   ssoAdmin: ${sso_admin}
   nsxAdmin: ${nsx_admin}
   sddcManagerRoot: ${sddc_root}
+  operationsAdmin: ${operations_admin}
+  operationsRoot: ${operations_root}
+  operationsCollectorRoot: ${operations_collector_root}

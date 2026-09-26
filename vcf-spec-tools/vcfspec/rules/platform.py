@@ -24,6 +24,7 @@ def check_platform(inventory: dict) -> Result:
     findings += _vsp_rules(inventory)
     findings += _existing_sddc_manager_rules(inventory)
     findings += _capacity_rules(inventory)
+    findings += _vsan_hcl_rules(inventory)
     # Device-identifier facts. These used to be reachable only from
     # render_provisioning(), which nothing calls -- so an inventory naming an
     # unstable boot disk validated clean. They are facts about the document,
@@ -31,6 +32,20 @@ def check_platform(inventory: dict) -> Result:
     findings += device_findings(inventory)
     findings.append(finding_for("VCF-LIC-EVALUATION", "/instance"))
     return Result(tuple(findings))
+
+
+def _vsan_hcl_rules(inventory: dict) -> list[Finding]:
+    """Record a deliberately disabled hardware check.
+
+    skipHclAutoDiskClaim lets VCF claim disks that are not on the vSAN ESA
+    HCL. That is the right call on consumer NVMe, and it is also a check
+    someone switched off -- so it is reported rather than left silent. The
+    finding is informational: it does not make the document invalid.
+    """
+    storage = _mapping(inventory.get("storage"))
+    if storage.get("skipHclAutoDiskClaim") is not True:
+        return []
+    return [finding_for("VCF-VSAN-HCL-BYPASSED", "/storage/skipHclAutoDiskClaim")]
 
 
 def _named_values(inventory: dict) -> list[tuple[str, str]]:

@@ -121,8 +121,9 @@ def test_vsp_cluster_uses_an_iprange_pool(inventory):
     vsp = spec["vspClusterSpec"]
     assert vsp["platformFqdn"] == "platform.vcf.lab.knowledgeondemand.net"
     assert vsp["instanceFqdn"] == "lab01.vcf.lab.knowledgeondemand.net"
-    assert vsp["ipv4Pool"] == {"ipRange": {"startIpAddress": "10.50.10.100",
-                                           "endIpAddress": "10.50.10.115"}}
+    assert vsp["fleetFqdn"] == "fleet.vcf.lab.knowledgeondemand.net"
+    assert vsp["ipv4Pool"] == {"ipRange": {"startIpAddress": "10.50.10.160",
+                                           "endIpAddress": "10.50.10.189"}}
 
 
 def test_credentials_stay_references_in_the_output(inventory):
@@ -266,3 +267,63 @@ def test_valid_tep_pool_ranges_render_unchanged(inventory):
     rendered = spec["nsxtSpec"]["ipAddressPoolSpec"]["subnets"][0]["ipAddressPoolRanges"]
     assert rendered == [{"start": r["start"], "end": r["end"]}
                         for r in inventory["nsx"]["tepPool"]["ranges"]]
+
+
+# --- fleetFqdn and the sections a new VCF fleet requires --------------------
+# Regression cover for the 2026-09-26 bring-up failure: a spec missing
+# vspClusterSpec.fleetFqdn validates clean and then fails at deploy time with
+# PUBLIC_LCM_COMPONENTS_DEPLOY_FLEET_LCM_FETCH_FAILED, because the installer
+# PATCHes fleetLcm with a null fqdn.
+
+def test_fleet_fqdn_is_emitted(inventory):
+    spec, _ = render(inventory)
+    assert spec["vspClusterSpec"]["fleetFqdn"] == inventory["appliances"]["vsp"]["fleetFqdn"]
+
+
+def test_the_three_vsp_fqdns_are_distinct(inventory):
+    spec, _ = render(inventory)
+    vsp = spec["vspClusterSpec"]
+    names = [vsp["platformFqdn"], vsp["instanceFqdn"], vsp["fleetFqdn"]]
+    assert len(set(names)) == 3, f"fleet/instance/platform must differ: {names}"
+
+
+def test_inventory_without_fleet_fqdn_is_rejected(inventory):
+    """The field is optional in SddcVspClusterSpec.required (VCF_EXTEND must
+    omit it), so only the inventory schema can stop a primary instance from
+    shipping without it."""
+    from vcfspec.inventory import validate_inventory
+    del inventory["appliances"]["vsp"]["fleetFqdn"]
+    result = validate_inventory(inventory)
+    assert any(f.code == "VCF-INV-SCHEMA" for f in result.findings)
+
+
+def test_operations_spec_has_one_master_node(inventory):
+    spec, _ = render(inventory)
+    ops = spec["vcfOperationsSpec"]
+    assert [n["type"] for n in ops["nodes"]] == ["master"]
+    assert ops["nodes"][0]["hostname"] == inventory["appliances"]["operations"]["hostname"]
+    assert ops["useExistingDeployment"] is False
+
+
+def test_required_new_fleet_sections_are_all_emitted(inventory):
+    spec, _ = render(inventory)
+    for section in ("vcfOperationsSpec", "vcfOperationsCollectorSpec",
+                    "vidbSpec", "licenseServerSpec"):
+        assert section in spec, f"{section} missing: the installer would stub it"
+
+
+def test_automation_is_not_emitted(inventory):
+    """VCF Automation wants 24 vCPU and is deferrable. Emitting it silently
+    would overcommit a 48-core cluster."""
+    spec, _ = render(inventory)
+    assert "vcfAutomationSpec" not in spec
+
+
+@pytest.mark.parametrize("section", ["operations", "operationsCollector",
+                                     "identityBroker", "licenseServer"])
+def test_each_new_appliance_is_required_by_the_schema(inventory, section):
+    from vcfspec.inventory import validate_inventory
+    del inventory["appliances"][section]
+    result = validate_inventory(inventory)
+    assert any(f.code == "VCF-INV-SCHEMA" for f in result.findings), \
+        f"appliances.{section} must be required, not optional"

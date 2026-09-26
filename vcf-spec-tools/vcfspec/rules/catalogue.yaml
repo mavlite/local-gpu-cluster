@@ -446,3 +446,9 @@ VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS:
   source_url: ""
   summary: "appliances.sddcManager.useExistingDeployment is set, but credentials.{missing} is not declared."
   fix: "Declare credentials.{missing} as a ${reference}. Importing an existing SDDC Manager needs credentials a fresh deployment does not: a real 9.1.1 Installer refuses the spec outright with QUICK_START_VALIDATION_FAILED, 'Empty local user password specified in SDDC Manager specification'. Measured 2026-09-22."
+VCF-VSAN-HCL-BYPASSED:
+  severity: info
+  source: docs
+  source_url: https://williamlam.com/2025/06/vsan-esa-disk-hcl-workaround-for-vcf-9-0.html
+  summary: vSAN ESA HCL disk check is disabled; disks are claimed without certification.
+  fix: Remove storage.skipHclAutoDiskClaim once the disks are on the vSAN ESA HCL.
