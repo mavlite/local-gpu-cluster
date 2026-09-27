@@ -516,12 +516,17 @@ def test_consumer_amd_workarounds_appear_in_firstboot_before_the_reboot(out):
     assert body.count("esxcli system shutdown reboot") == 1
 
 
-def test_consumer_amd_workarounds_include_all_four_settings(out):
+def test_consumer_amd_workarounds_include_every_setting(out):
+    """Five, not four: the RDSEED CPUID mask was added 2026-09-26. The
+    host-side entropySources setting does nothing for guests, and guest RDSEED
+    spinning is the documented cause of high CPU in NSX and VCF Automation.
+    """
     body = out.kickstarts["ks-esx01.cfg"]
-    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in body
+    assert 'cpuid.brandstring = "AMD EPYC Ryzen 9 7945HX"' in body
     assert '>> /etc/vmware/config' in body
     assert 'monitor_control.disable_apichv ="TRUE"' in body
     assert "esxcli system settings kernel set -s entropySources -v 2" in body
+    assert 'cpuid.7.ebx = "-------------0------------------"' in body
     assert ("esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0"
             in body)
 
@@ -530,8 +535,11 @@ def test_the_brand_string_uses_the_hosts_own_cpu_model(out):
     """hardware.cpuModel is per host; the reference lab sets it to 7945HX for
     every host and the brand string must reflect it, not a placeholder.
     """
-    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in out.kickstarts["ks-esx01.cfg"]
-    assert 'cpuid.brandstring = "AMD EPYC 7945HX"' in out.kickstarts["ks-esx03.cfg"]
+    # "AMD EPYC Ryzen 9 <model>", not "AMD EPYC <model>": the DPDK gate only
+    # needs the "AMD EPYC" substring, and keeping the real family in the string
+    # avoids asserting an EPYC part number that does not exist.
+    assert 'cpuid.brandstring = "AMD EPYC Ryzen 9 7945HX"' in out.kickstarts["ks-esx01.cfg"]
+    assert 'cpuid.brandstring = "AMD EPYC Ryzen 9 7945HX"' in out.kickstarts["ks-esx03.cfg"]
 
 
 def test_a_missing_cpu_model_falls_back_to_a_generic_epyc_string(inventory):

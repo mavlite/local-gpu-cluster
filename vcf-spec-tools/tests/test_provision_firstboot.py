@@ -536,3 +536,42 @@ def test_reboot_does_not_require_maintenance_mode(inventory):
         assert "\nreboot\n" in tail, (
             f"{name} regenerates certificates but never reboots; hostd would "
             "keep reporting the pre-regeneration certificate")
+
+
+def test_rdseed_is_masked_from_guests(inventory):
+    """entropySources only changes what the VMKERNEL consumes. Guests spin on
+    RDSEED directly -- which Zen4/5 executes ~50x slower than Zen3 -- and that
+    is the documented cause of high CPU in NSX and VCF Automation. Masking
+    CPUID leaf 7 EBX bit 18 hides it from guests.
+
+    The mask is 32 characters, bits 31..0 left to right, so the '0' must sit at
+    index 13: 31 - 13 = 18 = RDSEED.
+    """
+    from vcfspec.provision import render_provisioning
+    art = render_provisioning(inventory, None)
+    assert art.kickstarts
+    for name, text in art.kickstarts.items():
+        assert "cpuid.7.ebx" in text, f"{name} does not mask RDSEED from guests"
+        mask = text.split('cpuid.7.ebx = "')[1].split('"')[0]
+        assert len(mask) == 32, f"{name}: mask is {len(mask)} chars, must be 32"
+        assert mask.index("0") == 13, (
+            f"{name}: the masked bit is {31 - mask.index('0')}, expected 18 (RDSEED)")
+        assert mask.count("0") == 1, f"{name}: mask clears more than one bit"
+
+
+def test_brand_string_keeps_the_true_model_visible(inventory):
+    """The NSX Edge DPDK gate is a substring test for "AMD EPYC", so the spoof
+    only has to contain that. Emitting a bare "AMD EPYC <model>" invents an
+    EPYC part number that does not exist and makes every inventory export
+    assert it; keeping "Ryzen 9" in the string satisfies the gate without the
+    lie, and matches the reference implementation.
+    """
+    from vcfspec.provision import render_provisioning
+    art = render_provisioning(inventory, None)
+    for name, text in art.kickstarts.items():
+        line = [ln for ln in text.splitlines() if "cpuid.brandstring" in ln]
+        assert line, f"{name} has no brand string"
+        assert "AMD EPYC" in line[0], f"{name}: DPDK gate needs the AMD EPYC substring"
+        assert "Ryzen" in line[0], (
+            f"{name}: brand string drops the true family, asserting a "
+            f"nonexistent EPYC part: {line[0].strip()}")

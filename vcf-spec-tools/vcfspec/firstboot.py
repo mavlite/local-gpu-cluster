@@ -196,9 +196,28 @@ echo 'cpuid.brandstring = "{brand}"' >> /etc/vmware/config
 # NVMe memory tiering cannot power on VMs on AMD Ryzen without this. Needs a
 # reboot, served by the one below.
 echo 'monitor_control.disable_apichv ="TRUE"' >> /etc/vmware/config
-# Zen 4/5 entropy collection is slow; widen the kernel's entropy source
-# count. Needs a reboot, served by the one below.
+# Zen 4/5 entropy. entropySources is a BITMASK, not a count, and 2 NARROWS
+# the VMkernel to RDRAND only -- it does not widen anything. The host's own
+# help states it: "0=defaults, otherwise bitmask values: 1=interrupts,
+# 2=RDRAND, 4=RDSEED, 8=entropyd". 2 is the right value for a PHYSICAL host;
+# 1 (interrupt jitter) is the value for a NESTED one, and several third-party
+# summaries quote 1 indiscriminately. Zen4/5 executes RDSEED ~50x slower than
+# Zen3 with a high failure rate, so the default path -- which prefers RDSEED
+# -- burns CPU. Needs a reboot, served by the one below.
+#
+# This deliberately REDUCES entropy quality and will fail the DISA STIG
+# entropy check (ESXI-80-000245). Acceptable in a lab; do not copy into
+# anything audited.
 esxcli system settings kernel set -s entropySources -v 2
+# The host-side setting above does nothing for GUESTS: it only changes what
+# the VMkernel itself consumes. Guest userspace (OpenSSL 3.x, JVMs, anything
+# in FIPS mode) spins on RDSEED directly, which is where the NSX and VCFA
+# high-CPU reports come from. Masking CPUID leaf 7, EBX bit 18 hides RDSEED
+# from guests so they fall back to something that is not pathologically slow.
+# The 32 characters are bits 31..0 left to right; the 0 sits at index 13, so
+# 31-13 = bit 18 = RDSEED. Reboot required, served by the one below.
+# https://williamlam.com/2026/09/vcf-9-1-1-reducing-cpu-utilization-on-amd-ryzen-zen4-zen5-by-masking-the-rdseed-instruction.html
+echo 'cpuid.7.ebx = "-------------0------------------"' >> /etc/vmware/config
 # vSAN's default compression (Zstd) costs more CPU on this hardware than
 # LZ4. No reboot needed.
 esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0
@@ -240,7 +259,7 @@ reboot
 # Real host CPU models never appear here: the brand string exists to fool a
 # DPDK vendor check, not to describe the hardware. Used when hardware.cpuModel
 # is absent for a host that requested the consumer-amd workaround.
-_GENERIC_EPYC_BRAND = "AMD EPYC 9124"
+_GENERIC_EPYC_BRAND = "AMD EPYC Ryzen 9"
 
 
 def workarounds_block(host_workarounds: list[str], cpu_model: str | None) -> str:
@@ -252,7 +271,7 @@ def workarounds_block(host_workarounds: list[str], cpu_model: str | None) -> str
     """
     if "consumer-amd" not in host_workarounds:
         return ""
-    brand = f"AMD EPYC {cpu_model}" if cpu_model else _GENERIC_EPYC_BRAND
+    brand = f"AMD EPYC Ryzen 9 {cpu_model}" if cpu_model else _GENERIC_EPYC_BRAND
     return _CONSUMER_AMD_WORKAROUNDS.format(brand=brand)
 
 
