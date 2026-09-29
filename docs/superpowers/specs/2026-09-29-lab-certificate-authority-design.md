@@ -454,10 +454,36 @@ signing enforcement, and 636 presents no certificate.
 So the CA is genuinely required for AD identity. That is no longer an
 assumption.
 
-**Second link: still unproven.** Whether AD identity in Operations resolves
-VIDB's *"Invalid access policy"* has not been shown. That remains an
-authorisation-policy fault rather than a certificate fault, and step 10 may
-still fail with every other step green.
+**Second link: researched 2026-09-29, and the evidence points AGAINST it.**
+
+Nothing in the deployment path configures VIDB's access policy:
+
+- **VIDB's own configuration schema** (`configuration-schema-vidb-9.1.1.0.25679886.yaml`,
+  read from the depot) contains only `ingress`, `size` and `storage`. No
+  identity source, no directory, no policy.
+- **The VCF deployment spec** carries `vidbSpec` as `{"hostname": ...}` and
+  nothing else — see `vcf-spec-tools/vcfspec/render.py`. Bring-up places VIDB;
+  it does not configure its identity.
+- **VCF Operations**, which manages VIDB as `VMWARE_INFRA_MANAGEMENT`
+  (`VMSP_VIDB_INSTANCE`), collects exactly three properties about it, all
+  certificate-expiry. It has no visibility of VIDB's policy.
+- The error string appears in **no client bundle** — it is generated
+  server-side — and every VIDB policy API (`/acs/rulesets`, `/acs/rules`,
+  `/acs/associations`) returns 401.
+
+So VIDB's access policy is day-2 configuration with no automated path found,
+and **no established mechanism connects an Operations identity source to it**.
+The one thing that would connect them — Operations' `VIDB` source type — needs
+`client-id`, `client-secret`, `issuer-url` and `tenant`, and those can only come
+from a VIDB that already works. The circularity is structural, not a missing
+credential.
+
+**Consequence for this design:** the CA is still required and still correct —
+the first link is proven. But it should **not** be expected to unblock VIDB or
+fleet-lcm. Step 10's second half may well fail with every other step green, and
+if it does, the cause is not certificates. Deploying Logs and Networks probably
+needs a route other than fleet-lcm; VCF Operations, which already manages both
+VIDB and the fleet, is the place to look once AD identity works there.
 
 A cheaper test was attempted and is a dead end: the `VC` source type, which
 would use vCenter SSO and need no LDAPS at all, returns **HTTP 500** from
