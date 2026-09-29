@@ -2,8 +2,8 @@
 
 **Status:** revision 2, after architectural, security and operational review
 **Scope:** an internal CA for the VCF lab, and the certificates issued from it
-**Immediate driver:** the AD domain controller cannot serve LDAPS, which blocks
-identity in VCF Operations, which is *assumed* to block VIDB — see Open questions
+**Immediate driver:** the AD domain controller cannot serve LDAPS, which is
+**proven** to block identity in VCF Operations, and assumed to block VIDB
 
 ## Purpose
 
@@ -277,6 +277,37 @@ These are requirements, not recommendations. Each closes a live attack path.
 10. **Return to the original goal:** add AD as an identity source in VCF
     Operations, configured **by FQDN over 636**, then retest the VIDB login.
 
+    This step is fully specified programmatically. The contract comes from the
+    appliance's own REST reference at `/suite-api/docs/rest/index.html`, not
+    from guesswork:
+
+    ```
+    POST /suite-api/api/auth/sources
+    {"name": "knowledgeondemand-AD",
+     "sourceType": {"id":"ACTIVE_DIRECTORY","name":"ACTIVE_DIRECTORY",
+                    "others":[],"otherAttributes":{}},
+     "others": [], "otherAttributes": {}, "certificates": [],
+     "property": [{"name":"host","value":"dns01.knowledgeondemand.net"},
+                  {"name":"domain","value":"knowledgeondemand.net"},
+                  {"name":"use-ssl","value":"true"},
+                  {"name":"port","value":"636"},
+                  {"name":"base-domain","value":"dc=knowledgeondemand,dc=net"},
+                  {"name":"common-name","value":"sAMAccountName"},
+                  {"name":"user-name","value":"knowledgeondemand\\svc-vcf-ldap"},
+                  {"name":"password","value":"from AD_BIND_PASS at run time"}]}
+    ```
+
+    The `others: []` / `otherAttributes: {}` members are load-bearing — a
+    `sourceType` without them is rejected as null. Properties are name/value
+    pairs under `property`, not top-level fields.
+
+    **Validate before creating.** `POST /suite-api/api/auth/sources/test` takes
+    the identical body and creates nothing. Use it as the gate.
+
+    With SSL enabled the create call returns the certificates it found, and the
+    source is not usable until a follow-up `PATCH /suite-api/api/auth/sources`
+    supplies the certificate details. Budget for two calls, not one.
+
 **Root distribution before rotation is necessary but not sufficient.** It
 addresses chain trust only. vCenter↔NSX compute-manager registration, SDDC
 Manager's stored vCenter thumbprint, vCenter↔ESXi host thumbprints and VCF
@@ -406,8 +437,34 @@ design exists to unblock.
 If the answer is no, they keep VSP-issued certificates and the design still
 meets its purpose.
 
-**Is the causal chain in the header actually established?** It asserts no LDAPS
-→ no identity in Operations → no VIDB → no fleet. But VIDB fails with
-*"Invalid access policy"*, which is an authorisation-policy fault, not a
-certificate fault. Step 10 may fail with every other step green. This chain is
-**assumed, not proven**, and there is no fallback designed for that outcome.
+**Is the causal chain in the header actually established?** Partly — tested
+2026-09-29 against the live appliance, and the answer changed.
+
+**First link: PROVEN.** VCF Operations cannot consume this AD until LDAPS
+works. Using `POST /suite-api/api/auth/sources/test`, which validates without
+creating, an ACTIVE_DIRECTORY source failed the bind on **both** transports and
+with every account-name form tried — `DOMAIN\sam`, bare `sAMAccountName` and
+the full DN, over 389 and 636. That the failure is real and not an artefact was
+established by control: the same token returns 200 on `GET auth/sources`, and a
+deliberately bogus `sourceType` returns a clean `400 Invalid source type`, so
+the AD body reaches the bind and the bind is what fails. This matches the two
+independently observed causes — 389 refuses simple binds under Server 2025
+signing enforcement, and 636 presents no certificate.
+
+So the CA is genuinely required for AD identity. That is no longer an
+assumption.
+
+**Second link: still unproven.** Whether AD identity in Operations resolves
+VIDB's *"Invalid access policy"* has not been shown. That remains an
+authorisation-policy fault rather than a certificate fault, and step 10 may
+still fail with every other step green.
+
+A cheaper test was attempted and is a dead end: the `VC` source type, which
+would use vCenter SSO and need no LDAPS at all, returns **HTTP 500** from
+`POST auth/sources` even with the vendor's exact documented shape. It appears
+not to be creatable through this API.
+
+**Note for the bind account:** `svc-vcf-ldap` has **no userPrincipalName set**,
+so UPN-form authentication cannot work against it. Either set one or use
+`DOMAIN\sAMAccountName`, and pair it with `common-name: sAMAccountName` rather
+than `userPrincipalName`.
