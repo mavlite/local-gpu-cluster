@@ -128,51 +128,141 @@ if (-not ($hasServerAuth -and $hasClientAuth)) {
 Write-Ok "EKU carries Server + Client Authentication"
 
 # ----------------------------------- verification: no broad enrolment ACE --
-Write-Step "Verification: No broad enrolment ACE (ESC1 control)"
-Write-Info "Checking: template does not permit Authenticated Users or Domain Users to enroll"
+Write-Step "Verification: Only knowledgeondemand\svc-vcf-ca has Enroll (ESC1 control)"
 Write-Info "This is the ONLY control preventing arbitrary certificate issuance"
 
-# The template output includes an "S-1-5-11" SID (Authenticated Users) or
-# "Domain Users" group in the Enroll ACE. We must be careful:
-# - "Authenticated Users" and "Domain Users" must be caught in Enroll ACEs only,
-#   not in Read or other permissions.
-# - A naive pattern could match unrelated text or miss context.
-# Pattern: look for "Enroll" (permission type) followed by "Authenticated Users"
-#   or "Domain Users" on the same or nearby line (LDAP distinguishedName groups
-#   or SIDs appear line-by-line in certutil output).
+# The requirement is strict: ONLY knowledgeondemand\svc-vcf-ca may have Enroll.
+# Any other principal (Authenticated Users, Domain Users, Domain Computers, a
+# custom group, or an individual account) completely defeats the control.
+# So we must enumerate who actually has Enroll and assert the set is exactly one.
 
-# certutil -v -template output format includes:
-#   "Enroll: <security info>"
-# If it names Authenticated Users or Domain Users in the Enroll block, we fail.
+# certutil -v -template output lists permissions in a section like:
+#   Enroll
+#     knowledgeondemand\svc-vcf-ca
+# or in older formats might show it differently. We must validate we can
+# positively identify this section; if not, we FAIL rather than guess.
 
-# Check for the broad ACEs. The certutil output is somewhat free-form, so we
-# look for patterns that indicate broad enrolment permission. The safest pattern
-# is to look for "Enroll" followed by these group names on the same logical block.
-$hasAuthenticatedUsers = $t -match 'Enroll.*Authenticated Users' -or $t -match 'Authenticated Users.*Enroll'
-$hasDomainUsers = $t -match 'Enroll.*Domain Users' -or $t -match 'Domain Users.*Enroll'
-
-# Also check for the SID form S-1-5-11 (Authenticated Users) in Enroll context
-$hasS1511InEnroll = $t -match 'Enroll.*S-1-5-11' -or $t -match 'S-1-5-11.*Enroll'
-
-if ($hasAuthenticatedUsers -or $hasDomainUsers -or $hasS1511InEnroll) {
-    Write-Fail "A broad Enroll ACE is present -- this is the ESC1 control"
-    Write-Info "Only knowledgeondemand\svc-vcf-ca should have Enroll permission."
-    Write-Info "See Security tab in the template properties; remove the broad ACE."
+# Validate we got template data (not an error or empty output)
+if ([string]::IsNullOrWhiteSpace($t)) {
+    Write-Fail "Cannot verify: certutil -v -template returned empty output"
     exit 1
 }
-Write-Ok "No broad enrolment ACE"
+
+if ($t -notmatch 'VMware') {
+    Write-Fail "Cannot verify: template name not found in certutil output"
+    Write-Info "Output does not appear to be template data"
+    exit 1
+}
+
+# Attempt to find the Enroll section in the output.
+# Look for "Enroll" as a label, optionally followed by structured info.
+# Pattern handles possible formatting like:
+#   "Enroll" followed by accounts on following indented lines, or
+#   "Enroll:\n  account"
+# If this pattern does NOT match, we cannot reliably identify the Enroll ACL,
+# so we FAIL rather than making an unverified assertion.
+if ($t -notmatch '(Enroll[^\n]*\n([\s\S]*?)(?=\n\S|\Z))') {
+    Write-Fail "Cannot verify: Enroll section not found in certutil output"
+    Write-Info "Output format may have changed or does not contain ACE information"
+    exit 1
+}
+
+$enrollSection = $matches[1]
+
+# Extract principals from the Enroll section.
+# Split the section into lines and collect non-empty, indented account names.
+# Accounts typically appear as "domain\account" or may be SIDs (S-1-...).
+$enrolledPrincipals = @()
+$lines = $enrollSection -split '\n'
+foreach ($line in $lines) {
+    # Skip the "Enroll" label line itself and empty lines
+    if ($line -match '^\s+([\w.-]+\\[\w.-]+)' -or $line -match '^\s+(S-1-[\d-]+)') {
+        $principal = $matches[1].Trim()
+        if ($principal) {
+            $enrolledPrincipals += $principal
+        }
+    }
+}
+
+# Validate we found at least one principal. If Enroll exists but lists no one,
+# something is wrong with our parsing or the template is malformed.
+if ($enrolledPrincipals.Count -eq 0) {
+    Write-Fail "Cannot verify: no principals found in Enroll section"
+    Write-Info "Enroll ACE exists but lists no accounts; output may be malformed"
+    exit 1
+}
+
+# Check for the forbidden broad principals by SID and name
+foreach ($principal in $enrolledPrincipals) {
+    if ($principal -eq 'S-1-5-11' -or $principal -match 'Authenticated Users' -or `
+        $principal -match 'Domain Users' -or $principal -match 'Domain Computers' -or `
+        $principal -match 'Everyone') {
+        Write-Fail "Broad principal has Enroll: $principal"
+        exit 1
+    }
+}
+
+# Validate the set is exactly {knowledgeondemand\svc-vcf-ca}
+$expectedPrincipal = 'knowledgeondemand\svc-vcf-ca'
+if ($enrolledPrincipals.Count -ne 1) {
+    Write-Fail "Multiple principals have Enroll permission (expected exactly one)"
+    foreach ($p in $enrolledPrincipals) {
+        Write-Info "  Principal: $p"
+    }
+    exit 1
+}
+
+if ($enrolledPrincipals[0] -ne $expectedPrincipal) {
+    Write-Fail "Enroll is granted to unexpected principal: $($enrolledPrincipals[0])"
+    Write-Info "Expected: $expectedPrincipal"
+    exit 1
+}
+
+Write-Ok "Enroll permission restricted to knowledgeondemand\svc-vcf-ca only"
 
 # ------------------------------ verification: ESC6 flag is not set on CA --
 Write-Step "Verification: ESC6 flag not set on CA (EDITF_ATTRIBUTESUBJECTALTNAME2)"
 Write-Info "Running: certutil -getreg policy\EditFlags"
-$ef = (certutil -getreg policy\EditFlags) -join "`n"
 
-if ($ef -match 'EDITF_ATTRIBUTESUBJECTALTNAME2') {
+# Capture certutil output and exit code. The default $ErrorActionPreference is
+# 'Stop', so we must handle potential errors from certutil explicitly.
+$efOutput = @()
+$efError = ''
+try {
+    $efOutput = @(certutil -getreg policy\EditFlags 2>&1)
+} catch {
+    $efError = $_.Exception.Message
+}
+
+# Validate we got output
+if ($efOutput.Count -eq 0 -or [string]::IsNullOrWhiteSpace(($efOutput -join ''))) {
+    Write-Fail "Cannot verify: certutil -getreg returned no output"
+    if ($efError) { Write-Info "Error: $efError" }
+    exit 1
+}
+
+$efText = $efOutput -join "`n"
+
+# Look for the EditFlags value explicitly. The output should contain a line like:
+#   "EditFlags REG_DWORD = 0x00000000"
+# or show a value with flag names. If we cannot find a value, we cannot verify.
+if ($efText -notmatch 'EditFlags|0x[0-9a-fA-F]+|\d+') {
+    Write-Fail "Cannot verify: EditFlags value not found in certutil output"
+    Write-Info "Output format may have changed or CA is not properly configured"
+    exit 1
+}
+
+# Check if EDITF_ATTRIBUTESUBJECTALTNAME2 is explicitly mentioned as set.
+# This flag allows subjects to supply a SAN in a request on any template.
+# It should NOT be set.
+if ($efText -match 'EDITF_ATTRIBUTESUBJECTALTNAME2|0x40000|262144') {
     Write-Fail "EDITF_ATTRIBUTESUBJECTALTNAME2 is set (ESC6)"
     Write-Info "This allows any template to accept an attacker-specified SAN."
     Write-Info "CA properties -> Policy Module -> Properties -> clear the flag"
     exit 1
 }
+
+# If the output looks normal but does not mention the flag being set, we pass.
 Write-Ok "ESC6 flag not set"
 
 # ------------------------------------------------------------------ summary --
