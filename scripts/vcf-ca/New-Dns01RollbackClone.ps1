@@ -30,10 +30,10 @@
     do and changes nothing.
 
 .PARAMETER UseDatastoreCopy
-    Copy over the network with PowerCLI instead of running vmkfstools on the
-    host. No SSH needed, but it pulls ~60 GB across the wire rather than copying
-    locally on the datastore. Slower by a wide margin; use it if you would
-    rather not enable SSH.
+    Fall back to copying over the network with Copy-DatastoreItem instead of
+    using the host's VirtualDiskManager. Every byte round-trips through this
+    workstation, so it is slower by a wide margin. Only useful if the disk
+    manager refuses the copy.
 
 .EXAMPLE
     .\New-Dns01RollbackClone.ps1
@@ -81,7 +81,44 @@ try {
     Write-Info "$VmName is $($vm.PowerState), tools=$($vm.ExtensionData.Guest.ToolsRunningStatus)"
 
     $ds = Get-Datastore -Server $h -Name $Datastore
-    $needGb = [math]::Ceiling($vm.ExtensionData.Summary.Storage.Committed / 1GB)
+
+    # Work out what will actually be copied here, in the dry run, rather than
+    # at copy time -- the folder holds a great deal that must NOT come along.
+    # Observed in this VM's folder while running: an 8.5 GB .vswp, a 86 MB
+    # vmx-*.vswp, a .lck, a .vmx~ backup and twelve .scoreboard files, none of
+    # which belong in a rollback copy and all of which ESXi recreates on power
+    # on. An allowlist is the only safe filter: a denylist silently admits
+    # whatever the next ESXi build decides to leave lying around.
+    New-PSDrive -Name mgmtds -Location $ds -PSProvider VimDatastore -Root '\' -Scope Script | Out-Null
+    try {
+        $all = @(Get-ChildItem "mgmtds:\$SourceDir" | Where-Object { -not $_.PSIsContainer })
+    } finally { Remove-PSDrive mgmtds -ErrorAction SilentlyContinue }
+    if (-not $all) { Write-Fail "Nothing found in [$Datastore] $SourceDir"; exit 1 }
+
+    # The descriptor .vmdk only. Its -flat pair IS listed by the datastore
+    # browser -- contrary to what you might expect -- and must be excluded:
+    # VirtualDiskManager copies descriptor and flat together as one disk, so
+    # letting the flat match here would copy 60 GB a second time, on its own,
+    # as something that is not a valid disk.
+    $disks = @($all | Where-Object { $_.Name -match '\.vmdk$' -and $_.Name -notmatch '-(flat|delta|ctk|sesparse|rdm|rdmp)\.vmdk$' })
+    $files = @($all | Where-Object { $_.Name -match '\.(vmx|vmxf|nvram|vmsd)$' })
+    $items = $disks + $files
+
+    $skipped = @($all | Where-Object { $_.Name -notin $items.Name -and $_.Name -notmatch '-flat\.vmdk$' })
+    Write-Info ("copying {0} disk(s) and {1} config file(s); skipping {2} runtime file(s)" -f `
+                $disks.Count, $files.Count, $skipped.Count)
+    foreach ($d in $disks) { Write-Info "  disk   $($d.Name)" }
+    foreach ($f in $files) { Write-Info "  config $($f.Name)" }
+    if (-not $disks) { Write-Fail "No disk descriptor found -- refusing to make a copy with no disk."; exit 1 }
+    if (-not ($files | Where-Object { $_.Name -match '\.vmx$' })) {
+        Write-Fail "No .vmx found -- the copy would not be registerable."; exit 1
+    }
+
+    # Size the copy from the flat, not from Summary.Storage.Committed: that
+    # figure includes the swap file we are deliberately not copying.
+    $flatBytes = ($all | Where-Object { $_.Name -match '-flat\.vmdk$' } |
+                  Measure-Object -Property Length -Sum).Sum
+    $needGb = [math]::Ceiling((($flatBytes + ($files | Measure-Object -Property Length -Sum).Sum)) / 1GB)
     Write-Info ("copy needs about {0} GB; {1} GB free on {2}" -f $needGb, [int]$ds.FreeSpaceGB, $Datastore)
     if ($ds.FreeSpaceGB -lt ($needGb * 1.1)) {
         Write-Fail "Not enough free space for the clone with headroom."
@@ -126,38 +163,50 @@ try {
     Write-Ok "powered off"
 
     # ---------------------------------------------------------------------- copy
+    # The copy runs through the host's own VirtualDiskManager and FileManager,
+    # so the bytes never leave the datastore and SSH is never opened. Both
+    # managers are present on a standalone host (ha-vdiskmanager,
+    # ha-nfc-file-manager) -- cloning through New-VM is NOT, because the clone
+    # API lives in vCenter and this host has none.
     Write-Step "Copying"
-    if ($UseDatastoreCopy) {
-        # Pure PowerCLI: no SSH, but every byte crosses the network.
-        New-PSDrive -Name mgmtds -Location $ds -PSProvider VimDatastore -Root '\' -Scope Script | Out-Null
-        try {
-            Copy-DatastoreItem -Item "mgmtds:\$SourceDir" -Destination "mgmtds:\$target" -Recurse -Force
-            Write-Ok "copied over the network to $target"
-        } finally { Remove-PSDrive mgmtds -ErrorAction SilentlyContinue }
-    } else {
-        # vmkfstools on the host is far faster -- the copy never leaves the
-        # datastore. It needs SSH, which is off by default and is turned back
-        # off afterwards regardless of outcome.
-        $svc = Get-VMHostService -VMHost (Get-VMHost -Server $h) | Where-Object { $_.Key -eq 'TSM-SSH' }
-        $sshWasRunning = $svc.Running
-        if (-not $sshWasRunning) {
-            Start-VMHostService -HostService $svc -Confirm:$false | Out-Null
-            Write-Info "SSH enabled on the host (was off; will be restored)"
-        }
-        Write-Warn2 "Run this on $MgmtHost, then return here:"
-        Write-Host ""
-        Write-Host "  mkdir /vmfs/volumes/$Datastore/$target" -ForegroundColor White
-        Write-Host "  cp /vmfs/volumes/$Datastore/$SourceDir/*.vmx  /vmfs/volumes/$Datastore/$target/" -ForegroundColor White
-        Write-Host "  vmkfstools -i /vmfs/volumes/$Datastore/$SourceDir/$SourceDir.vmdk \" -ForegroundColor White
-        Write-Host "             /vmfs/volumes/$Datastore/$target/$SourceDir.vmdk -d thin" -ForegroundColor White
-        Write-Host ""
-        Write-Info "The .vmx matters as much as the disk: without it the copy is not registerable."
-        Read-Host "Press Enter once the copy has finished"
 
-        if (-not $sshWasRunning) {
-            Stop-VMHostService -HostService $svc -Confirm:$false | Out-Null
-            Write-Ok "SSH returned to its previous state (off)"
+    if ($UseDatastoreCopy) {
+        Write-Info "copying over the network (slower; every byte round-trips through this workstation)"
+        New-PSDrive -Name mgmtds -Location $ds -PSProvider VimDatastore -Root '\' -Scope Script | Out-Null
+        try { Copy-DatastoreItem -Item "mgmtds:\$SourceDir" -Destination "mgmtds:\$target" -Recurse -Force }
+        finally { Remove-PSDrive mgmtds -ErrorAction SilentlyContinue }
+        Write-Ok "copied to $target"
+    } else {
+        $si  = Get-View ServiceInstance -Server $h
+        $fm  = Get-View $si.Content.FileManager        -Server $h
+        $vdm = Get-View $si.Content.VirtualDiskManager -Server $h
+
+        $fm.MakeDirectory("[$Datastore] $target", $null, $true)
+        Write-Ok "created [$Datastore] $target"
+
+        foreach ($item in $items) {
+            $src = "[$Datastore] $SourceDir/$($item.Name)"
+            $dst = "[$Datastore] $target/$($item.Name)"
+            # A disk is not a file: copying a .vmdk descriptor with the file
+            # manager leaves its -flat behind and yields an unusable disk.
+            if ($item.Name -match '\.vmdk$') {
+                Write-Info "disk : $($item.Name)  (this is the slow one)"
+                $t = Get-View $vdm.CopyVirtualDisk_Task($src, $null, $dst, $null, $null, $false) -Server $h
+            } else {
+                Write-Info "file : $($item.Name)"
+                $t = Get-View $fm.CopyDatastoreFile_Task($src, $null, $dst, $null, $true) -Server $h
+            }
+            while ($t.Info.State -eq 'running' -or $t.Info.State -eq 'queued') {
+                Start-Sleep -Seconds 5
+                $t.UpdateViewData('Info')
+            }
+            if ($t.Info.State -ne 'success') {
+                Write-Fail "copy of $($item.Name) failed: $($t.Info.Error.LocalizedMessage)"
+                Write-Warn2 "DNS01 is still powered OFF. Bring it up before doing anything else."
+                exit 1
+            }
         }
+        Write-Ok "copied host-locally to $target"
     }
 
     # ------------------------------------------------------------------- restart
