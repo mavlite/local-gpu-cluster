@@ -24,8 +24,6 @@
     Actually install ADCS. Without -Apply, the script only previews the
     configuration and exits without making changes.
 
-.REQUIRES -RunAsAdministrator
-
 .EXAMPLE
     .\Install-LabCA.ps1
     Dry run: shows CAPolicy.inf contents and exits without installing.
