@@ -1,0 +1,60 @@
+[Version]
+Signature="$Windows NT$"
+
+[Certsrv_Server]
+; INSTALL-TIME ONLY: The following settings cannot be changed after the CA is
+; deployed without re-rooting the entire trust fabric. This requires uninstalling
+; the CA, rebuilding the machine, and reissuing certificates to all consumers.
+; Verify each with certutil -cainfo and certutil -getreg before continuing.
+
+; RenewalValidityPeriod: The lifetime of the root CA certificate itself.
+; Default is 5 years. Set to 10 years because:
+;   - The default 5-year lifetime means AD CS silently truncates any certificate
+;     template whose validity exceeds the CA's remaining life.
+;   - A 2-year template begins shortening from year 3 onwards.
+;   - The entire PKI trust fabric expires at year 5, causing a catastrophic
+;     renewal that cascades to every enrolled host and application.
+; 10 years is the maximum supportable horizon for lab infrastructure without
+; external renewal infrastructure.
+RenewalValidityPeriod=Years
+RenewalValidityPeriodUnits=10
+
+; CRLPeriod: The time between Certificate Revocation List publications.
+; Default is 1 week (7 days). Set to 52 weeks (1 year) because:
+;   - A 1-week CRL means a DC powered off during maintenance for 2+ weeks stops
+;     publishing CRLs.
+;   - Strict validators (including VCF LCM) begin hard-failing when they encounter
+;     a CRL whose nextUpdate has passed.
+;   - A 1-week default means the lab loses certificate validation when planned
+;     maintenance exceeds the publication interval.
+; 52 weeks tolerates longer maintenance windows (summer downtime, hardware upgrades)
+; without breaking the CA's ability to serve revocation data.
+CRLPeriod=Weeks
+CRLPeriodUnits=52
+
+; CRLDeltaPeriod: The time between delta (incremental) CRL publications.
+; Setting to 0 disables delta CRLs. The lab does not issue frequent revocations,
+; so the smaller bandwidth savings do not justify the added complexity of
+; maintaining both base and delta CRL coherence.
+CRLDeltaPeriod=Days
+CRLDeltaPeriodUnits=0
+
+; LoadDefaultTemplates: Suppress the auto-published certificate templates.
+; Default is 1 (enabled). Set to 0 to disable because:
+;   - The default templates include Domain Controller and Machine certificates
+;     with Client Authentication enabled and autoenrolment configured.
+;   - Client Authentication on machine accounts enables the PetitPotam relay
+;     attack chain: a malicious client coerces a DC to authenticate to an
+;     attacker-controlled relay, which forwards that auth to the attacker's
+;     target (e.g., a file server, ADCS server, or backup appliance).
+;   - The lab is isolated and patched, but disabling default templates costs
+;     nothing and removes an unnecessary attack surface.
+; Task 5 will explicitly publish only the templates the lab needs.
+LoadDefaultTemplates=0
+
+; AlternateSignatureAlgorithm: Do not use alternate signature algorithms.
+; Default is 0 (disabled). Kept at 0. When enabled (=1), the CA issues
+; certificates using the CMS (Cryptographic Message Syntax) signature format
+; instead of PKCS#1. This is rarely needed outside of very specific scenarios.
+; The lab uses RSA 2048 with SHA-256, which is standard and widely supported.
+AlternateSignatureAlgorithm=0
