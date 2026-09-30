@@ -48,21 +48,44 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\vcf-lab\VCFLab.Common.ps1')
 
+# Secret values that must never reach the console. VCF_SSO_ADMIN_PASS is sent
+# as a request credential to SDDC Manager (token acquisition) and to vCenter
+# (session acquisition), and SDDC Manager echoes request arguments back in
+# some validation failures -- so an error body can contain the very password
+# that was just sent. Populated after the credential file loads.
+$script:SecretValues = @()
+
+# Redacts every known secret from arbitrary text before it is printed. Applied
+# to every error body, not only the ones expected to carry a secret.
+function Protect-Secret {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    foreach ($s in $script:SecretValues) {
+        if ($s) { $Text = $Text.Replace($s, '<redacted>') }
+    }
+    $Text
+}
+
 # ------------------------------------------------------------------ helpers --
 
 function Get-RestErrorDetail {
     param($ErrRecord)
-    $msg  = $ErrRecord.Exception.Message
+    $msg   = $ErrRecord.Exception.Message
+    $inner = $ErrRecord.Exception.InnerException
+    while ($inner) {
+        $msg  += " -- $($inner.Message)"
+        $inner = $inner.InnerException
+    }
     $resp = $ErrRecord.Exception.Response
     if ($resp) {
         try {
             $stream = $resp.GetResponseStream()
             $reader = New-Object System.IO.StreamReader($stream)
             $body = $reader.ReadToEnd()
-            if ($body) { return "$msg -- $body" }
+            if ($body) { return (Protect-Secret "$msg -- $body") }
         } catch { }
     }
-    $msg
+    Protect-Secret $msg
 }
 
 # Parses a single PEM block into an X509Certificate2 so we have a locally
@@ -126,6 +149,11 @@ if (-not (Test-Path $RootPem)) {
 $cfg  = Import-VCFLabConfig
 $cred = Import-VCFLabCredential -Path $cfg.CredentialFile
 Disable-CertificateValidation
+
+# Register every secret this script handles before the first REST call.
+foreach ($k in @('VCF_SSO_ADMIN_PASS')) {
+    if ($cred.ContainsKey($k) -and $cred[$k]) { $script:SecretValues += $cred[$k] }
+}
 
 $pem = (Get-Content $RootPem -Raw).Trim()
 $rootThumbprint = Get-PemThumbprint $pem

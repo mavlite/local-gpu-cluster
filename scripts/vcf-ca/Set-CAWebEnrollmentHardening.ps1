@@ -379,7 +379,7 @@ if ($broadRemain) {
 Write-Step "Web enrolment hardening complete"
 Write-Ok "All hardening steps applied successfully"
 Write-Warn "IMPORTANT: /certsrv is unreachable until YOU bind a certificate to IIS on 443."
-Write-Warn "NO SCRIPT DOES THIS. It is a manual step -- README step 4, 'Bind the DC's"
+Write-Warn "NO SCRIPT DOES THIS. It is a manual step -- README step 5, 'Bind the DC's"
 Write-Warn "certificate to IIS on 443', which also depends on the DC having autoenrolled"
 Write-Warn "first (~90-120 min GPO cycle, or force it with certutil -pulse)."
 Write-Info "That is expected. No consumer of /certsrv exists until Register-VcfCA.ps1."

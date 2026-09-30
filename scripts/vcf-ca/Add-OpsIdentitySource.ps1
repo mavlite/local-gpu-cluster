@@ -75,7 +75,12 @@ function Protect-Secret {
 
 function Get-RestErrorDetail {
     param($ErrRecord)
-    $msg  = $ErrRecord.Exception.Message
+    $msg   = $ErrRecord.Exception.Message
+    $inner = $ErrRecord.Exception.InnerException
+    while ($inner) {
+        $msg  += " -- $($inner.Message)"
+        $inner = $inner.InnerException
+    }
     $resp = $ErrRecord.Exception.Response
     if ($resp) {
         try {
