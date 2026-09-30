@@ -11,10 +11,10 @@
     - Removing the HTTP (port 80) binding to prevent cleartext credential leakage
     - Scoping inbound HTTPS to SDDC Manager and optional admin IP
 
-    CRITICAL: The second and third steps (disable Windows auth and enable Basic auth)
-    are inseparable. Basic auth over cleartext exposes credentials on the wire, which
-    is why step four (removing port 80) is in the same script. Neither step is safe
-    alone; all four must be applied as a unit.
+    CRITICAL: Port 80 removal happens FIRST, before enabling Basic auth, to prevent a
+    cleartext window. Basic auth over cleartext exposes credentials on the wire. Disabling
+    Windows auth and enabling Basic auth must happen together. Neither step is safe alone;
+    all hardening steps must be applied as a unit.
 
     Dry run by default; pass -Apply to perform the hardening.
 
@@ -174,12 +174,21 @@ Write-Step "Configuring firewall rules"
 # Windows Firewall evaluates all matching Allow rules with OR semantics; a scoped Allow
 # does not narrow a broader pre-existing Allow. Task 1 commonly enables
 # "World Wide Web Services (HTTP/HTTPS Traffic-In)" which allows 443 from anywhere.
-Write-Info "Auditing for pre-existing broad Allow rules on port 443"
+# CRITICAL: Only TCP rules on port 443 are relevant. Rules with no port concept (ICMP, IGMP)
+# must never be disabled. Get-NetFirewallPortFilter returns LocalPort='Any' for protocol-less
+# rules; filter by protocol=TCP to avoid silencing ICMP on this domain controller.
+Write-Info "Auditing for pre-existing broad Allow TCP rules on port 443"
 $broadRules = @()
 try {
     $allInboundRules = Get-NetFirewallRule -Direction Inbound -Action Allow -ErrorAction Stop
     foreach ($rule in $allInboundRules) {
         $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+        # Gate on protocol: only TCP rules can legitimately listen on port 443.
+        # ICMP, IGMP, and other protocol-less rules must be skipped regardless of RemoteAddress.
+        $proto = $port.Protocol
+        if ($proto -ne 'TCP') {
+            continue
+        }
         if ($port.LocalPort -eq 443 -or $port.LocalPort -eq 'Any') {
             $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
             if ($addr.RemoteAddress -eq 'Any' -or $addr.RemoteAddress -eq '0.0.0.0/0' -or $addr.RemoteAddress -eq '::/0') {
@@ -194,11 +203,15 @@ try {
 }
 
 if ($broadRules.Count -gt 0) {
-    $msg = "Pre-existing Allow rules allow 443 from anywhere, bypassing scoping: $($broadRules -join ', '). These must be disabled."
-    Write-Host ("  {0} {1}" -f $(if($Apply) { 'FATAL' } else { 'WARN' }), $msg) -ForegroundColor Red
+    Write-Host "  [!] Pre-existing Allow rules allow TCP 443 from anywhere, bypassing scoping:" -ForegroundColor Yellow
+    foreach ($ruleName in $broadRules) {
+        Write-Host "      - $ruleName" -ForegroundColor Yellow
+    }
+    Write-Host "  [!] These must be disabled to enforce scoping." -ForegroundColor Yellow
     if ($Apply) {
+        Write-Info "Disabling pre-existing broad TCP 443 rules:"
         foreach ($ruleName in $broadRules) {
-            Write-Info "Disabling pre-existing broad rule: $ruleName"
+            Write-Info "  Disabling: $ruleName"
             try {
                 Disable-NetFirewallRule -DisplayName $ruleName -ErrorAction Stop
                 Write-Ok "Disabled: $ruleName"
@@ -209,6 +222,7 @@ if ($broadRules.Count -gt 0) {
             }
         }
     } else {
+        Write-Warn "DRY RUN: pass -Apply to disable these rules"
         exit 1
     }
 }
