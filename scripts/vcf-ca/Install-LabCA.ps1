@@ -18,7 +18,18 @@
         certutil -cainfo | Select-String 'Validity|Name'
         certutil -getreg CA\CRLPeriodUnits
 
+    THIS IS THE LAST ROLLBACK POINT IN THE ENTIRE PROJECT. Once the CA exists,
+    dns01 must never be snapshot-reverted -- reverting rolls the CA database
+    back and reuses serial numbers that are already issued and already trusted
+    elsewhere. So the moment BEFORE this script's -Apply is the final moment a
+    snapshot is usable. Take one now. The script requires a typed confirmation
+    that you have.
+
     Dry run by default; pass -Apply to perform the installation.
+
+.PARAMETER Confirmation
+    Supply the literal string CONFIRM to skip the interactive prompt (for a
+    console where Read-Host is not available). Any other value is refused.
 
 .PARAMETER Apply
     Actually install ADCS. Without -Apply, the script only previews the
@@ -30,11 +41,14 @@
 
 .EXAMPLE
     .\Install-LabCA.ps1 -Apply
-    Installs ADCS with the lab CA configuration.
+    Snapshot dns01 first, then installs ADCS with the lab CA configuration.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param([switch]$Apply)
+param(
+    [string]$Confirmation,
+    [switch]$Apply
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -44,6 +58,7 @@ function Write-Step { param([string]$m) Write-Host "`n=== $m" -ForegroundColor C
 function Write-Ok   { param([string]$m) Write-Host "  [OK] $m" -ForegroundColor Green }
 function Write-Info { param([string]$m) Write-Host "  [..] $m" -ForegroundColor Gray }
 function Write-Warn { param([string]$m) Write-Host "  [!] $m" -ForegroundColor Yellow }
+function Write-Fail { param([string]$m) Write-Host "  [X] $m" -ForegroundColor Red }
 
 # --------------------------------------------------------- locate CAPolicy.inf --
 $inf = Join-Path $PSScriptRoot 'CAPolicy.inf'
@@ -64,9 +79,57 @@ Write-Host ""
 # ---------------------------------------------------- dry-run guard and exit --
 if (-not $Apply) {
     Write-Warn "DRY RUN -- pass -Apply to perform the installation"
+    Write-Warn "Before you do: SNAPSHOT dns01. This is the last point at which you can."
     Write-Host ""
     exit 0
 }
+
+# ------------------------------------------- idempotency: already installed? --
+# A re-run after a partial failure used to hit Install-AdcsCertificationAuthority
+# on an already-configured CA and exit FATAL -- after having already overwritten
+# C:\Windows\CAPolicy.inf with -Force and no backup. Short-circuit instead.
+Write-Step "Checking whether ADCS is already installed"
+$caFeature = $null
+try {
+    $caFeature = Get-WindowsFeature -Name ADCS-Cert-Authority -ErrorAction Stop
+} catch {
+    Write-Fail "FATAL: Could not query Windows features: $($_.Exception.Message)"
+    exit 1
+}
+if ($caFeature -and $caFeature.Installed) {
+    Write-Warn "ADCS-Cert-Authority is already Installed on this host."
+    Write-Info "This script will NOT re-run the installation: Install-AdcsCertificationAuthority"
+    Write-Info "fails on a configured CA, and re-copying CAPolicy.inf now would have no effect"
+    Write-Info "anyway (it is read only at promotion time)."
+    Write-Info "Verify the existing CA instead:"
+    Write-Host ""
+    Write-Host "    certutil -cainfo | Select-String 'Validity|Name'" -ForegroundColor DarkGray
+    Write-Host "    certutil -getreg CA\CRLPeriodUnits" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Info "If the existing CA is wrong, removing it is a rebuild, not a re-run --"
+    Write-Info "see the design doc's placement section before touching it."
+    exit 0
+}
+
+# ------------------------------------------- last rollback point: confirm it --
+Write-Step "LAST ROLLBACK POINT -- snapshot dns01 NOW"
+Write-Warn "Once this CA exists, dns01 must NEVER be snapshot-reverted: reverting rolls"
+Write-Warn "the CA database back and reuses serial numbers that are already issued and"
+Write-Warn "already trusted elsewhere. Every later step in this project is therefore"
+Write-Warn "forward-only. THIS is the last moment a snapshot of dns01 is usable."
+Write-Host ""
+Write-Info "Take the snapshot before answering. Then type CONFIRM to proceed."
+
+$answer = $Confirmation
+if (-not $answer) {
+    $answer = Read-Host "Snapshot taken? Type CONFIRM to install the CA"
+}
+if ($answer -cne 'CONFIRM') {
+    Write-Fail "Not confirmed (got '$answer') -- nothing was changed."
+    Write-Info "Re-run with -Apply once dns01 is snapshotted."
+    exit 1
+}
+Write-Ok "Confirmed"
 
 # --------------------------------------------------------- install features --
 Write-Step "Installing ADCS Windows Features"
@@ -83,13 +146,32 @@ try {
 
 # ------------------------------------------------ copy CAPolicy to Windows --
 Write-Step "Deploying CAPolicy.inf"
-Write-Info "Copying to C:\Windows\CAPolicy.inf"
+
+# Back up any pre-existing file before -Force overwrites it. Something else on
+# this host may have put one there, and losing it silently is not acceptable on
+# a domain controller.
+$target = 'C:\Windows\CAPolicy.inf'
+if (Test-Path $target) {
+    $backup = "$target.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    Write-Warn "An existing $target is present and will be overwritten."
+    try {
+        Copy-Item $target $backup -ErrorAction Stop
+        Write-Ok "Backed up to $backup"
+    } catch {
+        Write-Fail "FATAL: Could not back up the existing CAPolicy.inf"
+        Write-Fail "  Error: $($_.Exception.Message)"
+        Write-Info "Refusing to overwrite a file that could not be backed up."
+        exit 1
+    }
+}
+
+Write-Info "Copying to $target"
 try {
-    Copy-Item $inf 'C:\Windows\CAPolicy.inf' -Force -ErrorAction Stop
+    Copy-Item $inf $target -Force -ErrorAction Stop
     Write-Ok "CAPolicy.inf deployed"
 } catch {
-    Write-Host "FATAL: Could not copy CAPolicy.inf to C:\Windows" -ForegroundColor Red
-    Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Fail "FATAL: Could not copy CAPolicy.inf to C:\Windows"
+    Write-Fail "  Error: $($_.Exception.Message)"
     exit 1
 }
 
@@ -140,4 +222,10 @@ Write-Host "    Expected: CRLPeriodUnits = 52" -ForegroundColor DarkGray
 Write-Host ""
 Write-Info "These are install-time values and cannot be changed without rebuilding the CA."
 Write-Host ""
-Write-Ok "CA installation complete. Run Test-LabCAHealth.ps1 to verify."
+Write-Warn "This CA has published NO certificate templates (LoadDefaultTemplates=0)."
+Write-Warn "Nothing autoenrols yet -- not even this domain controller, so LDAPS will"
+Write-Warn "NOT start until you publish 'Domain Controller Authentication' by hand."
+Write-Info "Next: Set-CAWebEnrollmentHardening.ps1 -Apply, then"
+Write-Info "      New-VcfCertificateTemplate.ps1 (section A) to publish the DC template."
+Write-Host ""
+Write-Ok "CA installation complete."
