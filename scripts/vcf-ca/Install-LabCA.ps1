@@ -19,11 +19,17 @@
         certutil -getreg CA\CRLPeriodUnits
 
     THIS IS THE LAST ROLLBACK POINT IN THE ENTIRE PROJECT. Once the CA exists,
-    dns01 must never be snapshot-reverted -- reverting rolls the CA database
-    back and reuses serial numbers that are already issued and already trusted
-    elsewhere. So the moment BEFORE this script's -Apply is the final moment a
-    snapshot is usable. Take one now. The script requires a typed confirmation
-    that you have.
+    dns01 must never be rolled back -- restoring an earlier image rolls the CA
+    database back and reuses serial numbers that are already issued and already
+    trusted elsewhere. So the moment BEFORE this script's -Apply is the final
+    moment a restorable copy is usable. Take one now. The script requires a
+    typed confirmation that you have.
+
+    A VM SNAPSHOT IS NOT AVAILABLE for this VM. dns01 runs on the standalone
+    management host, which has Software Memory Tiering enabled, and ESXi
+    refuses snapshots there; snapshot-reverting a domain controller would risk
+    USN rollback in any case. Take the copy with New-Dns01RollbackClone.ps1,
+    which shuts the guest down cleanly and clones it host-locally.
 
     Dry run by default; pass -Apply to perform the installation.
 
@@ -41,7 +47,8 @@
 
 .EXAMPLE
     .\Install-LabCA.ps1 -Apply
-    Snapshot dns01 first, then installs ADCS with the lab CA configuration.
+    Clone dns01 first (New-Dns01RollbackClone.ps1), then installs ADCS with
+    the lab CA configuration.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
@@ -79,7 +86,8 @@ Write-Host ""
 # ---------------------------------------------------- dry-run guard and exit --
 if (-not $Apply) {
     Write-Warn "DRY RUN -- pass -Apply to perform the installation"
-    Write-Warn "Before you do: SNAPSHOT dns01. This is the last point at which you can."
+    Write-Warn "Before you do: take the rollback COPY of dns01 -- the last point at which you can."
+    Write-Info "  .\New-Dns01RollbackClone.ps1 -Apply   (a VM snapshot is NOT possible on this host)"
     Write-Host ""
     exit 0
 }
@@ -112,21 +120,25 @@ if ($caFeature -and $caFeature.Installed) {
 }
 
 # ------------------------------------------- last rollback point: confirm it --
-Write-Step "LAST ROLLBACK POINT -- snapshot dns01 NOW"
-Write-Warn "Once this CA exists, dns01 must NEVER be snapshot-reverted: reverting rolls"
-Write-Warn "the CA database back and reuses serial numbers that are already issued and"
-Write-Warn "already trusted elsewhere. Every later step in this project is therefore"
-Write-Warn "forward-only. THIS is the last moment a snapshot of dns01 is usable."
+Write-Step "LAST ROLLBACK POINT -- take the rollback COPY of dns01 NOW"
+Write-Warn "Once this CA exists, dns01 must NEVER be rolled back: restoring an earlier"
+Write-Warn "image rolls the CA database back and reuses serial numbers that are already"
+Write-Warn "issued and already trusted elsewhere. Every later step in this project is"
+Write-Warn "therefore forward-only. THIS is the last moment a copy of dns01 is usable."
 Write-Host ""
-Write-Info "Take the snapshot before answering. Then type CONFIRM to proceed."
+Write-Warn "A VM SNAPSHOT IS NOT AVAILABLE here: the management host has Software Memory"
+Write-Warn "Tiering enabled and ESXi refuses snapshots on it. Use the cold clone instead:"
+Write-Info "  .\New-Dns01RollbackClone.ps1 -Apply"
+Write-Host ""
+Write-Info "Take the copy before answering. Then type CONFIRM to proceed."
 
 $answer = $Confirmation
 if (-not $answer) {
-    $answer = Read-Host "Snapshot taken? Type CONFIRM to install the CA"
+    $answer = Read-Host "Rollback copy taken? Type CONFIRM to install the CA"
 }
 if ($answer -cne 'CONFIRM') {
     Write-Fail "Not confirmed (got '$answer') -- nothing was changed."
-    Write-Info "Re-run with -Apply once dns01 is snapshotted."
+    Write-Info "Re-run with -Apply once the rollback copy of dns01 exists."
     exit 1
 }
 Write-Ok "Confirmed"

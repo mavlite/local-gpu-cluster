@@ -77,7 +77,7 @@ Manager's or VCF Operations' REST API with credentials already held.
 
 | # | Step | Script |
 |---|---|---|
-| 0 | **Snapshot `dns01`** -- the last rollback point in the whole project | manual, see below |
+| 0 | **Clone `dns01`** -- the last rollback point in the whole project | `New-Dns01RollbackClone.ps1 -Apply` |
 | 1 | Install the CA | `Install-LabCA.ps1 -Apply` |
 | 2 | Harden web enrolment | `Set-CAWebEnrollmentHardening.ps1 -Apply` |
 | 3 | **Publish `Domain Controller Authentication`** -- without this nothing autoenrols | manual + `New-VcfCertificateTemplate.ps1` section A |
@@ -89,13 +89,35 @@ Manager's or VCF Operations' REST API with credentials already held.
 | 9 | Rotate the eight SDDC-managed certificates | manual runbook, see below |
 | 10 | Add AD as an identity source in VCF Operations | `Add-OpsIdentitySource.ps1 -Apply` |
 
-### Step 0 -- snapshot `dns01`, and understand that it is the last one
+### Step 0 -- clone `dns01`, and understand that it is the last one
 
-Once the CA exists, `dns01` must never be snapshot-reverted (see the invariant
+Once the CA exists, `dns01` must never be rolled back (see the invariant
 below), so the moment before `Install-LabCA.ps1 -Apply` is the final moment a
-snapshot of this VM is usable. Take it now. The script prompts for a typed
+copy of this VM is usable. Take it now. The install script prompts for a typed
 `CONFIRM` that you have, and refuses to install without it. Everything from
 step 1 onwards is forward-only.
+
+**A VM snapshot is not available for this VM.** `dns01` runs on the standalone
+management host (192.168.6.167), which has Software Memory Tiering enabled, and
+ESXi refuses snapshots on a tiered system:
+
+> Snapshots are not yet supported on a system with Software Memory Tiering enabled.
+
+That is no loss. Snapshot-reverting a domain controller risks USN rollback, so
+a cold copy taken with the guest cleanly shut down is the better artifact
+anyway. `New-Dns01RollbackClone.ps1` does exactly that: graceful guest
+shutdown, a host-local copy through the host's own `VirtualDiskManager` (no
+SSH opened, no network round-trip), power back on, then a verification that
+DNS is serving again -- a real query, not a port check.
+
+```powershell
+.\New-Dns01RollbackClone.ps1              # dry run -- shows exactly what it would copy
+.\New-Dns01RollbackClone.ps1 -Apply       # ~61 GB; lab DNS and AD are DOWN meanwhile
+```
+
+Every VCF component resolves its peers through this DC, so run it in a window
+where the lab can lose name resolution. To roll back: power off `dns01`,
+register the copy's `.vmx` in the host's inventory, and power that on.
 
 ### Step 3 -- publish the DC template (nothing autoenrols without it)
 
@@ -396,7 +418,7 @@ trusting a FAIL from this gate as evidence of a real problem.
 | File | Purpose |
 |---|---|
 | `CAPolicy.inf` | install-time CA policy; copied to `C:\Windows` by `Install-LabCA.ps1` |
-| `Install-LabCA.ps1` | [OPERATOR] installs ADCS + Web Enrolment, applies `CAPolicy.inf`; requires a typed `CONFIRM` that `dns01` is snapshotted, backs up any existing `CAPolicy.inf`, and short-circuits if ADCS is already installed |
+| `Install-LabCA.ps1` | [OPERATOR] installs ADCS + Web Enrolment, applies `CAPolicy.inf`; requires a typed `CONFIRM` that the `dns01` rollback clone exists, backs up any existing `CAPolicy.inf`, and short-circuits if ADCS is already installed |
 | `Set-CAWebEnrollmentHardening.ps1` | [OPERATOR] disables Negotiate (the ESC8 control), enables Basic, EPA=Require on windowsAuth, unbinds port 80, scopes firewall to SDDC Manager, reports broad 443 rules |
 | `New-VcfCertificateTemplate.ps1` | [OPERATOR] prints build instructions for BOTH templates (DC + VMware), verifies issuance, cn, EKU, ESC1, DC Autoenroll scoping, ESC6, the CA-level Request Certificates ACE and `CA\AuditFilter` |
 | `Test-LabCAHealth.ps1` | [SCRIPTED] four read-only gates: LDAPS up, LDAPS bind works, 389 still refuses, port 80 closed |
