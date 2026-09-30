@@ -55,6 +55,24 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\vcf-lab\VCFLab.Common.ps1')
 
+# Secret values that must never reach the console. The request body carries
+# AD_BIND_PASS in a `property` entry, and the suite-api validation endpoint
+# echoes request arguments back in some failure responses -- so an error body
+# can contain the very password that was just sent. Populated after the
+# credential file loads.
+$script:SecretValues = @()
+
+# Redacts every known secret from arbitrary text before it is printed. Applied
+# to every error body, not only the ones expected to carry a secret.
+function Protect-Secret {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    foreach ($s in $script:SecretValues) {
+        if ($s) { $Text = $Text.Replace($s, '<redacted>') }
+    }
+    $Text
+}
+
 function Get-RestErrorDetail {
     param($ErrRecord)
     $msg  = $ErrRecord.Exception.Message
@@ -64,16 +82,21 @@ function Get-RestErrorDetail {
             $stream = $resp.GetResponseStream()
             $reader = New-Object System.IO.StreamReader($stream)
             $body = $reader.ReadToEnd()
-            if ($body) { return "$msg -- $body" }
+            if ($body) { return (Protect-Secret "$msg -- $body") }
         } catch { }
     }
-    $msg
+    Protect-Secret $msg
 }
 
 $cfg  = Import-VCFLabConfig
 $cred = Import-VCFLabCredential -Path $cfg.CredentialFile
 Disable-CertificateValidation
 $ops = $cfg.Appliances.Operations.Ip
+
+# Register every secret this script handles before the first REST call.
+foreach ($k in @('AD_BIND_PASS', 'OPERATIONS_ADMIN_PASS')) {
+    if ($cred.ContainsKey($k) -and $cred[$k]) { $script:SecretValues += $cred[$k] }
+}
 
 # ---------------------------------------------------- required credentials --
 Write-Step "Checking credentials"

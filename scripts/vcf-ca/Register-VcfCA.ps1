@@ -39,6 +39,22 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\vcf-lab\VCFLab.Common.ps1')
 
+# Secret values that must never reach the console. SDDC Manager echoes request
+# arguments back in some validation failures, so an error body can contain the
+# very password that was just sent. Populated after the credential file loads.
+$script:SecretValues = @()
+
+# Redacts every known secret from arbitrary text before it is printed. Applied
+# to every error body, not only the ones expected to carry a secret.
+function Protect-Secret {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    foreach ($s in $script:SecretValues) {
+        if ($s) { $Text = $Text.Replace($s, '<redacted>') }
+    }
+    $Text
+}
+
 function Get-RestErrorDetail {
     param($ErrRecord)
     $msg  = $ErrRecord.Exception.Message
@@ -48,16 +64,21 @@ function Get-RestErrorDetail {
             $stream = $resp.GetResponseStream()
             $reader = New-Object System.IO.StreamReader($stream)
             $body = $reader.ReadToEnd()
-            if ($body) { return "$msg -- $body" }
+            if ($body) { return (Protect-Secret "$msg -- $body") }
         } catch { }
     }
-    $msg
+    Protect-Secret $msg
 }
 
 $cfg  = Import-VCFLabConfig
 $cred = Import-VCFLabCredential -Path $cfg.CredentialFile
 Disable-CertificateValidation
 $sddc = $cfg.Appliances.SddcManager.Ip
+
+# Register every secret this script handles before the first REST call.
+foreach ($k in @('AD_CA_ENROLL_PASS', 'VCF_SSO_ADMIN_PASS', 'AD_BIND_PASS')) {
+    if ($cred.ContainsKey($k) -and $cred[$k]) { $script:SecretValues += $cred[$k] }
+}
 
 # ---------------------------------------------------- required credentials --
 # A missing key here must fail with its own name, not a null-reference three

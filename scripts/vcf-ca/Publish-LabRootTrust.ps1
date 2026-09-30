@@ -211,20 +211,44 @@ Write-Ok "session acquired"
 # -------------------------------------------------------- vCenter: write ----
 
 Write-Step "Writing vCenter trusted-root-chains"
-# Body shape per the vSphere Automation API's CertificateManagement.Vcenter
-# .TrustedRootChains.CreateSpec model (cert_chain.cert_chain: string[]).
-# This has not been exercised against a live vCenter in this run -- there is
-# no root certificate to publish yet (Task 5/6 precondition) -- so a failure
-# here is reported plainly rather than assumed impossible.
-$vcBody = @{ cert_chain = @{ cert_chain = @($pem) } }
+# Body shape: the design doc records this endpoint taking {"spec": {...}}
+# (probed against the live lab), while the vSphere Automation API's
+# CertificateManagement.Vcenter.TrustedRootChains.CreateSpec model is normally
+# posted unwrapped as {"cert_chain": {"cert_chain": [...]}} on the /api/ prefix.
+# The two disagree and neither was ever exercised with a real root certificate
+# to publish, because none existed until now. Rather than pick one and guess,
+# send the SPEC'S recorded shape first -- it is the only one backed by a live
+# probe -- and fall back to the unwrapped model shape if the server rejects it.
+# Both attempts are reported; nothing is retried silently.
+$vcSpecBody = @{ spec = @{ cert_chain = @{ cert_chain = @($pem) } } }
+$vcFlatBody = @{ cert_chain = @{ cert_chain = @($pem) } }
+$vcUri = "https://$vc/api/vcenter/certificate-management/vcenter/trusted-root-chains"
+$vcPosted = $false
 try {
-    Invoke-LabRest -Uri "https://$vc/api/vcenter/certificate-management/vcenter/trusted-root-chains" -Method POST `
-        -Headers $vcHdr -Body $vcBody | Out-Null
+    Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcSpecBody | Out-Null
+    $vcPosted = $true
+    Write-Ok "POST accepted (spec-wrapped body, as recorded in the design doc)"
 } catch {
-    Write-Fail "POST /api/vcenter/certificate-management/vcenter/trusted-root-chains failed: $(Get-RestErrorDetail $_)"
+    $firstErr = Get-RestErrorDetail $_
+    Write-Warn2 "spec-wrapped body rejected: $firstErr"
+    Write-Warn2 "retrying with the unwrapped CreateSpec shape {cert_chain:{cert_chain:[...]}}"
+    try {
+        Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcFlatBody | Out-Null
+        $vcPosted = $true
+        Write-Ok "POST accepted (unwrapped body)"
+        Write-Warn2 'The design doc''s recorded {"spec": {...}} shape is WRONG for this'
+        Write-Warn2 'vCenter build -- correct the doc once this run is confirmed good.'
+    } catch {
+        Write-Fail "POST trusted-root-chains failed with BOTH body shapes"
+        Write-Fail "  spec-wrapped : $firstErr"
+        Write-Fail "  unwrapped    : $(Get-RestErrorDetail $_)"
+        exit 1
+    }
+}
+if (-not $vcPosted) {
+    Write-Fail "vCenter trust write did not complete -- cannot verify"
     exit 1
 }
-Write-Ok "POST accepted"
 
 Write-Step "Verifying vCenter trusted-root-chains holds the root"
 $vcOk = $false
