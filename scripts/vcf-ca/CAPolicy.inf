@@ -49,7 +49,20 @@ CRLDeltaPeriodUnits=0
 ;     target (e.g., a file server, ADCS server, or backup appliance).
 ;   - The lab is isolated and patched, but disabling default templates costs
 ;     nothing and removes an unnecessary attack surface.
-; Task 5 will explicitly publish only the templates the lab needs.
+;
+; CONSEQUENCE, stated plainly: with this at 0 the CA publishes NO templates at
+; all on promotion. Nothing autoenrols -- including the domain controller, which
+; means LDAPS never starts, which is the entire reason this CA exists. Two
+; templates must therefore be published BY HAND after install, and both are
+; covered by New-VcfCertificateTemplate.ps1 (instructions + verification):
+;   1. 'Domain Controller Authentication' -- Autoenroll granted to the
+;      Domain Controllers group ONLY (never Domain Computers, never
+;      Authenticated Users). This is what gives dns01 its LDAPS certificate.
+;   2. 'VMware' -- the SDDC Manager template, Enroll restricted to
+;      knowledgeondemand\svc-vcf-ca.
+; Task 5 publishes the ROOT TRUST to vCenter and SDDC Manager; it does not
+; publish templates. Do not read this setting as "templates come later
+; automatically" -- they do not come at all unless an operator issues them.
 LoadDefaultTemplates=0
 
 ; AlternateSignatureAlgorithm: Do not use alternate signature algorithms.

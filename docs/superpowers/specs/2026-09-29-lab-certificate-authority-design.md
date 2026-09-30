@@ -74,7 +74,7 @@ coupling:
 
 | Consumer | Certified how | Ongoing effort |
 |---|---|---|
-| `dns01` LDAPS | AD CS autoenrolment | genuinely automatic |
+| `dns01` LDAPS | AD CS autoenrolment, but **only after an operator publishes a DC template** (see below) | automatic once published |
 | `dns01` IIS `/certsrv` | issued from this CA, bound to 443 manually | one-time |
 | 8 VCF resources | SDDC Manager, `PUT /v1/certificate-authorities` | one manual rotation per 2 years |
 | VCF Operations, Collector, License Server | **not** in SDDC Manager's inventory | unresolved |
@@ -82,6 +82,31 @@ coupling:
 | Domain members | automatic via Public Key Services — **no GPO to author** | none |
 | Appliances | manual root import, one-time | one-time |
 | ESXi | via vCenter's `TRUSTED_ROOTS`, **not** per-host | one-time |
+
+#### The DC template must be published by hand — decision and rationale
+
+`CAPolicy.inf` sets `LoadDefaultTemplates=0`, so the CA publishes **no**
+templates on promotion. Autoenrolment for the DC is therefore not automatic in
+the way this table originally claimed: with nothing published, `dns01` never
+enrols, LDAPS never starts, and the project's whole objective is unreachable.
+
+**Decision:** publish the standard **`Domain Controller Authentication`**
+template after install, and grant **Autoenroll to the `Domain Controllers`
+group only** — never `Domain Computers`, never `Authenticated Users`.
+`LoadDefaultTemplates=0` stays as it is; its job is suppressing the dozen other
+defaults, not suppressing this one.
+
+**Why that is sound, given the PetitPotam/ESC8 reasoning that motivated
+`LoadDefaultTemplates=0` in the first place:** ESC8 is a *relay* attack against
+the web-enrolment endpoint, and it is closed on the endpoint, not on the
+template. `Set-CAWebEnrollmentHardening.ps1` disables Negotiate on `/CertSrv`
+(with no NTLM accepted there is nothing to relay), unbinds port 80 so no
+credential crosses cleartext, and scopes inbound 443 to SDDC Manager plus one
+optional admin address. Separately, enrolment on the DC template is restricted
+to the `Domain Controllers` group, so the coercion target set is the three DCs
+that already hold DC certificates by definition — coercing one buys an attacker
+nothing it did not already have. Suppressing the template would not have closed
+ESC8 anyway; it would only have broken LDAPS.
 
 The 8 SDDC-managed resources, verified by querying the live API, are:
 **3× ESXI, 2× NSXT_MANAGER, SDDC_MANAGER, VCENTER, VSP.** VCF Operations, the
@@ -181,12 +206,17 @@ These are requirements, not recommendations. Each closes a live attack path.
   admin workstation, not the whole /24. `dns01` has **no web stack today** —
   ports 80 and 443 are both closed — so this genuinely opens new surface rather
   than hardening existing surface.
-- **Audit and prune the default templates** auto-published at Enterprise CA
-  promotion. Domain Controller, Machine and User carry Client Authentication
-  with autoenrolment, which is the PetitPotam → relay → PKINIT chain, live
-  independently of anything done to the `VMware` template. Enumerate with
-  `certutil -CATemplates`; confirm what remains is enrollable only by the
-  groups that need it.
+- **Audit what is published — there is nothing to prune.** `LoadDefaultTemplates=0`
+  means no template is auto-published at Enterprise CA promotion, so the earlier
+  instruction to "prune the default templates auto-published at promotion" is
+  wrong: they were never published. The requirement inverts. Exactly two
+  templates get published, both by hand, and each must be audited *as published*:
+  `Domain Controller Authentication` (**Autoenroll to `Domain Controllers` only**)
+  and `VMware` (**Enroll to `knowledgeondemand\svc-vcf-ca` only**). Enumerate with
+  `certutil -CATemplates` and confirm nothing else appears. The PetitPotam →
+  relay → PKINIT concern is addressed at the web-enrolment endpoint (Negotiate
+  disabled, HTTPS-only, scoped firewall), not by withholding the DC template —
+  see "The DC template must be published by hand" above.
 - **Verify, post-build, on the live CA** — not in this document: template EKU
   list, template enrolment ACL contains no `Authenticated Users` or
   `Domain Users`, and `certutil -getreg policy\EditFlags` does **not** have
