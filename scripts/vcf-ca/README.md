@@ -16,6 +16,44 @@ Every script here is dry-run by default; nothing writes until you pass
 `-Apply`. See the design doc for the full analysis:
 `docs/superpowers/specs/2026-09-29-lab-certificate-authority-design.md`.
 
+## Prerequisites (do these before step 1)
+
+**Create the enrolment service account.** Nothing in this directory creates it,
+and `Register-VcfCA.ps1` refuses to run without it:
+
+```powershell
+# on dns01, as a Domain Admin
+New-ADUser -Name 'svc-vcf-ca' -SamAccountName 'svc-vcf-ca' `
+    -UserPrincipalName 'svc-vcf-ca@knowledgeondemand.net' `
+    -AccountPassword (Read-Host -AsSecureString 'password for svc-vcf-ca') `
+    -PasswordNeverExpires $true -Enabled $true
+```
+
+**Deny it interactive and remote-desktop logon.** It is an enrolment identity,
+not a person; it never needs a session on any host. This is a spec requirement,
+not a nicety -- it is the containment for a leaked enrolment password.
+
+```powershell
+# GPO linked to the Domain Controllers OU (and to any OU holding member servers):
+#   Computer Configuration -> Policies -> Windows Settings -> Security Settings
+#     -> Local Policies -> User Rights Assignment
+#       "Deny log on locally"                 -> knowledgeondemand\svc-vcf-ca
+#       "Deny log on through Remote Desktop Services" -> knowledgeondemand\svc-vcf-ca
+gpupdate /force
+# verify from the target host:
+secedit /export /areas USER_RIGHTS /cfg C:\Windows\Temp\ur.inf
+Select-String -Path C:\Windows\Temp\ur.inf -Pattern 'SeDenyInteractiveLogonRight|SeDenyRemoteInteractiveLogonRight'
+```
+
+**Add its credentials to `C:\Users\willi\.vcflab\credentials.env`.** Neither key
+exists there today; `Register-VcfCA.ps1` names them explicitly when they are
+missing rather than failing with a null reference:
+
+```
+AD_CA_ENROLL_USER=knowledgeondemand\svc-vcf-ca
+AD_CA_ENROLL_PASS=<the password set above>
+```
+
 ## Ownership split
 
 No credential in `credentials.env` carries Domain Admin, and adding one is a
@@ -28,7 +66,7 @@ Manager's or VCF Operations' REST API with credentials already held.
 |---|---|---|
 | `Install-LabCA.ps1` | **[OPERATOR]** | `dns01` |
 | `Set-CAWebEnrollmentHardening.ps1` | **[OPERATOR]** | `dns01` |
-| `New-VcfCertificateTemplate.ps1` | **[OPERATOR]** | `dns01` (template build is manual in `certtmpl.msc`; the script prints instructions, then verifies) |
+| `New-VcfCertificateTemplate.ps1` | **[OPERATOR]** | `dns01` (both template builds are manual in `certtmpl.msc`; the script prints instructions, then verifies) |
 | `Test-LabCAHealth.ps1` | **[SCRIPTED]** | workstation |
 | `Publish-LabRootTrust.ps1` | **[SCRIPTED]** | workstation |
 | `Register-VcfCA.ps1` | **[SCRIPTED]** | workstation |
@@ -39,30 +77,124 @@ Manager's or VCF Operations' REST API with credentials already held.
 
 | # | Step | Script |
 |---|---|---|
+| 0 | **Snapshot `dns01`** -- the last rollback point in the whole project | manual, see below |
 | 1 | Install the CA | `Install-LabCA.ps1 -Apply` |
 | 2 | Harden web enrolment | `Set-CAWebEnrollmentHardening.ps1 -Apply` |
-| 3 | Wait for DC autoenrolment (~90-120 min GPO cycle), then confirm | `Test-LabCAHealth.ps1` |
-| 4 | Bind the DC's certificate to IIS on 443 | manual, then `New-VcfCertificateTemplate.ps1` builds the template |
-| 5 | Create + verify the `VMware` template | `New-VcfCertificateTemplate.ps1 -Apply` |
-| 6 | Distribute the root to vCenter + SDDC Manager | `Publish-LabRootTrust.ps1 -Apply` |
-| 7 | Register the CA with SDDC Manager | `Register-VcfCA.ps1 -Apply` |
-| 8 | Rotate the eight SDDC-managed certificates | manual runbook, see below |
-| 9 | Add AD as an identity source in VCF Operations | `Add-OpsIdentitySource.ps1 -Apply` |
+| 3 | **Publish `Domain Controller Authentication`** -- without this nothing autoenrols | manual + `New-VcfCertificateTemplate.ps1` section A |
+| 4 | Force + confirm DC autoenrolment | `certutil -pulse`, `certutil -dcinfo verify`, then `Test-LabCAHealth.ps1` |
+| 5 | Bind the DC's certificate to IIS on 443 | manual, snippet below |
+| 6 | Create + verify the `VMware` template, CA ACE and CA auditing | `New-VcfCertificateTemplate.ps1 -Apply` |
+| 7 | Distribute the root to vCenter + SDDC Manager | `Publish-LabRootTrust.ps1 -Apply` |
+| 8 | Register the CA with SDDC Manager | `Register-VcfCA.ps1 -Apply` |
+| 9 | Rotate the eight SDDC-managed certificates | manual runbook, see below |
+| 10 | Add AD as an identity source in VCF Operations | `Add-OpsIdentitySource.ps1 -Apply` |
+
+### Step 0 -- snapshot `dns01`, and understand that it is the last one
+
+Once the CA exists, `dns01` must never be snapshot-reverted (see the invariant
+below), so the moment before `Install-LabCA.ps1 -Apply` is the final moment a
+snapshot of this VM is usable. Take it now. The script prompts for a typed
+`CONFIRM` that you have, and refuses to install without it. Everything from
+step 1 onwards is forward-only.
+
+### Step 3 -- publish the DC template (nothing autoenrols without it)
+
+`CAPolicy.inf` sets `LoadDefaultTemplates=0`, so the CA published **no**
+templates at promotion -- not even a DC template. Until you do this by hand, the
+domain controller never enrols, LDAPS never starts, and steps 4 onward cannot
+work. `New-VcfCertificateTemplate.ps1` (run with no arguments) prints the full
+procedure as section A; the short form is:
+
+1. `certsrv.msc` -> Certificate Templates -> right-click -> New -> Certificate
+   Template to Issue -> **Domain Controller Authentication** (the standard
+   template; do not duplicate it, do not substitute the older
+   `Domain Controller` template).
+2. `certtmpl.msc` -> Domain Controller Authentication -> Security -> grant
+   **`knowledgeondemand\Domain Controllers`** -> Enroll **and** Autoenroll.
+   Not `Domain Computers`. Not `Authenticated Users`. A broader Autoenroll
+   grant hands a Client Authentication certificate to every machine in the
+   domain, which is the relay surface `LoadDefaultTemplates=0` exists to avoid.
+
+`New-VcfCertificateTemplate.ps1 -Apply` (step 6) asserts both: that the template
+is issued, and that Autoenroll went to the Domain Controllers group only.
+
+### Step 4 -- force and confirm autoenrolment
+
+Do not sit through the ~90-120 minute GPO cycle; trigger it:
+
+```powershell
+# on dns01
+certutil -pulse                       # force the autoenrolment cycle now
+certutil -dcinfo verify               # verifies the DC's own cert chain + LDAPS readiness
+
+# confirm a Server Authentication cert actually landed in the machine store
+Get-ChildItem Cert:\LocalMachine\My |
+    Where-Object { $_.EnhancedKeyUsageList.FriendlyName -contains 'Server Authentication' } |
+    Format-List Subject, Issuer, Thumbprint, NotAfter
+```
+
+Then `Test-LabCAHealth.ps1` from inside the lab. If `certutil -dcinfo verify`
+reports no certificate, step 3 did not take -- re-check the Autoenroll ACE
+before anything else.
+
+### Step 5 -- bind the certificate to IIS on 443 (no script does this)
+
+`Set-CAWebEnrollmentHardening.ps1` removed the port 80 binding and left
+`/certsrv` unreachable on purpose. Binding 443 is manual:
+
+```powershell
+# on dns01, after step 4 confirms a Server Authentication certificate exists
+$cert = Get-ChildItem Cert:\LocalMachine\My |
+    Where-Object { $_.Subject -like "*dns01.knowledgeondemand.net*" -and
+                   $_.EnhancedKeyUsageList.FriendlyName -contains 'Server Authentication' } |
+    Sort-Object NotAfter -Descending | Select-Object -First 1
+if (-not $cert) { throw 'no Server Authentication certificate in LocalMachine\My -- redo step 4' }
+
+Import-Module WebAdministration
+New-WebBinding -Name 'Default Web Site' -Protocol https -Port 443 -IPAddress '*'
+$binding = Get-WebBinding -Name 'Default Web Site' -Protocol https
+$binding.AddSslCertificate($cert.Thumbprint, 'My')
+
+# verify from the admin workstation allowed by the scoped firewall rule
+Invoke-WebRequest -Uri 'https://dns01.knowledgeondemand.net/certsrv' -UseBasicParsing
+```
+
+### Step 7 -- verify the chain after distributing the root
+
+`Publish-LabRootTrust.ps1` verifies by thumbprint against each store's own API.
+Verify the chain independently as well, from a host that is *not* the CA:
+
+```bash
+# validates that the endpoint's chain terminates in the lab root you published
+openssl s_client -connect dns01.knowledgeondemand.net:636 \
+    -servername dns01.knowledgeondemand.net \
+    -CAfile ./lab-root.pem -showcerts </dev/null 2>/dev/null \
+  | grep -E 'Verify return code|subject=|issuer='
+# want: "Verify return code: 0 (ok)"  -- anything else means the root did not land
+
+# same check against the web enrolment endpoint once step 5 is done
+openssl s_client -connect dns01.knowledgeondemand.net:443 \
+    -CAfile ./lab-root.pem </dev/null 2>/dev/null | grep 'Verify return code'
+```
+
+A `Verify return code: 19 (self signed certificate in certificate chain)` means
+the `-CAfile` root is not the one that signed the leaf -- re-export it with
+`certutil -ca.cert lab-root.cer` then `certutil -encode lab-root.cer lab-root.pem`.
 
 Two ordering constraints in here are load-bearing, not just tidy:
 
-- **Root trust must be distributed (step 6) before any certificate is
-  rotated (step 8), or the management plane partitions.** A resource
+- **Root trust must be distributed (step 7) before any certificate is
+  rotated (step 9), or the management plane partitions.** A resource
   re-issued from the lab CA before vCenter and SDDC Manager trust that CA's
   root presents a chain nothing else validates -- the exact failure mode this
   project exists to avoid, just moved one certificate later.
-- **SDDC Manager is rotated LAST in step 8, after vCenter.** SDDC Manager is
+- **SDDC Manager is rotated LAST in step 9, after vCenter.** SDDC Manager is
   the *instrument* that rotates vCenter's certificate. Rotating SDDC
   Manager's own certificate first restarts it mid-sequence and invalidates
   every in-flight task and token the rotation of the other seven resources
   depends on.
 
-Step 9 is last for a narrower reason: it is the original goal (AD identity in
+Step 10 is last for a narrower reason: it is the original goal (AD identity in
 VCF Operations), and everything from step 1 onward exists only to make LDAPS
 real enough for `Add-OpsIdentitySource.ps1`'s validation call to pass.
 
@@ -70,7 +202,7 @@ real enough for `Add-OpsIdentitySource.ps1`'s validation call to pass.
 
 `Install-LabCA.ps1` copies `CAPolicy.inf` to `C:\Windows` and installs from
 it. These four values cannot be changed afterward without uninstalling the
-CA, rebuilding the machine, and re-seeding every trust store in step 6 by
+CA, rebuilding the machine, and re-seeding every trust store in step 7 by
 hand:
 
 | Setting | Value | Why |
@@ -80,11 +212,49 @@ hand:
 | Key length | RSA 2048 | Minimum acceptable, standard, widely supported. |
 | Hash algorithm | SHA-256 | Standard; `AlternateSignatureAlgorithm` (CMS format) is explicitly left off. |
 
-`LoadDefaultTemplates=0` is also set (suppresses the Domain Controller /
-Machine / User default templates and the PetitPotam relay surface they carry
-via autoenrolled Client Authentication), but it is not in this "cannot
-change" list the same way -- templates can be issued or unissued by hand at
-any time after install.
+`LoadDefaultTemplates=0` is also set, and it is **not** in this "cannot change"
+list -- templates can be issued or unissued by hand at any time after install.
+It suppresses the dozen templates an Enterprise CA would otherwise publish at
+promotion, and its consequence is blunt: **the CA publishes nothing at all**,
+so the DC does not autoenrol and LDAPS does not start until step 3 publishes
+`Domain Controller Authentication` by hand. That template is published
+deliberately, with Autoenroll scoped to the `Domain Controllers` group; ESC8 is
+closed at the web-enrolment endpoint (Negotiate disabled, HTTPS-only, firewall
+scoped to SDDC Manager), not by withholding a template the lab cannot work
+without.
+
+## CA auditing, and the monthly review that makes it worth anything
+
+`svc-vcf-ca` requests certificates with the subject **supplied in the request**,
+and no name constraint is enforceable on that. The design accepts this *only*
+because the mitigation is detective: issuance is audited and the audit is read.
+An audit nobody reads is not a control. `New-VcfCertificateTemplate.ps1 -Apply`
+asserts `CA\AuditFilter` is 127 and fails if it is not.
+
+```powershell
+# on dns01, once (step 6 verifies it)
+certutil -setreg CA\AuditFilter 127            # all seven CA event categories
+auditpol /set /subcategory:"Certification Services" /success:enable /failure:enable
+net stop certsvc ; net start certsvc
+
+# confirm both halves -- the CA filter AND the OS audit policy
+certutil -getreg CA\AuditFilter
+auditpol /get /subcategory:"Certification Services"
+```
+
+**Monthly, on the first of the month**, review every certificate issued since
+the last review and confirm each CN is one you expect (the eight SDDC-managed
+resources, the DC itself, nothing else):
+
+```powershell
+# on dns01 -- every request since the last review
+certutil -view -restrict "NotBefore>=2026-09-01" `
+    -out "RequestID,RequesterName,CommonName,NotBefore,CertificateTemplate"
+```
+
+Any CN outside the expected set means `svc-vcf-ca` issued for a host it has no
+business issuing for -- treat it as a credential compromise, rotate
+`AD_CA_ENROLL_PASS`, and revoke the certificate before anything else.
 
 ## Two invariants this project must not "fix"
 
@@ -117,21 +287,34 @@ SDDC-managed endpoints. It does **not** deliver the fleet.
 | VIDB and the fleet certificates stay VSP-issued (`OU=vcfms`) | They are absent from SDDC Manager's certificate inventory, so `Register-VcfCA.ps1`'s registration cannot reach them. Whether AD CS can re-issue them at all is unresolved. |
 | VCF Operations, the Operations Collector, and the License Server are not in SDDC Manager's certificate inventory at all | Verified against the live API: the inventory is exactly `3x ESXI, 2x NSXT_MANAGER, SDDC_MANAGER, VCENTER, VSP`. These three appliances need their own certificate path, not this one. |
 
-## Four verification checks that must be validated on the first real run
+## Verification checks that must be validated on the first real run
 
 These could not be exercised without a live CA and are written to fail
 closed, but none of them has seen real `certutil` or API output yet. Recheck
 each the first time the corresponding script runs against the real CA:
 
-- **`New-VcfCertificateTemplate.ps1`'s ESC1 principal check** assumes
-  indented lines under `Enroll` in `certutil -v -template VMware` output
-  carry principal names in `domain\account` or SID form. If the real output
-  is formatted differently, the check reports "cannot verify" and fails
-  closed -- but that has not been proven against a real template.
-- **The same script's ESC6 check** looks for `EDITF_ATTRIBUTESUBJECTALTNAME2`
-  in `certutil -getreg policy\EditFlags` output. An EditFlags value that is
-  **absent entirely** is not the same thing as a value that explicitly
-  clears the flag, and the check has not seen either case for real.
+- **`New-VcfCertificateTemplate.ps1`'s ESC1 principal check** now collects
+  `Allow <rights> <principal>` ACE lines out of `certutil -v -template VMware`
+  directly (the earlier version anchored on the first literal `Enroll`, which
+  in real output is inside `msPKI-Enrollment-Flag`, and extracted zero
+  principals). It asserts the enrolment-capable set equals
+  `knowledgeondemand\svc-vcf-ca` **plus** an explicit allow-list of the
+  built-in admin principals (`Domain Admins`, `Enterprise Admins`,
+  `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM`) that hold Full Control on
+  every template by default and cannot sensibly be removed. Zero Allow lines
+  found is a FAIL, not a pass. The regex has been exercised against
+  representative output but not against this CA's real output.
+- **The same script's ESC6 check** now reads `$LASTEXITCODE`, parses the
+  `EditFlags REG_DWORD = <hex>` value and tests `-band 0x40000`. It no longer
+  sniffs text: the previous guard's `\d+` alternative matched
+  `CertUtil: -getreg command FAILED: 0x80070002`, so a failed command printed
+  `[OK] ESC6 flag not set`. An absent or unparseable value is now "cannot
+  verify", which is a FAIL.
+- **The same script's DC-template, CA-ACE and AuditFilter checks** are new and
+  have never run against a live CA. The CA-ACE check accepts either
+  `Request Certificates` or `Enroll` on the `svc-vcf-ca` line of
+  `certutil -getreg CA\Security`, because certutil's rendering of
+  `CA_ACCESS_ENROLL` varies by version; if neither appears it fails closed.
 - **`Publish-LabRootTrust.ps1`'s** `Confirm-ThumbprintPresent` and
   **`Register-VcfCA.ps1`'s** registration both assume a JSON response shape
   for the trust-store `GET`s (`/v1/sddc-manager/trusted-certificates` and
@@ -160,7 +343,7 @@ shows the lab root as issuer) and lets the operator run it by hand.
 ## Rotation runbook (after everything above is green)
 
 Task 7 of the plan produced no code -- it is deliberately operational. Do
-not run it until steps 1-7 above are complete and `Test-LabCAHealth.ps1`
+not run it until steps 1-8 above are complete and `Test-LabCAHealth.ps1`
 passes all four gates.
 
 1. **Take backups first.** SDDC Manager backup, plus appliance snapshots of
@@ -185,7 +368,7 @@ passes all four gates.
    - Every peer that pins its **leaf thumbprint** has been re-registered --
      vCenter<->NSX compute-manager, SDDC Manager's stored vCenter
      thumbprint, vCenter<->ESXi host thumbprints, VCF Operations adapters.
-     Root trust (step 6, above) does nothing for these; they pin the leaf,
+     Root trust (step 7, above) does nothing for these; they pin the leaf,
      not the chain, so distributing the root does not carry them forward.
    - For ESXi specifically, use `Get-HostInventoryDrift` (not
      `Confirm-HostInventorySync`, which repairs by default) **with VMs
@@ -213,9 +396,9 @@ trusting a FAIL from this gate as evidence of a real problem.
 | File | Purpose |
 |---|---|
 | `CAPolicy.inf` | install-time CA policy; copied to `C:\Windows` by `Install-LabCA.ps1` |
-| `Install-LabCA.ps1` | [OPERATOR] installs ADCS + Web Enrolment, applies `CAPolicy.inf` |
-| `Set-CAWebEnrollmentHardening.ps1` | [OPERATOR] Basic auth + EPA on `/CertSrv`, unbinds port 80, scopes firewall to SDDC Manager |
-| `New-VcfCertificateTemplate.ps1` | [OPERATOR] prints template build instructions, verifies EKU / ESC1 / ESC6 post-build |
+| `Install-LabCA.ps1` | [OPERATOR] installs ADCS + Web Enrolment, applies `CAPolicy.inf`; requires a typed `CONFIRM` that `dns01` is snapshotted, backs up any existing `CAPolicy.inf`, and short-circuits if ADCS is already installed |
+| `Set-CAWebEnrollmentHardening.ps1` | [OPERATOR] disables Negotiate (the ESC8 control), enables Basic, EPA=Require on windowsAuth, unbinds port 80, scopes firewall to SDDC Manager, reports broad 443 rules |
+| `New-VcfCertificateTemplate.ps1` | [OPERATOR] prints build instructions for BOTH templates (DC + VMware), verifies issuance, cn, EKU, ESC1, DC Autoenroll scoping, ESC6, the CA-level Request Certificates ACE and `CA\AuditFilter` |
 | `Test-LabCAHealth.ps1` | [SCRIPTED] four read-only gates: LDAPS up, LDAPS bind works, 389 still refuses, port 80 closed |
 | `Publish-LabRootTrust.ps1` | [SCRIPTED] pushes the root to vCenter's and SDDC Manager's trust stores, verifies by thumbprint |
 | `Register-VcfCA.ps1` | [SCRIPTED] registers the Microsoft CA with SDDC Manager, prints the manual issuance proof |
@@ -228,6 +411,12 @@ task: 4/4 gates FAIL, all attributable to `dns01` not resolving from here
 (see above), not to any gate defect. The CA install itself (Task 1) is
 complete and committed; template, trust-distribution, registration and AD
 identity source scripts (Tasks 2-6, 8) are written, reviewed, and
-parse-checked, with the four unvalidated checks listed above still pending
-their first live run. Task 7 (rotation) has produced no code by design --
-follow the runbook above when the time comes.
+parse-checked, with the unvalidated checks listed above still pending their
+first live run. Task 7 (rotation) has produced no code by design -- follow the
+runbook above when the time comes.
+
+The final review round added the step that made the whole plan reachable:
+`LoadDefaultTemplates=0` meant the CA published **no** templates, so the DC
+would never have autoenrolled and LDAPS would never have started. Publishing
+`Domain Controller Authentication` (step 3) is now an explicit, verified step
+rather than an assumption.
