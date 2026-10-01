@@ -58,6 +58,13 @@
 #                  MTP speculative decoding (--spec-type draft-mtp, +63.8%).
 #                  Together 19.05 -> 49.19 t/s, 2.58x. See the profile body.
 #
+#   hemmingway     Altworld Hemmingway-1 Q6_K  -> alias hemmingway
+#                  Qwen3.8-27B fine-tune for everyday human-sounding writing
+#                  (messages, emails, hard asks). Identical dense-27B arch, so
+#                  the tuned qwen3.8 config carries over unchanged. Auto-swap
+#                  is enabled for this profile (unlike qwen3.8-redteam): it is
+#                  the thing you ask for, so serving it on request is the point.
+#
 # NOTE: profiles carry three fields beyond the model spec -- SPLIT_MODE,
 # SPEC_TYPE and SPEC_NMAX. All pre-existing profiles use "layer none 0", which
 # is exactly the behaviour they had before those fields existed.
@@ -247,6 +254,26 @@ get_profile() {
       # value is 0. Harmless; left at 1024 so it activates if upstream adds support.
       echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 1024 q8_0 tensor draft-mtp 3"
       ;;
+    hemmingway)
+      # Altworld/Hemmingway-1 Q6_K — a Qwen3.8-27B fine-tune (bartowski GGUF,
+      # imatrix) for everyday human-sounding writing: messages, emails, the
+      # awkward note. English-first specialist. The card's headline claims are
+      # from Altworld's own blind pairwise benches; EQ-Bench 4 (external) has
+      # it 3rd. Do not expect qwen3.8-level general/coding ability from it.
+      #
+      # Architecture is identical to qwen3.8 (dense 27.78B, hybrid Gated
+      # DeltaNet + Attention, 262K), so the entire tuned qwen3.8 config
+      # carries over UNCHANGED: tensor split 1,1, draft-mtp n-max 3, q8_0 KV,
+      # 262K ctx. ~23.9 GB weights vs qwen3.8's 24.0 GB (UD-Q6_K_XL) —
+      # negligible VRAM difference. Expect the same ~43-49 t/s. No re-tuning.
+      #
+      # ONE UNVERIFIED ASSUMPTION: that the fine-tune preserved the
+      # blk.*.nextn.* MTP heads. If it did not, loading with --spec-type
+      # draft-mtp fails or degrades — change the last two fields to
+      # "none 0" (cost: ~27 t/s tensor-only instead of ~49), re-measure, and
+      # update this block + the VRAM estimate below.
+      echo "bartowski/Altworld_Hemmingway-1-GGUF Q6_K hemmingway 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      ;;
     qwen3.8-redteam)
       # Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — the SAME base model as the
       # qwen3.8 profile with refusal behaviour removed (abliterated). For
@@ -273,7 +300,7 @@ get_profile() {
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 qwen3.8-redteam)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 hemmingway qwen3.8-redteam)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -285,6 +312,7 @@ get_profile_description() {
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
     qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
+    hemmingway)   echo "Altworld Hemmingway-1 Q6_K — Qwen3.8-27B fine-tune for human-sounding everyday writing (same config/perf as qwen3.8)" ;;
     qwen3.8-redteam) echo "Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — uncensored; AUTHORISED pentest of own lab only (same config/perf as qwen3.8)" ;;
     *)               echo "" ;;
   esac
@@ -301,6 +329,7 @@ get_profile_vram_estimate() {
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
+    hemmingway)      echo "predicted same as qwen3.8 (identical arch, near-identical quant 23.9 vs 24.0 GB); idle ~89% / ~62%. RE-MEASURE on first swap and update this string." ;;
     qwen3.8-redteam) echo "predicted same as qwen3.8 (identical arch, near-identical quant 24.8 vs 24.0 GB); idle ~89% / ~62%. RE-MEASURE on first swap and update this string." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
@@ -316,8 +345,11 @@ Profiles:
   qwen3.6       — Qwen3.6-35B-A3B UD-Q6_K (RAG / general — default; near-lossless precision)
   qwen3.6-fast  — Qwen3.6-35B-A3B UD-Q4_K_M (throughput-prioritized alternative)
   coder         — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
-  devstral        — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
-  devstral-large  — Devstral 2 123B UD-IQ2_M (full-size, 64K ctx)
+   devstral        — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
+   devstral-large  — Devstral 2 123B UD-IQ2_M (full-size, 64K ctx)
+   qwen3.8         — Qwen3.8-27B UD-Q6_K_XL (DENSE 27B; tensor-split + MTP spec-decode)
+   hemmingway      — Altworld Hemmingway-1 Q6_K (human-sounding everyday writing; auto-swap)
+
 
 Flags:
   --status  Show currently-loaded profile (no changes)

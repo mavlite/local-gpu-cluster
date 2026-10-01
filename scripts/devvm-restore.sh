@@ -58,15 +58,21 @@ while read -r VM DS PG MAC; do
     continue
   fi
   echo "  $VM: importing to $DS"
+  # -net, not an -options NetworkMapping: the mapping's Name must match the
+  # network name inside the OVF, and an empty Name is rejected with
+  #   warning: invalid NetworkMapping.Name=""
+  #   Host did not have any virtual network defined
+  # govc's -net flag maps it without needing the OVF's internal name.
   $G import.ovf -ds "$DS" -pool "$POOL" -folder "$FOLDER" -name "$VM" \
-      -options <(printf '{"NetworkMapping":[{"Name":"","Network":"%s"}]}' "$PG") \
-      "$SRC/$VM/$VM.ovf" 2>&1 | sed 's/^/      /' \
+      -net "$PG" "$SRC/$VM/$VM.ovf" 2>&1 | sed 's/^/      /' \
     || die "import of $VM failed"
 
   echo "  $VM: pinning MAC to $MAC"
-  # addressType=Manual, or vSphere regenerates it on the next power cycle.
-  $G vm.network.change -vm "$VM" -net "$PG" -net.address "$MAC" \
-      -net.addressType manual ethernet-0 2>&1 | sed 's/^/      /' \
+  # Setting -net.address to a MAC makes it manual; there is no -net.addressType
+  # flag (govc rejects it outright). -net IS required alongside -net.address
+  # even when the network is not changing -- govc's own help says so.
+  $G vm.network.change -vm "$VM" -net "$PG" -net.address "$MAC" ethernet-0 \
+      2>&1 | sed 's/^/      /' \
     || die "could not set MAC on $VM"
 
   got=$($G device.info -vm "$VM" ethernet-0 2>/dev/null | awk '/MAC Address:/{print $3}')

@@ -64,12 +64,13 @@ $Records = @(
     @{ Name = 'log-insight';    Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.137'; Note = 'Logs ingress VIP' }
     @{ Name = 'vrni';           Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.136'; Note = 'Networks platform' }
     @{ Name = 'vrni-collector'; Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.138'; Note = 'Networks collector (NEW)' }
-    # The CA's CDP/AIA endpoint. It exists because dns01.knowledgeondemand.net
-    # resolves to TWO addresses -- 172.16.10.150 and 192.168.6.197 -- and a
-    # certificate's CRL URL must name an address every lab consumer can reach.
-    # A VCF appliance that round-robins onto 192.168.6.197 cannot fetch the
-    # CRL, and strict validators hard-fail on a CRL they cannot retrieve.
-    # A CNAME to dns01 would inherit exactly the problem it is meant to avoid.
+    # The CA's CDP/AIA endpoint. A convention, not a fix: an earlier comment
+    # here claimed dns01.knowledgeondemand.net resolves to two addresses, which
+    # was wrong -- verified on the DC 2026-10-01, it is a single static A record
+    # in a zone with dynamicUpdate=None. The reason to keep a dedicated name is
+    # that a certificate carries its CDP url for its whole life, so naming the
+    # SERVICE rather than the HOST lets the CA move off this domain controller
+    # later without reissuing everything.
     # NoReverse: this is a second name for an address whose PTR belongs to
     # dns01. Two PTRs on one address make reverse lookups return both.
     @{ Name = 'pki'; Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.150'; NoReverse = $true

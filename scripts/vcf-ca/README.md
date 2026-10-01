@@ -63,14 +63,24 @@ without it, by design:
 .\scripts\vcf-dns\Set-VCFLabDnsRecord.ps1 -Apply -Credential (Get-Credential KNOWLEDGEONDEMAND\Administrator)
 ```
 
-`pki.knowledgeondemand.net` -> `172.16.10.150`, and **only** that address.
-`dns01.knowledgeondemand.net` resolves to two (`172.16.10.150` and
-`192.168.6.197`), which is why the CA cannot use its own hostname for CDP and
-AIA: an appliance that round-robins onto the management address cannot fetch
-the CRL, and strict validators hard-fail on a CRL they cannot retrieve. A
-CNAME to `dns01` would inherit the same defect. The record carries no PTR --
-that address's PTR belongs to `dns01`, and two PTRs on one address make
-reverse lookups return both.
+`pki.knowledgeondemand.net` -> `172.16.10.150`, and only that address.
+
+**This is a convention, not a fix.** An earlier revision of this README said
+the CA could not use its own hostname because `dns01.knowledgeondemand.net`
+resolved to two addresses. That was wrong — measured on the DC on 2026-10-01,
+it resolves to exactly one (`172.16.10.150`), from a static record in a zone
+with `dynamicUpdate=None`. The two-address answer came from asking the DC
+about itself, where the local resolver reports the machine's own interfaces.
+
+The reason to keep a dedicated name is narrower: a certificate carries its CDP
+and AIA URLs for its whole life, so naming the *service* rather than the
+*host* means the CA can move off this domain controller later without
+reissuing everything. If you would rather not add the record, run
+`Set-CaRevocationEndpoints.ps1 -CdpHost dns01.knowledgeondemand.net` and it
+becomes a no-op that still asserts the host is single-homed.
+
+The record carries no PTR — that address's PTR belongs to `dns01`, and two
+PTRs on one address make reverse lookups return both.
 
 ## Ownership split
 

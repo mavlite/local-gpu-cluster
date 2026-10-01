@@ -9,12 +9,32 @@
     certificate already issued. The only remedy is reissuing it, so the window
     is: install -> here -> first issuance.
 
-    THE PROBLEM. AD CS builds its HTTP CDP and AIA from the CA server's own DNS
-    name. Here that is dns01.knowledgeondemand.net, which resolves to TWO
-    addresses -- 172.16.10.150 (lab) and 192.168.6.197 (management). A VCF
-    appliance that round-robins onto the management address cannot reach it, so
-    CRL retrieval fails intermittently, and strict validators (VCF LCM among
-    them) hard-fail on a CRL they cannot retrieve.
+    WHY USE A DEDICATED NAME AT ALL. AD CS builds its HTTP CDP and AIA from the
+    CA server's own DNS name, which here is dns01.knowledgeondemand.net.
+
+    Correction, 2026-10-01: an earlier version of this script claimed that name
+    resolves to TWO addresses and that the default CDP was therefore broken.
+    That was wrong. Measured on the DC itself -- zone records, Resolve-DnsName
+    against two servers, and nslookup -- dns01.knowledgeondemand.net resolves
+    to exactly one address, 172.16.10.150. The record is static, there is no
+    AAAA, and the zone has dynamicUpdate=None, so nothing can add the
+    management address to it. The two-address answer that prompted the claim
+    came from asking the DC about ITSELF, where the local resolver reports the
+    machine's own interface addresses; every row of that output was marked
+    "Section: Question", which was the tell.
+
+    So the default CDP would work. This script is a CONVENTION, not a fix:
+    pointing CDP and AIA at a dedicated pki name decouples the revocation URL
+    from the host that happens to run the CA today. Certificates carry those
+    URLs for their whole life, so if the CA ever moves off this domain
+    controller, a host-named CDP would have to be chased by reissuing
+    everything. That is the entire benefit, and it is a real but modest one --
+    running with -CdpHost dns01.knowledgeondemand.net is a perfectly sound
+    choice and makes this a no-op.
+
+    The single-homed assertion below stays regardless. A multi-homed CDP host
+    IS a genuine failure mode -- consumers round-robin and CRL retrieval fails
+    intermittently -- it simply is not one this lab currently has.
 
     WHAT THIS SCRIPT DOES, AND DELIBERATELY DOES NOT DO. It rewrites only the
     HOST of the existing http:// entries. Flag prefixes, paths and % tokens are

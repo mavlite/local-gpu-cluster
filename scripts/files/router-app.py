@@ -334,6 +334,10 @@ BACKEND_TO_PROFILE: dict[str, str] = {
     "devstral":         "devstral",
     "devstral-large":   "devstral-large",
     "qwen3.8":          "qwen3.8",
+    # hemmingway is auto-swapped on request (deliberate, unlike
+    # qwen3.8-redteam which is manual-only): it is the thing the operator
+    # asks for, so swapping the slot in when it is requested is the point.
+    "hemmingway":       "hemmingway",
 }
 
 # Serializes concurrent auto-swap requests. Only one swap runs at a time.
@@ -501,6 +505,18 @@ ALIAS_MAP: dict[str, dict] = {
     "qwen3.8-xhigh":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
                         "reasoning_effort": "xhigh",
                         "sampling": alias_defaults.QWEN38_THINK_SAMPLING},
+    # Hemmingway-1 — Altworld's Qwen3.8-27B fine-tune for everyday
+    # human-sounding writing (messages, emails, hard asks). Served by the
+    # "hemmingway" chat profile (swap-chat-model.sh); auto-swap is enabled,
+    # so requesting this alias swaps the chat slot in and the next qwen3.8*
+    # request swaps back.
+    #
+    # Thinking OFF is the product: the model is tuned to hand back the
+    # message, not a memo, so a pre-token thinking block is pure latency
+    # here. Sampling follows the Qwen3.8 base model card (same as the other
+    # nothink aliases); clients can override per request (setdefault).
+    "hemmingway":      {"backend": "hemmingway", "enable_thinking": False, "strip_thinking": True,
+                        "sampling": alias_defaults.QWEN38_NOTHINK_SAMPLING},
 }
 
 

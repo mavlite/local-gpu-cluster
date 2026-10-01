@@ -139,15 +139,27 @@ which would require validating an HTTPS certificate. This is why port 80 is
 allowed from the lab subnet (`Set-CAWebEnrollmentHardening.ps1
 -CrlConsumerSubnet`) while 443 stays scoped to SDDC Manager.
 
-**Correction, revision 3 — the CA may not use its own hostname for CDP/AIA.**
-AD CS builds its HTTP CDP and AIA from the CA server's DNS name, which here is
-`dns01.knowledgeondemand.net` — and that resolves to **two** addresses,
-`172.16.10.150` (lab) and `192.168.6.197` (management). An appliance that
-round-robins onto the management address cannot fetch the CRL, and strict
-validators hard-fail on a CRL they cannot retrieve. `Set-CaRevocationEndpoints.ps1`
-points both at `pki.knowledgeondemand.net`, an A record bound to the lab
-address only, and refuses to run if that name resolves to more than one
-address. A CNAME to `dns01` would inherit the defect it exists to remove.
+**Correction, revision 4 — revision 3's dual-homing claim was false.**
+Revision 3 asserted that `dns01.knowledgeondemand.net` resolves to two
+addresses and that the CA therefore could not use its own hostname for CDP and
+AIA. Measured on the DC on 2026-10-01 — zone records, `Resolve-DnsName`
+against two servers, and `nslookup` — it resolves to exactly **one** address,
+`172.16.10.150`, from a **static** record, in a zone with
+`dynamicUpdate=None` that nothing can re-register into. There is no AAAA
+record. The two-address answer that produced the claim came from querying the
+DC about itself, where the local resolver reports the machine's own interface
+addresses; every row of that output was marked `Section: Question`.
+
+The default CDP would therefore work. `Set-CaRevocationEndpoints.ps1` is kept
+as a **convention**: a certificate carries its CDP and AIA URLs for its whole
+life, so naming the service (`pki.knowledgeondemand.net`) rather than the host
+lets the CA move off this domain controller later without reissuing every
+certificate. That is a real but modest benefit, and running with
+`-CdpHost dns01.knowledgeondemand.net` is an equally sound choice.
+
+The script's refusal to accept a multi-homed CDP host stands on its own: that
+IS a genuine failure mode — consumers round-robin and CRL retrieval fails
+intermittently — it is simply not one this lab currently has.
 
 This must happen between install and first issuance: a certificate carries the
 URLs configured at the moment it was signed, and no later change repairs an
