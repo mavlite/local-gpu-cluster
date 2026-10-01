@@ -69,6 +69,40 @@ $esx = Get-VCFLabCredentialObject -Map $cred -UserKey 'MGMT_ESX_USER' -PassKey '
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $target = "$SourceDir-rollback-$stamp"
 
+<#
+    Returns one of three states, never a bare boolean:
+      ok       -- the server answered with an address
+      noanswer -- the server answered, but with no address (a real DNS fault)
+      error    -- the query could not be made at all (says nothing about the server)
+    Collapsing the last two into "false" is what made the first version of the
+    recovery check report a healthy DC as broken.
+#>
+function Get-DnsAnswer {
+    param([Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][string]$Name)
+    try {
+        $r = Resolve-DnsName -Name $Name -Server $Server -Type A -DnsOnly -ErrorAction Stop
+        # Under Set-StrictMode -Version Latest, reading a property an object
+        # does not carry THROWS -- and that throw lands in this function's own
+        # catch below, turning a real server answer into "could not ask". A
+        # response legitimately contains records without IPAddress (SOA on an
+        # empty name, CNAME chains), so test for the property before reading it.
+        $rec = @($r | Where-Object {
+                    $_.PSObject.Properties.Name -contains 'IPAddress' -and $_.IPAddress })
+        if ($rec.Count) { return @{ State = 'ok';       Detail = $rec[0].IPAddress } }
+        return               @{ State = 'noanswer'; Detail = 'replied with no address' }
+    } catch {
+        $m = $_.Exception.Message.Split([Environment]::NewLine)[0]
+        # NXDOMAIN and NoData also throw, but they are the server ANSWERING --
+        # authoritatively, that the name is absent. That is a real finding about
+        # a working server, not an inability to look, so it must not be filed
+        # with the timeouts.
+        if ($m -match 'does not exist|No such host|no records|NoData') {
+            return     @{ State = 'noanswer'; Detail = $m }
+        }
+        return         @{ State = 'error';    Detail = $m }
+    }
+}
+
 Write-Step "Connecting to the management host"
 $h = Connect-VIServer -Server $MgmtHost -Credential $esx -Force
 Write-Ok "connected to $MgmtHost"
@@ -227,24 +261,53 @@ try {
     # 636 accepts TCP and then resets every TLS handshake, because there is no
     # certificate yet. A port probe on 636 would report a healthy LDAPS that
     # cannot complete a single handshake.
+    #
+    # But a probe that cannot run is not a failure of the thing probed. The
+    # first version of this check reported "Lab DNS is not serving" after a
+    # perfectly successful clone, because the workstation running it was on a
+    # VPN using OpenVPN's block-outside-dns: that installs WFP filters
+    # permitting port 53 ONLY to the VPN's own resolvers. Every other DNS
+    # server -- the DC, 1.1.1.1, 8.8.8.8 -- then times out identically to a
+    # dead service. WFP is invisible to Get-NetFirewallRule, so both ends
+    # looked clean while the real cause sat on the client. So: establish
+    # whether this host can resolve at all before saying anything about the DC.
     Write-Step "Verifying the directory actually answers"
-    $dnsOk = $false
-    try {
-        $ans = Resolve-DnsName -Name $DnsProbeName -Server $DcAddress -Type A -DnsOnly -ErrorAction Stop
-        $ip  = ($ans | Where-Object { $_.IPAddress } | Select-Object -First 1).IPAddress
-        if ($ip) { $dnsOk = $true; Write-Ok "DNS resolves $DnsProbeName -> $ip" }
-        else     { Write-Warn2 "DNS replied but returned no address for $DnsProbeName" }
-    } catch {
-        Write-Warn2 "DNS query failed: $($_.Exception.Message.Split([Environment]::NewLine)[0])"
+
+    $dns = Get-DnsAnswer -Server $DcAddress -Name $DnsProbeName
+    switch ($dns.State) {
+        'ok' { Write-Ok "DNS resolves $DnsProbeName -> $($dns.Detail)" }
+        'noanswer' {
+            # The DC replied. That is a real answer about a real service.
+            Write-Fail "The DC answered but returned no address for $DnsProbeName."
+            Write-Warn2 "This IS a DNS fault -- the server is reachable and responding."
+        }
+        default {
+            # Could not query. Before blaming the DC, find out whether this
+            # host can query ANY resolver.
+            $own = (Get-DnsClientServerAddress -AddressFamily IPv4 |
+                    Where-Object { $_.ServerAddresses } |
+                    Select-Object -First 1).ServerAddresses
+            $control = if ($own) { Get-DnsAnswer -Server $own[0] -Name 'example.com' }
+                       else      { @{ State = 'error'; Detail = 'no resolver configured' } }
+
+            if ($control.State -eq 'ok') {
+                Write-Fail "Lab DNS is not answering (this host CAN resolve via $($own[0]))."
+                Write-Warn2 "Wait for it before starting the CA install -- every VCF"
+                Write-Warn2 "component resolves its peers through this DC."
+            } else {
+                Write-Warn2 "INCONCLUSIVE -- this host cannot query any DNS server, so this"
+                Write-Warn2 "says nothing about the DC. The control query also failed."
+                Write-Info  "A VPN client with block-outside-dns does exactly this. Verify"
+                Write-Info  "from inside the lab instead, e.g. on the Proxmox host:"
+                Write-Info  "  pct exec 159 -- nslookup $DnsProbeName $DcAddress"
+            }
+        }
     }
 
+    # Independent of DNS: AD DS itself. Its own fact, never folded into the
+    # DNS verdict.
     if (Test-TcpPort -ComputerName $DcAddress -Port 389 -TimeoutMs 5000) { Write-Ok "LDAP 389 is listening" }
     else { Write-Warn2 "LDAP 389 is not listening yet" }
-
-    if (-not $dnsOk) {
-        Write-Warn2 "Lab DNS is not serving yet. Wait for it before starting the CA install --"
-        Write-Warn2 "every VCF component resolves its peers through this DC."
-    }
 
     Write-Step "Done"
     Write-Ok "rollback copy: [$Datastore] $target"
