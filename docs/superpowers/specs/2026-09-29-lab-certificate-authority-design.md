@@ -180,6 +180,36 @@ issued certificates", so `10` is correct under either reading. Confirmed on
 2026-10-01: the DC's autoenrolled certificate carries the http CDP and AIA
 URLs, and both fetch and parse.
 
+**Correction, revision 6 — the vCenter trusted-root-chains body shape, and
+how to verify it.** Two facts recorded here were wrong, both settled by
+execution on 2026-10-01:
+
+1. **The body is NOT `{"spec": {...}}`.** vCenter answers
+   `400 UNEXPECTED_INPUT — Found unexpected fields [spec] in structure
+   com.vmware.vcenter.certificate_management.vcenter.trusted_root_chains.create_spec`.
+   The accepted shape is the unwrapped CreateSpec:
+   `{"cert_chain": {"cert_chain": ["-----BEGIN CERTIFICATE-----…"]}}`.
+
+2. **The LIST endpoint returns no certificates.** `GET
+   /api/vcenter/certificate-management/vcenter/trusted-root-chains` returns
+   chain identifiers only — `[{"chain":"BA7EEC55…"},{"chain":"4FF484BF…"}]` —
+   and each chain must then be fetched individually at
+   `…/trusted-root-chains/{id}` to obtain its PEM. Scanning the LIST response
+   for certificate blocks finds none, so a verification written that way
+   reports "cannot verify" against a store that already holds the root.
+
+   The store is also **eventually consistent after a write**: immediately after
+   the POST the LIST returned `$null` once, and `@($null)` has a `Count` of 1,
+   so a null response was counted as one unreadable chain. The verification
+   filters nulls and retries.
+
+Repeated POSTs of the same root do **not** accumulate chains — vCenter still
+reported exactly two after several runs — so the write is effectively
+idempotent. SDDC Manager instead answers
+`409 CERTIFICATE_CHAIN_EXISTS_IN_TRUST_STORE`, which the script now treats as
+the desired state rather than a failure; treating it as fatal made the script
+impossible to re-run after any partial success.
+
 ### The VCF certificate template
 
 Contract established by probing the live API:

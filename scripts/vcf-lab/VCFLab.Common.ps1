@@ -242,7 +242,13 @@ function Invoke-LabRest {
     if ($BasicCredential) {
         $pair = "{0}:{1}" -f $BasicCredential.UserName, $BasicCredential.GetNetworkCredential().Password
         $b64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair))
-        if (-not $p.Headers) { $p.Headers = @{} }
+        # ContainsKey, not dot access: under Set-StrictMode -Version Latest a
+        # hashtable's MISSING key throws on dot access exactly as a missing
+        # object property does ("The property 'Headers' cannot be found on this
+        # object"). So -BasicCredential without -Headers threw here rather than
+        # building an auth header, and the throw surfaced from the caller's
+        # catch block as an unrelated-looking error. Confirmed by execution.
+        if (-not $p.ContainsKey('Headers')) { $p.Headers = @{} }
         $p.Headers['Authorization'] = "Basic $b64"
     }
     # PS 5.1 has no -SkipCertificateCheck; the callback below is session-scoped.

@@ -76,7 +76,17 @@ function Get-RestErrorDetail {
         $msg  += " -- $($inner.Message)"
         $inner = $inner.InnerException
     }
-    $resp = $ErrRecord.Exception.Response
+    # Under Set-StrictMode -Version Latest, reading a property an object does
+    # not carry THROWS. Not every exception reaching here is a WebException --
+    # a DNS failure, a TLS failure or a PowerShell-level error has no Response
+    # at all -- and this function runs inside the caller's catch block, so the
+    # throw replaces the real error with "The property 'Response' cannot be
+    # found on this object". That is exactly what happened on the first real
+    # vCenter run: the actual cause was never printed.
+    $resp = $null
+    if ($ErrRecord.Exception.PSObject.Properties.Name -contains 'Response') {
+        $resp = $ErrRecord.Exception.Response
+    }
     if ($resp) {
         try {
             $stream = $resp.GetResponseStream()
@@ -126,7 +136,13 @@ function Confirm-ThumbprintPresent {
         Write-Fail "$StoreLabel : GET response could not be serialized for inspection -- cannot verify"
         return $false
     }
-    $blocks = Get-PemBlocksFromText $json
+    # @() is load-bearing: Get-PemBlocksFromText returns $null when it matches
+    # nothing, and under Set-StrictMode -Version Latest $null.Count THROWS --
+    # from inside this verification helper, so a store that simply held no
+    # certificates reported "The property 'Count' cannot be found on this
+    # object" instead of the real finding. Observed on the first real vCenter
+    # verification.
+    $blocks = @(Get-PemBlocksFromText $json)
     if ($blocks.Count -eq 0) {
         Write-Fail "$StoreLabel : GET response contained no certificate blocks -- cannot verify"
         return $false
@@ -138,6 +154,81 @@ function Confirm-ThumbprintPresent {
     }
     Write-Ok "$StoreLabel : root thumbprint $Thumbprint confirmed present"
     $true
+}
+
+<#
+    vCenter's trusted-root-chains LIST endpoint does NOT return certificates.
+    It returns chain identifiers only:
+
+        [ { "chain": "BA7EEC55..." }, { "chain": "4FF484BF..." } ]
+
+    Each chain must then be fetched individually to get its PEM. Scanning the
+    LIST response for certificate blocks therefore finds none and reports
+    "cannot verify" against a store that actually holds the root -- which is
+    what happened on the first real run, after the write had already succeeded.
+
+    Fail-closed throughout: an empty list, a chain whose GET fails, or a chain
+    with no parseable certificate all count as "could not verify", never as a
+    pass. Verified against the live API 2026-10-01.
+#>
+function Confirm-VcenterTrustedRoot {
+    param([string]$VcHost, [hashtable]$Headers, [string]$Thumbprint)
+    $base = "https://$VcHost/api/vcenter/certificate-management/vcenter/trusted-root-chains"
+
+    # The store is eventually consistent after a write: immediately following
+    # the POST the LIST returned $null on the first real run, and @($null) has
+    # a Count of 1 -- so the loop saw one null entry, read no certificate, and
+    # reported "1 chain(s) listed but no certificate could be read" against a
+    # store that in fact already held the root. Filter nulls so a null response
+    # is never counted as a chain, and retry a few times before concluding.
+    $list = @()
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            $raw = Invoke-LabRest -Uri $base -Method GET -Headers $Headers
+            $list = @($raw | Where-Object { $null -ne $_ })
+        } catch {
+            Write-Fail "vCenter trusted-root-chains : LIST failed: $(Get-RestErrorDetail $_) -- cannot verify"
+            return $false
+        }
+        if ($list.Count -gt 0) { break }
+        if ($attempt -lt 5) {
+            Write-Info "LIST returned nothing yet (attempt $attempt/5); the store settles after a write"
+            Start-Sleep -Seconds 4
+        }
+    }
+    if ($list.Count -eq 0) {
+        Write-Fail "vCenter trusted-root-chains : LIST returned no chains after 5 attempts -- cannot verify"
+        return $false
+    }
+
+    $seen = @()
+    foreach ($item in $list) {
+        $id = $null
+        if ($null -ne $item -and $item.PSObject.Properties.Name -contains 'chain') { $id = [string]$item.chain }
+        elseif ($item) { $id = [string]$item }
+        if (-not $id) { continue }
+        try {
+            $one = Invoke-LabRest -Uri "$base/$id" -Method GET -Headers $Headers
+            $json = $one | ConvertTo-Json -Depth 12 -Compress
+            foreach ($b in @(Get-PemBlocksFromText $json)) {
+                $t = Get-PemThumbprint $b
+                if ($t) { $seen += $t }
+            }
+        } catch {
+            Write-Warn2 "chain $id could not be read: $(Get-RestErrorDetail $_)"
+        }
+    }
+
+    if ($seen.Count -eq 0) {
+        Write-Fail "vCenter trusted-root-chains : $($list.Count) chain(s) listed but no certificate could be read -- cannot verify"
+        return $false
+    }
+    if ($seen -contains $Thumbprint) {
+        Write-Ok "vCenter trusted-root-chains : root thumbprint $Thumbprint confirmed present (of $($seen.Count) certificate(s) across $($list.Count) chain(s))"
+        return $true
+    }
+    Write-Fail "vCenter trusted-root-chains : root thumbprint $Thumbprint NOT among the $($seen.Count) certificate(s) found"
+    return $false
 }
 
 # --------------------------------------------------------------- load input --
@@ -203,11 +294,24 @@ Write-Step "Writing SDDC Manager trust store"
 try {
     Invoke-LabRest -Uri "https://$sddc/v1/sddc-manager/trusted-certificates" -Method POST `
         -Headers $sddcHdr -Body @{ certificate = $pem } | Out-Null
+    Write-Ok "POST accepted"
 } catch {
-    Write-Fail "POST /v1/sddc-manager/trusted-certificates failed: $(Get-RestErrorDetail $_)"
-    exit 1
+    $sddcErr = Get-RestErrorDetail $_
+    # A certificate already in the trust store is the DESIRED state, not a
+    # failure. Treating the 409 as fatal made this script impossible to re-run
+    # after ANY partial success: the SDDC Manager half would conflict and exit
+    # before the vCenter half was ever attempted, so a run that failed at
+    # vCenter could never be completed. Observed on the first real run:
+    #   409 {"errorCode":"CERTIFICATE_CHAIN_EXISTS_IN_TRUST_STORE", ...}
+    # The verification step below is what confirms the root is actually there,
+    # and it does not care how it arrived.
+    if ($sddcErr -match 'CERTIFICATE_CHAIN_EXISTS_IN_TRUST_STORE' -or $sddcErr -match '\(409\)') {
+        Write-Ok "already present in the SDDC Manager trust store -- nothing to write"
+    } else {
+        Write-Fail "POST /v1/sddc-manager/trusted-certificates failed: $sddcErr"
+        exit 1
+    }
 }
-Write-Ok "POST accepted"
 
 Write-Step "Verifying SDDC Manager trust store holds the root"
 $sddcOk = $false
@@ -239,38 +343,51 @@ Write-Ok "session acquired"
 # -------------------------------------------------------- vCenter: write ----
 
 Write-Step "Writing vCenter trusted-root-chains"
-# Body shape: the design doc records this endpoint taking {"spec": {...}}
-# (probed against the live lab), while the vSphere Automation API's
-# CertificateManagement.Vcenter.TrustedRootChains.CreateSpec model is normally
-# posted unwrapped as {"cert_chain": {"cert_chain": [...]}} on the /api/ prefix.
-# The two disagree and neither was ever exercised with a real root certificate
-# to publish, because none existed until now. Rather than pick one and guess,
-# send the SPEC'S recorded shape first -- it is the only one backed by a live
-# probe -- and fall back to the unwrapped model shape if the server rejects it.
-# Both attempts are reported; nothing is retried silently.
-$vcSpecBody = @{ spec = @{ cert_chain = @{ cert_chain = @($pem) } } }
+# Body shape: SETTLED BY EXECUTION 2026-10-01 against vCenter 9.x.
+#
+# The design doc recorded this endpoint taking {"spec": {...}}. That is WRONG
+# for this build -- it answers
+#   400 UNEXPECTED_INPUT "Found unexpected fields [spec] in structure
+#   com.vmware.vcenter.certificate_management.vcenter.trusted_root_chains.create_spec"
+# The unwrapped CreateSpec shape {"cert_chain": {"cert_chain": [...]}} is
+# accepted. So the unwrapped shape is attempted FIRST and the spec-wrapped
+# shape is kept only as a fallback, for an older build that might want it.
+#
+# Keeping the fallback rather than deleting it: this cost nothing and it is
+# what turned an outright failure into a successful write on the first real
+# run, when the documented shape turned out to be wrong.
 $vcFlatBody = @{ cert_chain = @{ cert_chain = @($pem) } }
+$vcSpecBody = @{ spec = @{ cert_chain = @{ cert_chain = @($pem) } } }
 $vcUri = "https://$vc/api/vcenter/certificate-management/vcenter/trusted-root-chains"
 $vcPosted = $false
 try {
-    Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcSpecBody | Out-Null
+    # Unwrapped CreateSpec first: proven against this build on 2026-10-01. The
+    # spec-wrapped shape the design doc recorded answers 400 UNEXPECTED_INPUT
+    # here, so trying it first guaranteed a failed request on every run.
+    Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcFlatBody | Out-Null
     $vcPosted = $true
-    Write-Ok "POST accepted (spec-wrapped body, as recorded in the design doc)"
+    Write-Ok "POST accepted (unwrapped CreateSpec body)"
 } catch {
     $firstErr = Get-RestErrorDetail $_
-    Write-Warn2 "spec-wrapped body rejected: $firstErr"
-    Write-Warn2 "retrying with the unwrapped CreateSpec shape {cert_chain:{cert_chain:[...]}}"
-    try {
-        Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcFlatBody | Out-Null
+    # Already present is the desired state, as it is for SDDC Manager.
+    if ($firstErr -match 'ALREADY_EXISTS|already exists|\(409\)') {
         $vcPosted = $true
-        Write-Ok "POST accepted (unwrapped body)"
-        Write-Warn2 'The design doc''s recorded {"spec": {...}} shape is WRONG for this'
-        Write-Warn2 'vCenter build -- correct the doc once this run is confirmed good.'
-    } catch {
-        Write-Fail "POST trusted-root-chains failed with BOTH body shapes"
-        Write-Fail "  spec-wrapped : $firstErr"
-        Write-Fail "  unwrapped    : $(Get-RestErrorDetail $_)"
-        exit 1
+        Write-Ok "already present in vCenter trusted-root-chains -- nothing to write"
+    } else {
+        Write-Warn2 "unwrapped body rejected: $firstErr"
+        Write-Warn2 "retrying with the spec-wrapped shape {spec:{cert_chain:{...}}}"
+        try {
+            Invoke-LabRest -Uri $vcUri -Method POST -Headers $vcHdr -Body $vcSpecBody | Out-Null
+            $vcPosted = $true
+            Write-Ok "POST accepted (spec-wrapped body)"
+            Write-Warn2 'This build wants the spec-wrapped shape -- the opposite of what was'
+            Write-Warn2 'observed on 2026-10-01. Record which build does which.'
+        } catch {
+            Write-Fail "POST trusted-root-chains failed with BOTH body shapes"
+            Write-Fail "  unwrapped    : $firstErr"
+            Write-Fail "  spec-wrapped : $(Get-RestErrorDetail $_)"
+            exit 1
+        }
     }
 }
 if (-not $vcPosted) {
@@ -281,8 +398,7 @@ if (-not $vcPosted) {
 Write-Step "Verifying vCenter trusted-root-chains holds the root"
 $vcOk = $false
 try {
-    $vcList = Invoke-LabRest -Uri "https://$vc/api/vcenter/certificate-management/vcenter/trusted-root-chains" -Method GET -Headers $vcHdr
-    $vcOk = Confirm-ThumbprintPresent -ResponseObject $vcList -Thumbprint $rootThumbprint -StoreLabel 'vCenter trusted-root-chains'
+    $vcOk = Confirm-VcenterTrustedRoot -VcHost $vc -Headers $vcHdr -Thumbprint $rootThumbprint
 } catch {
     Write-Fail "GET /api/vcenter/certificate-management/vcenter/trusted-root-chains failed: $(Get-RestErrorDetail $_) -- cannot verify"
 }
