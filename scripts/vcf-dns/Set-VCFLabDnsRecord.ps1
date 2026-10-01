@@ -245,14 +245,26 @@ if ($Apply) {
                     Select-Object -First 1).NameHost
         } catch { }
 
-        if ($fwd -eq $r.IPv4 -and $rev -eq $fqdn) {
-            Write-Ok "$fqdn <-> $($r.IPv4)"
+        # A NoReverse record deliberately has no PTR of its own -- the address's
+        # PTR belongs to another name -- so demanding one here would report a
+        # failure, and exit non-zero, on a completely correct zone.
+        $noReverse = ($r.ContainsKey('NoReverse') -and $r.NoReverse)
+        $reverseOk = $noReverse -or ($rev -eq $fqdn)
+
+        if ($fwd -eq $r.IPv4 -and $reverseOk) {
+            if ($noReverse) {
+                $v = if ($rev) { $rev } else { '<none>' }
+                Write-Ok "$fqdn -> $($r.IPv4)   (no PTR by design; $($r.IPv4) reverses to $v)"
+            } else {
+                Write-Ok "$fqdn <-> $($r.IPv4)"
+            }
         } else {
             # No ?? here: this has to run on Windows PowerShell 5.1, where the
             # null-coalescing operator is a parse error, not a nicety.
             $f = if ($fwd) { $fwd } else { '<none>' }
             $v = if ($rev) { $rev } else { '<none>' }
-            Write-Fail ("$fqdn : forward=$f reverse=$v")
+            if ($noReverse) { Write-Fail ("$fqdn : forward=$f (reverse not required)") }
+            else            { Write-Fail ("$fqdn : forward=$f reverse=$v") }
             $failed++
         }
     }

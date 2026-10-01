@@ -18,3 +18,12 @@
 *.yml   text eol=lf
 *.json  text eol=lf
 *.ipxe  text eol=lf
+
+# PowerShell scripts run on Windows but 17 of the repo's 18 .ps1 files were
+# already LF, and the one CRLF outlier produced a 515-line diff for a 19-line
+# change on 2026-09-30 -- churn that buries real edits in a safety-critical
+# review. PowerShell reads LF fine on Windows, so pin the majority convention
+# rather than let editors flip files back and forth.
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+*.psd1  text eol=lf

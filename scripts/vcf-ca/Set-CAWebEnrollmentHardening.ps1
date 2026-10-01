@@ -142,9 +142,34 @@ Write-Info "Enabling Basic auth because SDDC Manager cannot speak Negotiate"
 Write-Info "Setting EPA on windowsAuthentication as defence in depth only"
 Write-Host ""
 
-# CRITICAL: Remove port 80 FIRST, before enabling Basic auth. This prevents a cleartext window
-# where Basic auth is enabled but :80 is still bound. If any subsequent action fails, we have
-# already closed the cleartext exposure rather than creating it.
+# CRITICAL ORDERING: Require-SSL on /CertSrv goes FIRST, before Basic auth is
+# enabled there. Port 80 now stays bound (for /CertEnroll), so without this
+# ordering there would be a window where Basic is enabled and reachable over
+# cleartext. With it, an http request to /CertSrv is refused by the access
+# check before any WWW-Authenticate challenge is emitted.
+#
+# Do NOT "restore" a port-80 removal here. It was removed from this script
+# deliberately: it took /CertEnroll down with it, and /CertEnroll is where
+# every consumer in the lab fetches the CRL and the CA certificate.
+# /CertEnroll may legitimately be absent (Web Enrolment not installed). That is
+# the ONE error worth tolerating on these steps. Everything else -- a config
+# lock, an access denial -- must reach the normal failure path. An earlier
+# version of this script ENABLED Basic auth on /CertEnroll, so a silent failure
+# to turn it off again leaves revocation checking broken for the whole lab
+# while the script reports success. Presence is therefore established ONCE,
+# here, and the steps below carry no catch of their own.
+$certEnrollPresent = $false
+try {
+    $certEnrollPresent = [bool](Get-WebVirtualDirectory -Site 'Default Web Site' `
+                                    -Name 'CertEnroll' -ErrorAction Stop)
+} catch { $certEnrollPresent = $false }
+if ($certEnrollPresent) {
+    Write-Ok "/CertEnroll virtual directory found"
+} else {
+    Write-Warn "/CertEnroll virtual directory NOT found -- its steps will be skipped."
+    Write-Warn "Without it there is no publication point, so CDP and AIA cannot work."
+}
+
 $actions = @(
     @{
         what = 'Require SSL on /CertSrv -- this is the cleartext control'
@@ -188,6 +213,21 @@ $actions = @(
         }
     }
     @{
+        what = 'Disable anonymous auth on /CertSrv (completes the auth end state)'
+        do   = {
+            # The installer disables this already. Asserted anyway so the
+            # script's end state is fully specified rather than inherited:
+            # anonymous plus Basic would serve enrolment requests as IUSR,
+            # which fails enrolment rather than leaking anything, but leaving
+            # it unstated means a future change cannot be reasoned about.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/anonymousAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    @{
         what = 'Disable Windows auth on /CertSrv (the actual ESC8 control)'
         do   = {
             Set-WebConfigurationProperty `
@@ -207,60 +247,50 @@ $actions = @(
     # revocation checking for the entire lab.
     @{
         what = '/CertEnroll: anonymous auth ON (CRL and AIA fetches carry no credentials)'
+        skipUnlessCertEnroll = $true
         do   = {
-            try {
-                Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/authentication/anonymousAuthentication `
-                    -Name enabled -Value $true `
-                    -PSPath 'IIS:\' `
-                    -Location 'Default Web Site/CertEnroll' `
-                    -ErrorAction Stop
-            } catch {
-                Write-Warn "CertEnroll vdir not found; skipping CertEnroll configuration"
-            }
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/anonymousAuthentication `
+                -Name enabled -Value $true `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
         }
     }
     @{
         what = '/CertEnroll: Basic auth OFF (a 401 on a CRL fetch breaks revocation checking)'
+        skipUnlessCertEnroll = $true
         do   = {
-            try {
-                Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/authentication/basicAuthentication `
-                    -Name enabled -Value $false `
-                    -PSPath 'IIS:\' `
-                    -Location 'Default Web Site/CertEnroll' `
-                    -ErrorAction Stop
-            } catch { }
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/basicAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
         }
     }
     @{
         what = '/CertEnroll: Windows auth OFF'
+        skipUnlessCertEnroll = $true
         do   = {
-            try {
-                Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/authentication/windowsAuthentication `
-                    -Name enabled -Value $false `
-                    -PSPath 'IIS:\' `
-                    -Location 'Default Web Site/CertEnroll' `
-                    -ErrorAction Stop
-            } catch { }
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/windowsAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
         }
     }
     @{
         what = '/CertEnroll: do NOT require SSL -- CDP and AIA are plain HTTP by design'
+        skipUnlessCertEnroll = $true
         do   = {
             # Serving CDP/AIA over HTTPS is circular: validating the HTTPS
             # certificate requires fetching a CRL, which would require
             # validating an HTTPS certificate. CRLs and CA certificates are
             # signed, so the transport does not need to provide integrity.
-            try {
-                Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/access `
-                    -Name sslFlags -Value '' `
-                    -PSPath 'IIS:\' `
-                    -Location 'Default Web Site/CertEnroll' `
-                    -ErrorAction Stop
-            } catch { }
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/access `
+                -Name sslFlags -Value '' `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
         }
     }
     @{
@@ -280,6 +310,10 @@ $actions = @(
 
 $authFailed = $false
 foreach ($a in $actions) {
+    if ($a.ContainsKey('skipUnlessCertEnroll') -and $a.skipUnlessCertEnroll -and -not $certEnrollPresent) {
+        Write-Host ("  SKIP   {0}  (/CertEnroll absent)" -f $a.what) -ForegroundColor Yellow
+        continue
+    }
     Write-Host ("  {0} {1}" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }), $a.what)
     if ($Apply -and -not $authFailed) {
         try {
@@ -314,7 +348,27 @@ Write-Step "Configuring firewall rules"
 # do with 443, and disabling them would cost remote management of this domain
 # controller. Nothing here is ever disabled without -DisableBroadRules, and
 # action is taken on rule Name (unique), never DisplayName (not unique).
-Write-Info "Auditing for ENABLED inbound Allow rules that explicitly permit TCP 443 from anywhere"
+# LocalPort is not always a single number: it can be a comma list or a RANGE
+# such as "400-500" or "1-1024". A plain -contains comparison therefore misses
+# every range that COVERS the port, so a pre-existing rule allowing 1-1024 from
+# anywhere would never be reported and the scoped rules below would narrow
+# nothing. 'Any' stays deliberately excluded -- see the note above.
+function Test-PortCovered {
+    param([string[]]$LocalPorts, [int]$Port)
+    foreach ($p in $LocalPorts) {
+        if ($p -eq 'Any') { continue }
+        if ($p -match '^\d+$') {
+            if ([int]$p -eq $Port) { return $true }
+            continue
+        }
+        if ($p -match '^(\d+)\s*-\s*(\d+)$') {
+            if ($Port -ge [int]$Matches[1] -and $Port -le [int]$Matches[2]) { return $true }
+        }
+    }
+    return $false
+}
+
+Write-Info "Auditing for ENABLED inbound Allow rules that permit TCP 443 or TCP 80 from anywhere"
 $broadRules = @()
 try {
     $allInboundRules = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction Stop
@@ -324,7 +378,11 @@ try {
         # Gate on protocol: only TCP rules can legitimately listen on port 443.
         if ($port.Protocol -ne 'TCP') { continue }
         $localPorts = @($port.LocalPort | ForEach-Object { [string]$_ })
-        if ($localPorts -notcontains '443') { continue }
+        $covered = @()
+        foreach ($candidate in 443, 80) {
+            if (Test-PortCovered -LocalPorts $localPorts -Port $candidate) { $covered += $candidate }
+        }
+        if ($covered.Count -eq 0) { continue }
         $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
         if (-not $addr) { continue }
         $remotes = @($addr.RemoteAddress | ForEach-Object { [string]$_ })
@@ -341,6 +399,13 @@ try {
                 Program     = $program
                 Service     = $service
                 Profile     = [string]$rule.Profile
+                Ports       = ($covered -join ',')
+                # Only a broad 443 rule defeats a control. Everything on port
+                # 80 is public by design (a static directory of signed
+                # objects), and the one sensitive vdir there is protected at
+                # the IIS layer by Require-SSL -- so an over-broad 80 rule is
+                # reported for awareness and does NOT gate the exit code.
+                Blocking    = ($covered -contains 443)
             }
         }
     }
@@ -351,8 +416,25 @@ try {
 }
 
 $broadRemain = $false
+
+# Only a broad 443 rule defeats a control here. Everything reachable on port 80
+# is public by design -- a static directory of signed objects -- and the one
+# sensitive vdir on that port answers 403 because it requires SSL. So an
+# over-broad 80 rule is reported for awareness and does NOT gate this script,
+# while an over-broad 443 rule still does.
+$blockingRules = @($broadRules | Where-Object { $_.Blocking })
+$infoRules     = @($broadRules | Where-Object { -not $_.Blocking })
+
+if ($infoRules.Count -gt 0) {
+    Write-Info "FYI -- these ENABLED rules allow TCP 80 from any address (not gating):"
+    foreach ($r in $infoRules) {
+        Write-Host ("      {0}  ({1})  ports={2}" -f $r.Name, $r.DisplayName, $r.Ports) -ForegroundColor DarkGray
+    }
+}
+
+$broadRules = $blockingRules
 if ($broadRules.Count -eq 0) {
-    Write-Ok "No pre-existing rule explicitly allows TCP 443 from anywhere"
+    Write-Ok "No pre-existing rule allows TCP 443 from anywhere"
 } else {
     Write-Warn "These ENABLED rules allow TCP 443 from any address and bypass the scoping below:"
     foreach ($r in $broadRules) {

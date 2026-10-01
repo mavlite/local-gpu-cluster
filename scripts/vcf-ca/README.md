@@ -155,11 +155,29 @@ issuance, and it is not optional.
 ```
 
 It refuses to run unless `pki.knowledgeondemand.net` resolves to exactly one
-address, because a multi-homed CDP host is the defect it exists to remove. It
-writes `REG_MULTI_SZ` directly rather than through `certutil -setreg` (the
-values contain `%` tokens and backslashes and would need correct quoting in two
-layers), then reads both values back and compares them element by element
-before restarting `certsvc` and publishing a fresh CRL.
+address, because a multi-homed CDP host is the defect it exists to remove.
+
+**It rewrites only the host of the existing `http://` entries.** Flag prefixes,
+paths and `%` tokens are preserved byte for byte, and non-HTTP entries (local
+paths, `file://`, `ldap:///`) are left exactly as found. That restraint is the
+design, not laziness: the flag prefix decides whether a URL reaches the CDP
+extension of issued certificates, a wrong one cannot be fixed after issuance,
+and the documentation for those bits is thin enough that two independent
+reviews of this project reached opposite conclusions about them. Keeping
+whatever AD CS configured is correct by construction — those defaults already
+produce working certificates — so the script changes only the thing that is
+demonstrably wrong, the hostname.
+
+If an `http://` entry is missing entirely, the script stops rather than
+inventing one with a guessed flag. Add it in `certsrv.msc` → CA properties →
+**Extensions**, where the checkbox *"Include in the CDP extension of issued
+certificates"* sets the correct bit without anyone doing bit arithmetic, then
+re-run.
+
+The script then reads both values back and compares them element by element
+before restarting `certsvc` and publishing a fresh CRL (with a retry, because
+`certutil -CRL` answers *RPC server is unavailable* for a few seconds after the
+service restarts).
 
 **CDP and AIA are plain HTTP on purpose.** Serving them over HTTPS is circular:
 validating the HTTPS certificate requires fetching a CRL, which would require
@@ -167,10 +185,23 @@ validating an HTTPS certificate. CRLs and CA certificates are signed objects,
 so the transport does not need to supply integrity. Do not "upgrade" these URLs
 to 443.
 
-Configuration verified is not revocation working. Prove it end to end once a
-certificate exists -- the test reads the URLs out of the real certificate and
-fetches them, so a flag prefix that never reached the CDP extension shows up
-here and nowhere else:
+**Configuration verified is not revocation working, and this is a required
+step, not a nicety.** The read-back above compares what was written against
+what was intended — it cannot detect a wrong flag prefix, which is the failure
+that matters. So before issuing anything real:
+
+1. Issue **one throwaway certificate** from the CA, any template.
+2. Run the end-to-end gate against it. It reads the URLs out of the
+   certificate itself, so a flag that never reached the CDP extension shows up
+   here and nowhere else:
+
+```powershell
+.\Test-CaRevocationEndpoints.ps1 -CertificateFile .\throwaway.cer
+```
+
+3. Only once that exits `0`, proceed to the template and rotation steps.
+
+The same test also works against a live endpoint once LDAPS is up:
 
 ```powershell
 .\Test-CaRevocationEndpoints.ps1 -FromTlsEndpoint dns01.knowledgeondemand.net:636

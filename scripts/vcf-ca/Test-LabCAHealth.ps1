@@ -86,7 +86,13 @@ param(
     [string]$CaHost   = 'dns01.knowledgeondemand.net',
     [string]$BaseDn   = 'DC=knowledgeondemand,DC=net',
     [string]$RootFile,
-    [string]$CredFile = "$env:USERPROFILE\.vcflab\credentials.env"
+    [string]$CredFile = "$env:USERPROFILE\.vcflab\credentials.env",
+    # Gate 4c needs a real object to fetch. Directory browsing is off on
+    # /CertEnroll by default, so a bare GET of the directory cannot prove the
+    # publication point serves anything. Supply the CRL's URL and the gate
+    # becomes a real check; omit it and the gate honestly reports NOT VERIFIED
+    # instead of passing on a 403 it did not understand.
+    [string]$CrlUrl
 )
 
 Set-StrictMode -Version Latest
@@ -98,6 +104,7 @@ function Write-Step { param([string]$m) Write-Host "`n=== $m" -ForegroundColor C
 function Write-Info { param([string]$m) Write-Host "  [..] $m" -ForegroundColor Gray }
 
 $script:failCount = 0
+$script:unverifiedCount = 0
 function Test-Gate {
     param([string]$Label, [bool]$Ok, [string]$Detail = '')
     if ($Ok) {
@@ -106,6 +113,17 @@ function Test-Gate {
         Write-Host "  FAIL  $Label  $Detail" -ForegroundColor Red
         $script:failCount++
     }
+}
+
+# A third outcome, because this project keeps shipping gates that cannot tell
+# "healthy" from "I could not look" and resolve the ambiguity as PASS. An
+# unobservable gate is reported as its own thing and counted -- it is not a
+# failure of the system under test, but it is NOT a pass either, and the exit
+# code must not say everything is fine.
+function Skip-Gate {
+    param([string]$Label, [string]$Why)
+    Write-Host "  ????  $Label  -- NOT VERIFIED: $Why" -ForegroundColor Yellow
+    $script:unverifiedCount++
 }
 
 # LDAP_SERVER_DOWN. A transport failure, never a server-issued refusal.
@@ -161,8 +179,8 @@ if (-not $hostResolved) {
     Test-Gate "simple bind over LDAPS reads the directory" $false $detail
     Test-Gate "389 refuses simple binds (signing enforcement intact)" $false $detail
     Test-Gate "4a port 80 is open (CDP/AIA reachable)" $false $detail
-    Test-Gate "4b /certsrv refuses cleartext (not 401)" $false $detail
-    Test-Gate "4c /CertEnroll served anonymously" $false $detail
+    Test-Gate "4b /certsrv requires SSL (403 over http)" $false $detail
+    Test-Gate "4c CRL served anonymously over http" $false $detail
 
     Write-Host ""
     Write-Host ("  {0} gate(s) failed" -f $script:failCount) -ForegroundColor Red
@@ -289,8 +307,8 @@ if (-not $negotiateOk) {
 $hostConfirmedReachable = $ldapsUp -or $negotiateOk
 if (-not $hostConfirmedReachable) {
     foreach ($g in @('4a port 80 is open (CDP/AIA reachable)',
-                     '4b /certsrv refuses cleartext (not 401)',
-                     '4c /CertEnroll served anonymously')) {
+                     '4b /certsrv requires SSL (403 over http)',
+                     '4c CRL served anonymously over http')) {
         Test-Gate $g $false "cannot verify -- $CaHost was not confirmed reachable on any other port"
     }
 } else {
@@ -302,55 +320,103 @@ if (-not $hostConfirmedReachable) {
     Test-Gate "4a port 80 is open (CDP/AIA reachable)" $httpUp `
         $(if (-not $httpUp) { 'closed -- every certificate this CA issues has an unreachable CRL' } else { '' })
 
-    # Returns the HTTP status for a URL, or $null when no reply was obtained at
-    # all. $null is NOT a status and must never be read as a passing one.
-    function Get-HttpStatus {
+    # Returns the HTTP status AND whether the reply carried a WWW-Authenticate
+    # header. Status is $null when no reply was obtained at all; $null is NOT a
+    # status and must never be read as a passing one.
+    function Get-HttpResult {
         param([string]$Url)
+        $out = @{ Status = $null; HasAuthChallenge = $false }
         try {
             $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 8 `
                      -MaximumRedirection 0 -ErrorAction Stop
-            return [int]$r.StatusCode
+            $out.Status = [int]$r.StatusCode
+            try { $out.HasAuthChallenge = [bool]$r.Headers['WWW-Authenticate'] } catch { }
+            return $out
         } catch {
             $resp = $null
             try { $resp = $_.Exception.Response } catch { }
             if ($resp) {
-                try { return [int]$resp.StatusCode } catch { }
+                try { $out.Status = [int]$resp.StatusCode } catch { }
+                # Guard every hop: a partial response object is common on error
+                # paths, and under StrictMode a missing member throws.
+                try {
+                    $hdrs = $resp.Headers
+                    if ($hdrs) { $out.HasAuthChallenge = [bool]$hdrs['WWW-Authenticate'] }
+                } catch { }
             }
-            return $null
+            return $out
         }
     }
 
     if ($httpUp) {
-        $certsrvStatus = Get-HttpStatus "http://$CaHost/certsrv/"
-        if ($null -eq $certsrvStatus) {
-            Test-Gate "4b /certsrv refuses cleartext (not 401)" $false `
+        # 4b. The property is "Require SSL is in force", and only 403 shows
+        # that. An earlier version passed on anything except 401, which meant a
+        # 200 -- /certsrv fully served over cleartext, the worst case -- passed,
+        # as did a 404 on a host where web enrolment was never installed.
+        $certsrv = Get-HttpResult "http://$CaHost/certsrv/"
+        if ($null -eq $certsrv.Status) {
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $false `
                 'no HTTP reply -- cannot tell a refusal from an unreachable service'
+        } elseif ($certsrv.Status -eq 200) {
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $false `
+                'HTTP 200 -- /certsrv is being SERVED over cleartext'
+        } elseif ($certsrv.Status -eq 401) {
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $false `
+                'HTTP 401 -- Basic auth offered over cleartext'
+        } elseif ($certsrv.Status -ne 403) {
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $false `
+                "HTTP $($certsrv.Status) -- expected 403; is web enrolment installed?"
+        } elseif ($certsrv.HasAuthChallenge) {
+            # Belt and braces on the ordering claim: a 403 that still carried
+            # WWW-Authenticate would mean a challenge was emitted anyway.
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $false `
+                '403 but WWW-Authenticate present -- a challenge was still offered'
         } else {
-            # 401 is the failure that matters: it means Basic was offered over
-            # cleartext. Anything else (403 SSL-required, 404) is a refusal.
-            Test-Gate "4b /certsrv refuses cleartext (not 401)" ($certsrvStatus -ne 401) `
-                "HTTP $certsrvStatus$(if ($certsrvStatus -eq 401) { ' -- Basic auth offered over cleartext' })"
+            Test-Gate "4b /certsrv requires SSL (403 over http)" $true
         }
 
-        $enrollStatus = Get-HttpStatus "http://$CaHost/CertEnroll/"
-        if ($null -eq $enrollStatus) {
-            Test-Gate "4c /CertEnroll served anonymously" $false `
-                'no HTTP reply from /CertEnroll'
+        # 4c. Fetching the directory itself cannot prove the publication point
+        # serves anything: directory browsing is off by default, so /CertEnroll/
+        # answers 403.14 on a perfectly healthy CA -- and a 403.4 from an SSL
+        # requirement mistakenly set on /CertEnroll looks identical while every
+        # CRL fetch fails. Only fetching a real object settles it.
+        if ($CrlUrl) {
+            $crl = Get-HttpResult $CrlUrl
+            if ($null -eq $crl.Status) {
+                Test-Gate "4c CRL served anonymously over http" $false "no HTTP reply from $CrlUrl"
+            } elseif ($crl.Status -eq 401) {
+                Test-Gate "4c CRL served anonymously over http" $false `
+                    'HTTP 401 -- authentication on /CertEnroll breaks revocation checking'
+            } elseif ($crl.Status -ne 200) {
+                Test-Gate "4c CRL served anonymously over http" $false "HTTP $($crl.Status) -- expected 200"
+            } else {
+                Test-Gate "4c CRL served anonymously over http" $true
+            }
         } else {
-            # 403 here is usually directory-browsing denied, which is fine --
-            # a named .crl still serves. 401 is never fine: no consumer sends
-            # credentials to fetch a CRL.
-            Test-Gate "4c /CertEnroll served anonymously" ($enrollStatus -ne 401) `
-                "HTTP $enrollStatus$(if ($enrollStatus -eq 401) { ' -- authentication on /CertEnroll breaks revocation checking' })"
+            $enroll = Get-HttpResult "http://$CaHost/CertEnroll/"
+            if ($null -ne $enroll.Status -and $enroll.Status -eq 401) {
+                # 401 is unambiguous whatever else is true.
+                Test-Gate "4c CRL served anonymously over http" $false `
+                    'HTTP 401 -- authentication on /CertEnroll breaks revocation checking'
+            } elseif ($null -ne $enroll.Status -and $enroll.Status -eq 200) {
+                Test-Gate "4c CRL served anonymously over http" $true 'directory listing served'
+            } else {
+                $what = if ($null -eq $enroll.Status) { 'no reply' } else { "HTTP $($enroll.Status)" }
+                Skip-Gate "4c CRL served anonymously over http" `
+                    "$what from /CertEnroll/ proves nothing (directory browsing is off by default) -- pass -CrlUrl, or run Test-CaRevocationEndpoints.ps1"
+            }
         }
     } else {
-        Test-Gate "4b /certsrv refuses cleartext (not 401)" $false 'port 80 closed'
-        Test-Gate "4c /CertEnroll served anonymously"      $false 'port 80 closed'
+        Test-Gate "4b /certsrv requires SSL (403 over http)" $false 'port 80 closed'
+        Test-Gate "4c CRL served anonymously over http"      $false 'port 80 closed'
     }
 }
 
 # ------------------------------------------------------------------ summary --
 Write-Host ""
+if ($script:unverifiedCount -gt 0) {
+    Write-Host ("  {0} gate(s) NOT VERIFIED -- listed above; these are not passes" -f $script:unverifiedCount) -ForegroundColor Yellow
+}
 if ($script:failCount -gt 0) {
     Write-Host ("  {0} gate(s) failed" -f $script:failCount) -ForegroundColor Red
 } else {

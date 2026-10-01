@@ -236,15 +236,27 @@ re-rooting and re-seeding every trust store:
 
 These are requirements, not recommendations. Each closes a live attack path.
 
-- **Extended Protection for Authentication set to Require** on the CertSrv and
-  CertEnroll virtual directories, and **port 80 unbound**. Web enrolment with
+- **Extended Protection for Authentication set to Require** on the CertSrv
+  virtual directory, and **Require-SSL on CertSrv** (superseding revision 2's
+  "port 80 unbound" — see the revision 3 correction above). Web enrolment with
   Basic or Integrated auth is the ESC8 NTLM-relay target. Without EPA this is
   exploitable the moment AD CS is installed. Basic auth over plain HTTP would
-  also put `svc-vcf-ca`'s password on the wire in base64 on every request.
-- **Firewall the CertSrv virtual directories** to SDDC Manager's address and the
-  admin workstation, not the whole /24. `dns01` has **no web stack today** —
-  ports 80 and 443 are both closed — so this genuinely opens new surface rather
-  than hardening existing surface.
+  also put `svc-vcf-ca`'s password on the wire in base64 on every request;
+  Require-SSL prevents that because IIS enforces the SSL requirement in its
+  access check and answers `403.4` *before* any `WWW-Authenticate` challenge is
+  emitted, so Basic is never offered over cleartext.
+  **EPA is NOT applied to CertEnroll, and CertEnroll gets no SSL requirement.**
+  It is an anonymous static publication point; see the revision 3 correction.
+  *Residual risk, accepted:* the server never solicits Basic over HTTP, but it
+  cannot stop a client that volunteers `Authorization: Basic` unprompted at an
+  `http://` URL. The registered SDDC Manager URL is `https://`, so this is
+  client discipline. Port-80 removal would have prevented it, at the cost of
+  breaking every CRL fetch in the lab.
+- **Firewall the CertSrv virtual directory** to SDDC Manager's address and the
+  admin workstation, not the whole /24. Port 80 is scoped separately and more
+  broadly, to the lab subnet, because every relying party must fetch the CRL.
+  `dns01` has **no web stack today** — ports 80 and 443 are both closed — so
+  this genuinely opens new surface rather than hardening existing surface.
 - **Audit what is published — there is nothing to prune.** `LoadDefaultTemplates=0`
   means no template is auto-published at Enterprise CA promotion, so the earlier
   instruction to "prune the default templates auto-published at promotion" is
@@ -281,7 +293,9 @@ These are requirements, not recommendations. Each closes a live attack path.
 
 2. **Configure `/certsrv`:** enable IIS **Basic Authentication** on the CertSrv
    application (the stock site is Windows/Negotiate, which SDDC Manager cannot
-   speak), apply EPA, unbind port 80.
+   speak), apply EPA, and set **Require-SSL on CertSrv** — not "unbind port
+   80", which revision 3 corrected: port 80 must stay bound to serve
+   `/CertEnroll`, and `/CertEnroll` must stay anonymous.
 
 3. **Confirm the DC autoenrolled.** Autoenrolment fires on a Group Policy cycle
    (90–120 minutes), not at install. Force it with `certutil -pulse`; Schannel
