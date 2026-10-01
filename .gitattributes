@@ -27,3 +27,9 @@
 *.ps1   text eol=lf
 *.psm1  text eol=lf
 *.psd1  text eol=lf
+
+# Vendored third-party code is stored byte-for-byte as obtained upstream so the
+# hashes recorded in scripts/vcf-ca/vendor/README.md stay verifiable. Line-ending
+# normalisation would silently invalidate them, which would make the provenance
+# record worse than no record at all.
+scripts/vcf-ca/vendor/** -text
