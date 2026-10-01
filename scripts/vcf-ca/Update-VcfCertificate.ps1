@@ -281,7 +281,8 @@ if (-not $accepted) {
 # ---------------------------------------------------------------- verify ----
 # "Accepted" is not "replaced". Poll until issuedBy names the lab root.
 Write-Step "Waiting for the new certificate to appear (up to $TimeoutMinutes min)"
-$deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+$started  = Get-Date
+$deadline = $started.AddMinutes($TimeoutMinutes)
 $replaced = $false
 $lastSeen = ''
 $i = 0
@@ -295,13 +296,14 @@ while ((Get-Date) -lt $deadline) {
         break
     }
     $issuer = [string](Get-Field $now 'issuedBy')
+    $elapsed = [int]((Get-Date) - $started).TotalSeconds
     if ($issuer -match 'LabRoot-CA') {
-        Write-Ok "replaced after $($i * 20)s -- issued by the lab CA"
+        Write-Ok "replaced after ${elapsed}s -- issued by the lab CA"
         $replaced = $true
         break
     }
     if ($issuer -ne $lastSeen -or $i % 3 -eq 0) {
-        Write-Info ("...{0,4}s status={1} issuedBy={2}" -f ($i * 20), (Get-Field $now 'displayStatus'), (($issuer -split ',')[0]))
+        Write-Info ("...{0,4}s status={1} issuedBy={2}" -f $elapsed, (Get-Field $now 'displayStatus'), (($issuer -split ',')[0]))
         $lastSeen = $issuer
     }
 }
@@ -314,7 +316,7 @@ if ($after) {
     Write-Info "status       $(Get-Field $after 'displayStatus')  daysToExpire=$(Get-Field $after 'daysToExpire')"
 }
 if (-not $replaced) {
-    Write-Fail "NOT replaced within $TimeoutMinutes minutes."
+    Write-Fail ("NOT replaced within {0} minutes (waited {1}s)." -f $TimeoutMinutes, [int]((Get-Date) - $started).TotalSeconds)
     Write-Info  "The request was accepted, so this is either a still-running task or a"
     Write-Info  "silent non-submission. Check the CA's own request table on the CA host --"
     Write-Info  "if no new row appeared there, Operations never asked for a certificate:"
