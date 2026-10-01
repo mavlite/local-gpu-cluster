@@ -198,26 +198,53 @@ Both templates below must be issued by hand or the lab does not work.
 
   B1. Duplicate 'Web Server'
 
-  B2. General: Set Template display name to 'VMware'
+      THESE STEPS ARE VMWARE'S, VERBATIM FROM THE 9.1 DOCUMENTATION:
+      techdocs.broadcom.com > VCF 9.0 and later > 9.1 > Fleet Management >
+      Certificate Management > Configure a Certificate Authority >
+      Prepare Your Microsoft Certificate Authority ...
+
+      An earlier revision of this script told you to KEEP Server
+      Authentication and said nothing about Basic Constraints or Key Usage.
+      That contradicted the documentation, and this script's own verification
+      would then have REJECTED a correctly built template. Both are corrected.
+
+  B2. Compatibility tab
+      - Certification Authority : Windows Server 2008 R2
+      - Certificate recipient   : Windows 7 / Server 2008 R2
+
+  B3. General tab
+      - Template display name: 'VMware'
       - Confirm the TEMPLATE NAME (cn) is also 'VMware' in the Name field.
-        SDDC Manager is given the cn, and a display-name mismatch fails at
+        The CA is given the cn, and a display-name mismatch fails at
         certificate REQUEST time, not at configuration time. This script
         verifies the cn specifically, not just that 'VMware' appears somewhere.
-      - Validity period: 2 years
 
-  B3. Compatibility: Leave at the LOWEST offered version
-      - A modern default produces a v4 template with CNG/KSP constraints that
-        reject web-enrolment CSR submission.
+  B4. Extensions tab -- three changes, all required
+      - Application Policies : select 'Server Authentication', click Remove.
+        Counter-intuitive but documented and correct: the stock Web Server
+        template's only EKU is Server Authentication, so removing it leaves
+        the issued certificate with NO EKU restriction, which makes it valid
+        for every purpose VCF needs. Leaving it in RESTRICTS the certificate
+        to server authentication only.
+        ** Because the issued certificate is then unrestricted, the Enroll ACE
+           in B6 is the only thing limiting who can obtain one. Treat it as
+           load-bearing, not hygiene. **
+      - Basic Constraints   : tick 'Enable this extension'
+      - Key Usage           : tick 'Signature is proof of origin
+                              (nonrepudiation)'; leave every other option at
+                              its default
 
-  B4. Extensions: Application Policies
-      - Server Authentication AND Client Authentication (both required)
+  B5. Subject Name tab
+      - 'Supply in the request' must be selected.
+        Note the stock Web Server template already has this
+        (msPKI-Certificate-Name-Flag = 1), so confirm rather than change it.
+      - Do not set Subject Name alternatives; VCF provides the SAN.
 
-  B5. Subject Name: 'Supply in the request'
-      - Do not set any Subject Name alternatives; SDDC Manager provides the SAN.
-
-  B6. Security: Enroll ACE
-      - Add: knowledgeondemand\svc-vcf-ca -> Enroll (allow)
-      - Remove: Any Authenticated Users / Domain Users Enroll ACE (this is ESC1)
+  B6. Security tab -- least privilege, per VMware's service-account topic
+      - knowledgeondemand\svc-vcf-ca :  Read = ALLOW, Enroll = ALLOW
+                                        Full Control / Write / Autoenroll = not set
+      - Remove any Authenticated Users / Domain Users ENROLL ACE. With no EKU
+        restriction and subject-in-request, a broad Enroll grant here is ESC1.
       - Domain Admins / Enterprise Admins / BUILTIN\Administrators keep Full
         Control; that is a default that cannot sensibly be removed and is
         explicitly allow-listed by this script's verification.
@@ -227,9 +254,17 @@ Both templates below must be issued by hand or the lab does not work.
 
 -- C. CA-level settings (separate from anything on a template)
 
-  C1. CA properties -> Security
-      - Add: knowledgeondemand\svc-vcf-ca -> Request Certificates (allow)
-      - NOTE: This is SEPARATE from the template Enroll ACE in B6. Both are
+  C1. CA properties -> Security (certsrv.msc), per VMware's documented
+      least-privilege table for the service account:
+      - knowledgeondemand\svc-vcf-ca :
+            Read                        = NOT selected
+            Issue and Manage Certificates = ALLOW
+            Manage CA                   = NOT selected
+            Request Certificates        = ALLOW
+      - NOTE: 'Issue and Manage Certificates' was MISSING from this script's
+        earlier instructions, which listed only Request Certificates. VMware
+        requires both.
+      - This is SEPARATE from the template Enroll ACE in B6. Both are
         required; neither implies the other.
 
   C2. Enable CA auditing (the detective control the design relies on, because
@@ -309,17 +344,31 @@ if ([string]::IsNullOrWhiteSpace($t)) {
     exit 1
 }
 
-$hasServerAuth = $t -match 'Server Authentication'
-$hasClientAuth = $t -match 'Client Authentication'
-
-if (-not ($hasServerAuth -and $hasClientAuth)) {
-    Write-Fail "EKU is not as designed"
-    if (-not $hasServerAuth) { Write-Info "  Missing: Server Authentication" }
-    if (-not $hasClientAuth) { Write-Info "  Missing: Client Authentication" }
-    Write-Info "VCF certificates must carry both; see General -> Extensions tab."
-    $failures++
+# VMware's documented template REMOVES Server Authentication from Application
+# Policies, which leaves the stock Web Server template with no EKU at all. An
+# earlier version of this check asserted that Server AND Client Authentication
+# must both be PRESENT -- the opposite of the documentation -- so it would have
+# rejected a correctly built template and passed a restricted one.
+#
+# Why removing it is right: the issued certificate then carries no EKU
+# restriction, so it is valid for every purpose VCF needs. Leaving Server
+# Authentication in RESTRICTS the certificate to server auth only.
+#
+# The security consequence is real and is checked separately below: an
+# unrestricted certificate means the Enroll ACE is the ONLY thing deciding who
+# can obtain one. That is why the ESC1 check that follows is not optional.
+$ekuLines = @($t -split "`r?`n" | Where-Object { $_ -match 'Server Authentication|Client Authentication|Smart Card Logon|Code Signing' })
+if ($ekuLines.Count -eq 0) {
+    Write-Ok "No EKU restriction on the template -- as VMware's procedure requires"
+    Write-Info "Issued certificates are unrestricted, so the Enroll ACE below is the control"
 } else {
-    Write-Ok "EKU carries Server + Client Authentication"
+    # Not a hard failure: a restricted template still issues, it just may not
+    # serve every VCF purpose. Report it as a deviation and let the operator
+    # decide, rather than blocking on a judgement VMware already made.
+    Write-Warn "The template carries an EKU restriction, which VMware's procedure removes:"
+    foreach ($l in $ekuLines) { Write-Info "    $($l.Trim())" }
+    Write-Info "VMware 9.1: Extensions -> Application Policies -> select Server Authentication -> Remove."
+    Write-Info "A restricted certificate may be rejected for some VCF component roles."
 }
 
 # ----------------------------------- verification: no broad enrolment ACE --

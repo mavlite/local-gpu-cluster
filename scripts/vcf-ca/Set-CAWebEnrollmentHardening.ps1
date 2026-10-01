@@ -122,6 +122,23 @@ function Write-Fail { param([string]$m) Write-Host "  [X] $m" -ForegroundColor R
 # unhandled Modules_ModuleNotFound exception. Measured on dns01 before install:
 # the bare Import-Module threw a four-line stack trace naming neither the cause
 # nor the fix.
+# Basic auth cannot work without its module, and enabling it in configuration
+# without the feature silently does nothing -- see Install-LabCA.ps1. Guard
+# here too, because this script is what disables the other providers: doing
+# that while Basic is non-functional leaves /certsrv with no way to
+# authenticate at all (401 2 5).
+$basicFeature = Get-WindowsFeature Web-Basic-Auth -ErrorAction SilentlyContinue
+if ($basicFeature -and $basicFeature.InstallState -ne 'Installed') {
+    Write-Fail "The Web-Basic-Auth IIS feature is NOT installed."
+    Write-Fail "Enabling basicAuthentication without it is accepted and does nothing, and"
+    Write-Fail "this script disables anonymous and Windows auth -- leaving /certsrv with no"
+    Write-Fail "working authentication provider (HTTP 401.2)."
+    Write-Info  "Install it first:  Install-WindowsFeature Web-Basic-Auth"
+    Write-Info  "This is VMware's documented step: Web Server (IIS) > Web Server > Security"
+    Write-Info  "> Basic Authentication."
+    exit 1
+}
+
 if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
     Write-Fail "The WebAdministration module is not present, so IIS is not installed."
     Write-Info "/CertSrv and /CertEnroll are created by the ADCS-Web-Enrollment role service."

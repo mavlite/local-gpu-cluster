@@ -145,9 +145,20 @@ Write-Ok "Confirmed"
 
 # --------------------------------------------------------- install features --
 Write-Step "Installing ADCS Windows Features"
-Write-Info "Installing: ADCS-Cert-Authority, ADCS-Web-Enrollment"
+# Web-Basic-Auth is VMware's documented step 1 and is NOT pulled in by
+# ADCS-Web-Enrollment. Omitting it was a real defect: setting
+# basicAuthentication enabled=true without the feature is accepted by the IIS
+# configuration system and does nothing, because the module is never loaded.
+# Combined with anonymous and Windows auth disabled on /CertSrv -- which the
+# hardening step does, correctly, to close ESC8 -- that leaves NO working
+# authentication provider, and every request to /certsrv answers
+#     401 2 5   (401.2, access denied due to server configuration)
+# which is the exact symptom Broadcom KB 432263 attributes to a Microsoft CA
+# whose /certsrv is not configured for Basic Authentication. Observed on this
+# lab on 2026-10-01, after the CA was otherwise working.
+Write-Info "Installing: ADCS-Cert-Authority, ADCS-Web-Enrollment, Web-Basic-Auth"
 try {
-    Install-WindowsFeature -Name ADCS-Cert-Authority, ADCS-Web-Enrollment `
+    Install-WindowsFeature -Name ADCS-Cert-Authority, ADCS-Web-Enrollment, Web-Basic-Auth `
         -IncludeManagementTools -ErrorAction Stop | Out-Null
     Write-Ok "Features installed"
 } catch {
