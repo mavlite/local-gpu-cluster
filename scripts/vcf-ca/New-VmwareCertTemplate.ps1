@@ -84,10 +84,31 @@ $KU_NON_REPUDIATION   = 0x40
 $KU_KEY_ENCIPHERMENT  = 0x20
 $OID_SERVER_AUTH      = '1.3.6.1.5.5.7.3.1'
 $OID_BASIC_CONSTRAINTS = '2.5.29.19'
-# certtmpl.msc's "Windows Server 2008 R2 / Windows 7" compatibility pair is
-# schema version 3. The stock Web Server template is version 1, which has no
-# template OID at all, so this must be raised for the import to be coherent.
-$SCHEMA_2008R2 = 3
+# SCHEMA VERSION: 2, and this DEVIATES from VMware's documentation.
+#
+# VMware specifies Compatibility = "Windows Server 2008 R2 / Windows 7", which
+# certtmpl.msc renders as schema version 3. Built that way and published, VCF
+# Operations rejected the registration with
+#
+#     "Certificate template VMware was not found on the Microsoft CA."
+#
+# even though the template was published, readable and enrollable by
+# svc-vcf-ca. The cause, measured directly: the legacy web enrolment page does
+# not offer v3 templates. Fetching
+# https://<ca>/certsrv/certrqxt.asp as the service account returned a 10,981
+# byte page in which the string "VMware" does not appear at all, while the
+# same template showed in certutil -CATemplates and on the CA object's
+# certificateTemplates attribute. VCF reads /certsrv, so what /certsrv offers
+# is what counts.
+#
+# Schema 2 (Server 2003 / XP compatibility) is offered by the legacy pages and
+# still gets a template OID, which schema 1 does not have and the import
+# requires. The project's ORIGINAL instruction -- "leave Compatibility at the
+# lowest offered version, a modern default produces a template that rejects
+# web-enrolment CSR submission" -- was right about this, and replacing it with
+# VMware's documented value was a regression. Everything else in VMware's
+# procedure is followed exactly.
+$SCHEMA_WEB_ENROLMENT_COMPATIBLE = 2
 
 Write-Step "Loading the vendored ADCSTemplate module"
 # Canonical location first, then a recursive search, then alongside this
@@ -258,11 +279,11 @@ if ($crit -notcontains $OID_BASIC_CONSTRAINTS) {
 # --- 4. Compatibility / schema version --------------------------------------
 $oldSchema = Show-Prop 'msPKI-Template-Schema-Version'
 if ($t.PSObject.Properties.Name -contains 'msPKI-Template-Schema-Version') {
-    $t.'msPKI-Template-Schema-Version' = $SCHEMA_2008R2
+    $t.'msPKI-Template-Schema-Version' = $SCHEMA_WEB_ENROLMENT_COMPATIBLE
 } else {
-    $t | Add-Member -NotePropertyName 'msPKI-Template-Schema-Version' -NotePropertyValue $SCHEMA_2008R2
+    $t | Add-Member -NotePropertyName 'msPKI-Template-Schema-Version' -NotePropertyValue $SCHEMA_WEB_ENROLMENT_COMPATIBLE
 }
-Write-Info "msPKI-Template-Schema-Version : $oldSchema -> $SCHEMA_2008R2  (CA 2008 R2 / recipient Win7)"
+Write-Info "msPKI-Template-Schema-Version : $oldSchema -> $SCHEMA_WEB_ENROLMENT_COMPATIBLE  (legacy /certsrv does not offer v3)"
 
 # A fresh template starts its own revision history rather than inheriting the
 # stock template's.
@@ -340,7 +361,7 @@ $newCrit = @()
 if ($new.PSObject.Properties.Name -contains 'pKICriticalExtensions' -and $new.pKICriticalExtensions) { $newCrit = @($new.pKICriticalExtensions) }
 Check "Basic Constraints listed" ($newCrit -contains $OID_BASIC_CONSTRAINTS) "[$($newCrit -join ', ')]"
 
-Check "schema version is $SCHEMA_2008R2" ([int]$new.'msPKI-Template-Schema-Version' -eq $SCHEMA_2008R2) "v$($new.'msPKI-Template-Schema-Version')"
+Check "schema version is $SCHEMA_WEB_ENROLMENT_COMPATIBLE" ([int]$new.'msPKI-Template-Schema-Version' -eq $SCHEMA_WEB_ENROLMENT_COMPATIBLE) "v$($new.'msPKI-Template-Schema-Version')"
 Check "Supply in the request set" ((([int]$new.'msPKI-Certificate-Name-Flag') -band 0x1) -eq 0x1) "flag=$($new.'msPKI-Certificate-Name-Flag')"
 Check "template OID assigned" ([bool]$new.'msPKI-Cert-Template-OID') "$($new.'msPKI-Cert-Template-OID')"
 

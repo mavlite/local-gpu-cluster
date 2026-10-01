@@ -63,6 +63,13 @@ param(
     [string]$CaServerUrl  = 'https://dns01.knowledgeondemand.net/certsrv',
     [string]$TemplateName = 'VMware',
     [string]$OperationsIp,
+    # The discriminator Operations requires alongside the spec object. 'MSCA'
+    # is the Microsoft CA; the other configurable type is OpenSSL.
+    # Sent as 'certificateAuthorityType'. MICROSOFT is accepted by this build;
+    # the certificate-REPLACEMENT endpoint uses a different enum ('MSCA'),
+    # which is why the published write-ups do not transfer here.
+    [ValidateSet('MICROSOFT','OPENSSL')]
+    [string]$CaType = 'MICROSOFT',
     [switch]$Apply
 )
 
@@ -260,12 +267,32 @@ try {
     Write-Warn2 "Could not read the current configuration: $(Get-RestErrorDetail $_)"
 }
 
+# The body shape was established by submitting payloads and reading which
+# field the server said was null -- it names its own model one field at a
+# time. Two things are NOT what the GET response or SDDC Manager's legacy
+# endpoint suggest:
+#
+#   1. A discriminator is required. Omitting it, or sending it under the name
+#      'caType' (which is what the Java getter is called), gives
+#         "...CertificateAuthorityType.equals(Object) because the return value
+#          of VcfConfigureCertificateAuthoritiesSpec.getCaType() is null"
+#      An INVALID value produced the identical error, which is how we knew the
+#      key was not binding at all rather than being rejected. The JSON name is
+#      'certificateAuthorityType'.
+#   2. The spec objects are NESTED one level deeper than the GET response
+#      shows, under 'certificateAuthoritiesSpec'. Supplying the discriminator
+#      correctly moved the error on to
+#         "...getMicrosoftCertificateAuthoritySpec() because the return value
+#          of ...getCertificateAuthoritiesSpec() is null"
 $spec = @{
-    microsoftCertificateAuthoritySpec = @{
-        serverUrl    = $CaServerUrl
-        username     = $enrollUser
-        secret       = $enrollPass
-        templateName = $TemplateName
+    certificateAuthorityType = $CaType
+    certificateAuthoritiesSpec = @{
+        microsoftCertificateAuthoritySpec = @{
+            serverUrl    = $CaServerUrl
+            username     = $enrollUser
+            secret       = $enrollPass
+            templateName = $TemplateName
+        }
     }
 }
 
