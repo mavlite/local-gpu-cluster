@@ -64,6 +64,16 @@ $Records = @(
     @{ Name = 'log-insight';    Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.137'; Note = 'Logs ingress VIP' }
     @{ Name = 'vrni';           Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.136'; Note = 'Networks platform' }
     @{ Name = 'vrni-collector'; Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.138'; Note = 'Networks collector (NEW)' }
+    # The CA's CDP/AIA endpoint. It exists because dns01.knowledgeondemand.net
+    # resolves to TWO addresses -- 172.16.10.150 and 192.168.6.197 -- and a
+    # certificate's CRL URL must name an address every lab consumer can reach.
+    # A VCF appliance that round-robins onto 192.168.6.197 cannot fetch the
+    # CRL, and strict validators hard-fail on a CRL they cannot retrieve.
+    # A CNAME to dns01 would inherit exactly the problem it is meant to avoid.
+    # NoReverse: this is a second name for an address whose PTR belongs to
+    # dns01. Two PTRs on one address make reverse lookups return both.
+    @{ Name = 'pki'; Zone = 'knowledgeondemand.net'; IPv4 = '172.16.10.150'; NoReverse = $true
+       Note = 'CA CDP/AIA endpoint -- single-homed name for the DC lab address' }
 )
 
 # ------------------------------------------------------------------- helpers --
@@ -175,6 +185,15 @@ foreach ($r in $Records) {
     }
 
     # --- reverse (PTR) ---
+    # A record that deliberately shares an address with another host must not
+    # claim the PTR. One address has one canonical name; a second PTR makes
+    # reverse lookups return both, and this lab has already been bitten by a
+    # reverse-DNS defect that 300+ unit tests missed.
+    if ($r.ContainsKey('NoReverse') -and $r.NoReverse) {
+        Write-Info "PTR deliberately skipped (NoReverse) -- this address's PTR belongs to another name"
+        continue
+    }
+
     $rev = Get-ReverseZoneName -IPv4 $r.IPv4
     if (-not (Test-ZonePresent $rev.ZoneName)) {
         Write-Warn2 "reverse zone $($rev.ZoneName) does not exist -- PTR skipped"

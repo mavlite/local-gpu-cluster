@@ -5,12 +5,29 @@
 .DESCRIPTION
     This script configures the /CertSrv web enrolment site to defend against ESC8
     (NTLM relay to /certsrv) by:
-    - Removing the HTTP (port 80) binding to prevent cleartext credential leakage
+    - Requiring SSL on /CertSrv so Basic auth is never offered over cleartext
     - Enabling Basic authentication (SDDC Manager cannot speak Negotiate)
     - DISABLING Windows (Negotiate/NTLM) authentication
     - Setting Extended Protection to Require on windowsAuthentication as
       defence in depth, in case anyone ever re-enables it
     - Scoping inbound HTTPS to SDDC Manager and an optional admin IP
+    - Leaving /CertEnroll ANONYMOUS on port 80, and allowing port 80 from the
+      lab subnet, so CDP and AIA are actually reachable
+
+    TWO VIRTUAL DIRECTORIES, OPPOSITE TREATMENTS -- and this script used to get
+    the second one backwards. /CertSrv authenticates, so it is the ESC8 surface
+    and gets locked down. /CertEnroll does NOT authenticate: it is a static
+    directory holding the CRL and the CA certificate, both signed objects, and
+    there is no authentication there to relay. An earlier version of this
+    script enabled Basic auth on /CertEnroll and removed the port 80 binding
+    outright. Neither hardened anything, and together they broke revocation
+    checking for the whole lab: a CRL fetch answers 401, and no consumer sends
+    credentials when fetching a CRL.
+
+    CDP AND AIA ARE PLAIN HTTP BY DESIGN, not by oversight. Serving them over
+    HTTPS is circular -- validating the HTTPS certificate requires fetching a
+    CRL, which would require validating an HTTPS certificate. The objects are
+    signed, so the transport does not need to supply integrity.
 
     WHAT ACTUALLY CLOSES ESC8 HERE IS DISABLING NEGOTIATE. ESC8 is an NTLM
     relay against the web-enrolment endpoint; with Windows authentication off
@@ -24,8 +41,12 @@
     logonMethod and nothing else, so writing extendedProtection there either
     throws or produces a 500.19 on /CertSrv.
 
-    CRITICAL: Port 80 removal happens FIRST, before enabling Basic auth, to prevent a
-    cleartext window. Basic auth over cleartext exposes credentials on the wire.
+    CRITICAL: Require-SSL on /CertSrv happens FIRST, before enabling Basic auth,
+    to prevent a cleartext window. Basic auth over cleartext exposes credentials
+    on the wire. IIS evaluates the SSL requirement BEFORE issuing an auth
+    challenge, so an HTTP request to /CertSrv answers 403.4 and never sees a
+    Basic prompt -- the same protection the old port-80 removal gave, without
+    taking /CertEnroll down with it.
 
     RECOVERY: if any authentication step fails part-way, the script re-asserts
     windowsAuthentication enabled=$false on both virtual directories and still
@@ -41,6 +62,11 @@
 .PARAMETER AdminIp
     Optional IP address of an admin workstation.
     If provided, the firewall rule will also allow HTTPS from this address.
+
+.PARAMETER CrlConsumerSubnet
+    Subnet permitted to reach /CertEnroll on port 80 (default: 172.16.10.0/24).
+    Deliberately broader than the 443 scope: every host that validates a
+    certificate from this CA must fetch the CRL, not just SDDC Manager.
 
 .PARAMETER DisableBroadRules
     Disable the pre-existing inbound Allow rules that explicitly permit TCP 443
@@ -70,6 +96,12 @@
 param(
     [string]$SddcManagerIp = '172.16.10.133',
     [string]$AdminIp,
+    # Every consumer that validates a certificate issued by this CA has to
+    # fetch the CRL and the CA certificate from /CertEnroll over HTTP --
+    # vCenter, NSX, the ESXi hosts, Operations, SDDC Manager. That is the lab
+    # subnet, not one host, so the port 80 rule is deliberately broader than
+    # the 443 one.
+    [string]$CrlConsumerSubnet = '172.16.10.0/24',
     [switch]$DisableBroadRules,
     [switch]$Apply
 )
@@ -115,11 +147,20 @@ Write-Host ""
 # already closed the cleartext exposure rather than creating it.
 $actions = @(
     @{
-        what = 'Remove the HTTP (port 80) binding so Basic auth never crosses cleartext'
+        what = 'Require SSL on /CertSrv -- this is the cleartext control'
         do   = {
-            Get-WebBinding -Name 'Default Web Site' -Protocol http |
-                Where-Object { $_.bindingInformation -like '*:80:*' } |
-                Remove-WebBinding
+            # IIS evaluates the SSL requirement BEFORE issuing an authentication
+            # challenge, so a plain HTTP request to /CertSrv gets 403.4 and never
+            # sees a Basic prompt. Removing the port 80 binding also achieves
+            # that -- which is what this script used to do -- but it takes
+            # /CertEnroll down with it, and /CertEnroll is where every consumer
+            # in the lab fetches the CRL and the CA certificate. Scope the
+            # control to the vdir that actually needs it.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/access `
+                -Name sslFlags -Value 'Ssl' `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
         }
     }
     @{
@@ -156,38 +197,44 @@ $actions = @(
                 -Location 'Default Web Site/CertSrv'
         }
     }
+    # ----------------------------------------------------------- /CertEnroll --
+    # /CertEnroll is NOT an ESC8 surface. ESC8 relays NTLM to an endpoint that
+    # AUTHENTICATES; /CertEnroll is a static directory of signed objects (the
+    # CRL and the CA certificate) and accepts no credentials, so there is
+    # nothing to relay to it. An earlier version of this script enabled Basic
+    # auth here. That is not hardening -- it makes every CRL fetch answer 401,
+    # and no consumer sends credentials when fetching a CRL, so it breaks
+    # revocation checking for the entire lab.
     @{
-        what = 'Enable Basic auth on /CertEnroll (if present)'
+        what = '/CertEnroll: anonymous auth ON (CRL and AIA fetches carry no credentials)'
         do   = {
             try {
                 Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/authentication/basicAuthentication `
+                    -Filter /system.webServer/security/authentication/anonymousAuthentication `
                     -Name enabled -Value $true `
                     -PSPath 'IIS:\' `
                     -Location 'Default Web Site/CertEnroll' `
                     -ErrorAction Stop
             } catch {
-                Write-Warn "CertEnroll vdir not found; skipping CertEnroll auth configuration"
+                Write-Warn "CertEnroll vdir not found; skipping CertEnroll configuration"
             }
         }
     }
     @{
-        what = 'Set Extended Protection = Require on /CertEnroll windowsAuthentication (if present)'
+        what = '/CertEnroll: Basic auth OFF (a 401 on a CRL fetch breaks revocation checking)'
         do   = {
             try {
                 Set-WebConfigurationProperty `
-                    -Filter /system.webServer/security/authentication/windowsAuthentication `
-                    -Name extendedProtection.tokenChecking -Value 'Require' `
+                    -Filter /system.webServer/security/authentication/basicAuthentication `
+                    -Name enabled -Value $false `
                     -PSPath 'IIS:\' `
                     -Location 'Default Web Site/CertEnroll' `
                     -ErrorAction Stop
-            } catch {
-                # Already warned above if CertEnroll missing; don't repeat
-            }
+            } catch { }
         }
     }
     @{
-        what = 'Disable Windows auth on /CertEnroll (if present)'
+        what = '/CertEnroll: Windows auth OFF'
         do   = {
             try {
                 Set-WebConfigurationProperty `
@@ -196,8 +243,36 @@ $actions = @(
                     -PSPath 'IIS:\' `
                     -Location 'Default Web Site/CertEnroll' `
                     -ErrorAction Stop
-            } catch {
-                # Already warned above if CertEnroll missing; don't repeat
+            } catch { }
+        }
+    }
+    @{
+        what = '/CertEnroll: do NOT require SSL -- CDP and AIA are plain HTTP by design'
+        do   = {
+            # Serving CDP/AIA over HTTPS is circular: validating the HTTPS
+            # certificate requires fetching a CRL, which would require
+            # validating an HTTPS certificate. CRLs and CA certificates are
+            # signed, so the transport does not need to provide integrity.
+            try {
+                Set-WebConfigurationProperty `
+                    -Filter /system.webServer/security/access `
+                    -Name sslFlags -Value '' `
+                    -PSPath 'IIS:\' `
+                    -Location 'Default Web Site/CertEnroll' `
+                    -ErrorAction Stop
+            } catch { }
+        }
+    }
+    @{
+        what = 'Ensure the port 80 binding EXISTS -- CDP and AIA depend on it'
+        do   = {
+            $b = Get-WebBinding -Name 'Default Web Site' -Protocol http |
+                 Where-Object { $_.bindingInformation -like '*:80:*' }
+            if (-not $b) {
+                New-WebBinding -Name 'Default Web Site' -Protocol http -Port 80 -IPAddress '*'
+                Write-Ok "port 80 binding restored"
+            } else {
+                Write-Ok "port 80 binding already present"
             }
         }
     }
@@ -349,6 +424,50 @@ if ($Apply) {
     } catch {
         Write-Fail "FATAL: Could not create firewall rule"
         Write-Fail "  Error: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
+# --------------------------------------- port 80 for CDP/AIA (/CertEnroll) --
+# What this exposes is a static directory of SIGNED objects. /CertSrv on the
+# same port answers 403 because it requires SSL, so widening 80 does not widen
+# the enrolment surface. Without this rule every certificate this CA issues
+# carries a revocation URL nothing in the lab can reach, and strict validators
+# -- VCF LCM among them -- hard-fail on a CRL they cannot retrieve.
+$crlRuleName = 'CertEnroll HTTP CDP-AIA (lab subnet)'
+Write-Info "Checking for existing CDP/AIA rule to remove (idempotency)"
+$existingCrlRule = Get-NetFirewallRule -DisplayName $crlRuleName -Direction Inbound -ErrorAction SilentlyContinue
+if ($existingCrlRule) {
+    Write-Host ("  {0} remove stale CDP/AIA rule" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }))
+    if ($Apply) {
+        try {
+            $existingCrlRule | Remove-NetFirewallRule -ErrorAction Stop
+            Write-Ok "Stale CDP/AIA rule removed"
+        } catch {
+            Write-Fail "FATAL: Could not remove stale CDP/AIA firewall rule"
+            Write-Fail "  Error: $($_.Exception.Message)"
+            exit 1
+        }
+    }
+}
+
+Write-Host ("  {0} allow inbound 80 from: {1}  (/CertEnroll only; /CertSrv requires SSL)" -f `
+            $(if($Apply) { 'APPLY ' } else { 'WOULD ' }), $CrlConsumerSubnet)
+if ($Apply) {
+    try {
+        New-NetFirewallRule `
+            -DisplayName $crlRuleName `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 80 `
+            -RemoteAddress $CrlConsumerSubnet `
+            -Action Allow `
+            -ErrorAction Stop | Out-Null
+        Write-Ok "CDP/AIA firewall rule created"
+    } catch {
+        Write-Fail "FATAL: Could not create the CDP/AIA firewall rule"
+        Write-Fail "  Error: $($_.Exception.Message)"
+        Write-Fail "Without it, every certificate this CA issues has an unreachable CRL."
         exit 1
     }
 }

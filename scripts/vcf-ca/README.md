@@ -54,6 +54,24 @@ AD_CA_ENROLL_USER=knowledgeondemand\svc-vcf-ca
 AD_CA_ENROLL_PASS=<the password set above>
 ```
 
+**Create the `pki` DNS record.** `Set-CaRevocationEndpoints.ps1` refuses to run
+without it, by design:
+
+```powershell
+# from the workstation -- the record is already declared in the script's table
+.\scripts\vcf-dns\Set-VCFLabDnsRecord.ps1
+.\scripts\vcf-dns\Set-VCFLabDnsRecord.ps1 -Apply -Credential (Get-Credential KNOWLEDGEONDEMAND\Administrator)
+```
+
+`pki.knowledgeondemand.net` -> `172.16.10.150`, and **only** that address.
+`dns01.knowledgeondemand.net` resolves to two (`172.16.10.150` and
+`192.168.6.197`), which is why the CA cannot use its own hostname for CDP and
+AIA: an appliance that round-robins onto the management address cannot fetch
+the CRL, and strict validators hard-fail on a CRL they cannot retrieve. A
+CNAME to `dns01` would inherit the same defect. The record carries no PTR --
+that address's PTR belongs to `dns01`, and two PTRs on one address make
+reverse lookups return both.
+
 ## Ownership split
 
 No credential in `credentials.env` carries Domain Admin, and adding one is a
@@ -65,7 +83,10 @@ Manager's or VCF Operations' REST API with credentials already held.
 | Script | Ownership | Runs on |
 |---|---|---|
 | `Install-LabCA.ps1` | **[OPERATOR]** | `dns01` |
+| `Set-CaRevocationEndpoints.ps1` | **[OPERATOR]** | `dns01` |
 | `Set-CAWebEnrollmentHardening.ps1` | **[OPERATOR]** | `dns01` |
+| `Test-CaRevocationEndpoints.ps1` | **[SCRIPTED]** | inside the lab (see below) |
+| `Test-LdapsHandshake.ps1` | **[SCRIPTED]** | workstation |
 | `New-VcfCertificateTemplate.ps1` | **[OPERATOR]** | `dns01` (both template builds are manual in `certtmpl.msc`; the script prints instructions, then verifies) |
 | `Test-LabCAHealth.ps1` | **[SCRIPTED]** | workstation |
 | `Publish-LabRootTrust.ps1` | **[SCRIPTED]** | workstation |
@@ -79,6 +100,7 @@ Manager's or VCF Operations' REST API with credentials already held.
 |---|---|---|
 | 0 | **Clone `dns01`** -- the last rollback point in the whole project | `New-Dns01RollbackClone.ps1 -Apply` |
 | 1 | Install the CA | `Install-LabCA.ps1 -Apply` |
+| 1b | **Point CDP/AIA at a single-homed name** -- before ANY certificate is issued | `Set-CaRevocationEndpoints.ps1 -Apply` |
 | 2 | Harden web enrolment | `Set-CAWebEnrollmentHardening.ps1 -Apply` |
 | 3 | **Publish `Domain Controller Authentication`** -- without this nothing autoenrols | manual + `New-VcfCertificateTemplate.ps1` section A |
 | 4 | Force + confirm DC autoenrolment | `certutil -pulse`, `certutil -dcinfo verify`, then `Test-LabCAHealth.ps1` |
@@ -118,6 +140,54 @@ DNS is serving again -- a real query, not a port check.
 Every VCF component resolves its peers through this DC, so run it in a window
 where the lab can lose name resolution. To roll back: power off `dns01`,
 register the copy's `.vmx` in the host's inventory, and power that on.
+
+### Step 1b -- CDP and AIA, before the CA signs anything
+
+A certificate carries the CDP and AIA URLs that were configured **at the moment
+it was signed**. Changing them later does not repair a certificate already
+issued; the only fix is reissuing it. So this sits between install and first
+issuance, and it is not optional.
+
+```powershell
+# on dns01
+.\Set-CaRevocationEndpoints.ps1              # dry run -- prints current vs new
+.\Set-CaRevocationEndpoints.ps1 -Apply
+```
+
+It refuses to run unless `pki.knowledgeondemand.net` resolves to exactly one
+address, because a multi-homed CDP host is the defect it exists to remove. It
+writes `REG_MULTI_SZ` directly rather than through `certutil -setreg` (the
+values contain `%` tokens and backslashes and would need correct quoting in two
+layers), then reads both values back and compares them element by element
+before restarting `certsvc` and publishing a fresh CRL.
+
+**CDP and AIA are plain HTTP on purpose.** Serving them over HTTPS is circular:
+validating the HTTPS certificate requires fetching a CRL, which would require
+validating an HTTPS certificate. CRLs and CA certificates are signed objects,
+so the transport does not need to supply integrity. Do not "upgrade" these URLs
+to 443.
+
+Configuration verified is not revocation working. Prove it end to end once a
+certificate exists -- the test reads the URLs out of the real certificate and
+fetches them, so a flag prefix that never reached the CDP extension shows up
+here and nowhere else:
+
+```powershell
+.\Test-CaRevocationEndpoints.ps1 -FromTlsEndpoint dns01.knowledgeondemand.net:636
+```
+
+Run on `dns01` it proves the CA's output and the CRL's validity, but not that a
+lab consumer can reach the endpoint -- `dns01` is reaching itself. For the claim
+that actually matters, ask from inside the lab:
+
+```bash
+pct exec 159 -- curl -sS -o /dev/null -w '%{http_code}\n' \
+    http://pki.knowledgeondemand.net/CertEnroll/
+```
+
+The test exits `2` for INCONCLUSIVE when it cannot resolve or reach a URL,
+rather than reporting a failure it did not observe. A workstation on a VPN with
+`block-outside-dns` always returns `2`, however healthy the lab is.
 
 ### Step 3 -- publish the DC template (nothing autoenrols without it)
 
@@ -161,8 +231,9 @@ before anything else.
 
 ### Step 5 -- bind the certificate to IIS on 443 (no script does this)
 
-`Set-CAWebEnrollmentHardening.ps1` removed the port 80 binding and left
-`/certsrv` unreachable on purpose. Binding 443 is manual:
+`Set-CAWebEnrollmentHardening.ps1` set Require-SSL on `/certsrv`, so it is
+unreachable over HTTP on purpose (403 before any auth challenge) while port 80
+stays bound for `/CertEnroll`. Binding 443 is manual:
 
 ```powershell
 # on dns01, after step 4 confirms a Server Authentication certificate exists
@@ -419,9 +490,11 @@ trusting a FAIL from this gate as evidence of a real problem.
 |---|---|
 | `CAPolicy.inf` | install-time CA policy; copied to `C:\Windows` by `Install-LabCA.ps1` |
 | `Install-LabCA.ps1` | [OPERATOR] installs ADCS + Web Enrolment, applies `CAPolicy.inf`; requires a typed `CONFIRM` that the `dns01` rollback clone exists, backs up any existing `CAPolicy.inf`, and short-circuits if ADCS is already installed |
-| `Set-CAWebEnrollmentHardening.ps1` | [OPERATOR] disables Negotiate (the ESC8 control), enables Basic, EPA=Require on windowsAuth, unbinds port 80, scopes firewall to SDDC Manager, reports broad 443 rules |
+| `Set-CAWebEnrollmentHardening.ps1` | [OPERATOR] disables Negotiate (the ESC8 control), enables Basic, EPA=Require on windowsAuth, Require-SSL on `/certsrv`, keeps `/CertEnroll` anonymous on port 80, scopes 443 to SDDC Manager and 80 to the lab subnet, reports broad 443 rules |
+| `Set-CaRevocationEndpoints.ps1` | [OPERATOR] points CDP/AIA at the single-homed `pki` name over HTTP; refuses a multi-homed name; read-back verified; restarts certsvc and publishes a CRL |
+| `Test-CaRevocationEndpoints.ps1` | [SCRIPTED] reads CDP/AIA out of a real issued certificate, resolves and fetches each, validates the CRL parses and has not expired; exits 2 for INCONCLUSIVE |
 | `New-VcfCertificateTemplate.ps1` | [OPERATOR] prints build instructions for BOTH templates (DC + VMware), verifies issuance, cn, EKU, ESC1, DC Autoenroll scoping, ESC6, the CA-level Request Certificates ACE and `CA\AuditFilter` |
-| `Test-LabCAHealth.ps1` | [SCRIPTED] four read-only gates: LDAPS up, LDAPS bind works, 389 still refuses, port 80 closed |
+| `Test-LabCAHealth.ps1` | [SCRIPTED] read-only gates: LDAPS up, LDAPS bind works, 389 still refuses, and gate 4's three claims -- port 80 OPEN (CDP reachable), `/certsrv` refuses cleartext (not 401), `/CertEnroll` served anonymously |
 | `Publish-LabRootTrust.ps1` | [SCRIPTED] pushes the root to vCenter's and SDDC Manager's trust stores, verifies by thumbprint |
 | `Register-VcfCA.ps1` | [SCRIPTED] registers the Microsoft CA with SDDC Manager, prints the manual issuance proof |
 | `Add-OpsIdentitySource.ps1` | [SCRIPTED] validates then creates the AD identity source in VCF Operations |

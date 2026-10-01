@@ -36,8 +36,16 @@
       LdapException.ErrorCode to make sure it is a server-issued rejection
       (e.g. invalid credentials, 49) and not LDAP_SERVER_DOWN (81), a
       transport failure, before it counts as a refusal.
-    - Gate 4 only trusts a closed port 80 when the host has already been
-      confirmed reachable by gate 1 or gate 3's Negotiate cross-check.
+    - Gate 4 is three claims, not one, and it does NOT assert that port 80 is
+      closed -- that would be backwards. Port 80 MUST be open, because it
+      serves /CertEnroll where every lab consumer fetches the CRL and the CA
+      certificate, and CDP/AIA are plain HTTP by design. The security property
+      is that /certsrv never offers Basic over cleartext (it requires SSL, so
+      an HTTP request gets 403 before any auth challenge), and that
+      /CertEnroll is served WITHOUT credentials. A 401 from either is the
+      failure. Each claim is only credited once the host is confirmed
+      reachable by gate 1 or gate 3's Negotiate cross-check, and a missing
+      HTTP reply is never read as a pass.
 
     Exit code is the number of failed gates (0 = all healthy). Nothing here
     writes to AD, the CA, or the host under test.
@@ -152,7 +160,9 @@ if (-not $hostResolved) {
     Test-Gate "636 accepts connections on $CaHost" $false $detail
     Test-Gate "simple bind over LDAPS reads the directory" $false $detail
     Test-Gate "389 refuses simple binds (signing enforcement intact)" $false $detail
-    Test-Gate "port 80 is closed on $CaHost" $false $detail
+    Test-Gate "4a port 80 is open (CDP/AIA reachable)" $false $detail
+    Test-Gate "4b /certsrv refuses cleartext (not 401)" $false $detail
+    Test-Gate "4c /CertEnroll served anonymously" $false $detail
 
     Write-Host ""
     Write-Host ("  {0} gate(s) failed" -f $script:failCount) -ForegroundColor Red
@@ -261,21 +271,82 @@ if (-not $negotiateOk) {
     }
 }
 
-# --------------------------------------- Gate 4 -- certsrv is HTTPS-only --
-Write-Step "Gate 4 -- port 80 is closed on the CA host"
-# A TCP connect failure only means "port 80 is closed" if the host is known
-# to be up. Gate 1 (636) or gate 3's Negotiate cross-check (389) already
-# confirms that; without either, a closed-looking port 80 could just as
-# easily be an unreachable host, so don't credit it as a real result.
+# ------------------------- Gate 4 -- cleartext enrolment refused, CDP open --
+# This gate used to assert "port 80 is closed", which is now exactly backwards.
+# Port 80 MUST be open: it serves /CertEnroll, where every consumer in the lab
+# fetches the CRL and the CA certificate, and CDP/AIA are plain HTTP by design
+# (fetching them over HTTPS is circular -- validating the HTTPS certificate
+# needs a CRL). A closed port 80 means revocation checking is broken fabric-wide.
+#
+# The security property was never "port 80 is closed". It is "web enrolment
+# never accepts credentials over cleartext", which /CertSrv delivers by
+# requiring SSL: IIS evaluates that before issuing an auth challenge, so an
+# HTTP request gets 403 and is never offered Basic. So three claims, each
+# measured separately:
+#     4a  port 80 is OPEN              (CDP/AIA are reachable at all)
+#     4b  http://.../certsrv  refused  (403/404, and specifically NOT 401)
+#     4c  http://.../CertEnroll/ served WITHOUT credentials (not 401)
 $hostConfirmedReachable = $ldapsUp -or $negotiateOk
 if (-not $hostConfirmedReachable) {
-    Test-Gate "port 80 is closed on $CaHost" $false `
-        "cannot verify -- $CaHost was not confirmed reachable on any other port"
+    foreach ($g in @('4a port 80 is open (CDP/AIA reachable)',
+                     '4b /certsrv refuses cleartext (not 401)',
+                     '4c /CertEnroll served anonymously')) {
+        Test-Gate $g $false "cannot verify -- $CaHost was not confirmed reachable on any other port"
+    }
 } else {
+    Write-Step "Gate 4 -- cleartext enrolment refused, CDP reachable"
+
     $httpUp = $false
     $tcp2 = New-Object System.Net.Sockets.TcpClient
     try { $httpUp = $tcp2.ConnectAsync($CaHost, 80).Wait(4000) } catch {} finally { $tcp2.Close() }
-    Test-Gate "port 80 is closed on $CaHost" (-not $httpUp)
+    Test-Gate "4a port 80 is open (CDP/AIA reachable)" $httpUp `
+        $(if (-not $httpUp) { 'closed -- every certificate this CA issues has an unreachable CRL' } else { '' })
+
+    # Returns the HTTP status for a URL, or $null when no reply was obtained at
+    # all. $null is NOT a status and must never be read as a passing one.
+    function Get-HttpStatus {
+        param([string]$Url)
+        try {
+            $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 8 `
+                     -MaximumRedirection 0 -ErrorAction Stop
+            return [int]$r.StatusCode
+        } catch {
+            $resp = $null
+            try { $resp = $_.Exception.Response } catch { }
+            if ($resp) {
+                try { return [int]$resp.StatusCode } catch { }
+            }
+            return $null
+        }
+    }
+
+    if ($httpUp) {
+        $certsrvStatus = Get-HttpStatus "http://$CaHost/certsrv/"
+        if ($null -eq $certsrvStatus) {
+            Test-Gate "4b /certsrv refuses cleartext (not 401)" $false `
+                'no HTTP reply -- cannot tell a refusal from an unreachable service'
+        } else {
+            # 401 is the failure that matters: it means Basic was offered over
+            # cleartext. Anything else (403 SSL-required, 404) is a refusal.
+            Test-Gate "4b /certsrv refuses cleartext (not 401)" ($certsrvStatus -ne 401) `
+                "HTTP $certsrvStatus$(if ($certsrvStatus -eq 401) { ' -- Basic auth offered over cleartext' })"
+        }
+
+        $enrollStatus = Get-HttpStatus "http://$CaHost/CertEnroll/"
+        if ($null -eq $enrollStatus) {
+            Test-Gate "4c /CertEnroll served anonymously" $false `
+                'no HTTP reply from /CertEnroll'
+        } else {
+            # 403 here is usually directory-browsing denied, which is fine --
+            # a named .crl still serves. 401 is never fine: no consumer sends
+            # credentials to fetch a CRL.
+            Test-Gate "4c /CertEnroll served anonymously" ($enrollStatus -ne 401) `
+                "HTTP $enrollStatus$(if ($enrollStatus -eq 401) { ' -- authentication on /CertEnroll breaks revocation checking' })"
+        }
+    } else {
+        Test-Gate "4b /certsrv refuses cleartext (not 401)" $false 'port 80 closed'
+        Test-Gate "4c /CertEnroll served anonymously"      $false 'port 80 closed'
+    }
 }
 
 # ------------------------------------------------------------------ summary --

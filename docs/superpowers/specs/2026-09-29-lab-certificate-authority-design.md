@@ -100,9 +100,9 @@ defaults, not suppressing this one.
 `LoadDefaultTemplates=0` in the first place:** ESC8 is a *relay* attack against
 the web-enrolment endpoint, and it is closed on the endpoint, not on the
 template. `Set-CAWebEnrollmentHardening.ps1` disables Negotiate on `/CertSrv`
-(with no NTLM accepted there is nothing to relay), unbinds port 80 so no
-credential crosses cleartext, and scopes inbound 443 to SDDC Manager plus one
-optional admin address. Separately, enrolment on the DC template is restricted
+(with no NTLM accepted there is nothing to relay), requires SSL on `/CertSrv`
+so no credential crosses cleartext, and scopes inbound 443 to SDDC Manager plus
+one optional admin address. Separately, enrolment on the DC template is restricted
 to the `Domain Controllers` group, so the coercion target set is the three DCs
 that already hold DC certificates by definition — coercing one buys an attacker
 nothing it did not already have. Suppressing the template would not have closed
@@ -113,6 +113,45 @@ The 8 SDDC-managed resources, verified by querying the live API, are:
 Operations Collector and the License Server are **absent** — so the endpoint
 this design exists to unblock is not certificate-managed by SDDC Manager, and
 needs its own path.
+
+**Correction, revision 3 — `/CertEnroll` must stay anonymous on port 80.**
+Revision 2 had the hardening script remove the port 80 binding outright and
+enable Basic authentication on `/CertEnroll` as well as `/CertSrv`. Both were
+wrong, and together they would have broken revocation checking for the entire
+fabric.
+
+`/CertEnroll` is not an ESC8 surface. ESC8 relays NTLM to an endpoint that
+*authenticates*; `/CertEnroll` is a static directory holding the CRL and the CA
+certificate — signed objects — and accepts no credentials, so there is nothing
+there to relay. Putting Basic auth on it does not harden it; it makes every CRL
+fetch answer `401`, and no consumer sends credentials when fetching a CRL.
+Removing the port 80 binding has the same effect by a different route.
+
+The cleartext protection belongs on `/CertSrv` alone, as a Require-SSL flag.
+IIS evaluates the SSL requirement *before* issuing an authentication challenge,
+so an HTTP request to `/CertSrv` answers `403.4` and is never offered Basic —
+the same protection the port-80 removal gave, without taking `/CertEnroll` with
+it.
+
+**CDP and AIA are plain HTTP by design, not by omission.** Serving them over
+HTTPS is circular: validating the HTTPS certificate requires fetching a CRL,
+which would require validating an HTTPS certificate. This is why port 80 is
+allowed from the lab subnet (`Set-CAWebEnrollmentHardening.ps1
+-CrlConsumerSubnet`) while 443 stays scoped to SDDC Manager.
+
+**Correction, revision 3 — the CA may not use its own hostname for CDP/AIA.**
+AD CS builds its HTTP CDP and AIA from the CA server's DNS name, which here is
+`dns01.knowledgeondemand.net` — and that resolves to **two** addresses,
+`172.16.10.150` (lab) and `192.168.6.197` (management). An appliance that
+round-robins onto the management address cannot fetch the CRL, and strict
+validators hard-fail on a CRL they cannot retrieve. `Set-CaRevocationEndpoints.ps1`
+points both at `pki.knowledgeondemand.net`, an A record bound to the lab
+address only, and refuses to run if that name resolves to more than one
+address. A CNAME to `dns01` would inherit the defect it exists to remove.
+
+This must happen between install and first issuance: a certificate carries the
+URLs configured at the moment it was signed, and no later change repairs an
+already-issued certificate.
 
 ### The VCF certificate template
 
