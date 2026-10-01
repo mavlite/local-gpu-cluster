@@ -109,14 +109,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Import-Module WebAdministration
-
 # ------------------------------------------------------------------ helpers --
 function Write-Step { param([string]$m) Write-Host "`n=== $m" -ForegroundColor Cyan }
 function Write-Ok   { param([string]$m) Write-Host "  [OK] $m" -ForegroundColor Green }
 function Write-Info { param([string]$m) Write-Host "  [..] $m" -ForegroundColor Gray }
 function Write-Warn { param([string]$m) Write-Host "  [!] $m" -ForegroundColor Yellow }
 function Write-Fail { param([string]$m) Write-Host "  [X] $m" -ForegroundColor Red }
+
+# IIS, and the WebAdministration module with it, arrives as part of
+# ADCS-Web-Enrollment. Running this script before the CA is installed is an
+# ordering mistake, not a broken script -- so say which, instead of dying on an
+# unhandled Modules_ModuleNotFound exception. Measured on dns01 before install:
+# the bare Import-Module threw a four-line stack trace naming neither the cause
+# nor the fix.
+if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+    Write-Fail "The WebAdministration module is not present, so IIS is not installed."
+    Write-Info "/CertSrv and /CertEnroll are created by the ADCS-Web-Enrollment role service."
+    Write-Info "Run Install-LabCA.ps1 -Apply first, then re-run this script."
+    exit 1
+}
+Import-Module WebAdministration
 
 # Best-effort re-assertion of the one setting that must never be left on after a
 # partial failure: Negotiate/NTLM enabled on the enrolment endpoint.

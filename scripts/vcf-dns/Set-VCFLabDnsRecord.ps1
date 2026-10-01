@@ -37,7 +37,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$DnsServer = '172.16.10.150',
+    # A NAME, not an IP. WinRM refuses default authentication to a bare IP
+    # unless the transport is HTTPS or the address is in TrustedHosts, so the
+    # old 172.16.10.150 default failed with "The WinRM client cannot process
+    # the request" even from a domain-joined host with valid credentials. The
+    # FQDN lets Kerberos work.
+    [string]$DnsServer = 'DNS01.knowledgeondemand.net',
     [pscredential]$Credential,
     [switch]$Apply,
     [switch]$Force

@@ -198,16 +198,52 @@ if (-not $IncludeHosts) {
     Write-Info "WHATIF: would enter maintenance mode (vSAN noAction) and power off each host"
 } else {
     Write-Step "ESX hosts"
+
+    # vCenter was just shut down, so the session this script opened to it is
+    # dead. Drop it before anything else runs a cmdlet without an explicit
+    # -Server: PowerCLI falls back to the default server list, which still
+    # holds that dead connection, and the call fails with
+    #   "There was no endpoint listening at https://<vcsa>/sdk"
+    # even though every host is perfectly healthy.
+    Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
+
     # A host cannot enter maintenance mode with any VM running on it. This
     # script will not stop a VM it does not own just to clear the way, so if
-    # anything foreign is still up it refuses and names it.
-    $blockers = @(Get-VM | Where-Object { $_.PowerState -eq 'PoweredOn' -and $managed -notcontains $_.Name })
+    # anything foreign is still up it refuses and names it. Ask each host
+    # directly -- they are the only thing still answering, and they are the
+    # authority on what is actually running on them.
+    $blockers    = @()
+    $unreachable = @()
+    foreach ($h in $cfg.Hosts) {
+        $c = $null
+        try {
+            $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
+            foreach ($v in @(Get-VM -Server $c)) {
+                if ($v.PowerState -eq 'PoweredOn' -and $managed -notcontains $v.Name) {
+                    $blockers += [pscustomobject]@{ Name = $v.Name; Host = $h.Short }
+                }
+            }
+        } catch {
+            $unreachable += $h.Short
+        } finally {
+            if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+        }
+    }
+
+    # A host that could not be queried is NOT a host known to be clear. Treating
+    # "I could not look" as "nothing is running" would power off a host with
+    # live VMs on it.
+    if ($unreachable.Count -gt 0) {
+        Write-Fail "Could not enumerate VMs on: $($unreachable -join ', ')"
+        Write-Fail "Refusing to power off any host while another host's state is unknown."
+        Write-Info "VCF components are already down. Check those hosts, then re-run with -IncludeHosts."
+        exit 1
+    }
+
     if ($blockers.Count -gt 0) {
         Write-Fail "Cannot power off hosts: non-VCF VMs are still running and this script will not stop them."
         foreach ($b in ($blockers | Sort-Object Name)) {
-            $hn = ''
-            try { $hn = (Get-VMHost -VM $b -ErrorAction SilentlyContinue).Name } catch {}
-            Write-Warn2 ("  running: {0}  on {1}" -f $b.Name, ($hn -split '\.')[0])
+            Write-Warn2 ("  running: {0}  on {1}" -f $b.Name, $b.Host)
         }
         Write-Info "Stop those VMs yourself, then re-run with -IncludeHosts. VCF components are already down."
         exit 1
