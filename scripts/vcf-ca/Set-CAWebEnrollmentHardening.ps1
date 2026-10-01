@@ -10,7 +10,9 @@
     - DISABLING Windows (Negotiate/NTLM) authentication
     - Setting Extended Protection to Require on windowsAuthentication as
       defence in depth, in case anyone ever re-enables it
-    - Scoping inbound HTTPS to SDDC Manager and an optional admin IP
+    - Scoping inbound HTTPS to VCF Operations, SDDC Manager and an optional
+      admin IP. Operations is the component that connects to /certsrv in
+      VCF 9.x; scoping to SDDC Manager alone locks it out.
     - Leaving /CertEnroll ANONYMOUS on port 80, and allowing port 80 from the
       lab subnet, so CDP and AIA are actually reachable
 
@@ -95,6 +97,12 @@
 [CmdletBinding()]
 param(
     [string]$SddcManagerIp = '172.16.10.133',
+    # VCF 9.x registers the CA in VCF OPERATIONS (Manage > Fleet Management >
+    # Certificates > Configure CA for Fleet), so Operations -- not SDDC
+    # Manager -- is the component that connects to https://<ca>/certsrv. An
+    # earlier version scoped 443 to SDDC Manager alone and firewalled
+    # Operations out entirely.
+    [string]$OperationsIp = '172.16.10.122',
     [string]$AdminIp,
     # Every consumer that validates a certificate issued by this CA has to
     # fetch the CRL and the CA certificate from /CertEnroll over HTTP --
@@ -553,6 +561,7 @@ if ($broadRules.Count -eq 0) {
 }
 
 $allow = @($SddcManagerIp)
+if ($OperationsIp) { $allow += $OperationsIp }
 if ($AdminIp) {
     $allow += $AdminIp
 }

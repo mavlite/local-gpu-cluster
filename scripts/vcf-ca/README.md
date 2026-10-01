@@ -45,14 +45,39 @@ secedit /export /areas USER_RIGHTS /cfg C:\Windows\Temp\ur.inf
 Select-String -Path C:\Windows\Temp\ur.inf -Pattern 'SeDenyInteractiveLogonRight|SeDenyRemoteInteractiveLogonRight'
 ```
 
-**Add its credentials to `C:\Users\willi\.vcflab\credentials.env`.** Neither key
-exists there today; `Register-VcfCA.ps1` names them explicitly when they are
-missing rather than failing with a null reference:
+**Add its credentials to `C:\Users\willi\.vcflab\credentials.env`.**
+`Register-VcfCA.ps1` names them explicitly when missing rather than failing
+with a null reference:
 
 ```
-AD_CA_ENROLL_USER=knowledgeondemand\svc-vcf-ca
+AD_CA_ENROLL_USER=svc-vcf-ca@knowledgeondemand.net
 AD_CA_ENROLL_PASS=<the password set above>
 ```
+
+**The username must be in UPN form, and the password must not contain `{` or
+`}`.** Both are hard requirements from Broadcom KBs, and both are checked as
+pre-flight in `Register-VcfCA.ps1` rather than discovered as a failed API call:
+
+| rule | source | symptom if violated |
+|---|---|---|
+| UPN form, not `DOMAIN\user` | [KB 416470](https://knowledge.broadcom.com/external/article/416470/configure-microsoft-ca-certificate-under.html) | `Certificate authorities update failed.` — the backslash breaks JSON escaping |
+| no `{` or `}` in the password | [KB 432263](https://knowledge.broadcom.com/external/article/432263/troubleshooting-microsoft-ca-configurati.html) | `Not enough variable values available to expand` — read as a variable placeholder |
+
+**Install the IIS Basic Authentication feature.** This is VMware's documented
+step 1 and `ADCS-Web-Enrollment` does **not** pull it in:
+
+```powershell
+Install-WindowsFeature Web-Basic-Auth
+```
+
+`Install-LabCA.ps1` now does this, but if you are working on a CA built before
+that change, check it. Setting `basicAuthentication enabled=true` without the
+feature is accepted by the IIS configuration system and does **nothing** —
+the module is never loaded. Combined with the hardening step disabling
+anonymous and Windows auth on `/CertSrv`, that leaves no working
+authentication provider and every request answers `401 2 5`, which KB 432263
+attributes to exactly this cause. Authenticated and unauthenticated requests
+fail identically, so it reads as a credential problem.
 
 **Create the `pki` DNS record.** `Set-CaRevocationEndpoints.ps1` refuses to run
 without it, by design:
@@ -100,7 +125,7 @@ Manager's or VCF Operations' REST API with credentials already held.
 | `New-VcfCertificateTemplate.ps1` | **[OPERATOR]** | `dns01` (both template builds are manual in `certtmpl.msc`; the script prints instructions, then verifies) |
 | `Test-LabCAHealth.ps1` | **[SCRIPTED]** | workstation |
 | `Publish-LabRootTrust.ps1` | **[SCRIPTED]** | workstation |
-| `Register-VcfCA.ps1` | **[SCRIPTED]** | workstation |
+| `Register-VcfCA.ps1` | **[SCRIPTED]** | workstation (needs to resolve the CA's name; see below) |
 | `Add-OpsIdentitySource.ps1` | **[SCRIPTED]** | workstation |
 | Certificate rotation (Task 7, no script) | mixed -- see [Rotation runbook](#rotation-runbook-after-everything-above-is-green) | `dns01` + workstation |
 
@@ -117,7 +142,7 @@ Manager's or VCF Operations' REST API with credentials already held.
 | 5 | Bind the DC's certificate to IIS on 443 | manual, snippet below |
 | 6 | Create + verify the `VMware` template, CA ACE and CA auditing | `New-VcfCertificateTemplate.ps1 -Apply` |
 | 7 | Distribute the root to vCenter + SDDC Manager | `Publish-LabRootTrust.ps1 -Apply` |
-| 8 | Register the CA with SDDC Manager | `Register-VcfCA.ps1 -Apply` |
+| 8 | Register the CA with **VCF Operations** | `Register-VcfCA.ps1 -Apply` |
 | 9 | Rotate the eight SDDC-managed certificates | manual runbook, see below |
 | 10 | Add AD as an identity source in VCF Operations | `Add-OpsIdentitySource.ps1 -Apply` |
 
@@ -315,6 +340,65 @@ $binding.AddSslCertificate($cert.Thumbprint, 'My')
 # verify from the admin workstation allowed by the scoped firewall rule
 Invoke-WebRequest -Uri 'https://dns01.knowledgeondemand.net/certsrv' -UseBasicParsing
 ```
+
+### Step 8 -- the CA is registered in VCF OPERATIONS, not SDDC Manager
+
+In VCF 9.x the certificate-authority control point moved. VMware's documented
+path is
+
+> **Manage → Fleet Management → Certificates → VCF Management → Configure CA for Fleet**
+
+and the equivalent API, confirmed against this lab on 2026-10-01, is
+
+```
+GET/PUT https://<ops>/suite-api/api/fleet-management/certificate-management/certificate-authorities
+```
+
+with the same `microsoftCertificateAuthoritySpec` body that SDDC Manager's
+legacy endpoint takes:
+
+```json
+{ "microsoftCertificateAuthoritySpec": {
+    "serverUrl":    "https://dns01.knowledgeondemand.net/certsrv",
+    "username":     "svc-vcf-ca@knowledgeondemand.net",
+    "secret":       "...",
+    "templateName": "VMware" } }
+```
+
+Three things that cost time to establish:
+
+- **The auth scheme is `vRealizeOpsToken`, not `Bearer`.** Published write-ups
+  say Bearer; it returns 401 on this build. The token comes from
+  `POST /suite-api/api/auth/token/acquire` with `authSource: "local"`.
+- **The CA server URL must begin with `https://` and end with `/certsrv`.**
+  VMware states this explicitly, which makes the IIS 443 binding (step 5) a
+  hard prerequisite rather than a nicety.
+- **Operations is the component that connects to `/certsrv`**, so it must be
+  in the 443 firewall allowlist. Scoping to SDDC Manager alone locks it out;
+  `Set-CAWebEnrollmentHardening.ps1 -OperationsIp` now covers it.
+
+Why not SDDC Manager's `/v1/certificate-authorities`? It exists, but it is the
+4.x/5.x path, and KB 432263 warns that out-of-band certificate work on SDDC
+Manager using legacy procedures produces `PKIX path building failed` and a
+trust mismatch needing adapter restarts. Operations also reports **39** managed
+certificates against SDDC Manager's 8.
+
+**Registering is not proving.** A `GET` echoes back whatever was stored. The
+proof is replacing one certificate — pick the least critical resource — and
+confirming the replacement is signed by this CA:
+
+```
+PUT /suite-api/api/fleet-management/certificate-management/certificates/{certificateResourceKey}
+    {"caType": "MSCA"}
+```
+
+**Unresolved:** whether Operations needs the lab root in its own trust store.
+Its `GET /suite-api/api/certificate` store holds four *peer server*
+certificates (platform, sddc-manager, vcsa, nsx), not root CAs, which suggests
+it is populated by connection flows rather than seeded. Five plausible POST
+body shapes were all rejected with an opaque `500`, so this is left to be
+settled by the registration attempt itself: if TLS trust is the obstacle, the
+error will name it.
 
 ### Step 7 -- verify the chain after distributing the root
 

@@ -514,8 +514,8 @@ if ($efRes.ExitCode -ne 0) {
     }
 }
 
-# ------------------- verification: CA-level Request Certificates ACE (H6c) --
-Write-Step "Verification: svc-vcf-ca holds Request Certificates on the CA itself"
+# ------------------ verification: CA-level rights per VMware table (H6c) --
+Write-Step "Verification: svc-vcf-ca CA-level rights match VMware's documented table"
 Write-Info "Running: certutil -getreg CA\Security"
 Write-Info "This is SEPARATE from the template Enroll ACE; neither implies the other."
 
@@ -529,18 +529,39 @@ if ($secRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($secRes.Output)) {
         Write-Fail "Cannot verify: no Allow ACE lines in CA\Security output"
         $failures++
     } else {
-        # certutil renders CA_ACCESS_ENROLL as either "Request Certificates" or
-        # "Enroll" depending on version; accept either on the svc account's line.
-        $hit = @($allowLines | Where-Object {
-            $_ -match 'svc-vcf-ca' -and ($_ -match 'Request Certificates' -or $_ -match 'Enroll')
-        })
-        if ($hit.Count -eq 0) {
-            Write-Fail "svc-vcf-ca does NOT hold Request Certificates on the CA"
-            Write-Info "Add it: CA properties -> Security -> knowledgeondemand\svc-vcf-ca"
-            Write-Info "        -> Request Certificates (allow). See step C1 above."
+        # VMware's documented table for this account is BOTH rights:
+        #   Issue and Manage Certificates = ALLOW   (CA_ACCESS_OFFICER, 0x002)
+        #   Request Certificates          = ALLOW   (CA_ACCESS_ENROLL,  0x200)
+        #   Read / Manage CA              = not selected
+        # An earlier version checked only Request Certificates, so a CA missing
+        # the Officer right passed and then failed at issuance time.
+        #
+        # certutil renders these with version-dependent wording, so each right
+        # is matched on either of its spellings.
+        $svcLines = @($allowLines | Where-Object { $_ -match 'svc-vcf-ca' })
+        if ($svcLines.Count -eq 0) {
+            Write-Fail "svc-vcf-ca holds NO Allow ACE on the CA at all"
+            Write-Info "CA properties -> Security -> add knowledgeondemand\svc-vcf-ca with"
+            Write-Info "  Issue and Manage Certificates = allow, Request Certificates = allow."
+            Write-Info "See step C1 above."
             $failures++
         } else {
-            Write-Ok "svc-vcf-ca holds Request Certificates on the CA"
+            $hasEnroll  = @($svcLines | Where-Object { $_ -match 'Request Certificates' -or $_ -match 'Enroll' }).Count -gt 0
+            $hasOfficer = @($svcLines | Where-Object { $_ -match 'Issue and Manage Certificates' -or $_ -match 'Officer' }).Count -gt 0
+            if ($hasEnroll)  { Write-Ok "Request Certificates (CA_ACCESS_ENROLL) granted" }
+            else { Write-Fail "Request Certificates NOT granted on the CA"; $failures++ }
+            if ($hasOfficer) { Write-Ok "Issue and Manage Certificates (CA_ACCESS_OFFICER) granted" }
+            else {
+                Write-Fail "Issue and Manage Certificates NOT granted on the CA"
+                Write-Info "VMware requires it alongside Request Certificates; neither implies the other."
+                $failures++
+            }
+            # Over-grant is a finding too: the documented table withholds these.
+            $overGrant = @($svcLines | Where-Object { $_ -match 'Manage CA' -or $_ -match 'CA Administrator' })
+            if ($overGrant.Count -gt 0) {
+                Write-Warn "svc-vcf-ca appears to hold Manage CA, which VMware's table withholds:"
+                foreach ($l in $overGrant) { Write-Info "    $($l.Trim())" }
+            }
         }
     }
 }

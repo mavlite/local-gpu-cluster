@@ -1,164 +1,326 @@
 <#
 .SYNOPSIS
-    Registers the Microsoft (lab) CA with SDDC Manager as a certificate
-    authority.
+    Registers the lab CA with VCF Operations Fleet Management. [SCRIPTED].
 
 .DESCRIPTION
-    PUTs a microsoftCertificateAuthoritySpec to SDDC Manager. This alone does
-    NOT prove the CA works: GET /v1/certificate-authorities echoes back
-    whatever was just stored, and passes with a wrong password and an
-    unreachable URL. It is configuration-time acceptance, not a functional
-    gate, and this script does not pretend otherwise -- it prints the actual
-    proof procedure (issuing a real certificate for one NSX manager) rather
-    than declaring success from the PUT response or a follow-up GET.
+    In VCF 9.x the certificate-authority control point is VCF OPERATIONS, not
+    SDDC Manager. VMware's documented path is
+
+        Manage > Fleet Management > Certificates > VCF Management
+                                                 > Configure CA for Fleet
+
+    and the equivalent API, confirmed against this lab on 2026-10-01, is
+
+        GET/PUT https://<ops>/suite-api/api/fleet-management/
+                              certificate-management/certificate-authorities
+
+    An earlier version of this script PUT to SDDC Manager's
+    /v1/certificate-authorities. That endpoint exists, but it is the 4.x/5.x
+    path, and Broadcom KB 432263 warns that out-of-band certificate work on
+    SDDC Manager using legacy procedures produces "PKIX path building failed"
+    and a trust mismatch that then needs adapter restarts to repair. Operations
+    also reports 39 managed certificates against SDDC Manager's 8, so it is the
+    broader and correct control point.
+
+    TWO GOTCHAS FROM THE KBs, both enforced here as pre-flight checks rather
+    than discovered as a failed API call:
+
+      * The username must be in UPN form. KB 416470: DOMAIN\username produces
+        "Certificate authorities update failed." because the backslash breaks
+        JSON escaping.
+      * The password must not contain { or }. KB 432263: the API framework
+        reads curly brackets as a variable placeholder and fails to expand it.
+
+    AUTH SCHEME: vRealizeOpsToken, not Bearer. Published write-ups say Bearer;
+    on this build Bearer returns 401. The token comes from
+    POST /suite-api/api/auth/token/acquire with authSource 'local'.
+
+    This script registers; it does not prove issuance. A GET echoes back
+    whatever was stored, so the real proof is replacing one certificate and
+    watching it come back signed by this CA.
 
     Dry run by default; pass -Apply to register.
 
-.PARAMETER Apply
-    Actually PUT the CA spec to SDDC Manager. Without -Apply, only reports
-    what would be sent (the secret is withheld from all output).
+.PARAMETER CaServerUrl
+    Must begin with https:// and end with /certsrv -- VMware states this
+    explicitly, and /certsrv is only reachable over TLS here because the
+    hardening step sets Require-SSL on that virtual directory.
 
-.REQUIRES
-    AD_CA_ENROLL_USER and AD_CA_ENROLL_PASS in the credential file. As of
-    this writing these do not exist yet -- the script fails with a clear,
-    named message rather than a null-reference if they are missing.
+.PARAMETER TemplateName
+    The template's cn, not its display name. A display-name mismatch fails at
+    certificate REQUEST time rather than at configuration time.
+
+.PARAMETER Apply
+    Actually PUT the specification.
 
 .EXAMPLE
     .\Register-VcfCA.ps1
-    Dry run: shows what would be sent.
-
 .EXAMPLE
     .\Register-VcfCA.ps1 -Apply
-    Registers the CA, then prints the issuance procedure that actually
-    proves it.
 #>
 [CmdletBinding()]
-param([switch]$Apply)
+param(
+    [string]$CaServerUrl  = 'https://dns01.knowledgeondemand.net/certsrv',
+    [string]$TemplateName = 'VMware',
+    [string]$OperationsIp,
+    [switch]$Apply
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\vcf-lab\VCFLab.Common.ps1')
 
-# Secret values that must never reach the console. SDDC Manager echoes request
-# arguments back in some validation failures, so an error body can contain the
-# very password that was just sent. Populated after the credential file loads.
-$script:SecretValues = @()
+function Write-Step  { param([string]$m) Write-Host "`n=== $m" -ForegroundColor Cyan }
+function Write-Ok    { param([string]$m) Write-Host "  [ OK ] $m" -ForegroundColor Green }
+function Write-Info  { param([string]$m) Write-Host "  [info] $m" -ForegroundColor Gray }
+function Write-Warn2 { param([string]$m) Write-Host "  [WARN] $m" -ForegroundColor Yellow }
+function Write-Fail  { param([string]$m) Write-Host "  [FAIL] $m" -ForegroundColor Red }
 
-# Redacts every known secret from arbitrary text before it is printed. Applied
-# to every error body, not only the ones expected to carry a secret.
+# Secrets that must never reach the console. Both the enrolment password and
+# the Operations admin password are sent as request content, and APIs echo
+# request arguments back in some validation failures.
+$script:SecretValues = @()
 function Protect-Secret {
     param([string]$Text)
     if (-not $Text) { return $Text }
     foreach ($s in $script:SecretValues) {
         if ($s) { $Text = $Text.Replace($s, '<redacted>') }
     }
-    $Text
+    return $Text
 }
-
 function Get-RestErrorDetail {
     param($ErrRecord)
-    $msg   = $ErrRecord.Exception.Message
+    $msg = $ErrRecord.Exception.Message
     $inner = $ErrRecord.Exception.InnerException
-    while ($inner) {
-        $msg  += " -- $($inner.Message)"
-        $inner = $inner.InnerException
+    while ($inner) { $msg += " -- $($inner.Message)"; $inner = $inner.InnerException }
+    # Under StrictMode, reading a property an exception does not carry throws,
+    # and this runs inside a catch -- so the throw would replace the real error.
+    $resp = $null
+    if ($ErrRecord.Exception.PSObject.Properties.Name -contains 'Response') {
+        $resp = $ErrRecord.Exception.Response
     }
-    $resp = $ErrRecord.Exception.Response
     if ($resp) {
         try {
-            $stream = $resp.GetResponseStream()
-            $reader = New-Object System.IO.StreamReader($stream)
+            $reader = New-Object IO.StreamReader($resp.GetResponseStream())
             $body = $reader.ReadToEnd()
             if ($body) { return (Protect-Secret "$msg -- $body") }
         } catch { }
     }
-    Protect-Secret $msg
+    return (Protect-Secret $msg)
 }
 
+# ------------------------------------------------------------- load inputs --
 $cfg  = Import-VCFLabConfig
 $cred = Import-VCFLabCredential -Path $cfg.CredentialFile
 Disable-CertificateValidation
-$sddc = $cfg.Appliances.SddcManager.Ip
 
-# Register every secret this script handles before the first REST call.
-foreach ($k in @('AD_CA_ENROLL_PASS', 'VCF_SSO_ADMIN_PASS', 'AD_BIND_PASS')) {
-    if ($cred.ContainsKey($k) -and $cred[$k]) { $script:SecretValues += $cred[$k] }
+foreach ($k in 'AD_CA_ENROLL_USER', 'AD_CA_ENROLL_PASS', 'OPERATIONS_ADMIN_PASS') {
+    if (-not $cred.ContainsKey($k) -or -not $cred[$k]) {
+        Write-Fail "$k is missing from the credential file."
+        Write-Info "See the Prerequisites section of scripts/vcf-ca/README.md."
+        exit 1
+    }
+}
+foreach ($k in 'AD_CA_ENROLL_PASS', 'OPERATIONS_ADMIN_PASS') { $script:SecretValues += $cred[$k] }
+
+$ops = if ($OperationsIp) { $OperationsIp } else { $cfg.Appliances.Operations.Ip }
+$opsUser = if ($cred.ContainsKey('OPERATIONS_ADMIN_USER') -and $cred['OPERATIONS_ADMIN_USER']) {
+    $cred['OPERATIONS_ADMIN_USER'] } else { 'admin' }
+$enrollUser = $cred['AD_CA_ENROLL_USER']
+$enrollPass = $cred['AD_CA_ENROLL_PASS']
+
+Write-Step "Target"
+Write-Info "VCF Operations : $ops  (admin user: $opsUser)"
+Write-Info "CA server URL  : $CaServerUrl"
+Write-Info "Template (cn)  : $TemplateName"
+Write-Info "Enrolment user : $enrollUser"
+
+# ------------------------------------------------- pre-flight, from the KBs --
+Write-Step "Pre-flight checks taken from the Broadcom KBs"
+$blockers = 0
+
+# KB 416470
+if ($enrollUser -match '\\') {
+    Write-Fail "Enrolment username is in DOMAIN\user form: '$enrollUser'"
+    Write-Fail "KB 416470: this produces 'Certificate authorities update failed.' because"
+    Write-Fail "the backslash breaks JSON escaping. Use UPN form, e.g. svc-vcf-ca@domain.tld"
+    $blockers++
+} elseif ($enrollUser -notmatch '^[^@\s]+@[^@\s]+$') {
+    Write-Fail "Enrolment username '$enrollUser' is not a UPN. KB 416470 requires UPN form."
+    $blockers++
+} else {
+    Write-Ok "username is UPN form (KB 416470)"
 }
 
-# ---------------------------------------------------- required credentials --
-# A missing key here must fail with its own name, not a null-reference three
-# lines later when it is interpolated into the request body.
-Write-Step "Checking enrolment credentials"
-$missing = @()
-foreach ($k in @('AD_CA_ENROLL_USER', 'AD_CA_ENROLL_PASS')) {
-    if (-not $cred.ContainsKey($k) -or -not $cred[$k]) { $missing += $k }
+# KB 432263
+if ($enrollPass -match '[{}]') {
+    Write-Fail "The enrolment password contains a curly bracket."
+    Write-Fail "KB 432263: the API framework reads { } as a variable placeholder and the"
+    Write-Fail "request fails with 'Not enough variable values available to expand'."
+    Write-Fail "Rotate the password to one without { or }."
+    $blockers++
+} else {
+    Write-Ok "password contains no curly brackets (KB 432263)"
 }
-if ($missing.Count -gt 0) {
-    Write-Fail ("Missing credential key(s) in {0}: {1}" -f $cfg.CredentialFile, ($missing -join ', '))
-    Write-Info "Add them as NAME=value lines before registering the CA."
-    exit 1
-}
-Write-Ok "AD_CA_ENROLL_USER / AD_CA_ENROLL_PASS present"
 
-# ------------------------------------------------------------------ token ---
-Write-Step "Acquiring SDDC Manager token"
-$sso = Get-VCFLabCredentialObject -Map $cred -UserKey $null -PassKey 'VCF_SSO_ADMIN_PASS' -DefaultUser 'administrator@vsphere.local'
-$tok = $null
+# VMware states the URL format explicitly.
+if ($CaServerUrl -notmatch '^https://') {
+    Write-Fail "CA server URL must begin with https:// -- VMware states this explicitly."
+    $blockers++
+} elseif ($CaServerUrl -notmatch '/certsrv/?$') {
+    Write-Fail "CA server URL must end with /certsrv."
+    $blockers++
+} else {
+    Write-Ok "CA server URL is https and ends with /certsrv"
+}
+
+# The endpoint has to be reachable and actually accept these credentials,
+# because Operations will make exactly this request. Checking it here turns a
+# confusing "Certificate authorities update failed" into a clear local finding.
+Write-Step "Proving /certsrv accepts the enrolment credentials over TLS"
 try {
-    $tokResp = Invoke-LabRest -Uri "https://$sddc/v1/tokens" -Method POST `
-        -Body @{ username = $sso.UserName; password = $sso.GetNetworkCredential().Password }
-    $tok = $tokResp.accessToken
+    $req = [Net.HttpWebRequest]::Create($CaServerUrl.TrimEnd('/') + '/')
+    $req.Method = 'GET'
+    $req.Timeout = 20000
+    $req.AllowAutoRedirect = $false
+    $pair = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${enrollUser}:${enrollPass}"))
+    $req.Headers.Add('Authorization', "Basic $pair")
+    $resp = $req.GetResponse()
+    Write-Ok "GET $CaServerUrl returned $([int]$resp.StatusCode) as $enrollUser"
+    $resp.Close()
+} catch [Net.WebException] {
+    $code = $null
+    if ($_.Exception.PSObject.Properties.Name -contains 'Response' -and $_.Exception.Response) {
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+    }
+    $msg = $_.Exception.Message
+    if ($code -eq 401) {
+        # A 401 IS a real finding: the credentials or the Basic auth setup are
+        # wrong, and Operations will fail the same way.
+        Write-Fail "401 from /certsrv with these credentials."
+        Write-Fail "If IIS logs '401 2 5', the Web-Basic-Auth FEATURE is missing -- enabling"
+        Write-Fail "basicAuthentication without it is accepted and does nothing (KB 432263)."
+        Write-Info "Check:  Get-WindowsFeature Web-Basic-Auth   on the CA host."
+        $blockers++
+    } elseif ($msg -match 'could not be resolved|No such host|name or service not known') {
+        # This machine not resolving the CA's name says nothing about whether
+        # VCF Operations can reach it -- and Operations is the client that
+        # matters. A workstation on a VPN using block-outside-dns cannot
+        # resolve any lab name at all. Inconclusive, not a blocker.
+        Write-Warn2 "Cannot resolve $CaServerUrl from THIS host -- check not performed."
+        Write-Info "That is a statement about this workstation, not about the CA. Operations"
+        Write-Info "is the client that matters. Verify from inside the lab if in doubt:"
+        Write-Info "  curl -ksS -o /dev/null -w '%{http_code}\n' -u '<upn>' $CaServerUrl/"
+    } else {
+        # Reachability failures from here are likewise about this host's
+        # position, not about the endpoint. Reported, not fatal.
+        Write-Warn2 "GET $CaServerUrl did not complete from this host$(if ($code) { " ($code)" }): $(Protect-Secret $msg)"
+        Write-Info "Not treated as a blocker: this host may simply have no route to the CA."
+    }
 } catch {
-    Write-Fail "Could not reach SDDC Manager to acquire a token: $(Get-RestErrorDetail $_)"
+    Write-Warn2 "GET $CaServerUrl could not be attempted: $(Protect-Secret $_.Exception.Message)"
+    Write-Info "Not treated as a blocker -- see above."
+}
+
+if ($blockers -gt 0) {
+    Write-Step "Stopping"
+    Write-Fail "$blockers pre-flight blocker(s). Nothing was sent to VCF Operations."
     exit 1
 }
-if (-not $tok) {
-    Write-Fail "SDDC Manager responded but returned no accessToken -- cannot authenticate"
+
+# --------------------------------------------------------- Operations token --
+Write-Step "Acquiring a VCF Operations token"
+$token = $null
+try {
+    $t = Invoke-LabRest -Uri "https://$ops/suite-api/api/auth/token/acquire" -Method POST `
+            -Headers @{ Accept = 'application/json' } `
+            -Body @{ username = $opsUser; password = $cred['OPERATIONS_ADMIN_PASS']; authSource = 'local' }
+    foreach ($f in 'token','accessToken','access_token') {
+        if ($t.PSObject.Properties.Name -contains $f -and $t.$f) { $token = $t.$f; break }
+    }
+} catch {
+    Write-Fail "Token acquisition failed: $(Get-RestErrorDetail $_)"
     exit 1
 }
-$hdr = @{ Authorization = "Bearer $tok" }
+if (-not $token) { Write-Fail "Operations returned no token field."; exit 1 }
+$script:SecretValues += $token
 Write-Ok "token acquired"
+
+# vRealizeOpsToken, not Bearer -- Bearer returns 401 on this build.
+$hdr = @{ Authorization = "vRealizeOpsToken $token"; Accept = 'application/json' }
+$caUri = "https://$ops/suite-api/api/fleet-management/certificate-management/certificate-authorities"
+
+# ------------------------------------------------------------ current state --
+Write-Step "Current CA configuration in VCF Operations"
+try {
+    $before = Invoke-LabRest -Uri $caUri -Method GET -Headers $hdr
+    $j = $before | ConvertTo-Json -Depth 8
+    foreach ($line in ($j -split "`r?`n")) { Write-Info $line }
+} catch {
+    Write-Warn2 "Could not read the current configuration: $(Get-RestErrorDetail $_)"
+}
 
 $spec = @{
     microsoftCertificateAuthoritySpec = @{
-        serverUrl    = 'https://dns01.knowledgeondemand.net/certsrv'
-        username     = $cred['AD_CA_ENROLL_USER']
-        secret       = $cred['AD_CA_ENROLL_PASS']
-        templateName = 'VMware'
+        serverUrl    = $CaServerUrl
+        username     = $enrollUser
+        secret       = $enrollPass
+        templateName = $TemplateName
     }
 }
 
-# ------------------------------------------------------------- dry-run -----
-Write-Step "Registering the Microsoft CA"
 if (-not $Apply) {
-    Write-Info "WOULD PUT https://$sddc/v1/certificate-authorities (secret withheld)"
-    Write-Info "  serverUrl    = $($spec.microsoftCertificateAuthoritySpec.serverUrl)"
-    Write-Info "  username     = $($spec.microsoftCertificateAuthoritySpec.username)"
-    Write-Info "  templateName = $($spec.microsoftCertificateAuthoritySpec.templateName)"
-    Write-Info "Pass -Apply to register."
+    Write-Step "DRY RUN"
+    Write-Info "WOULD PUT $caUri"
+    Write-Info "  serverUrl    = $CaServerUrl"
+    Write-Info "  username     = $enrollUser"
+    Write-Info "  templateName = $TemplateName"
+    Write-Info "  secret       = <withheld>"
+    Write-Host ""
+    Write-Warn2 "Pass -Apply to register."
     exit 0
 }
 
+# ------------------------------------------------------------------- register --
+Write-Step "Registering"
 try {
-    Invoke-LabRest -Uri "https://$sddc/v1/certificate-authorities" -Method PUT -Headers $hdr -Body $spec | Out-Null
+    Invoke-LabRest -Uri $caUri -Method PUT -Headers $hdr -Body $spec | Out-Null
+    Write-Ok "PUT accepted"
 } catch {
-    Write-Fail "PUT /v1/certificate-authorities failed: $(Get-RestErrorDetail $_)"
+    Write-Fail "PUT failed: $(Get-RestErrorDetail $_)"
+    Write-Info "If the body shape was rejected, the field names are the thing to check:"
+    Write-Info "  serverUrl / username / secret / templateName inside"
+    Write-Info "  microsoftCertificateAuthoritySpec."
     exit 1
 }
-Write-Ok "SDDC Manager accepted the CA registration request"
 
-# -------------------------------------------------- this is not the gate ---
-Write-Step "This is NOT proof the CA works"
-Write-Warn2 "GET /v1/certificate-authorities echoes back whatever was just stored."
-Write-Warn2 "It passes with a wrong password and an unreachable URL -- it is not a gate."
+Write-Step "Reading the stored configuration back"
+$storedOk = $false
+try {
+    $after = Invoke-LabRest -Uri $caUri -Method GET -Headers $hdr
+    $j = ($after | ConvertTo-Json -Depth 8)
+    foreach ($line in ($j -split "`r?`n")) { Write-Info $line }
+    # Match on the values we sent; a GET that echoes something else means the
+    # server stored something other than what was asked for.
+    if ($j -match [regex]::Escape($CaServerUrl) -and $j -match [regex]::Escape($TemplateName)) {
+        $storedOk = $true
+        Write-Ok "serverUrl and templateName are stored as sent"
+    } else {
+        Write-Fail "The stored configuration does not contain the values just sent."
+    }
+} catch {
+    Write-Fail "Read-back failed: $(Get-RestErrorDetail $_)"
+}
+
+Write-Step "Registered, NOT yet proven"
+Write-Warn2 "A GET echoes back whatever was stored. It does not prove the CA can issue."
+Write-Info "Prove it by replacing ONE certificate -- pick the least critical resource --"
+Write-Info "and confirming the replacement is signed by this CA:"
+Write-Info "  Manage > Fleet Management > Certificates > select a component >"
+Write-Info "  Replace with configured CA certificate"
+Write-Info "or via the API:"
+Write-Info "  PUT /suite-api/api/fleet-management/certificate-management/certificates/{key}"
+Write-Info "      {\"caType\": \"MSCA\"}"
 Write-Host ""
-Write-Info "Proof requires issuing a real certificate against the least critical resource:"
-Write-Info "  1. Generate a CSR for ONE NSX manager (not every resource)."
-Write-Info "  2. Have SDDC Manager fulfil it from this CA registration."
-Write-Info "  3. GET /v1/domains/{id}/resource-certificates and confirm that ONE"
-Write-Info "     resource now shows an issuer of 'knowledgeondemand-LabRoot-CA'"
-Write-Info "     while the other resources still show 'CN=CA'."
-Write-Info "A successful issuance proves the URL, the credentials, the enrolment"
-Write-Info "right, and the template name all at once -- the four things the"
-Write-Info "configuration-time check above cannot prove."
+if (-not $storedOk) { exit 1 }
 exit 0
