@@ -61,7 +61,89 @@ function Write-Warn { param([string]$m) Write-Host "  [!] $m" -ForegroundColor Y
 function Write-Fail { param([string]$m) Write-Host "  [X] $m" -ForegroundColor Red }
 
 # The expected enrolment identity for the VMware template.
-$ExpectedEnrollee = 'knowledgeondemand\svc-vcf-ca'
+# Resolved from the directory, not hard-coded. NetBIOS domain names are capped
+# at 15 characters, so the domain knowledgeondemand.net is KNOWLEDGEONDEMA --
+# and 'knowledgeondemand\svc-vcf-ca', which this line used to contain, does not
+# translate to a SID at all and never matches a real ACE. The comparison below
+# is also done on the sAMAccountName portion so it cannot be defeated by
+# whichever spelling certutil happens to print.
+$ExpectedEnrolleeSam = 'svc-vcf-ca'
+$ExpectedEnrollee = $null
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $ExpectedEnrollee = "$((Get-ADDomain).NetBIOSName)\$ExpectedEnrolleeSam"
+} catch { }
+if (-not $ExpectedEnrollee) { $ExpectedEnrollee = $ExpectedEnrolleeSam }
+
+<#
+    Reads enrolment rights for a template from ACTIVE DIRECTORY, which is the
+    authoritative source, instead of parsing certutil output.
+
+    This exists because certutil lies by omission. Measured on this CA:
+
+        certutil -v -template VMware
+            Allow Full Control   KNOWLEDGEONDEMA\Domain Admins
+            Allow Read           NT AUTHORITY\Authenticated Users
+            Allow Full Control   NT AUTHORITY\SYSTEM
+            ...
+
+    while the directory holds
+
+        KNOWLEDGEONDEMA\svc-vcf-ca   ENROLL
+
+    certutil rendered no Enroll ACE at all. A verifier parsing that output
+    reports "svc-vcf-ca does NOT have Enroll" against a correctly permissioned
+    template -- a false negative on the ESC1 gate, which is the most
+    security-critical check in this project. The same omission made the
+    Domain Controllers Autoenroll check fail on a correct template.
+
+    Returns objects with Principal, Enroll and AutoEnroll. Full Control
+    (GenericAll) confers both, so it is reported as granting both.
+#>
+function Get-TemplateEnrolmentAcl {
+    param([Parameter(Mandatory)][string]$TemplateCn)
+    $ENROLL_GUID     = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
+    $AUTOENROLL_GUID = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+    try { Import-Module ActiveDirectory -ErrorAction Stop } catch { return $null }
+    try {
+        $cfgNc = (Get-ADRootDSE).configurationNamingContext
+        $dn = "CN=$TemplateCn,CN=Certificate Templates,CN=Public Key Services,CN=Services,$cfgNc"
+        $aces = (Get-Acl "AD:$dn").Access
+    } catch { return $null }
+
+    $byPrincipal = @{}
+    foreach ($a in $aces) {
+        if ($a.AccessControlType -ne 'Allow') { continue }
+        $who = $a.IdentityReference.Value
+        if (-not $byPrincipal.ContainsKey($who)) {
+            $byPrincipal[$who] = [pscustomobject]@{ Principal = $who; Enroll = $false; AutoEnroll = $false; ViaFullControl = $false }
+        }
+        $guid = $a.ObjectType.ToString()
+        if ($a.ActiveDirectoryRights -match 'GenericAll') {
+            $byPrincipal[$who].Enroll = $true
+            $byPrincipal[$who].AutoEnroll = $true
+            $byPrincipal[$who].ViaFullControl = $true
+        }
+        if ($guid -eq $ENROLL_GUID)     { $byPrincipal[$who].Enroll = $true }
+        if ($guid -eq $AUTOENROLL_GUID) { $byPrincipal[$who].AutoEnroll = $true }
+    }
+    return @($byPrincipal.Values | Where-Object { $_.Enroll -or $_.AutoEnroll })
+}
+
+# Returns the bare account name from DOMAIN\user, user@domain or user, so two
+# spellings of the same principal compare equal.
+function Get-AccountNamePart {
+    param([string]$Principal)
+    if (-not $Principal) { return '' }
+    $p = $Principal.Trim()
+    # .Contains/.Split with a char, not -match/-split with a pattern: a
+    # backslash in a regex needs escaping, and an under-escaped one becomes the
+    # pattern '\' which throws "Illegal \ at end of pattern" at runtime.
+    $bs = [char]92
+    if ($p.Contains($bs)) { $p = $p.Split($bs)[-1] }
+    elseif ($p.Contains('@')) { $p = $p.Split('@')[0] }
+    return $p.ToLower()
+}
 
 # Built-in administrative principals that hold Full Control on EVERY certificate
 # template by default and cannot sensibly be removed (removing Enterprise Admins
@@ -69,11 +151,18 @@ $ExpectedEnrollee = 'knowledgeondemand\svc-vcf-ca'
 # principal" is therefore unsatisfiable; the assertion is that the set of
 # enrolment-capable principals equals {$ExpectedEnrollee} PLUS this explicit,
 # documented allow-list, and NOTHING else.
+# Listed by ACCOUNT NAME only, deliberately. These used to carry a
+# 'knowledgeondemand\' prefix, which is not this domain's NetBIOS name --
+# NetBIOS caps at 15 characters, so it is KNOWLEDGEONDEMA. The prefixed
+# entries therefore never matched, and the verification reported
+# KNOWLEDGEONDEMA\Domain Admins as an unexpected enrolment principal on a
+# correctly built template. Comparing on the account name removes the
+# dependency on how certutil renders the domain portion.
 $BuiltinAdminPrincipals = @(
-    'knowledgeondemand\domain admins'
-    'knowledgeondemand\enterprise admins'
-    'builtin\administrators'
-    'nt authority\system'
+    'domain admins'
+    'enterprise admins'
+    'administrators'
+    'system'
 )
 
 # Principals that must NEVER hold enrolment on either template. Listed by name
@@ -167,9 +256,23 @@ function Get-IssuedTemplate {
 # ------------------------------------------------- print build instructions --
 Write-Step "Certificate template build instructions"
 Write-Host @"
-Create the templates by hand in certtmpl.msc -- there is no supported cmdlet
-for template creation, and a scripted ADSI clone is fragile enough that a
-wrong template costs more than the five minutes this saves.
+THE 'VMware' TEMPLATE IS NOW AUTOMATED. Use New-VmwareCertTemplate.ps1,
+which exports the stock Web Server template, applies the edits in section B
+below, creates and publishes the result, grants Enroll to svc-vcf-ca only,
+and verifies each documented property. The GUI steps in section B are kept
+as the reference for what it does, and as the fallback.
+
+    .\New-VmwareCertTemplate.ps1          # dry run, shows every edit
+    .\New-VmwareCertTemplate.ps1 -Apply
+
+An earlier revision of this header claimed template creation could not be
+scripted. That was wrong: it can, and the only genuinely fiddly part --
+generating a unique msPKI-Cert-Template-OID together with its
+msPKI-Enterprise-Oid object -- is solved by the vendored ADCSTemplate module
+rather than reimplemented.
+
+Section A ('Domain Controller Authentication') remains a one-click publish of
+a STANDARD template, so it stays manual: there is nothing to build.
 
 CAPolicy.inf set LoadDefaultTemplates=0, so the CA has published NOTHING.
 Both templates below must be issued by hand or the lab does not work.
@@ -375,7 +478,22 @@ if ($ekuLines.Count -eq 0) {
 Write-Step "Verification: VMware enrolment is restricted (ESC1 control)"
 Write-Info "This is the ONLY control preventing arbitrary certificate issuance"
 
-$vmwareAces = Get-AllowAce $t
+# AD is the authoritative source; the certutil parse is kept only as a
+# fallback for a host without the ActiveDirectory module, and it announces
+# itself because it is known to omit Enroll ACEs.
+$vmwareAdAcl = Get-TemplateEnrolmentAcl -TemplateCn 'VMware'
+if ($null -ne $vmwareAdAcl) {
+    Write-Info "ACL source: Active Directory (authoritative)"
+    $vmwareAces = @($vmwareAdAcl | ForEach-Object {
+        [pscustomobject]@{
+            Principal = $_.Principal
+            Rights    = $(if ($_.ViaFullControl) { 'Full Control' } elseif ($_.Enroll -and $_.AutoEnroll) { 'Enroll, AutoEnroll' } elseif ($_.AutoEnroll) { 'AutoEnroll' } else { 'Enroll' })
+        } })
+} else {
+    Write-Warn "Falling back to parsing certutil output, which OMITS Enroll ACEs."
+    Write-Warn "A pass from this source is not trustworthy; install RSAT/ActiveDirectory."
+    $vmwareAces = Get-AllowAce $t
+}
 $vmwareEnroll = @($vmwareAces | Where-Object { Test-GrantsEnroll $_.Rights })
 
 if ($vmwareEnroll.Count -eq 0) {
@@ -385,15 +503,20 @@ if ($vmwareEnroll.Count -eq 0) {
     Write-Info "certutil output format may have changed. This is a FAILURE."
     $failures++
 } else {
-    $allowed = @($BuiltinAdminPrincipals) + @($ExpectedEnrollee.ToLower())
+    # The allow-list and the ACE are both reduced to the account name before
+    # comparison, so the domain portion's spelling cannot cause a false
+    # finding. $ForbiddenPrincipals still matches against the FULL principal,
+    # because some of its entries are well-known SIDs rather than names.
+    $allowed = @($BuiltinAdminPrincipals) + @($ExpectedEnrolleeSam.ToLower())
     $unexpected = @()
     $forbidden  = @()
     foreach ($ace in $vmwareEnroll) {
-        $p = $ace.Principal.ToLower()
+        $full = $ace.Principal.ToLower()
+        $name = Get-AccountNamePart $ace.Principal
         foreach ($f in $ForbiddenPrincipals) {
-            if ($p -like "*$f*") { $forbidden += $ace.Principal }
+            if ($full -like "*$f*") { $forbidden += $ace.Principal }
         }
-        if ($allowed -notcontains $p) { $unexpected += "$($ace.Principal) ($($ace.Rights))" }
+        if ($allowed -notcontains $name) { $unexpected += "$($ace.Principal) ($($ace.Rights))" }
     }
 
     foreach ($f in ($forbidden | Select-Object -Unique)) {
@@ -403,7 +526,11 @@ if ($vmwareEnroll.Count -eq 0) {
         Write-Fail "Unexpected principal can enrol on VMware: $u"
     }
 
-    $sawExpected = @($vmwareEnroll | Where-Object { $_.Principal.ToLower() -eq $ExpectedEnrollee.ToLower() }).Count -gt 0
+    # Compare on the account name, not the full DOMAIN\user string: certutil's
+    # rendering of the domain portion is not something to depend on.
+    $sawExpected = @($vmwareEnroll | Where-Object {
+        (Get-AccountNamePart $_.Principal) -eq $ExpectedEnrolleeSam.ToLower()
+    }).Count -gt 0
     if (-not $sawExpected) {
         Write-Fail "$ExpectedEnrollee does NOT have Enroll on VMware -- SDDC Manager cannot issue"
     }
@@ -429,23 +556,44 @@ if ($dcRow.Count -eq 0) {
         Write-Fail "Cannot verify: certutil -v -template $dcCn exited $($dcRes.ExitCode)"
         $failures++
     } else {
-        $dcAces = Get-AllowAce $dcRes.Output
+        $dcAdAcl = Get-TemplateEnrolmentAcl -TemplateCn 'DomainControllerAuthentication'
+        if ($null -ne $dcAdAcl) {
+            Write-Info "ACL source: Active Directory (authoritative)"
+            $dcAces = @($dcAdAcl | ForEach-Object {
+                [pscustomobject]@{
+                    Principal = $_.Principal
+                    Rights    = $(if ($_.ViaFullControl) { 'Full Control' } elseif ($_.Enroll -and $_.AutoEnroll) { 'Enroll, AutoEnroll' } elseif ($_.AutoEnroll) { 'AutoEnroll' } else { 'Enroll' })
+                } })
+        } else {
+            Write-Warn "Falling back to parsing certutil output, which OMITS Enroll ACEs."
+            $dcAces = Get-AllowAce $dcRes.Output
+        }
         $dcAuto = @($dcAces | Where-Object { Test-GrantsAutoEnroll $_.Rights })
         if ($dcAuto.Count -eq 0) {
             Write-Fail "Cannot verify: no Allow ACE granting AutoEnroll found on $dcCn"
             Write-Info "Without Autoenroll the DC never enrols and LDAPS never starts."
             $failures++
         } else {
+            # Compared on the ACCOUNT NAME, not DOMAIN\name: the hard-coded
+            # 'knowledgeondemand\...' prefix is not this domain's NetBIOS name
+            # (NetBIOS caps at 15 characters, so it is KNOWLEDGEONDEMA), so
+            # these comparisons never matched and the check failed on a
+            # correctly permissioned template.
+            #
+            # 'Enterprise Read-only Domain Controllers' is accepted alongside
+            # the two DC groups: it is DC-scoped by definition and the stock
+            # template grants it, so flagging it would be a false finding.
+            $dcAllowedAuto = @(
+                'domain controllers'
+                'enterprise domain controllers'
+                'enterprise read-only domain controllers'
+            )
             $dcOk = $false
             $dcBad = @()
             foreach ($ace in $dcAuto) {
-                $p = $ace.Principal.ToLower()
-                if ($p -eq 'knowledgeondemand\domain controllers' -or
-                    $p -eq 'knowledgeondemand\enterprise domain controllers') {
-                    $dcOk = $true
-                    continue
-                }
-                if ($BuiltinAdminPrincipals -contains $p) { continue }
+                $name = Get-AccountNamePart $ace.Principal
+                if ($dcAllowedAuto -contains $name) { $dcOk = $true; continue }
+                if ($BuiltinAdminPrincipals -contains $name) { continue }
                 $dcBad += "$($ace.Principal) ($($ace.Rights))"
             }
             foreach ($b in ($dcBad | Select-Object -Unique)) {
@@ -547,7 +695,14 @@ if ($secRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($secRes.Output)) {
             $failures++
         } else {
             $hasEnroll  = @($svcLines | Where-Object { $_ -match 'Request Certificates' -or $_ -match 'Enroll' }).Count -gt 0
-            $hasOfficer = @($svcLines | Where-Object { $_ -match 'Issue and Manage Certificates' -or $_ -match 'Officer' }).Count -gt 0
+            # certutil renders CA_ACCESS_OFFICER as "Certificate Manager", not
+            # "Issue and Manage Certificates" (the GUI's wording) and not
+            # "Officer". Measured: "Allow Certificate Manager Enroll
+            # KNOWLEDGEONDEMA\svc-vcf-ca". Matching only the GUI wording
+            # produced a false negative against a correctly permissioned CA.
+            $hasOfficer = @($svcLines | Where-Object {
+                $_ -match 'Issue and Manage Certificates' -or $_ -match 'Certificate Manager' -or $_ -match 'Officer'
+            }).Count -gt 0
             if ($hasEnroll)  { Write-Ok "Request Certificates (CA_ACCESS_ENROLL) granted" }
             else { Write-Fail "Request Certificates NOT granted on the CA"; $failures++ }
             if ($hasOfficer) { Write-Ok "Issue and Manage Certificates (CA_ACCESS_OFFICER) granted" }
