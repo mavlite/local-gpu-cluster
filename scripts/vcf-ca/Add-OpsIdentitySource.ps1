@@ -15,9 +15,12 @@
     per the appliance's own REST reference (/suite-api/docs/rest/index.html)
     a sourceType without them is rejected as null.
 
-    svc-vcf-ldap has no userPrincipalName, so UPN-form authentication cannot
-    work against it; this uses knowledgeondemand\svc-vcf-ldap with
-    common-name sAMAccountName instead.
+    The bind login name is the UPN form (svc-vcf-ldap@knowledgeondemand.net),
+    derived from AD_BIND_USER, which holds a distinguished name. The NetBIOS
+    form is deliberately rejected: NetBIOS names cap at 15 characters, so this
+    domain is KNOWLEDGEONDEMA, and the knowledgeondemand\user form resolves to
+    nothing. An earlier comment here claimed the account has no
+    userPrincipalName; it has one, and the UPN form sidesteps truncation.
 
     The suite-api token is acquired fresh on every run (POST
     /suite-api/api/auth/token/acquire) -- it expires quickly and is never
@@ -44,12 +47,30 @@
 
 .EXAMPLE
     .\Add-OpsIdentitySource.ps1 -Apply
-    Validates, and if that passes, creates the identity source. A follow-up
-    PATCH /suite-api/api/auth/sources is still required before use once SSL
-    discovers certificates.
+    Validates, and if that passes, creates the identity source: POST, then the
+    PATCH that accepts the discovered LDAPS certificates, then a read-back to
+    confirm the source is actually listed. Importing a principal and granting it
+    a role is a separate step -- see Import-OpsAdPrincipal.ps1.
 #>
 [CmdletBinding()]
-param([switch]$Apply)
+param(
+    # Login name for the LDAP bind. NOT derived from AD at run time because
+    # this script runs from a workstation without the ActiveDirectory module.
+    #
+    # The previous hard-coded value was 'knowledgeondemand\svc-vcf-ldap',
+    # which does not resolve: NetBIOS domain names cap at 15 characters, so
+    # this domain is KNOWLEDGEONDEMA. Measured -- 'knowledgeondemand\...'
+    # fails to translate to a SID, 'KNOWLEDGEONDEMA\...' succeeds. The same
+    # mistake had already broken template creation and two verification gates.
+    #
+    # The UPN form is preferred because it carries no NetBIOS truncation to get
+    # wrong. An old comment here claimed svc-vcf-ldap has no
+    # userPrincipalName; it does -- svc-vcf-ldap@knowledgeondemand.net --
+    # so that justification for DOMAIN\user no longer applies.
+    [string]$BindUserName,
+    [string]$Domain = 'knowledgeondemand.net',
+    [switch]$Apply
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -71,6 +92,12 @@ function Protect-Secret {
         if ($s) { $Text = $Text.Replace($s, '<redacted>') }
     }
     $Text
+}
+
+function Test-HasProperty {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
+    (@($Object.PSObject.Properties.Name) -contains $Name)
 }
 
 function Get-RestErrorDetail {
@@ -135,9 +162,32 @@ $hdr = @{ Authorization = "vRealizeOpsToken $tok" }
 Write-Ok "token acquired (acquired fresh this run; not reused across runs)"
 
 # ---------------------------------------------------------------- body -----
-# svc-vcf-ldap has NO userPrincipalName, so UPN-form authentication cannot
-# work against it. Use DOMAIN\sAMAccountName, paired with common-name
-# sAMAccountName.
+# Resolve the bind login name. AD_BIND_USER in the credential file holds a
+# DISTINGUISHED NAME (CN=svc-vcf-ldap,CN=Users,DC=...), which is not a login
+# name, so it is converted rather than used as-is.
+if (-not $BindUserName) {
+    $raw = if ($cred.ContainsKey('AD_BIND_USER')) { $cred['AD_BIND_USER'] } else { '' }
+    if ($raw -match '^\s*CN=([^,]+),') {
+        # A DN: take the CN and build a UPN for the configured domain.
+        $BindUserName = "$($Matches[1])@$Domain"
+    } elseif ($raw -and ($raw -match '@' -or $raw.Contains([char]92))) {
+        # Already a usable login form (UPN or DOMAIN\user).
+        $BindUserName = $raw
+    } else {
+        Write-Fail "Cannot determine a bind login name from AD_BIND_USER ('$raw')."
+        Write-Info "Pass -BindUserName explicitly, e.g. svc-vcf-ldap@$Domain"
+        exit 1
+    }
+}
+Write-Info "bind login name: $BindUserName"
+# StartsWith with an explicit char, not a regex: a trailing backslash in a
+# pattern throws "Illegal \ at end of pattern", and this very guard did.
+if ($BindUserName.StartsWith('knowledgeondemand' + [char]92)) {
+    Write-Fail "'$BindUserName' uses a NetBIOS domain that does not exist."
+    Write-Fail "NetBIOS caps at 15 characters; this domain is KNOWLEDGEONDEMA."
+    Write-Info "Use the UPN form instead: svc-vcf-ldap@$Domain"
+    exit 1
+}
 $body = @{
     name       = 'knowledgeondemand-AD'
     sourceType = @{ id = 'ACTIVE_DIRECTORY'; name = 'ACTIVE_DIRECTORY'; others = @(); otherAttributes = @{} }
@@ -153,7 +203,7 @@ $body = @{
         @{ name = 'port';             value = '636' }
         @{ name = 'base-domain';      value = 'dc=knowledgeondemand,dc=net' }
         @{ name = 'common-name';      value = 'sAMAccountName' }
-        @{ name = 'user-name';        value = 'knowledgeondemand\svc-vcf-ldap' }
+        @{ name = 'user-name';        value = $BindUserName }
         @{ name = 'password';         value = $cred['AD_BIND_PASS'] }
     )
 }
@@ -189,14 +239,78 @@ if (-not $validated) {
 }
 
 # ------------------------------------------------------------------ create -
-Write-Step "Creating the identity source"
+# Creating an SSL identity source is TWO calls, not one. The POST returns 200
+# and a fully populated source object, but nothing is persisted: with use-ssl
+# true the response carries the certificates Operations discovered at the LDAPS
+# endpoint, and the source only exists once those are accepted back via PATCH.
+#
+# Measured: after a "successful" POST alone, GET /auth/sources returned
+# {"sources": []} and AD authentication 401'd. An earlier version of this script
+# named the required PATCH in a warning and then discarded the response it
+# needed (| Out-Null), so the create could never complete.
+Write-Step "Creating the identity source (POST)"
+$posted = $null
 try {
-    Invoke-LabRest -Uri "https://$ops/suite-api/api/auth/sources" -Method POST -Headers $hdr -Body $body | Out-Null
+    $posted = Invoke-LabRest -Uri "https://$ops/suite-api/api/auth/sources" -Method POST `
+        -Headers $hdr -Body $body -TimeoutSec 120
 } catch {
     Write-Fail "POST /suite-api/api/auth/sources failed: $(Get-RestErrorDetail $_)"
     exit 1
 }
-Write-Ok "identity source created"
-Write-Warn2 "With SSL enabled the response carries discovered certificates; a follow-up"
-Write-Warn2 "PATCH /suite-api/api/auth/sources is required before this source can be used."
+if (-not $posted) {
+    Write-Fail "POST returned no body, so the discovered certificates cannot be accepted."
+    exit 1
+}
+Write-Ok "POST accepted"
+
+$discovered = @()
+if (Test-HasProperty $posted 'certificates') { $discovered = @($posted.certificates) }
+Write-Info "certificates discovered at the LDAPS endpoint: $($discovered.Count)"
+foreach ($c in $discovered) {
+    if (Test-HasProperty $c 'thumbprint') { Write-Info "  thumbprint $($c.thumbprint)" }
+}
+if ($discovered.Count -eq 0 -and $body.property | Where-Object { $_.name -eq 'use-ssl' -and $_.value -eq 'true' }) {
+    Write-Warn2 "use-ssl is true but no certificate was discovered -- the PATCH below"
+    Write-Warn2 "will likely leave the source unusable. Check LDAPS on the directory host."
+}
+
+Write-Step "Accepting the discovered certificates (PATCH)"
+$patchBody = $posted
+if ($discovered.Count -gt 0) { $patchBody.certificates = $discovered }
+$created = $null
+try {
+    $created = Invoke-LabRest -Uri "https://$ops/suite-api/api/auth/sources" -Method PATCH `
+        -Headers $hdr -Body $patchBody -TimeoutSec 120
+} catch {
+    Write-Fail "PATCH /suite-api/api/auth/sources failed: $(Get-RestErrorDetail $_)"
+    Write-Fail "The source is NOT usable -- the POST alone persists nothing."
+    exit 1
+}
+if (Test-HasProperty $created 'id') { Write-Ok "source persisted with id $($created.id)" }
+else { Write-Ok "PATCH accepted" }
+
+# ------------------------------------------------------------------ verify ---
+# "Created" is not "present". Read the list back rather than trusting the PATCH.
+Write-Step "Verifying the source is listed"
+$listed = $null
+try {
+    $listed = Invoke-LabRest -Uri "https://$ops/suite-api/api/auth/sources" -Method GET `
+        -Headers $hdr -TimeoutSec 90
+} catch {
+    Write-Fail "GET /suite-api/api/auth/sources failed: $(Get-RestErrorDetail $_)"
+    exit 1
+}
+$sources = @()
+if (Test-HasProperty $listed 'sources') { $sources = @($listed.sources) }
+if ($sources.Count -eq 0) {
+    Write-Fail "Operations lists no identity sources -- the create did not take effect."
+    exit 1
+}
+foreach ($s in $sources) { Write-Info "listed: name='$($s.name)' type='$($s.sourceType.id)'" }
+Write-Ok "identity source present in VCF Operations"
+
+Write-Warn2 "The source alone does not grant access: a directory principal must be"
+Write-Warn2 "imported and given a role before it can log in. Use Import-OpsAdPrincipal.ps1."
+Write-Info  "At login, authSource is the source's DISPLAY NAME ('knowledgeondemand'),"
+Write-Info  "not its name ('knowledgeondemand-AD') -- measured; the latter returns 401."
 exit 0
