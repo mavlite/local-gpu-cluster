@@ -247,14 +247,57 @@ foreach ($t in $targets) {
             continue
         }
         $httpSeen++
-        if ($r.Changed) {
+
+        # Rewriting the host is necessary but NOT sufficient, and assuming
+        # otherwise was a real defect in an earlier version of this script.
+        # Measured on this CA immediately after install, AD CS writes its http
+        # entries with flag 0:
+        #
+        #   CRLPublicationURLs     65:C:\...crl   79:ldap:///...   0:http://%1/...
+        #   CACertPublicationURLs   1:C:\...crt    3:ldap:///...   0:http://%1/...
+        #
+        # Flag 0 means "do nothing with this". By default the ONLY url that
+        # reaches an issued certificate is the ldap:/// one, which the lab's
+        # Photon-based appliances cannot follow. Preserving that flag would
+        # have produced a perfectly verified no-op and certificates with no
+        # usable CDP.
+        #
+        # WHICH FLAG TO USE. The ldap entry that does reach issued certificates
+        # carries 79 = 1+2+4+8+64. The publish bits (1, 64) are meaningless for
+        # http -- a CA cannot publish over http -- which leaves 2+4+8. Bit 4
+        # concerns delta-CRL location discovery and deltas are disabled here,
+        # so 10 = 2+8. That is also the value used in the archived Microsoft
+        # thread whose author confirms the http location becomes the only one in
+        # the CDP extension of issued certificates.
+        #
+        # 10 is chosen deliberately because it contains BOTH candidate bits.
+        # Published documentation does not enumerate these bits and two careful
+        # reviews of this project disagreed about whether 2 or 8 means "include
+        # in the CDP extension of issued certificates". 10 is correct under
+        # either reading, so the ambiguity cannot bite. For AIA both readings
+        # agree that bit 2 is "include in the AIA extension", so 2 is used.
+        #
+        # None of this is trusted. Test-CaRevocationEndpoints.ps1 against a
+        # real issued certificate is the gate that settles it.
+        $wantFlag = if ($t.Name -eq 'CRLPublicationURLs') { 10 } else { 2 }
+        $curFlag  = [int]([regex]::Match($r.Value, '^(\d+):').Groups[1].Value)
+        $final    = $r.Value
+
+        if (($curFlag -band $wantFlag) -ne $wantFlag) {
+            $promoted = $curFlag -bor $wantFlag
+            $final = $r.Value -replace '^\d+:', "${promoted}:"
+            Write-Warn "promote $entry"
+            Write-Host  "    ->  $final" -ForegroundColor White
+            Write-Info "       flag $curFlag -> $promoted (adding ${wantFlag}, include in the issued"
+            Write-Info "       certificate's extension). Flag $curFlag would publish nothing."
+        } elseif ($r.Changed) {
             Write-Info "change $entry"
-            Write-Host  "    ->  $($r.Value)" -ForegroundColor White
-            Write-Info "       flag prefix preserved; only the host changed ($($r.OldHost) -> $CdpHost)"
+            Write-Host  "    ->  $final" -ForegroundColor White
+            Write-Info "       flag $curFlag already sufficient; only the host changed ($($r.OldHost) -> $CdpHost)"
         } else {
-            Write-Ok "keep   $entry   (already points at $CdpHost)"
+            Write-Ok "keep   $entry   (already correct)"
         }
-        $newVals += $r.Value
+        $newVals += $final
     }
 
     if ($httpSeen -eq 0) {

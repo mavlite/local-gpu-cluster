@@ -306,6 +306,61 @@ $actions = @(
         }
     }
     @{
+        what = '/CertEnroll: remove the legacy Netscape revocation ASP page'
+        skipUnlessCertEnroll = $true
+        do   = {
+            # AD CS drops nsrev_<CA>.asp into CertEnroll at install. It is a
+            # Netscape-era revocation endpoint that takes a serial number from
+            # the query string and instantiates the CertificateAuthority.Admin
+            # COM object:
+            #
+            #   stat = Admin.IsValidCertificate("<host>\<CA>", serialnumber)
+            #
+            # Once port 80 is open to the lab subnet that is an anonymous
+            # endpoint invoking a CA administration interface on a domain
+            # controller. Nothing in VCF -- or in any current client -- uses
+            # Netscape revocation checking, so the page has no consumer and is
+            # removed. Verified present on this CA after install.
+            $asp = @(Get-ChildItem 'C:\Windows\System32\CertSrv\CertEnroll\nsrev_*.asp' -ErrorAction SilentlyContinue)
+            if (-not $asp) { Write-Ok "no nsrev_*.asp present"; return }
+            foreach ($a in $asp) {
+                Remove-Item -LiteralPath $a.FullName -Force -ErrorAction Stop
+                Write-Ok "removed $($a.Name)"
+            }
+        }
+    }
+    @{
+        what = '/CertEnroll: refuse to execute ASP at all (defence in depth)'
+        skipUnlessCertEnroll = $true
+        do   = {
+            # The ASP feature must stay installed -- /CertSrv's web enrolment
+            # pages ARE .asp -- so removing the one file above is not a durable
+            # control: a repair, reinstall or role re-add puts it back. Clearing
+            # the handler mapping on THIS vdir means an .asp there is served as
+            # bytes rather than executed, whatever reappears.
+            #
+            # /CertEnroll only ever serves .crl and .crt files, so it has no
+            # legitimate need for a script handler.
+            $loc = 'Default Web Site/CertEnroll'
+            $handlers = @(Get-WebConfiguration -Filter /system.webServer/handlers/add -PSPath 'IIS:\' -Location $loc -ErrorAction SilentlyContinue |
+                          Where-Object { $_.path -match '\.asp$' })
+            if (-not $handlers) {
+                # Nothing inherited to remove is fine; add the explicit deny below anyway.
+                Write-Info "no inherited .asp handler found at $loc"
+            }
+            foreach ($hd in $handlers) {
+                Remove-WebConfigurationProperty -Filter /system.webServer/handlers -PSPath 'IIS:\' `
+                    -Location $loc -Name '.' -AtElement @{ name = $hd.name } -ErrorAction SilentlyContinue
+                Write-Ok "removed handler '$($hd.name)' from $loc"
+            }
+            # Belt and braces: deny the .asp extension outright via request filtering.
+            Add-WebConfigurationProperty -Filter /system.webServer/security/requestFiltering/fileExtensions `
+                -PSPath 'IIS:\' -Location $loc -Name '.' `
+                -Value @{ fileExtension = '.asp'; allowed = 'false' } -ErrorAction SilentlyContinue
+            Write-Ok "request filtering denies .asp under /CertEnroll"
+        }
+    }
+    @{
         what = 'Ensure the port 80 binding EXISTS -- CDP and AIA depend on it'
         do   = {
             $b = Get-WebBinding -Name 'Default Web Site' -Protocol http |
@@ -488,7 +543,8 @@ if ($AdminIp) {
 # Remove the old scoped rule if it exists (idempotency). Looked up by DisplayName
 # but removed via the pipeline object, so the actual rule identity is preserved.
 Write-Info "Checking for existing scoped rule to remove (idempotency)"
-$existingRule = Get-NetFirewallRule -DisplayName 'CertSrv HTTPS (scoped)' -Direction Inbound -ErrorAction SilentlyContinue
+$existingRule = @(Get-NetFirewallRule -DisplayName 'CertSrv HTTPS (scoped)' -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Direction -eq 'Inbound' })
 if ($existingRule) {
     Write-Host ("  {0} remove stale scoped rule (re-running with new -AdminIp?)" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }))
     if ($Apply) {
@@ -530,7 +586,8 @@ if ($Apply) {
 # -- VCF LCM among them -- hard-fail on a CRL they cannot retrieve.
 $crlRuleName = 'CertEnroll HTTP CDP-AIA (lab subnet)'
 Write-Info "Checking for existing CDP/AIA rule to remove (idempotency)"
-$existingCrlRule = Get-NetFirewallRule -DisplayName $crlRuleName -Direction Inbound -ErrorAction SilentlyContinue
+$existingCrlRule = @(Get-NetFirewallRule -DisplayName $crlRuleName -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Direction -eq 'Inbound' })
 if ($existingCrlRule) {
     Write-Host ("  {0} remove stale CDP/AIA rule" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }))
     if ($Apply) {

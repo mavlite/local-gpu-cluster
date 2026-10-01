@@ -165,6 +165,21 @@ This must happen between install and first issuance: a certificate carries the
 URLs configured at the moment it was signed, and no later change repairs an
 already-issued certificate.
 
+**Correction, revision 5 — rewriting the host is not sufficient.** Revision 4
+said `Set-CaRevocationEndpoints.ps1` would preserve AD CS's flag prefixes and
+change only the hostname. Measured on the real CA immediately after install,
+AD CS writes its **http entries with flag `0`** — inert. Preserving that would
+have produced a fully verified no-op, and every issued certificate would carry
+only an `ldap:///` CDP that the Photon-based appliances cannot follow. The
+script therefore also promotes the flag: **10** for CDP, **2** for AIA.
+
+`10 = 2+8` is chosen because it contains both candidate bits. The published
+documentation does not enumerate them and two reviews of this project
+disagreed about whether `2` or `8` means "include in the CDP extension of
+issued certificates", so `10` is correct under either reading. Confirmed on
+2026-10-01: the DC's autoenrolled certificate carries the http CDP and AIA
+URLs, and both fetch and parse.
+
 ### The VCF certificate template
 
 Contract established by probing the live API:

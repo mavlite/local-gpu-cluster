@@ -167,22 +167,45 @@ issuance, and it is not optional.
 It refuses to run unless `pki.knowledgeondemand.net` resolves to exactly one
 address, because a multi-homed CDP host is the defect it exists to remove.
 
-**It rewrites only the host of the existing `http://` entries.** Flag prefixes,
-paths and `%` tokens are preserved byte for byte, and non-HTTP entries (local
-paths, `file://`, `ldap:///`) are left exactly as found. That restraint is the
-design, not laziness: the flag prefix decides whether a URL reaches the CDP
-extension of issued certificates, a wrong one cannot be fixed after issuance,
-and the documentation for those bits is thin enough that two independent
-reviews of this project reached opposite conclusions about them. Keeping
-whatever AD CS configured is correct by construction — those defaults already
-produce working certificates — so the script changes only the thing that is
-demonstrably wrong, the hostname.
+**What AD CS actually writes at install, measured on this CA:**
 
-If an `http://` entry is missing entirely, the script stops rather than
-inventing one with a guessed flag. Add it in `certsrv.msc` → CA properties →
-**Extensions**, where the checkbox *"Include in the CDP extension of issued
-certificates"* sets the correct bit without anyone doing bit arithmetic, then
-re-run.
+```
+CRLPublicationURLs      65:C:\...\CertEnroll\%3%8%9.crl
+                        79:ldap:///CN=%7%8,...,CN=CDP,...
+                         0:http://%1/CertEnroll/%3%8%9.crl
+                         0:file://%1/CertEnroll/%3%8%9.crl
+CACertPublicationURLs    1:C:\...\CertEnroll\%1_%3%4.crt
+                         3:ldap:///CN=%7,CN=AIA,...
+                         0:http://%1/CertEnroll/%1_%3%4.crt
+                         0:file://%1/CertEnroll/%1_%3%4.crt
+```
+
+**The http entries carry flag `0`** — inert placeholders. By default the only
+URL that reaches an issued certificate is the `ldap:///` one, which the lab's
+Photon-based appliances cannot follow. So the script does two things: it
+rewrites the host, **and** it promotes the flag.
+
+Flag prefixes, paths and `%` tokens are otherwise preserved byte for byte, and
+non-HTTP entries (local paths, `file://`, `ldap:///`) are left exactly as
+found.
+
+**Which flag, and why that one.** The `ldap` CDP entry that does reach issued
+certificates carries `79 = 1+2+4+8+64`. The publish bits (1, 64) are
+meaningless for http — a CA cannot publish over http — leaving `2+4+8`. Bit 4
+concerns delta-CRL discovery and deltas are disabled here, so **10 = 2+8** for
+CDP and **2** for AIA.
+
+`10` was chosen deliberately because it contains *both* candidate bits:
+Microsoft's primary reference does not enumerate them, and two independent
+reviews of this project reached opposite conclusions about whether `2` or `8`
+means "include in the CDP extension of issued certificates". `10` is correct
+under either reading.
+
+**Confirmed empirically on 2026-10-01.** The DC's autoenrolled certificate
+carries
+`URL=http://pki.knowledgeondemand.net/CertEnroll/knowledgeondemand-LabRoot-CA.crl`
+in its CDP extension and the matching `.crt` in its AIA, and both fetch and
+parse. So `10`/`2` work; the ambiguity never needed resolving.
 
 The script then reads both values back and compares them element by element
 before restarting `certsvc` and publishing a fresh CRL (with a retry, because
