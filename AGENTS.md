@@ -29,3 +29,18 @@ ruff/black/mypy or change build config without asking.
   and **no `Co-Authored-By` trailer** — commits are attributed solely to the author.
 - The `cluster-ops` and `vcf-lookup` opencode skills carry the full topology, router aliases,
   and RAG-query conventions — consult them for infra/RAG work.
+
+## Delegating to the local model (Claude Code, Phase-1 experiment)
+The `local-delegate` MCP service (`scripts/delegate/`, `127.0.0.1:3006`) hands work to the
+cluster's Qwen3.8. Full rule: `clients/opencode-delegate/CLAUDE-delegation-rule.md`.
+- **Eligible:** `ask_local` for reads ≥ ~20K tokens (logs, dumps, long docs); `submit_task` for
+  well-specified, output-heavy work (≥ ~200-line diff) **with `checks`**.
+- **Never delegate:** anything needing this conversation's context, design/architecture calls,
+  security-sensitive code, small changes, or ambiguous tasks.
+- **A/B (first ~30 eligible tasks):** flip a real coin —
+  `python -c "import secrets; print(secrets.choice(['heads', 'tails']))"`. Heads: delegate.
+  Tails: do it yourself, then `record_direct(...)`. Progress: `python -m scripts.delegate.cli report`.
+- **After `submit_task`:** run `python -m scripts.delegate.cli wait <job_id>` as a background Bash
+  command and keep working. On completion, review with the `delegate-review` skill and
+  `record_review(...)`. Never apply a diff with non-empty `gate_reasons`.
+- If `local-delegate` is not connected, do the work yourself — do not block on the service.

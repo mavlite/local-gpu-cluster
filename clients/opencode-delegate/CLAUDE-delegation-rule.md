@@ -25,15 +25,21 @@ The `local-delegate` MCP service enables Claude to queue agentic coding tasks an
 - Security-sensitive edits (auth, crypto, secrets, input validation)
 - Small/medium changes (< ~200 lines diff) — review overhead outweighs savings
 - Unstructured/ambiguous tasks — local model needs clarity; if you're unsure, Claude should clarify first
-- Calls to `result()` or `record_review()` — only the human reviewer calls these; Claude calls `submit_task()` once and waits
+- Repos outside `LOCAL_DELEGATE_ALLOWED_ROOTS` — `submit_task` refuses them
+- Sensitive repos — Phase-1 jobs run with the user's rights (no OS sandbox until Phase 2)
+
+Claude reviews every delegated result itself (design decision D4) using the `delegate-review`
+skill — nothing lands without that review.
 
 ## A/B Protocol (first ~30 tasks)
 
-For tasks that meet eligibility, **flip a coin:**
+For tasks that meet eligibility, **flip a real coin** — do not pick, or the arms are biased:
 
-- **Heads:** Delegate to `submit_task(…, checks=[…])` and await review. The human reviewer
-  later calls `record_review(job_id, verdict, claude_tokens=…, …)` — passing Claude's token
-  cost for the task; the local LLM cost is read from the job state automatically.
+    python -c "import secrets; print(secrets.choice(['heads', 'tails']))"
+
+- **Heads:** Delegate to `submit_task(…, checks=[…])`. When the job finishes, review it with the
+  `delegate-review` skill and call `record_review(job_id, verdict, claude_tokens=…, …)` with
+  Claude's token cost for the task; the local LLM cost is read from the job state automatically.
 - **Tails:** Do it yourself in this conversation, then call
   `record_direct(task_type=…, claude_tokens=…, note=…)` to log the self-done arm.
 
@@ -45,8 +51,10 @@ joinable ledger and we can measure which is more efficient.
 
 1. **Delegate (submit_task):**
    - Call `submit_task(task="...", repo="C:\\Users\\willi\\Documents\\GitHub\\local-gpu-cluster", base_ref="HEAD", checks=[[...], [...]], task_type="...")`
-   - Return immediately; tell the user the job is queued
-   - A human reviews it (call `result(job_id)`, re-run checks, then `record_review(…)`)
+   - Tell the user the job is queued, then start the wait as a **background** Bash command so the
+     harness notifies you when it ends: `python -m scripts.delegate.cli wait <job_id>`
+   - Keep working meanwhile; on the notification, follow `delegate-review` (`result(job_id)`,
+     re-run the checks, read the diff, then `record_review(…)`)
 
 2. **Ask Local (ask_local):**
    - Call `ask_local(prompt="...", content="..." or files=[...], mode="summarize")`
@@ -54,6 +62,6 @@ joinable ledger and we can measure which is more efficient.
    - Useful for logs, config dumps, verbose docs — anywhere input >> output
 
 3. **Do Not:**
-   - Call `result()` or `record_review()` — only humans review delegated work
+   - Apply a delegated diff without the `delegate-review` procedure, or when `gate_reasons` is non-empty
    - Delegate design decisions, security code, or anything needing conversation context
    - Queue a task without checks — the result gate will flag it as incomplete
