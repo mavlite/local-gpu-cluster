@@ -28,3 +28,6 @@ dist/
 
 # Playwright MCP session artifacts
 .playwright-mcp/
+
+# SDD subagent-driven-development scratch workspace (ledger, briefs, reports, diffs)
+.superpowers/sdd/
