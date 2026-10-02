@@ -212,6 +212,8 @@ class JobStore:
 
     def _run_job(self, jid):
         st = self.get(jid)
+        if st.get("status") != "queued":
+            return  # already run/finished (e.g. reconcile re-enqueue)
         if not self.deps.lease.acquire(timeout_s=self.cfg.job_timeout_s):
             self._save({**st, "status": "failed", "error": "GPU lease busy"})
             return
@@ -254,6 +256,10 @@ class JobStore:
 class MemLedger:
     def __init__(self):
         self.records = []
+
+    @property
+    def rows(self) -> list:
+        return self.records
 
     def append(self, record: dict) -> None:
         self.records.append(dict(record))

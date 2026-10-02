@@ -203,3 +203,16 @@ def test_corrupt_job_file_does_not_break_list_or_reconcile(tmp_path):
     store.reconcile()
     assert [s["id"] for s in store.list()] == [jid]
     assert store.get(jid)["status"] == "abandoned"
+
+
+def test_run_job_skips_non_queued(tmp_path):
+    from scripts.delegate.config import load_config
+    cfg = load_config({"LOCAL_DELEGATE_BEARER_TOKEN": "b", "LOCAL_DELEGATE_ROUTER_TOKEN": "r",
+                       "LOCAL_DELEGATE_JOBS_DIR": str(tmp_path)})
+    deps = jobs.make_test_deps()
+    store = jobs.JobStore(cfg, deps)
+    jid = store.submit({"task": "t", "repo": "."})
+    store.join()
+    assert store.get(jid)["status"] == "done" and deps.acquired == 1
+    store._run_job(jid)  # e.g. a reconcile re-enqueue of a finished job
+    assert deps.acquired == 1 and store.get(jid)["status"] == "done"

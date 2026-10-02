@@ -5,7 +5,10 @@ StreamableHTTPSessionManager, stateless, mounted at /mcp).
 """
 import contextlib
 import hmac
+import json
 import os
+import shutil
+import time
 
 import httpx
 import uvicorn
@@ -17,6 +20,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from scripts.delegate.config import load_config
+from scripts.delegate.jobs import JobStore, real_deps
 from scripts.delegate.ledger import Ledger
 from scripts.delegate.lease import GpuLease
 from scripts.delegate.router_client import InputTooLarge, PathNotAllowed, ProfileBusy, ask_local
@@ -66,17 +70,96 @@ async def _run_ask_local(cfg, deps, arguments: dict) -> list[TextContent]:
     return _text(out["text"])
 
 
-def build_server(cfg, deps) -> Server:
+_TERMINAL = ("done", "failed", "abandoned")
+_S = {"type": "string"}
+
+
+def _tool(name: str, description: str, props: dict, required: list) -> Tool:
+    return Tool(name=name, description=description,
+                inputSchema={"type": "object", "properties": props, "required": required})
+
+
+AGENTIC_TOOLS = [
+    _tool("submit_task", "Queue a background coding job on the local model; returns job_id immediately.",
+          {"task": _S, "repo": _S, "base_ref": _S,
+           "checks": {"type": "array", "items": {"type": "array", "items": _S}},
+           "task_type": _S, "allow_web": {"type": "boolean"}, "timeout_s": {"type": "integer"}},
+          ["task", "repo"]),
+    _tool("result", "Fetch a job's outcome (diff, checks, gate verdict, summary, tokens).",
+          {"job_id": _S}, ["job_id"]),
+    _tool("list_jobs", "List jobs, optionally filtered by status.", {"status": _S}, []),
+    _tool("record_review", "Record the review verdict for a job (A/B ledger) and clean its work dir.",
+          {"job_id": _S, "verdict": _S, "fix_lines": {"type": "integer"}, "cause": _S},
+          ["job_id", "verdict"]),
+]
+_AGENTIC_NAMES = {t.name for t in AGENTIC_TOOLS}
+
+
+class AgenticTools:
+    """submit_task/result/list_jobs/record_review over a JobStore + ledger."""
+
+    def __init__(self, cfg, store, ledger):
+        self.cfg, self.store, self.ledger = cfg, store, ledger
+
+    def submit_task(self, task, repo, base_ref="HEAD", checks=None, task_type="",
+                    allow_web=False, timeout_s=1800) -> dict:
+        spec = {"task": task, "repo": repo, "base_ref": base_ref, "checks": list(checks or []),
+                "task_type": task_type, "allow_web": allow_web, "timeout_s": timeout_s}
+        return {"job_id": self.store.submit(spec)}
+
+    def result(self, job_id) -> dict:
+        try:
+            st = self.store.get(job_id)
+        except (OSError, ValueError):
+            return {"error": f"unknown job: {job_id}"}
+        if st["status"] not in _TERMINAL:
+            return {"status": st["status"], "note": "job not finished; wait for completion"}
+        gate = st.get("gate") or {}
+        dur = (st.get("finished") or 0) - (st.get("started") or 0)
+        return {"status": st["status"], "diff": st.get("diff"), "checks": st.get("checks", []),
+                "checks_skipped": st.get("checks_skipped"), "summary": st.get("text"),
+                "tokens": st.get("tokens"), "duration_s": max(dur, 0),
+                "flagged": gate.get("flagged", []), "gate_reasons": gate.get("reasons", []),
+                "error": st.get("error")}
+
+    def list_jobs(self, status=None) -> list:
+        return [{"id": s["id"], "status": s["status"],
+                 "task_type": (s.get("spec") or {}).get("task_type", ""),
+                 "ts": s.get("submitted")} for s in self.store.list(status)]
+
+    def record_review(self, job_id, verdict, fix_lines=0, cause="") -> dict:
+        st = self.store.get(job_id)
+        self.ledger.append({"job_id": job_id, "delegated": True, "verdict": verdict,
+                            "fix_lines": fix_lines, "cause": cause,
+                            "task_type": (st.get("spec") or {}).get("task_type", ""),
+                            "tokens": st.get("tokens"), "ts": time.time()})
+        if os.path.basename(job_id) == job_id:  # never rmtree outside jobs_dir
+            shutil.rmtree(os.path.join(self.cfg.jobs_dir, job_id), ignore_errors=True)
+        return {"ok": True}
+
+
+def _run_agentic(tools: AgenticTools, name: str, arguments: dict) -> list[TextContent]:
+    try:
+        out = getattr(tools, name)(**arguments)
+    except (TypeError, OSError, ValueError, KeyError) as e:
+        return _text(f"ERROR: {name} failed ({type(e).__name__}): {str(e)[:300]}")
+    return _text(json.dumps(out))
+
+
+def build_server(cfg, deps, store=None) -> Server:
     server = Server("local-delegate")
+    tools = AgenticTools(cfg, store, ledger=deps.ledger) if store is not None else None
 
     @server.list_tools()
     async def _tools() -> list[Tool]:
-        return [ASK_LOCAL_TOOL]
+        return [ASK_LOCAL_TOOL, *AGENTIC_TOOLS]
 
     @server.call_tool()
     async def _call(name: str, arguments: dict | None) -> list[TextContent]:
         if name == "ask_local":
             return await _run_ask_local(cfg, deps, arguments or {})
+        if name in _AGENTIC_NAMES and tools is not None:
+            return _run_agentic(tools, name, arguments or {})
         return _text(f"unknown tool: {name}")
 
     return server
@@ -98,9 +181,9 @@ class BearerAuth:
         await self.app(scope, receive, send)
 
 
-def build_app(cfg, deps) -> Starlette:
+def build_app(cfg, deps, store=None) -> Starlette:
     manager = StreamableHTTPSessionManager(
-        app=build_server(cfg, deps), event_store=None, json_response=True, stateless=True
+        app=build_server(cfg, deps, store), event_store=None, json_response=True, stateless=True
     )
 
     async def handle(scope, receive, send):
@@ -124,4 +207,6 @@ class _Deps:
 if __name__ == "__main__":
     _cfg = load_config(os.environ)
     _deps = _Deps(httpx.AsyncClient(timeout=_cfg.ask_timeout_s), Ledger(_cfg.ledger_path), GpuLease(_cfg.lease_path))
-    uvicorn.run(build_app(_cfg, _deps), host=_cfg.host, port=_cfg.port)
+    _store = JobStore(_cfg, real_deps(_cfg))
+    _store.reconcile()
+    uvicorn.run(build_app(_cfg, _deps, _store), host=_cfg.host, port=_cfg.port)
