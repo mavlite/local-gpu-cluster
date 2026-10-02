@@ -139,17 +139,25 @@ policy_out: ACCEPT
 
 [RULES]
 IN  ACCEPT -p tcp -dport 22        # the only way in
-OUT DROP -dest 10.78.0.254         # the PVE host itself — no host services
-OUT DROP -dest 192.168.6.0/24      # the LAN: host + every inference LXC
-OUT DROP -dest 10.77.0.0/24        # the sibling SDN vnet
-OUT DROP -dest 10.60.0.0/16        # production fleet VPN, same reason as VM 170
+OUT DROP -dest 10.0.0.0/8          # this vnet, sibling 10.77.0.0/24, fleet VPN 10.60.0.0/16, PVE host 10.78.0.254
+OUT DROP -dest 172.16.0.0/12       # the VCF lab management network
+OUT DROP -dest 192.168.0.0/16      # the LAN 192.168.6.0/24 (host + every inference LXC) and beside it
+OUT DROP -dest 100.64.0.0/10       # CGNAT / carrier space
 OUT DROP -dest 169.254.0.0/16      # link-local and cloud metadata
                                    # everything else → internet
 ```
 
 Rule order matters: the DROPs precede the implicit accept.
 
-**Why the gateway is blocked, and what it costs.** `10.78.0.254` is the PVE host. Denying it
+**Why all private space, not named networks.** The first policy listed the PVE host, the LAN,
+the sibling vnet and the fleet VPN by name. It therefore permitted `172.16.0.0/12` — the VCF lab
+management network, created after the policy was written — so an external tester could reach
+the ESXi hosts and the VCF Installer. Verified open from inside the guest on 2026-09-25 and
+closed the same day by denying all of RFC1918 plus CGNAT. A list of networks to deny goes stale
+every time a network is added; denying the whole private range does not.
+
+**Why the gateway is blocked, and what it costs.** `10.78.0.254` is the PVE host (inside the
+`10.0.0.0/8` deny). Denying it
 stops the guest reaching host services while still allowing it to *route through* the host —
 forwarded traffic is addressed to the internet, not to the gateway. The cost is that the guest
 cannot use the host as a DNS resolver, so cloud-init sets public resolvers. That is deliberate.
