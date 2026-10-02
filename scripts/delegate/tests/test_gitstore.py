@@ -40,11 +40,6 @@ def test_resolve_ref_returns_sha_and_passes_worktree(tmp_path):
     assert gitstore.resolve_ref(str(r), "WORKTREE") == "WORKTREE"
 
 def _exp(tmp_path, r, ref="HEAD"):
-    work, gd = tmp_path/"job"/"work", tmp_path/"job"/"gitdir"
-    gitstore.export(str(r), ref, str(work), str(gd))
-    return work, gd
-
-def _exp(tmp_path, r, ref="HEAD"):
     work, gd = tmp_path / "job" / "work", tmp_path / "job" / "gitdir"
     gitstore.export(str(r), ref, str(work), str(gd))
     return work, gd
@@ -118,18 +113,38 @@ def test_planted_hook_is_not_executed(tmp_path):
     gitstore.commit_work(str(gd), str(work))
     assert not sentinel.exists()
 
+def _filter_cmd(sentinel):
+    code = ("import sys; open(r'%s','w').close(); sys.stdout.write(sys.stdin.read())"
+            % os.path.abspath(str(sentinel)))
+    return 'python -c "%s"' % code
+
+def _dirty_with_evil_attrs(work):
+    (work/".gitattributes").write_text("* filter=evil\n")
+    (work/"a.txt").write_text("changed\n")
+
+def test_filter_in_trusted_git_dir_config_fires_positive_control(tmp_path):
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
+    sentinel = tmp_path/"control-sentinel"
+    subprocess.run(["git", f"--git-dir={gd}", "config", "filter.evil.clean",
+                    _filter_cmd(sentinel)], check=True, capture_output=True)
+    _dirty_with_evil_attrs(work)
+    gitstore.commit_work(str(gd), str(work))
+    assert sentinel.exists()   # proves the probe detects filter execution
+
 def test_agent_planted_filter_driver_is_not_executed(tmp_path):
     r = _repo(tmp_path)
     work, gd = _exp(tmp_path, r)
-    sentinel = tmp_path/"filter-ran"
-    (work/".gitattributes").write_text("* filter=evil\n")
+    sentinel = tmp_path/"defense-sentinel"
+    base = gitstore.base_sha(str(gd))
+    _dirty_with_evil_attrs(work)
+    cfg = '[filter "evil"]\n    clean = ' + _filter_cmd(sentinel).replace("\\", "\\\\").replace('"', '\\"') + "\n"
     (work/".git").mkdir()
-    cmd = f"python -c \"open(r'{sentinel.as_posix()}', 'w').write('x')\""
-    cmd = cmd.replace("\"", "\\\"")
-    (work/".git"/"config").write_text('[filter "evil"]\n    clean = "' + cmd + '"\n')
-    (work/"w.txt").write_text("w\n")
+    (work/".git"/"config").write_text(cfg)
+    (work/".gitconfig").write_text(cfg)
     gitstore.commit_work(str(gd), str(work))
     assert not sentinel.exists()
+    assert "changed" in gitstore.extract_patch(str(gd), base, str(work))  # commit really happened
 
 def test_validate_rejects_sibling_prefix(tmp_path):
     r = _repo(tmp_path)
