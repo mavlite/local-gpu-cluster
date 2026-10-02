@@ -88,3 +88,31 @@ def test_commit_work_with_no_changes_keeps_head(tmp_path):
     gitstore.commit_work(str(dest))
     assert gitstore.base_sha(str(dest)) == base
     assert gitstore.extract_patch(str(dest), base) == ""
+
+def test_export_keeps_export_ignored_files(tmp_path):
+    r = _repo(tmp_path); dest = tmp_path/"job"
+    (r/".gitattributes").write_text("secret.txt export-ignore\n")
+    (r/"secret.txt").write_text("keep me\n")
+    _run("git","add","-A", cwd=r); _run("git","commit","-qm","attrs", cwd=r)
+    gitstore.export(str(r), "HEAD", str(dest))
+    assert (dest/"secret.txt").read_text() == "keep me\n"
+
+def test_planted_hook_is_not_executed(tmp_path):
+    r = _repo(tmp_path); dest = tmp_path/"job"
+    gitstore.export(str(r), "HEAD", str(dest))
+    sentinel = tmp_path/"hook-ran"
+    for name in ("pre-commit", "post-commit"):
+        h = dest/".git"/"hooks"/name
+        h.parent.mkdir(exist_ok=True)
+        h.write_text(f"#!/bin/sh\necho x > '{sentinel.as_posix()}'\n")
+        h.chmod(0o755)
+    (dest/"w.txt").write_text("w\n")
+    gitstore.commit_work(str(dest))
+    assert not sentinel.exists()
+
+def test_validate_is_case_insensitive_on_windows_and_rejects_sibling_prefix(tmp_path):
+    r = _repo(tmp_path)
+    sib = tmp_path/"repo2"; sib.mkdir(); (sib/".git").mkdir()
+    cfg = _cfg(r)
+    with pytest.raises(gitstore.RepoNotAllowed):
+        gitstore.validate_repo(cfg, str(sib))
