@@ -108,6 +108,64 @@ $ok = Wait-Gate -Name "vSAN reports 3 members on every host" -TimeoutSeconds $cf
 }
 if (-not $ok) { Write-Fail "vSAN did not form. Check for a partition before continuing."; exit 1 }
 
+# --- 1a. exit maintenance mode -------------------------------------------------
+# Stop-VCFLab.ps1 puts every host into maintenance mode before powering it off,
+# and ESXi PERSISTS maintenance mode across a reboot. Nothing used to clear it
+# on the way back up, so a cold start met hosts that were powered on, healthy,
+# vSAN-complete -- and refusing every single power-on with
+#   "The operation is not allowed in the current state."
+# Observed 2026-10-02: all three hosts in Maintenance, zero VMs running, every
+# VCF appliance unreachable. The old failure signature was a full-length
+# vCenter gate timeout, because step 2 discards Start-LabVM's result, so the
+# refused power-on was never reported.
+#
+# Deliberately AFTER the vSAN gate: taking hosts out of maintenance while vSAN
+# is still partitioned would let VMs power on against a datastore that is not
+# actually healthy. Maintenance mode does not stop a host participating in the
+# vSAN cluster, so the gate above passes either way.
+Write-Step "1a. Exit maintenance mode"
+$stuck = @()
+foreach ($h in $cfg.Hosts) {
+    $c = $null
+    try {
+        $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
+        $vmh = Get-VMHost -Server $c
+        if ($vmh.ConnectionState -ne 'Maintenance') {
+            Write-Info "$($h.Short) : not in maintenance mode"
+        } elseif ($WhatIf) {
+            Write-Info "$($h.Short) : WHATIF would exit maintenance mode"
+        } else {
+            Set-VMHost -VMHost $vmh -State Connected -Confirm:$false -ErrorAction Stop | Out-Null
+
+            # Read it back. "The call returned" is not "the host left
+            # maintenance mode", and every later tier depends on this having
+            # actually happened -- a silent no-op here reappears as an
+            # inexplicable power-on failure several steps downstream.
+            $left = $false
+            for ($i = 0; $i -lt 6; $i++) {
+                if ((Get-VMHost -Server $c).ConnectionState -ne 'Maintenance') { $left = $true; break }
+                Start-Sleep -Seconds 5
+            }
+            if ($left) { Write-Ok "$($h.Short) : exited maintenance mode" }
+            else {
+                Write-Fail "$($h.Short) : still in maintenance mode after the exit was accepted"
+                $stuck += $h.Short
+            }
+        }
+    } catch {
+        Write-Fail "$($h.Short) : could not exit maintenance mode -- $(($_.Exception.Message -replace '\s+', ' '))"
+        $stuck += $h.Short
+    } finally {
+        if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+    }
+}
+if ($stuck.Count -gt 0) {
+    Write-Fail "Still in maintenance mode: $($stuck -join ', ')"
+    Write-Fail "No VM can power on while its host is in maintenance mode, so stopping here"
+    Write-Fail "rather than timing out on every gate below."
+    exit 1
+}
+
 # --- 2. vCenter ---------------------------------------------------------------
 Write-Step "2. vCenter"
 $vcHost = $null

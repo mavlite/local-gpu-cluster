@@ -50,6 +50,7 @@ $cfgText = [regex]::Replace($cfgText,
     '${1}5')
 Set-Content -Path $cfgPath -Value $cfgText -Encoding utf8
 
+
 $ScriptDir = $sandbox
 
 # ------------------------------------------------------------------ stubs ---
@@ -61,6 +62,26 @@ $ScriptDir = $sandbox
 # exactly as misleading as it sounds.
 $global:FakeVMs = @()
 $global:Log     = New-Object System.Collections.Generic.List[string]
+
+# Per-host connection state, keyed the way the scripts address hosts: by IP,
+# because both scripts connect with `Connect-VIServer -Server $h.Ip`.
+#
+# This exists because the previous Get-VMHost stub hard-coded
+# ConnectionState='Connected' and the Set-VMHost stub logged the bare string
+# "MAINTENANCE" whatever state it was asked for. Entering and exiting were
+# therefore indistinguishable to every test, and a cold start that never left
+# maintenance mode was invisible to the whole suite.
+$global:HostState     = @{}
+$global:HostIpByFqdn  = @{}
+
+# Populated HERE, after the declarations above -- doing it up in the sandbox
+# section ran before `$global:HostIpByFqdn = @{}` and was silently wiped by it.
+# The fakes key host state by IP (that is how the scripts connect) while a VM
+# names its host by FQDN, so the mapping is read from the config rather than
+# duplicated, and a config change cannot quietly decouple the two.
+$sandboxCfg = Import-PowerShellDataFile -Path $cfgPath
+foreach ($h in $sandboxCfg.Hosts) { $global:HostIpByFqdn[[string]$h.Name] = [string]$h.Ip }
+$global:SandboxHostIps = @($sandboxCfg.Hosts | ForEach-Object { [string]$_.Ip })
 function Note { param($m) $global:Log.Add($m) }
 
 function New-FakeVM {
@@ -89,8 +110,12 @@ function Connect-VIServer {
 }
 function Disconnect-VIServer { param([Parameter(ValueFromRemainingArguments)]$a) }
 function Get-VMHost {
-    param($VM,[string]$Name,[Parameter(ValueFromRemainingArguments)]$a)
-    [pscustomobject]@{ Name=$(if($Name){$Name}else{'stub-host.lab'}); ConnectionState='Connected' }
+    param($VM,[string]$Name,$Server,[Parameter(ValueFromRemainingArguments)]$a)
+    $key = if ($Server -and $Server.Name) { [string]$Server.Name }
+           elseif ($Name)                 { [string]$Name }
+           else                           { 'stub-host.lab' }
+    $state = if ($global:HostState.ContainsKey($key)) { $global:HostState[$key] } else { 'Connected' }
+    [pscustomobject]@{ Name = $key; ConnectionState = $state }
 }
 function Get-VMHostService { param([Parameter(ValueFromRemainingArguments)]$a)
     ,@([pscustomobject]@{ Key='vpxa'; Running=$true; Policy='on' }) }
@@ -110,7 +135,20 @@ function Get-VM {
     if ($Name -match '\*') { return @($global:FakeVMs | Where-Object { $_.Name -like $Name }) }
     @($global:FakeVMs | Where-Object { $_.Name -eq $Name })
 }
-function Start-VM { param($VM,[switch]$Confirm,[string]$ErrorAction)
+function Start-VM { param($VM,$Server,[switch]$Confirm,[string]$ErrorAction)
+    # Faithful to ESXi: a host in maintenance mode refuses to power on a VM. A
+    # stub that happily started VMs anyway would let a fix that exits
+    # maintenance mode too LATE still pass, which is the ordering mistake most
+    # worth catching here.
+    $hv = $null
+    try { $hv = [string]$VM.VMHost.Name } catch { }
+    if ($hv) {
+        $ip = if ($global:HostIpByFqdn.ContainsKey($hv)) { $global:HostIpByFqdn[$hv] } else { $hv }
+        if ($global:HostState.ContainsKey($ip) -and $global:HostState[$ip] -eq 'Maintenance') {
+            Note "REFUSED-MAINT $($VM.Name)"
+            throw "The operation is not allowed in the current state. The host is in maintenance mode."
+        }
+    }
     Note "START $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOn' } }
 function Stop-VM { param($VM,[switch]$Confirm,[string]$ErrorAction)
     Note "HARDSTOP $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOff' } }
@@ -128,7 +166,21 @@ function Get-EsxCli {
 function Get-Cluster { param([Parameter(ValueFromRemainingArguments)]$a)
     [pscustomobject]@{ Name='lab01-cluster-001'; HAEnabled=$true; DrsAutomationLevel='FullyAutomated' } }
 function Set-Cluster { param([Parameter(ValueFromRemainingArguments)]$a) Note "Set-Cluster" }
-function Set-VMHost  { param([Parameter(ValueFromRemainingArguments)]$a) Note "MAINTENANCE" }
+function Set-VMHost {
+    # No [Parameter()] attribute anywhere in this param block, deliberately:
+    # a single [Parameter(...)] makes the function ADVANCED, PowerShell then
+    # supplies -ErrorAction as a common parameter, and the explicit
+    # [string]$ErrorAction below collides with it --
+    #   "A parameter with the name 'ErrorAction' was defined multiple times"
+    # which surfaced as "could not exit maintenance mode" and, in the shutdown
+    # path, as hosts never powering off at all.
+    param($VMHost,[string]$State,$VsanDataMigrationMode,[switch]$Confirm,[string]$ErrorAction)
+    $key = if ($VMHost -and $VMHost.Name) { [string]$VMHost.Name } else { 'stub-host.lab' }
+    if ($State) { $global:HostState[$key] = $State }
+    # Record the TARGET state, so entering and exiting maintenance are
+    # distinguishable in the log.
+    Note "SETHOSTSTATE $key $State"
+}
 function Stop-VMHost { param([Parameter(ValueFromRemainingArguments)]$a) Note "HOSTOFF" }
 
 # make gates resolve instantly
@@ -177,6 +229,9 @@ function Reset-Fleet {
         (New-FakeVM 'devvm03'        $ForeignPower 8 '172.16.72.10')
         (New-FakeVM 'truenas-backup' $ForeignPower 2 '172.16.10.200')
     )
+    # Hosts start out of maintenance unless a test says otherwise, so the
+    # existing cases keep their previous meaning.
+    $global:HostState = @{}
     $global:Log.Clear()
 }
 
@@ -236,6 +291,28 @@ try { & (Join-Path $ScriptDir 'Stop-VCFLab.ps1') -IncludeHosts -ErrorAction Stop
 catch { Write-Host "   SCRIPT ERROR: $($_.Exception.Message)" -ForegroundColor Red; $script:fail++ }
 Check "still never touches a powered-off foreign VM" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
 Check "hosts powered off when the way is clear" ($global:Log -contains 'HOSTOFF')
+
+# --- cold start after a -IncludeHosts shutdown: hosts are STILL in maintenance -
+# Stop-VCFLab enters maintenance mode before powering hosts off, and ESXi
+# PERSISTS maintenance mode across a reboot. So the state a cold start actually
+# meets is: hosts up, in maintenance, no VMs running. Observed live on
+# 2026-10-02 -- all three hosts Maintenance, 0 powered-on VMs, every VCF
+# appliance unreachable.
+Write-Host "`
+########## Start-VCFLab.ps1 (hosts left in maintenance by a prior shutdown) ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+foreach ($ip in $global:SandboxHostIps) { $global:HostState[$ip] = 'Maintenance' }
+try { & (Join-Path $ScriptDir 'Start-VCFLab.ps1') -ErrorAction Stop *>&1 | Select-Object -Last 6 | ForEach-Object { "   $_" } | Write-Host }
+catch { Write-Host "   SCRIPT ERROR: $($_.Exception.Message)" -ForegroundColor Red }
+$stillMaint = @($global:SandboxHostIps | Where-Object { $global:HostState[$_] -eq 'Maintenance' })
+$exited     = @($global:Log | Where-Object { $_ -match '^SETHOSTSTATE \S+ Connected$' })
+Check "cold start takes every host OUT of maintenance (still in: $($stillMaint.Count))" ($stillMaint.Count -eq 0)
+Check "cold start records an explicit exit per host (got $($exited.Count))" ($exited.Count -ge $global:SandboxHostIps.Count)
+# The consequence, not just the call: nothing can start while a host is in
+# maintenance, so vCenter coming up is the proof the exit happened in time.
+Check "vcsa powers on despite the prior maintenance state" (@($global:Log | Where-Object { $_ -eq 'START vcsa' }).Count -gt 0)
+Check "no power-on was refused for maintenance mode" (@($global:Log | Where-Object { $_ -like 'REFUSED-MAINT *' }).Count -eq 0)
+Check "maintenance exit still touches no non-VCF VM" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
 
 # --- 7. vCenter cannot power on: host fallback + vpxa repair -----------------
 Write-Host "`n########## Start-VCFLab.ps1 (vCenter power-on wedged) ##########" -ForegroundColor Magenta
