@@ -27,7 +27,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 # ---- REST contract (confirm against docs/memory-vault-openapi.json, Task 3) ----
@@ -216,15 +216,19 @@ _session_manager = StreamableHTTPSessionManager(
 )
 
 
-async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-    # Per-request memory space from ?space= on the /mcp URL; the explicit `space`
-    # tool argument still backstops it.
-    qs = parse_qs(scope.get("query_string", b"").decode())
-    token = _space_var.set((qs.get("space") or [DEFAULT_SPACE])[0] or DEFAULT_SPACE)
-    try:
-        await _session_manager.handle_request(scope, receive, send)
-    finally:
-        _space_var.reset(token)
+class _McpEndpoint:
+    """ASGI app for a Route. A class instance, not a function, so Starlette
+    passes it the raw ASGI call instead of wrapping it as request/response."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Per-request memory space from ?space= on the /mcp URL; the explicit `space`
+        # tool argument still backstops it.
+        qs = parse_qs(scope.get("query_string", b"").decode())
+        token = _space_var.set((qs.get("space") or [DEFAULT_SPACE])[0] or DEFAULT_SPACE)
+        try:
+            await _session_manager.handle_request(scope, receive, send)
+        finally:
+            _space_var.reset(token)
 
 
 @contextlib.asynccontextmanager
@@ -233,7 +237,8 @@ async def _lifespan(_app: Starlette):
         yield
 
 
-app = Starlette(routes=[Mount("/mcp", app=handle_mcp)], lifespan=_lifespan)
+# Route, not Mount: a Mount only matches /mcp/..., so a bare /mcp 307s to /mcp/.
+app = Starlette(routes=[Route("/mcp", endpoint=_McpEndpoint())], lifespan=_lifespan)
 
 
 if __name__ == "__main__":

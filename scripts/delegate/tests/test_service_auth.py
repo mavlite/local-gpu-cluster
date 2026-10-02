@@ -30,6 +30,16 @@ def test_correct_bearer_passes_auth_gate():
     assert r.status_code != 401
 
 
+def test_bare_mcp_path_is_served_without_redirect():
+    # Clients are configured with http://.../mcp; a Mount would 307 them to /mcp/.
+    h = {"Authorization": "Bearer secret", "Accept": "application/json, text/event-stream"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    with TestClient(build_app(CFG, Deps()), follow_redirects=False) as client:
+        r = client.post("/mcp", json=body, headers=h)
+    assert r.status_code == 200
+    assert any(t["name"] == "ask_local" for t in r.json()["result"]["tools"])
+
+
 class BusyLease:
     def acquire(self, timeout_s=0):
         return False
@@ -49,6 +59,6 @@ def test_ask_local_reports_gpu_busy_when_lease_held():
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "ask_local", "arguments": {"prompt": "x"}}}
     with TestClient(build_app(CFG, BusyDeps())) as client:
-        r = client.post("/mcp/", json=body, headers=h)
+        r = client.post("/mcp", json=body, headers=h)
     assert r.status_code == 200
     assert "GPU busy" in r.json()["result"]["content"][0]["text"]

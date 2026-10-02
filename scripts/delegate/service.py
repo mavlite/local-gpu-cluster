@@ -1,7 +1,7 @@
 """local-delegate MCP service: localhost Streamable-HTTP server with bearer auth.
 
 Wiring mirrors scripts/files/memory-vault-bridge.py (low-level Server +
-StreamableHTTPSessionManager, stateless, mounted at /mcp).
+StreamableHTTPSessionManager, stateless), served at exactly /mcp.
 """
 import contextlib
 import hmac
@@ -16,7 +16,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Mount
+from starlette.routing import Route
 
 from scripts.delegate.config import load_config
 from scripts.delegate.gitstore import rmtree_force
@@ -204,20 +204,29 @@ class BearerAuth:
         await self.app(scope, receive, send)
 
 
+class _McpEndpoint:
+    """ASGI app for a Route. A class instance, not a function, so Starlette
+    passes it the raw ASGI call instead of wrapping it as request/response."""
+
+    def __init__(self, manager: StreamableHTTPSessionManager):
+        self._manager = manager
+
+    async def __call__(self, scope, receive, send):
+        await self._manager.handle_request(scope, receive, send)
+
+
 def build_app(cfg, deps, store=None) -> Starlette:
     manager = StreamableHTTPSessionManager(
         app=build_server(cfg, deps, store), event_store=None, json_response=True, stateless=True
     )
-
-    async def handle(scope, receive, send):
-        await manager.handle_request(scope, receive, send)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         async with manager.run():
             yield
 
-    app = Starlette(routes=[Mount("/mcp", app=handle)], lifespan=lifespan)
+    # Route, not Mount: a Mount only matches /mcp/..., so a bare /mcp 307s to /mcp/.
+    app = Starlette(routes=[Route("/mcp", endpoint=_McpEndpoint(manager))], lifespan=lifespan)
     app.add_middleware(BearerAuth, token=cfg.bearer_token)
     return app
 
