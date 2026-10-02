@@ -39,80 +39,100 @@ def test_resolve_ref_returns_sha_and_passes_worktree(tmp_path):
     assert len(sha) == 40
     assert gitstore.resolve_ref(str(r), "WORKTREE") == "WORKTREE"
 
+def _exp(tmp_path, r, ref="HEAD"):
+    work, gd = tmp_path/"job"/"work", tmp_path/"job"/"gitdir"
+    gitstore.export(str(r), ref, str(work), str(gd))
+    return work, gd
+
+def _exp(tmp_path, r, ref="HEAD"):
+    work, gd = tmp_path / "job" / "work", tmp_path / "job" / "gitdir"
+    gitstore.export(str(r), ref, str(work), str(gd))
+    return work, gd
+
 def test_export_head_is_independent_git(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
-    sha = gitstore.resolve_ref(str(r), "HEAD")
-    gitstore.export(str(r), sha, str(dest))
-    assert (dest/"a.txt").read_text() == "base\n"
-    # dest/.git is a real dir, not a pointer into repo/.git
-    assert (dest/".git").is_dir()
-    gitdir = subprocess.run(["git","-C",str(dest),"rev-parse","--git-dir"],
-                            capture_output=True,text=True).stdout.strip()
-    assert os.path.realpath(os.path.join(str(dest),gitdir)) != os.path.realpath(str(r/".git"))
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r, gitstore.resolve_ref(str(r), "HEAD"))
+    assert (work/"a.txt").read_text() == "base\n"
+    assert not (work/".git").exists()
+    assert os.path.realpath(gd) != os.path.realpath(str(r/".git"))
+    assert (gd/"HEAD").is_file()
+    assert len(gitstore.base_sha(str(gd))) == 40
 
 def test_worktree_snapshot_includes_uncommitted_and_untracked(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
+    r = _repo(tmp_path)
     (r/"a.txt").write_text("edited\n")        # tracked, uncommitted
     (r/"new.txt").write_text("fresh\n")       # untracked
-    gitstore.export(str(r), "WORKTREE", str(dest))
-    assert (dest/"a.txt").read_text() == "edited\n"
-    assert (dest/"new.txt").read_text() == "fresh\n"
+    work, _ = _exp(tmp_path, r, "WORKTREE")
+    assert (work/"a.txt").read_text() == "edited\n"
+    assert (work/"new.txt").read_text() == "fresh\n"
 
 def test_worktree_does_not_touch_source_index(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
+    r = _repo(tmp_path)
     (r/"new.txt").write_text("fresh\n")
-    gitstore.export(str(r), "WORKTREE", str(dest))
+    _exp(tmp_path, r, "WORKTREE")
     status = subprocess.run(["git","-C",str(r),"status","--porcelain"],
                             capture_output=True,text=True).stdout
     assert "?? new.txt" in status
 
 def test_worktree_on_clean_tree_does_not_crash(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
-    gitstore.export(str(r), "WORKTREE", str(dest))
-    assert (dest/"a.txt").read_text() == "base\n"
+    r = _repo(tmp_path)
+    work, _ = _exp(tmp_path, r, "WORKTREE")
+    assert (work/"a.txt").read_text() == "base\n"
 
 def test_commit_work_then_extract_patch_shows_new_file(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
-    gitstore.export(str(r), "HEAD", str(dest))
-    base = gitstore.base_sha(str(dest))
-    (dest/"added.txt").write_text("hello\n")
-    gitstore.commit_work(str(dest))
-    patch = gitstore.extract_patch(str(dest), base)
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
+    base = gitstore.base_sha(str(gd))
+    (work/"added.txt").write_text("hello\n")
+    gitstore.commit_work(str(gd), str(work))
+    patch = gitstore.extract_patch(str(gd), base, str(work))
     assert "added.txt" in patch and "+hello" in patch
-    assert gitstore.base_sha(str(dest)) != base
+    assert gitstore.base_sha(str(gd)) != base
 
 def test_commit_work_with_no_changes_keeps_head(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
-    gitstore.export(str(r), "HEAD", str(dest))
-    base = gitstore.base_sha(str(dest))
-    gitstore.commit_work(str(dest))
-    assert gitstore.base_sha(str(dest)) == base
-    assert gitstore.extract_patch(str(dest), base) == ""
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
+    base = gitstore.base_sha(str(gd))
+    gitstore.commit_work(str(gd), str(work))
+    assert gitstore.base_sha(str(gd)) == base
+    assert gitstore.extract_patch(str(gd), base, str(work)) == ""
 
 def test_export_keeps_export_ignored_files(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
+    r = _repo(tmp_path)
     (r/".gitattributes").write_text("secret.txt export-ignore\n")
     (r/"secret.txt").write_text("keep me\n")
     _run("git","add","-A", cwd=r); _run("git","commit","-qm","attrs", cwd=r)
-    gitstore.export(str(r), "HEAD", str(dest))
-    assert (dest/"secret.txt").read_text() == "keep me\n"
+    work, _ = _exp(tmp_path, r)
+    assert (work/"secret.txt").read_text() == "keep me\n"
 
 def test_planted_hook_is_not_executed(tmp_path):
-    r = _repo(tmp_path); dest = tmp_path/"job"
-    gitstore.export(str(r), "HEAD", str(dest))
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
     sentinel = tmp_path/"hook-ran"
     for name in ("pre-commit", "post-commit"):
-        h = dest/".git"/"hooks"/name
+        h = gd/"hooks"/name
         h.parent.mkdir(exist_ok=True)
         h.write_text(f"#!/bin/sh\necho x > '{sentinel.as_posix()}'\n")
         h.chmod(0o755)
-    (dest/"w.txt").write_text("w\n")
-    gitstore.commit_work(str(dest))
+    (work/"w.txt").write_text("w\n")
+    gitstore.commit_work(str(gd), str(work))
     assert not sentinel.exists()
 
-def test_validate_is_case_insensitive_on_windows_and_rejects_sibling_prefix(tmp_path):
+def test_agent_planted_filter_driver_is_not_executed(tmp_path):
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
+    sentinel = tmp_path/"filter-ran"
+    (work/".gitattributes").write_text("* filter=evil\n")
+    (work/".git").mkdir()
+    cmd = f"python -c \"open(r'{sentinel.as_posix()}', 'w').write('x')\""
+    cmd = cmd.replace("\"", "\\\"")
+    (work/".git"/"config").write_text('[filter "evil"]\n    clean = "' + cmd + '"\n')
+    (work/"w.txt").write_text("w\n")
+    gitstore.commit_work(str(gd), str(work))
+    assert not sentinel.exists()
+
+def test_validate_rejects_sibling_prefix(tmp_path):
     r = _repo(tmp_path)
     sib = tmp_path/"repo2"; sib.mkdir(); (sib/".git").mkdir()
-    cfg = _cfg(r)
     with pytest.raises(gitstore.RepoNotAllowed):
-        gitstore.validate_repo(cfg, str(sib))
+        gitstore.validate_repo(_cfg(r), str(sib))

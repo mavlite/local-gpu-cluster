@@ -1,4 +1,6 @@
+import atexit
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -44,13 +46,15 @@ def resolve_ref(repo: str, base_ref: str) -> str:
 
 
 _EMPTY_HOOKS = tempfile.mkdtemp(prefix="delegate-nohooks-")
+atexit.register(shutil.rmtree, _EMPTY_HOOKS, ignore_errors=True)
 
 
-def _dgit(dest, *args):
-    """Run git in an agent-writable dest with hooks/config/fsmonitor neutralized."""
+def _dgit(git_dir, work_dir, *args):
+    """Run git with metadata in git_dir (never inside the agent-writable work_dir),
+    and hooks/fsmonitor/signing/global config neutralized as defense in depth."""
     env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
     cmd = ["git", "-c", f"core.hooksPath={_EMPTY_HOOKS}", "-c", "core.fsmonitor=false",
-           "-c", "commit.gpgsign=false", "-C", dest, *args]
+           "-c", "commit.gpgsign=false", f"--git-dir={git_dir}", f"--work-tree={work_dir}", *args]
     return subprocess.run(cmd, check=True, capture_output=True, text=True, env=env).stdout
 
 
@@ -67,31 +71,35 @@ def _populate(repo: str, ref: str, dest: str) -> None:
         _git(repo, f"--work-tree={os.path.abspath(dest)}", "checkout-index", "-a", "-f", env=env)
 
 
-def _init_fresh_git(dest: str) -> None:
-    _dgit(dest, "init", "-q")
-    _dgit(dest, "config", "user.email", "delegate@local")
-    _dgit(dest, "config", "user.name", "delegate")
-    _dgit(dest, "add", "-A")
-    _dgit(dest, "commit", "-q", "--no-verify", "-m", "base")
+def _init_fresh_git(git_dir: str, work_dir: str) -> None:
+    _dgit(git_dir, work_dir, "init", "-q")
+    _dgit(git_dir, work_dir, "config", "core.bare", "false")
+    _dgit(git_dir, work_dir, "config", "user.email", "delegate@local")
+    _dgit(git_dir, work_dir, "config", "user.name", "delegate")
+    _dgit(git_dir, work_dir, "add", "-A")
+    _dgit(git_dir, work_dir, "commit", "-q", "--no-verify", "-m", "base")
 
 
-def export(repo: str, ref: str, dest: str) -> None:
-    os.makedirs(dest, exist_ok=True)
-    _populate(repo, ref, dest)
-    _init_fresh_git(dest)
+def export(repo: str, ref: str, work_dir: str, git_dir: str) -> None:
+    """work_dir gets tracked files only (no .git); git metadata lives in git_dir."""
+    work_dir, git_dir = os.path.abspath(work_dir), os.path.abspath(git_dir)
+    os.makedirs(work_dir, exist_ok=True)
+    os.makedirs(git_dir, exist_ok=True)
+    _populate(repo, ref, work_dir)
+    _init_fresh_git(git_dir, work_dir)
 
 
-def base_sha(dest: str) -> str:
-    return _dgit(dest, "rev-parse", "HEAD").strip()
+def base_sha(git_dir: str) -> str:
+    return _dgit(git_dir, os.devnull, "rev-parse", "HEAD").strip()
 
 
-def commit_work(dest: str) -> None:
+def commit_work(git_dir: str, work_dir: str) -> None:
     """Commit the agent's edits atop the base commit; no-op if nothing changed."""
-    if not _dgit(dest, "status", "--porcelain").strip():
+    if not _dgit(git_dir, work_dir, "status", "--porcelain").strip():
         return
-    _dgit(dest, "add", "-A")
-    _dgit(dest, "commit", "-q", "--no-verify", "-m", "work")
+    _dgit(git_dir, work_dir, "add", "-A")
+    _dgit(git_dir, work_dir, "commit", "-q", "--no-verify", "-m", "work")
 
 
-def extract_patch(dest: str, base: str) -> str:
-    return _dgit(dest, "diff", "--no-ext-diff", "--no-textconv", f"{base}..HEAD")
+def extract_patch(git_dir: str, base: str, work_dir: str) -> str:
+    return _dgit(git_dir, work_dir, "diff", "--no-ext-diff", "--no-textconv", f"{base}..HEAD")
