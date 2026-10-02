@@ -158,3 +158,18 @@ the `<id>.json` state file and the measurement row in the ledger remain.
 | Diff is empty | Task did not make changes; check the summary and error fields in `result()` |
 | Result gate rejects diff | Read `gate_reasons`; common: protected paths, binaries, symlinks; fix and re-queue |
 | Checks failed | Task output does not match expected; review `result.checks` and re-run manually to compare |
+
+## Measuring the Phase-1 A/B experiment
+
+The go/no-go is whether delegating saves Claude tokens. It accrues over real use:
+
+- For the first ~30 eligible tasks, flip a coin (see the `delegate-review` skill):
+  - **Heads** — delegate: run the task, then `record_review(job_id, verdict, claude_tokens, ...)` with the Claude tokens the task cost you (from the transcript).
+  - **Tails** — do it yourself, then `record_direct(task_type, claude_tokens, note)` with what it cost you.
+- Read the running tally any time:
+
+  ```
+  python -m scripts.delegate.cli report
+  ```
+
+  It prints mean Claude tokens/task for each arm, the savings %, and whether the >=20% gate is met. Keep is only if delegation is >=20% cheaper on some clear task band; otherwise stop at Phase 1.
