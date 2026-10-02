@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# Lock files (e.g. local-delegate GPU lease, test lease locks). Never commit live locks.
+*.lock
+
 # Local-only operator notes — contain session state / customer data, not for publishing
 SESSION_HANDOFF.md
 weekly_customer_adoption_review.html

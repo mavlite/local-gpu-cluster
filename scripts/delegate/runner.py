@@ -83,6 +83,8 @@ def run_opencode(cfg, dest, prompt, *, spawn=subprocess.Popen, timeout_s=None) -
     finally:
         if timer:
             timer.cancel()
+        if proc.poll() is None:  # an exception left it running: don't leak a GPU holder
+            _kill_tree(proc.pid)
     err_thread.join(timeout=5)
     stderr = "".join(err_chunks)
     code = proc.returncode

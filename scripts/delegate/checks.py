@@ -16,9 +16,13 @@ class CheckResult:
     output: str
 
 
-_SCRUB_PREFIXES = ("LOCAL_DELEGATE_",)
-_SCRUB_EXACT = ("GH_TOKEN", "GITHUB_TOKEN")
-_SCRUB_CONTAINS = ("SSH", "TOKEN", "SECRET", "PASSWORD", "API_KEY")
+# Allow-list, not deny-list: only these names reach agent-authored conftest.py/checks.
+# A denylist leaks anything it did not think to name (e.g. AWS_ACCESS_KEY_ID,
+# GOOGLE_APPLICATION_CREDENTIALS, which carry no TOKEN/SECRET/KEY substring).
+_ENV_ALLOW = frozenset({
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC",
+    "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS",
+})
 _DEFAULT_TIMEOUT = 300
 
 
@@ -30,13 +34,7 @@ def load_allowlist(path: str) -> list[list[str]]:
 
 
 def _scrubbed_env() -> dict:
-    out = {}
-    for k, v in os.environ.items():
-        if k.startswith(_SCRUB_PREFIXES) or k in _SCRUB_EXACT:
-            continue
-        if any(s in k.upper() for s in _SCRUB_CONTAINS):
-            continue
-        out[k] = v
+    out = {k: v for k, v in os.environ.items() if k.upper() in _ENV_ALLOW}
     out["PYTHONDONTWRITEBYTECODE"] = "1"
     return out
 

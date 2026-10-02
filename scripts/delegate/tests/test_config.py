@@ -21,3 +21,18 @@ def test_allowed_roots_parsed_from_pathsep_list():
 def test_lease_path_defaults_to_gpu_lock():
     c = load_config(BASE)
     assert c.lease_path.endswith("gpu.lock")
+
+
+def test_timeout_and_size_defaults():
+    c = load_config(BASE)
+    assert c.job_timeout_s == 1800 and c.ask_timeout_s == 600
+    assert c.ask_max_input_bytes == 400_000
+
+
+def test_timeout_and_size_env_overrides_take_effect():
+    c = load_config({**BASE,
+                     "LOCAL_DELEGATE_JOB_TIMEOUT_S": "90",
+                     "LOCAL_DELEGATE_ASK_TIMEOUT_S": "45",
+                     "LOCAL_DELEGATE_ASK_MAX_INPUT_BYTES": "12345"})
+    assert c.job_timeout_s == 90 and c.ask_timeout_s == 45
+    assert c.ask_max_input_bytes == 12345

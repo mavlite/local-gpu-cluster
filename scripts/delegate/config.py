@@ -43,4 +43,7 @@ def load_config(env) -> Config:
         lease_path=env.get("LOCAL_DELEGATE_LEASE", _default_local_appdata("gpu.lock")),
         opencode_exe=env.get("LOCAL_DELEGATE_OPENCODE_EXE", ""),
         overlay_dir=env.get("LOCAL_DELEGATE_OVERLAY", ""),
+        ask_timeout_s=int(env.get("LOCAL_DELEGATE_ASK_TIMEOUT_S", "600")),
+        job_timeout_s=int(env.get("LOCAL_DELEGATE_JOB_TIMEOUT_S", "1800")),
+        ask_max_input_bytes=int(env.get("LOCAL_DELEGATE_ASK_MAX_INPUT_BYTES", "400000")),
     )

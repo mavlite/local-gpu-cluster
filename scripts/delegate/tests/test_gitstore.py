@@ -84,6 +84,22 @@ def test_commit_work_then_extract_patch_shows_new_file(tmp_path):
     assert "added.txt" in patch and "+hello" in patch
     assert gitstore.base_sha(str(gd)) != base
 
+def test_extract_patch_excludes_overlay_files(tmp_path):
+    r = _repo(tmp_path)
+    work, gd = _exp(tmp_path, r)
+    base = gitstore.base_sha(str(gd))
+    # Overlay-style files the pipeline installs plus a normal edit.
+    (work / "opencode.json").write_text('{"x":1}\n')
+    (work / ".opencode").mkdir()
+    (work / ".opencode" / "agent.md").write_text("agent\n")
+    (work / "real.txt").write_text("real change\n")
+    gitstore.commit_work(str(gd), str(work))
+    patch = gitstore.extract_patch(str(gd), base, str(work))
+    assert "real.txt" in patch and "+real change" in patch
+    assert "opencode.json" not in patch
+    assert ".opencode" not in patch and "agent.md" not in patch
+
+
 def test_commit_work_with_no_changes_keeps_head(tmp_path):
     r = _repo(tmp_path)
     work, gd = _exp(tmp_path, r)

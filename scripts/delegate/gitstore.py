@@ -113,8 +113,13 @@ def commit_work(git_dir: str, work_dir: str) -> None:
     _dgit(git_dir, work_dir, "commit", "-q", "--no-verify", "-m", "work")
 
 
+# Same exclusion resultgate.inspect_diff uses: overlay files never enter the patch.
+_PATCH_PATHSPEC = ["--", ".", ":(exclude).opencode", ":(exclude).opencode/**", ":(exclude)opencode.json"]
+
+
 def extract_patch(git_dir: str, base: str, work_dir: str) -> str:
-    return _dgit(git_dir, work_dir, "diff", "--no-ext-diff", "--no-textconv", f"{base}..HEAD")
+    return _dgit(git_dir, work_dir, "diff", "--no-ext-diff", "--no-textconv",
+                 f"{base}..HEAD", *_PATCH_PATHSPEC)
 
 
 def run_git(git_dir: str, work_dir: str, *args) -> str:

@@ -24,6 +24,26 @@ def test_strip_removes_attacker_config(tmp_path):
     assert (d / "keep.txt").exists()
 
 
+def test_strip_is_recursive_into_subdirs(tmp_path):
+    """opencode loads nested AGENTS.md/opencode.json/.opencode, so they must be stripped
+    anywhere under work_dir, not only at the root."""
+    d = tmp_path / "job"
+    sub = d / "pkg" / "deep"
+    sub.mkdir(parents=True)
+    (sub / "AGENTS.md").write_text("nested attacker rules")
+    (sub / "opencode.jsonc").write_text("{}")
+    (d / "pkg" / "CLAUDE.md").write_text("more rules")
+    (sub / ".opencode" / "agent").mkdir(parents=True)
+    (sub / ".opencode" / "agent" / "evil.md").write_text("evil")
+    (sub / "keep.py").write_text("print(1)")
+    overlay.strip_project_config(str(d))
+    assert not (sub / "AGENTS.md").exists()
+    assert not (sub / "opencode.jsonc").exists()
+    assert not (d / "pkg" / "CLAUDE.md").exists()
+    assert not (sub / ".opencode").exists()
+    assert (sub / "keep.py").exists()  # ordinary nested files untouched
+
+
 def test_install_overlay_writes_agent_def(tmp_path):
     d = tmp_path / "job"; d.mkdir()
     overlay.install_overlay(CFG, str(d), allow_web=False)

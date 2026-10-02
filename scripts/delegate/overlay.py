@@ -6,17 +6,31 @@ _STRIP = ("opencode.json", "opencode.jsonc", "AGENTS.md", "CLAUDE.md")
 _MODEL = "qwen3.8-think"
 
 
+def _is_stripped_file(name: str) -> bool:
+    # opencode.json* (json/jsonc/json5) plus AGENTS.md/CLAUDE.md, matched anywhere.
+    return name in _STRIP or name.startswith("opencode.json")
+
+
 def strip_project_config(dest: str) -> None:
-    """Remove attacker-controlled project config from an exported job dir."""
-    for name in _STRIP:
-        p = os.path.join(dest, name)
-        if os.path.lexists(p):
-            os.remove(p)
-    d = os.path.join(dest, ".opencode")
-    if os.path.islink(d):
-        os.remove(d)
-    elif os.path.isdir(d):
-        shutil.rmtree(d)
+    """Remove attacker-controlled project config anywhere under an exported job dir.
+
+    Recursive: opencode loads nested AGENTS.md/opencode.json/.opencode, so a stray
+    copy in a subdirectory would re-arm the exact config the overlay strips at root.
+    """
+    for root, dirs, files in os.walk(dest):
+        for name in list(dirs):
+            if name == ".opencode":
+                p = os.path.join(root, name)
+                if os.path.islink(p):
+                    os.remove(p)
+                else:
+                    shutil.rmtree(p, ignore_errors=True)
+                dirs.remove(name)  # don't descend into the removed tree
+        for name in files:
+            if _is_stripped_file(name):
+                p = os.path.join(root, name)
+                if os.path.lexists(p):
+                    os.remove(p)
 
 
 def _provider(cfg) -> dict:

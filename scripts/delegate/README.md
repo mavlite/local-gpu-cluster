@@ -21,6 +21,9 @@ A localhost MCP server that queues agentic coding tasks and ask-local reads on a
 - `LOCAL_DELEGATE_LEASE` — GPU lease lock file (default: `%LOCALAPPDATA%\local-delegate\gpu.lock`)
 - `LOCAL_DELEGATE_OPENCODE_EXE` — Path to `opencode.exe` binary for re-running checks in isolation (optional)
 - `LOCAL_DELEGATE_OVERLAY` — Overlay work directory (optional; for advanced isolation)
+- `LOCAL_DELEGATE_JOB_TIMEOUT_S` — Default per-job opencode timeout in seconds (default: `1800` = 30 min)
+- `LOCAL_DELEGATE_ASK_TIMEOUT_S` — HTTP timeout for `ask_local` router calls in seconds (default: `600`)
+- `LOCAL_DELEGATE_ASK_MAX_INPUT_BYTES` — Max combined `ask_local` input size in bytes (default: `400000`)
 
 ## Starting the Service
 
@@ -30,7 +33,13 @@ A localhost MCP server that queues agentic coding tasks and ask-local reads on a
 python -m scripts.delegate.service
 ```
 
-This starts the server on `127.0.0.1:3006` (or custom `LOCAL_DELEGATE_HOST:LOCAL_DELEGATE_PORT`).
+This runs `uvicorn` on the Starlette app and starts the server on `127.0.0.1:3006`
+(or custom `LOCAL_DELEGATE_HOST:LOCAL_DELEGATE_PORT`). Equivalently:
+
+```bash
+LOCAL_DELEGATE_BEARER_TOKEN=... LOCAL_DELEGATE_ROUTER_TOKEN=... python -m scripts.delegate.service
+# which is: uvicorn.run(build_app(cfg, deps, store), host=cfg.host, port=cfg.port)
+```
 
 ### At Logon (Windows Scheduled Task)
 
@@ -91,28 +100,33 @@ schtasks /Change /TN "local-delegate" /DISABLE
 
 ## MCP Integration (Claude Code)
 
-Add to `.mcp.json`:
+The service is a **persistent localhost HTTP server** (not a stdio subprocess), so the
+client connects over HTTP with a bearer token — it does not spawn the server. Start it
+yourself (see *Starting the Service* above), then add to `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "local-delegate": {
-      "command": "python",
-      "args": ["-m", "scripts.delegate.service"],
-      "env": {
-        "LOCAL_DELEGATE_BEARER_TOKEN": "your-token",
-        "LOCAL_DELEGATE_ROUTER_TOKEN": "your-router-token"
-      },
-      "alwaysAllow": ["ask_local", "submit_task", "result", "list_jobs", "record_review"]
+      "type": "http",
+      "url": "http://127.0.0.1:3006/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOCAL_DELEGATE_BEARER_TOKEN}"
+      }
     }
   }
 }
 ```
 
+`${LOCAL_DELEGATE_BEARER_TOKEN}` is expanded from the environment, so the token lives
+in your environment (and the server's), never in the committed file. The bearer token in
+the header must equal the `LOCAL_DELEGATE_BEARER_TOKEN` the server was started with.
+
 The service exposes two tool categories:
 
 - **ask_local** — Bulky reads (≥ ~20K tokens) on the local LLM; blocks until result
-- **submit_task, result, list_jobs, record_review** — Agentic task queue; non-blocking
+- **submit_task, result, list_jobs, record_review, record_direct** — Agentic task queue
+  and A/B measurement; non-blocking
 
 ## Checking Logs
 
@@ -123,11 +137,17 @@ Results and reviews are recorded in the ledger (default: `%LOCALAPPDATA%\local-d
 Get-Content "$env:LOCALAPPDATA\local-delegate\ledger.jsonl" | Select-Object -Last 20
 ```
 
-Job state is stored in `LOCAL_DELEGATE_JOBS_DIR`. Each job has:
+Job state is stored in `LOCAL_DELEGATE_JOBS_DIR`. For a job with id `<id>`:
 
-- `spec.json` — task specification
-- `result.json` — final result (diff, checks, tokens, gate report)
-- `work/` — git worktree with the changes
+- `<id>.json` — the single JSON state file: spec, status, diff, checks, tokens, gate
+  report, timing. There is no separate `spec.json`/`result.json`.
+- `<id>/work/` — the agent's working copy (tracked files only, **no `.git`**); the
+  agent is confined here.
+- `<id>/gitdir/` — the isolated git metadata (object store, refs) kept outside `work/`
+  so the agent cannot reach it; diffs and the result patch are produced from here.
+
+`record_review` removes the `<id>/` directory (work + gitdir) after a verdict is logged;
+the `<id>.json` state file and the measurement row in the ledger remain.
 
 ## Troubleshooting
 

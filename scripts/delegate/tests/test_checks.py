@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -103,6 +104,27 @@ def test_broad_secret_names_scrubbed(monkeypatch):
     env = checks._scrubbed_env()
     assert not {"OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD"} & set(env)
     assert "PATH" in env
+
+
+def test_allowlist_excludes_secret_vars_without_telltale_substrings(monkeypatch):
+    """Allow-list, not deny-list: vars with no TOKEN/SECRET/KEY/PASSWORD substring
+    (AWS_ACCESS_KEY_ID, GOOGLE_APPLICATION_CREDENTIALS) must still not reach checks."""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAnotasecret")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", r"C:\creds.json")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "abc")
+    env = checks._scrubbed_env()
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    assert "AZURE_CLIENT_ID" not in env
+    assert "PATH" in env  # the functional minimum is still passed through
+
+
+def test_scrubbed_env_is_allowlist_only(monkeypatch):
+    monkeypatch.setenv("TOTALLY_ARBITRARY_VAR", "leak-me")
+    env = checks._scrubbed_env()
+    assert "TOTALLY_ARBITRARY_VAR" not in env
+    assert set(env) - {"PYTHONDONTWRITEBYTECODE"} <= {k for k in os.environ}
+    assert all(k.upper() in checks._ENV_ALLOW or k == "PYTHONDONTWRITEBYTECODE" for k in env)
 
 
 def test_nothing_runs_if_any_entry_disallowed(tmp_path):
