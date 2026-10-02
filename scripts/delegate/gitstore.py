@@ -103,3 +103,8 @@ def commit_work(git_dir: str, work_dir: str) -> None:
 
 def extract_patch(git_dir: str, base: str, work_dir: str) -> str:
     return _dgit(git_dir, work_dir, "diff", "--no-ext-diff", "--no-textconv", f"{base}..HEAD")
+
+
+def run_git(git_dir: str, work_dir: str, *args) -> str:
+    """Public hardened git runner (external git_dir, hooks/fsmonitor/signing/global config off)."""
+    return _dgit(git_dir, work_dir, *args)
