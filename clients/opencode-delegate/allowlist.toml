@@ -1,0 +1,3 @@
+# Check commands the delegate server may run after a job (argv prefixes, split on whitespace).
+# Separate from the agent's own bash permissions in agent/delegate.md (cat/ls/rg/sed only).
+allow = ["cat", "ls", "rg", "sed -n", "bash -n", "shellcheck", "python -m pytest"]
