@@ -122,6 +122,19 @@ yourself (see *Starting the Service* above), then add to `.mcp.json`:
 in your environment (and the server's), never in the committed file. The bearer token in
 the header must equal the `LOCAL_DELEGATE_BEARER_TOKEN` the server was started with.
 
+**Start Claude Code from a fresh shell.** Claude Code expands `${LOCAL_DELEGATE_BEARER_TOKEN}`
+from its *own* process environment, which it inherits from the shell that launched it. A
+shell opened before the variable was set (e.g. with `setx` or the User-level environment)
+does not have it — and restarting `claude` from that same shell does not pick it up. The
+header then goes out as a bare `Bearer `, the server logs `POST /mcp 401 Unauthorized`, and
+Claude Code reports `local-delegate (AUTH_HEADER_REJECTED)`. Open a new terminal window, or
+import the variable into the current shell before launching:
+
+```powershell
+$env:LOCAL_DELEGATE_BEARER_TOKEN = [Environment]::GetEnvironmentVariable("LOCAL_DELEGATE_BEARER_TOKEN", "User")
+claude
+```
+
 The service exposes two tool categories:
 
 - **ask_local** — Bulky reads (≥ ~20K tokens) on the local LLM; blocks until result
