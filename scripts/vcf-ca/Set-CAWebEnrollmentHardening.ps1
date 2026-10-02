@@ -103,6 +103,27 @@ param(
     # earlier version scoped 443 to SDDC Manager alone and firewalled
     # Operations out entirely.
     [string]$OperationsIp = '172.16.10.122',
+    # ...and Operations is STILL not the whole story. Registration is done by
+    # Operations, but ISSUANCE is driven by the fleet UCM workflow
+    # (ucmreplacecertificateworkflow), which runs on the VCF services runtime /
+    # VSP plane -- platform, fleet, lab01, idb and the platform-* worker nodes.
+    # Scoping 443 to SddcManagerIp + OperationsIp therefore lets the CA be
+    # REGISTERED and silently prevents it from ever ISSUING: -RemoteAddress
+    # drops non-matching traffic without a reset, so the submitter sees a
+    # timeout, the CA logs nothing at all, and VCF reports no error.
+    #
+    # Measured 2026-10-01: two separate rotations (License Server, then the
+    # Identity broker) were accepted as ucmreplacecertificateworkflow, ran
+    # ~15 minutes each, changed nothing, and left the CA's request table
+    # holding only its own three rows.
+    #
+    # A subnet, not a host list: the lab config notes the supervisor destroys
+    # and recreates VSP workers, so their addresses are not stable enough to
+    # pin. The ESC8 controls that actually matter -- Require-SSL and Windows
+    # auth disabled on /CertSrv, so there is no NTLM to relay -- are unaffected
+    # by this scope, and the subnet still excludes the admin VPN and anything
+    # off-lab.
+    [string]$EnrolmentConsumerSubnet = '172.16.10.0/24',
     [string]$AdminIp,
     # Every consumer that validates a certificate issued by this CA has to
     # fetch the CRL and the CA certificate from /CertEnroll over HTTP --
@@ -562,6 +583,8 @@ if ($broadRules.Count -eq 0) {
 
 $allow = @($SddcManagerIp)
 if ($OperationsIp) { $allow += $OperationsIp }
+# The fleet UCM plane submits the CSR; without it the CA registers but never issues.
+if ($EnrolmentConsumerSubnet) { $allow += $EnrolmentConsumerSubnet }
 if ($AdminIp) {
     $allow += $AdminIp
 }
