@@ -114,10 +114,17 @@ def _execute(cfg, d, spec, job_dir) -> dict:
     d.gitstore.commit_work(gitdir, work)
     gate = d.resultgate.inspect_diff(gitdir, work, base)
     diff = d.gitstore.extract_patch(gitdir, base, work)
-    results = []
+    results, skipped = [], None
     if spec.get("checks"):
-        allow = d.checks.load_allowlist(os.path.join(cfg.overlay_dir, "allowlist.toml"))
-        results = d.checks.run_checks(work, spec["checks"], allowlist=allow)
+        if gate.rejected:
+            skipped = "skipped: gate rejected"
+        elif res.rejected:
+            skipped = "skipped: run rejected"
+        elif res.exit_code != 0:
+            skipped = "skipped: run failed"
+        else:
+            allow = d.checks.load_allowlist(os.path.join(cfg.overlay_dir, "allowlist.toml"))
+            results = d.checks.run_checks(work, spec["checks"], allowlist=allow)
     bad = res.exit_code != 0 or res.rejected or gate.rejected
     return {"status": "failed" if bad else "done", "base": base, "diff": diff,
             "exit_code": res.exit_code, "text": res.text, "tokens": res.tokens,
@@ -125,7 +132,8 @@ def _execute(cfg, d, spec, job_dir) -> dict:
             "gate": {"rejected": gate.rejected, "reasons": gate.reasons,
                      "flagged": gate.flagged},
             "checks": [{"argv": c.argv, "exit_code": c.exit_code, "output": c.output}
-                       for c in results]}
+                       for c in results],
+            "checks_skipped": skipped}
 
 
 # --- store -----------------------------------------------------------------
@@ -136,6 +144,8 @@ class JobStore:
         self._q = queue.Queue()
         self._io = threading.Lock()
         self._worker = None
+        self._worker_lock = threading.Lock()
+        self._worker_starts = 0  # observable for the single-worker test
         os.makedirs(cfg.jobs_dir, exist_ok=True)
 
     def _path(self, jid):
@@ -156,7 +166,10 @@ class JobStore:
         out = []
         for name in sorted(os.listdir(self.cfg.jobs_dir)):
             if name.endswith(".json"):
-                st = self.get(name[:-5])
+                try:
+                    st = self.get(name[:-5])
+                except ValueError:
+                    continue  # corrupt job file: skip, don't break listing
                 if status is None or st.get("status") == status:
                     out.append(st)
         return out
@@ -173,17 +186,29 @@ class JobStore:
         self._q.join()
 
     def _ensure_worker(self):
-        if self._worker is None or not self._worker.is_alive():
-            self._worker = threading.Thread(target=self._loop, daemon=True)
-            self._worker.start()
+        with self._worker_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self._loop, daemon=True)
+                self._worker_starts += 1
+                self._worker.start()
 
     def _loop(self):
         while True:
             jid = self._q.get()
             try:
                 self._run_job(jid)
+            except Exception as e:  # keep the worker alive; record on the job
+                self._fail(jid, e)
             finally:
                 self._q.task_done()
+
+    def _fail(self, jid, exc):
+        try:
+            st = self.get(jid)
+            self._save({**st, "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}", "finished": time.time()})
+        except Exception:  # state itself unwritable; nothing more can be persisted
+            pass
 
     def _run_job(self, jid):
         st = self.get(jid)
@@ -201,7 +226,10 @@ class JobStore:
                 out = {"status": "failed", "error": f"{type(e).__name__}: {e}"}
             final = {**st, **out, "finished": time.time()}
             self._save(final)
-            self._ledger(final)
+            try:
+                self._ledger(final)
+            except Exception:  # ledger failure must not lose the saved result
+                pass
         finally:
             self.deps.lease.release()
 
@@ -212,6 +240,10 @@ class JobStore:
                         "tokens": st.get("tokens")})
 
     def reconcile(self) -> None:
+        # NOTE: past-deadline "interrupted" status is deferred.
+        for st in self.list("queued"):  # leftovers from a previous process
+            self._q.put(st["id"])
+            self._ensure_worker()
         for st in self.list("running"):
             if not owner_alive(st.get("owner_pid"), st.get("owner_started")):
                 self._save({**st, "status": "abandoned"})
@@ -243,30 +275,30 @@ class _TestDeps:
         self.gitstore = SimpleNamespace(
             validate_repo=lambda cfg, repo: rec("validate_repo") or repo,
             resolve_ref=lambda repo, ref: rec("resolve_ref") or ref,
-            export=lambda *a: rec("export"),
-            base_sha=lambda g: rec("base_sha") or "BASE",
-            commit_work=lambda g, w: rec("commit_work"),
-            extract_patch=lambda g, b, w: rec("extract_patch") or "DIFF")
+            export=lambda *a: rec("export", *a),
+            base_sha=lambda g: rec("base_sha", g) or "BASE",
+            commit_work=lambda g, w: rec("commit_work", g, w),
+            extract_patch=lambda g, b, w: rec("extract_patch", g, b, w) or "DIFF")
         self.overlay = SimpleNamespace(
-            strip_project_config=lambda w: rec("strip"),
-            install_overlay=lambda cfg, w, web: rec("overlay"))
+            strip_project_config=lambda w: rec("strip", w),
+            install_overlay=lambda cfg, w, web: rec("overlay", w))
         self.runner = SimpleNamespace(
-            run_opencode=lambda cfg, w, p, **kw: self._run(exit_code))
+            run_opencode=lambda cfg, w, p, **kw: self._run(exit_code, w))
         self.resultgate = SimpleNamespace(
-            inspect_diff=lambda g, w, b: rec("inspect_diff") or SimpleNamespace(
+            inspect_diff=lambda g, w, b: rec("inspect_diff", g, w, b) or SimpleNamespace(
                 rejected=gate_rejected, reasons=["r"] if gate_rejected else [], flagged=[]))
         self.checks = SimpleNamespace(
             load_allowlist=lambda p: [["pytest"]],
-            run_checks=lambda w, c, **kw: rec("run_checks") or [
+            run_checks=lambda w, c, **kw: rec("run_checks", w) or [
                 SimpleNamespace(argv=x, exit_code=0, output="ok") for x in c])
 
-    def _rec(self, name):
+    def _rec(self, name, *args):
         if self.raise_in == name:
             raise RuntimeError("boom")
-        self.calls.append((name,))
+        self.calls.append((name,) + args)
 
-    def _run(self, exit_code):
-        self._rec("run_opencode")
+    def _run(self, exit_code, work):
+        self._rec("run_opencode", work)
         time.sleep(self.sleep)  # hold the lease long enough to expose overlap
         return SimpleNamespace(exit_code=exit_code, text="SUMMARY", tokens={"output": 5},
                                rejected=False, stderr_tail="")
