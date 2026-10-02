@@ -136,7 +136,8 @@ the fleet; allow the rest so Steam keeps working):
 
 - Datacenter firewall enabled (`/etc/pve/firewall/cluster.fw` → `enable: 1`); it was previously
   fully disabled. Only VM 170's NIC has `firewall=1`, so **only VM 170 is filtered** — every LXC
-  has `firewall=0` and is untouched.
+  has `firewall=0` and is untouched. (Since 2026-09-25 the tester VM 172 is filtered too; both
+  firewall scripts allow for each other.)
 - Host left open (`/etc/pve/nodes/gpu-cluster/host.fw` → `enable: 1` + `IN ACCEPT`) so host
   services (cluster-monitor `:8888`, node metrics `:9100`, SSH, web UI) keep working exactly as
   before. Verified `:8888` → HTTP 200 after the change.
@@ -146,7 +147,20 @@ the fleet; allow the rest so Steam keeps working):
 - Verified from inside the guest: internet `1.1.1.1:443` REACHABLE; host `:8006`, anythingllm
   `154:3001`, router `153:8000`, fleet `10.60.0.1` all **blocked**.
 
-Caveat: the drop rules are IPv4-only, matching the IPv4 LAN/fleet ranges in this document. When the
+**Widened to all private space (2026-10-02).** The rules above named the LAN and the fleet, so
+they never denied the VCF lab management network (`172.16.0.0/12`), which came later. The LAN
+router does not route to it, which is why the guest could not reach it by default. But the
+firewall matches the destination address, not the next hop, so one
+`route add 172.16.0.0 mask 255.255.0.0 192.168.6.11` inside the guest would have reached the ESXi
+hosts and the VCF Installer. That was proven from a LAN container with the same routing, which
+got HTTP 301 from `172.16.10.133`. The VM was stopped throughout, so it was never actually
+exposed. VM 172 had the same flaw and was fixed the same way on 2026-09-25. The rules are now:
+`ACCEPT → 192.168.6.1 udp/67` (DHCP renew, first), then `DROP` to `10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`, `100.64.0.0/10` and `169.254.0.0/16`, then the default `ACCEPT`. Not yet
+re-verified from inside the guest; `71-vm-se-qa-firewall.sh` prints the commands to run, including
+the lab-route probe, the next time the VM is started.
+
+Caveat: the drop rules are IPv4-only, matching the IPv4 ranges in this document. When the
 client team proves (or disproves) the offline join, flip to the stronger end state by moving the NIC
 to `vmbrseqa` (`qm set 170 --net0 virtio,bridge=vmbrseqa,firewall=1`) — the isolated bridge already
 exists.
@@ -155,8 +169,8 @@ exists.
 the host; `scripts/71-vm-se-qa-firewall.sh` codifies it. The script regenerates the three files
 byte for byte, so running it against the current host is a no-op. It is separate from
 `70-vm-se-qa.sh` deliberately: creating a guest affects one guest, whereas enabling the datacenter
-switch is cluster-wide. Before touching that switch it asserts that no other guest has opted into
-filtering, and afterwards it verifies which interfaces are actually filtered by looking for `fwbr*`
+switch is cluster-wide. Before touching that switch it asserts that no guest other than VM 170
+and the tester VM 172 has opted into filtering, and afterwards it verifies which interfaces are actually filtered by looking for `fwbr*`
 bridges rather than trusting config flags.
 
 **Latent trap worth knowing.** Containment rests on the fact that only VM 170 opts in. Containers

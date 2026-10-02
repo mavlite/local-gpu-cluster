@@ -22,11 +22,20 @@
 #                                expires and the guest silently loses its
 #                                address, because the next rule would drop the
 #                                renewal along with the rest of the subnet.
-#   - DROP to 192.168.6.0/24  -- the LAN: this PVE host and every inference
-#                                container. Ordered AFTER the DHCP accept.
-#   - DROP to 10.60.0.0/16    -- the production fleet VPN range. This guest
-#                                exists to provoke crashes; it must never be
-#                                able to reach a live game server.
+#   - DROP all private space, ordered AFTER the DHCP accept:
+#       10.0.0.0/8     -- the production fleet VPN (10.60.0.0/16; this guest
+#                         exists to provoke crashes and must never reach a live
+#                         game server), plus the host-only lab and SDN vnets.
+#       172.16.0.0/12  -- the VCF lab management network.
+#       192.168.0.0/16 -- the LAN: this PVE host and every inference container.
+#       100.64.0.0/10  -- CGNAT / carrier space.
+#       169.254.0.0/16 -- link-local.
+#     The first policy denied only 192.168.6.0/24 and 10.60.0.0/16 by name.
+#     The VCF lab (172.16.0.0/12) came later and was never denied: the LAN
+#     router does not route to it, but one `route add ... 192.168.6.11` inside
+#     the guest did, and the firewall matches destination, not next hop.
+#     Verified 2026-10-02 from a LAN LXC; same flaw VM 172 had on 2026-09-25.
+#     Denying all of RFC1918 does not go stale when a network is added.
 #
 # KNOWN LIMIT: these are IPv4 rules. The LAN and fleet ranges in the
 # requirements doc are IPv4, and the guest gets no IPv6 address today, but this
@@ -46,11 +55,25 @@ require_pve_host
 load_config
 
 SEQA_VMID="${SEQA_VMID:-170}"
-SEQA_LAN_CIDR="${SEQA_LAN_CIDR:-192.168.6.0/24}"
 SEQA_GATEWAY="${SEQA_GATEWAY:-192.168.6.1}"
-SEQA_FLEET_CIDR="${SEQA_FLEET_CIDR:-10.60.0.0/16}"
-# Probed after the change to prove host services still answer.
-SEQA_HOST_PROBE_URL="${SEQA_HOST_PROBE_URL:-http://127.0.0.1:8888/}"
+# The tester VM (73-vm-tester-firewall.sh) is the one other guest expected to be filtered.
+TESTER_VMID="${TESTER_VMID:-172}"
+# Probed after the change to prove host services still answer. Derived from the
+# monitor's own config, as 73-vm-tester-firewall.sh does: cluster-monitor binds
+# the LAN address only, so the old 127.0.0.1 default could never answer and
+# warned on every run. An explicit SEQA_HOST_PROBE_URL always wins.
+SEQA_HOST_PROBE_URL="${SEQA_HOST_PROBE_URL:-}"
+SEQA_MONITOR_CONFIG="${SEQA_MONITOR_CONFIG:-/etc/cluster-monitor.json}"
+if [[ -z "$SEQA_HOST_PROBE_URL" && -f "$SEQA_MONITOR_CONFIG" ]]; then
+  SEQA_HOST_PROBE_URL="$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open('$SEQA_MONITOR_CONFIG'))
+    print('http://%s:%s/' % (cfg['bind_host'], cfg.get('bind_port', 8888)))
+except Exception:
+    sys.exit(1)
+" 2>/dev/null)" || SEQA_HOST_PROBE_URL=""
+fi
 
 step "1 — preflight"
 require_cmd pve-firewall
@@ -70,16 +93,16 @@ others=""
 for conf in /etc/pve/lxc/*.conf /etc/pve/qemu-server/*.conf; do
   [[ -e "$conf" ]] || continue
   id="$(basename "$conf" .conf)"
-  [[ "$id" == "$SEQA_VMID" ]] && continue
+  [[ "$id" == "$SEQA_VMID" || "$id" == "$TESTER_VMID" ]] && continue
   if grep -qE '^net[0-9]+:.*firewall=1' "$conf"; then
     others="${others} ${id}"
   fi
 done
 if [[ -n "$others" ]]; then
   die "refusing to proceed: guest(s)${others} also have firewall=1 and would start being filtered.
-        Every other guest on this host is expected to be unfiltered. Investigate before re-running."
+        Only VM $SEQA_VMID and VM $TESTER_VMID are expected to be filtered. Investigate before re-running."
 fi
-ok "no other guest opts into filtering — enabling the datacenter switch touches only VM $SEQA_VMID"
+ok "only VM $SEQA_VMID and VM $TESTER_VMID opt into filtering — the datacenter switch touches nothing else"
 
 step "3 — datacenter switch"
 write_file_if_changed /etc/pve/firewall/cluster.fw 0640 <<'EOF'
@@ -108,9 +131,12 @@ policy_in: ACCEPT
 policy_out: ACCEPT
 
 [RULES]
-OUT ACCEPT -dest ${SEQA_GATEWAY} -p udp -dport 67 # DHCP renew to gateway
-OUT DROP -dest ${SEQA_LAN_CIDR} # deny LAN: PVE host + all inference LXCs
-OUT DROP -dest ${SEQA_FLEET_CIDR} # deny production fleet VPN range
+OUT ACCEPT -dest ${SEQA_GATEWAY} -p udp -dport 67 # DHCP renew to gateway; must precede the 192.168 deny
+OUT DROP -dest 10.0.0.0/8 # RFC1918: production fleet VPN 10.60.0.0/16, host-only lab and SDN vnets
+OUT DROP -dest 172.16.0.0/12 # RFC1918: the VCF lab management network
+OUT DROP -dest 192.168.0.0/16 # RFC1918: the LAN - PVE host + all inference LXCs
+OUT DROP -dest 100.64.0.0/10 # CGNAT / carrier space
+OUT DROP -dest 169.254.0.0/16 # link-local
 EOF
 
 step "6 — apply and verify"
@@ -128,27 +154,34 @@ if ip -br link show type bridge 2>/dev/null | grep -q "fwbr${SEQA_VMID}i"; then
 else
   warn "no fwbr${SEQA_VMID}i* interface — expected if VM $SEQA_VMID is stopped; re-check once it is running"
 fi
-stray="$(ip -br link show type bridge 2>/dev/null | awk '{print $1}' | grep -E '^fwbr' | grep -v "^fwbr${SEQA_VMID}i" || true)"
-[[ -z "$stray" ]] || die "unexpected filter bridges present: $stray — something other than VM $SEQA_VMID is being filtered"
+stray="$(ip -br link show type bridge 2>/dev/null | awk '{print $1}' | grep -E '^fwbr' | grep -v "^fwbr${SEQA_VMID}i" | grep -v "^fwbr${TESTER_VMID}i" || true)"
+[[ -z "$stray" ]] || die "unexpected filter bridges present: $stray — something other than VM $SEQA_VMID or VM $TESTER_VMID is being filtered"
 
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$SEQA_HOST_PROBE_URL" || true)"
-[[ "$code" == "200" ]] \
-  && ok "host services still answering ($SEQA_HOST_PROBE_URL -> $code)" \
-  || warn "host probe $SEQA_HOST_PROBE_URL returned '$code' — check cluster-monitor before walking away"
+if [[ -z "$SEQA_HOST_PROBE_URL" ]]; then
+  warn "no host probe URL ($SEQA_MONITOR_CONFIG missing or unparseable) — check host services by hand"
+else
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$SEQA_HOST_PROBE_URL" || true)"
+  [[ "$code" == "200" ]] \
+    && ok "host services still answering ($SEQA_HOST_PROBE_URL -> $code)" \
+    || warn "host probe $SEQA_HOST_PROBE_URL returned '$code' — check cluster-monitor before walking away"
+fi
 
 step "done"
 cat <<EOF
 
   VM ${SEQA_VMID} is on vmbr0 and confined by /etc/pve/firewall/${SEQA_VMID}.fw:
     allowed  : everything else, including Steam
-    denied   : ${SEQA_LAN_CIDR} (this host + every inference container)
-    denied   : ${SEQA_FLEET_CIDR} (production fleet)
+    denied   : 10/8, 172.16/12, 192.168/16 (all RFC1918: LAN, fleet, VCF lab)
+    denied   : 100.64/10 (CGNAT), 169.254/16 (link-local)
     excepted : udp/67 to ${SEQA_GATEWAY}, so the DHCP lease can renew
 
   Verify from inside the guest, not from here:
     qm guest exec ${SEQA_VMID} -- powershell -Command "Test-NetConnection 1.1.1.1 -Port 443"
     qm guest exec ${SEQA_VMID} -- powershell -Command "Test-NetConnection 192.168.6.175 -Port 8006"
-  Expect the first to succeed and the second to fail.
+  Expect the first to succeed and the second to fail. The VCF lab is not on the
+  guest's default route, so prove the deny with the route a guest admin could add:
+    qm guest exec ${SEQA_VMID} -- powershell -Command "route add 172.16.10.133 mask 255.255.255.255 192.168.6.11; Test-NetConnection 172.16.10.133 -Port 443; route delete 172.16.10.133"
+  Expect TcpTestSucceeded False.
 
   This is the fallback posture, not the target. When the client-side team
   settles the offline-join question, move to the isolated bridge:
