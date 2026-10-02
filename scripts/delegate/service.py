@@ -7,6 +7,7 @@ import contextlib
 import hmac
 import json
 import os
+import sys
 import time
 
 import httpx
@@ -236,7 +237,23 @@ class _Deps:
         self.http, self.ledger, self.lease = http, ledger, lease
 
 
+def redirect_output(env) -> None:
+    """Append stdout/stderr to LOCAL_DELEGATE_LOG when set. With no console (the
+    logon task runs pythonw, whose streams are None, and cannot set env vars) it
+    defaults to %LOCALAPPDATA%\\local-delegate\\service.log; otherwise the uvicorn
+    log would be lost."""
+    path = env.get("LOCAL_DELEGATE_LOG")
+    if not path and sys.stdout is None and env.get("LOCALAPPDATA"):
+        path = os.path.join(env["LOCALAPPDATA"], "local-delegate", "service.log")
+    if not path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    stream = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered; lives for the process
+    sys.stdout = sys.stderr = stream
+
+
 if __name__ == "__main__":
+    redirect_output(os.environ)  # first, so a config error below is logged too
     _cfg = load_config(os.environ)
     _ledger = Ledger(_cfg.ledger_path)  # one shared, lock-guarded writer
     _deps = _Deps(httpx.AsyncClient(timeout=_cfg.ask_timeout_s), _ledger, GpuLease(_cfg.lease_path))

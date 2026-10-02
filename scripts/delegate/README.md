@@ -19,6 +19,8 @@ A localhost MCP server that queues agentic coding tasks and ask-local reads on a
 - `LOCAL_DELEGATE_JOBS_DIR` — Work directory for queued jobs (default: `%LOCALAPPDATA%\local-delegate\jobs`)
 - `LOCAL_DELEGATE_LEDGER` — A/B measurement ledger path (default: `%LOCALAPPDATA%\local-delegate\ledger.jsonl`)
 - `LOCAL_DELEGATE_LEASE` — GPU lease lock file (default: `%LOCALAPPDATA%\local-delegate\gpu.lock`)
+- `LOCAL_DELEGATE_LOG` — Append service output to this file (default: unset on a console;
+  `%LOCALAPPDATA%\local-delegate\service.log` under `pythonw`, i.e. the logon task)
 - `LOCAL_DELEGATE_OPENCODE_EXE` — Path to `opencode.exe` binary for re-running checks in isolation (optional)
 - `LOCAL_DELEGATE_OVERLAY` — Overlay work directory (optional; for advanced isolation)
 - `LOCAL_DELEGATE_JOB_TIMEOUT_S` — Default per-job opencode timeout in seconds (default: `1800` = 30 min)
@@ -43,60 +45,60 @@ LOCAL_DELEGATE_BEARER_TOKEN=... LOCAL_DELEGATE_ROUTER_TOKEN=... python -m script
 
 ### At Logon (Windows Scheduled Task)
 
-To start the service automatically when you log in, create a Scheduled Task:
+Register it once, as you and **not** elevated. The task runs `pythonw.exe` directly (no console
+window), so Task Scheduler owns the service process itself:
 
 ```powershell
-$token = "your-bearer-token-here"
-$routerToken = "your-router-token-here"
-
-schtasks /Create `
-  /TN "local-delegate" `
-  /SC ONLOGON `
-  /TR "powershell -NoProfile -Command `"cd 'C:\Users\willi\Documents\GitHub\local-gpu-cluster' && python -m scripts.delegate.service`"" `
-  /RL HIGHEST `
-  /F
+$pyw = Join-Path (Split-Path (Get-Command python).Source) "pythonw.exe"
+$action = New-ScheduledTaskAction -Execute $pyw -Argument "-m scripts.delegate.service" `
+  -WorkingDirectory "C:\Users\willi\Documents\GitHub\local-gpu-cluster"
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName "local-delegate" -Action $action -Trigger $trigger `
+  -Settings $settings -RunLevel Limited -Force
 ```
 
-**Before running the command:**
+Why each setting:
 
-1. Replace `your-bearer-token-here` and `your-router-token-here` with actual tokens
-2. Ensure the Python interpreter path is correct (or add Python to PATH)
-3. Set environment variables on the task:
-   - Edit the task in Task Scheduler
-   - Go to **Conditions** → ensure "Power" settings allow the task to run on battery
-   - Go to **Actions** → **Edit** the action
-   - In the action, prepend `env:` commands or set them at the system level
+- **`pythonw.exe` directly, no wrapper.** A PowerShell/cmd wrapper is what the task would own:
+  `Stop-ScheduledTask` then ends only the wrapper and leaves Python orphaned on port 3006, so the
+  next start fails to bind. (Verified 2026-10-02.)
+- **Logging.** `pythonw` has no console, so the service appends its output to
+  `%LOCALAPPDATA%\local-delegate\service.log` (override with `LOCAL_DELEGATE_LOG`). A config
+  error such as a missing token is logged there too.
+- **`-ExecutionTimeLimit 0`** — the default is 72 hours, after which Task Scheduler kills the
+  task; a long-running service must opt out.
+- **`-RunLevel Limited`** — a `127.0.0.1` service needs no admin rights; jobs run with whatever
+  rights the service has, so do not elevate it.
+- **No tokens in the task.** `LOCAL_DELEGATE_BEARER_TOKEN` / `LOCAL_DELEGATE_ROUTER_TOKEN` are
+  read from your User-level environment, which a logon task inherits.
 
-Alternatively, set environment variables **before** creating the task:
+Older revisions of this README used `schtasks /Create ... /RL HIGHEST` with a `cd ... && python`
+action: `&&` is a parser error in Windows PowerShell 5.1, `HIGHEST` elevates for no reason, and
+the 72-hour limit still applied.
 
-```powershell
-$env:LOCAL_DELEGATE_BEARER_TOKEN = "your-bearer-token"
-$env:LOCAL_DELEGATE_ROUTER_TOKEN = "your-router-token"
-
-schtasks /Create `
-  /TN "local-delegate" `
-  /SC ONLOGON `
-  /TR "powershell -NoProfile -Command `"cd 'C:\Users\willi\Documents\GitHub\local-gpu-cluster' && python -m scripts.delegate.service`"" `
-  /RL HIGHEST `
-  /F
-```
-
-To verify the task was created:
+Check, start or read the log:
 
 ```powershell
 schtasks /Query /TN "local-delegate"
-schtasks /Run /TN "local-delegate"  # Test run
+Start-ScheduledTask -TaskName "local-delegate"
+Get-Content "$env:LOCALAPPDATA\local-delegate\service.log" -Tail 20
 ```
+
+If you start it by hand (`python -m scripts.delegate.service`) while the task is running, the
+second instance fails to bind 3006 — stop the task first.
 
 ### Stopping the Service
 
-```bash
-# Kill the Python process
-Get-Process python | Where-Object { $_.CommandLine -like "*scripts.delegate.service*" } | Stop-Process
-
-# Or disable the Scheduled Task
-schtasks /Change /TN "local-delegate" /DISABLE
+```powershell
+Stop-ScheduledTask -TaskName "local-delegate"     # stops the service (port 3006 is freed)
+Disable-ScheduledTask -TaskName "local-delegate"  # and keeps it from starting at logon
 ```
+
+After a restart, Claude Code marks `local-delegate` as failed if it tried to connect while the
+service was down; reconnect it with `/mcp`.
 
 ## MCP Integration (Claude Code)
 
