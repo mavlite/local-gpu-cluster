@@ -18,7 +18,8 @@ class CheckResult:
 
 _SCRUB_PREFIXES = ("LOCAL_DELEGATE_",)
 _SCRUB_EXACT = ("GH_TOKEN", "GITHUB_TOKEN")
-_SCRUB_CONTAINS = ("SSH",)
+_SCRUB_CONTAINS = ("SSH", "TOKEN", "SECRET", "PASSWORD", "API_KEY")
+_DEFAULT_TIMEOUT = 300
 
 
 def load_allowlist(path: str) -> list[list[str]]:
@@ -51,25 +52,29 @@ def _isolate(argv) -> list:
         base = base[:-4]
     out = list(argv)
     if base.startswith("python"):
-        if "-I" not in out:
-            out.insert(1, "-I")
+        out.insert(1, "-I")  # unconditional: a trailing script arg "-I" must not suppress it
         if "pytest" in out and "no:cacheprovider" not in out:
             i = out.index("pytest")
             out[i + 1:i + 1] = ["-p", "no:cacheprovider"]
+    # Bare pytest: true interpreter isolation needs `python -m pytest` (the only allow-listed form).
     elif base == "pytest" and "no:cacheprovider" not in out:
         out[1:1] = ["-p", "no:cacheprovider"]
     return out
 
 
-def run_checks(dest, checks_list, *, allowlist, runner=subprocess.run):
+def _run_one(argv, dest, runner, timeout) -> CheckResult:
+    try:
+        proc = runner(_isolate(argv), cwd=dest, env=_scrubbed_env(),
+                      capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return CheckResult(argv=argv, exit_code=127, output=f"{type(exc).__name__}: {exc}")
+    return CheckResult(argv=argv, exit_code=proc.returncode,
+                       output=(proc.stdout or "") + (proc.stderr or ""))
+
+
+def run_checks(dest, checks_list, *, allowlist, runner=subprocess.run, timeout=_DEFAULT_TIMEOUT):
     # Validate everything first so a disallowed entry runs nothing.
     for argv in checks_list:
         if not _allowed(argv, allowlist):
             raise CheckNotAllowed(argv)
-    results = []
-    for argv in checks_list:
-        proc = runner(_isolate(argv), cwd=dest, env=_scrubbed_env(),
-                      capture_output=True, text=True)
-        results.append(CheckResult(argv=argv, exit_code=proc.returncode,
-                                   output=(proc.stdout or "") + (proc.stderr or "")))
-    return results
+    return [_run_one(argv, dest, runner, timeout) for argv in checks_list]

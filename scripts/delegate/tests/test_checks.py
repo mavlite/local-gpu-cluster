@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -81,7 +82,54 @@ def test_planted_sitecustomize_does_not_run(tmp_path):
 
 
 def test_load_allowlist_splits_prefixes():
-    assert checks.load_allowlist("clients/opencode-delegate/allowlist.toml") == [
+    assert checks.load_allowlist(str(Path(__file__).resolve().parents[3] / "clients/opencode-delegate/allowlist.toml")) == [
         ["cat"], ["ls"], ["rg"], ["sed", "-n"], ["bash", "-n"], ["shellcheck"],
         ["python", "-m", "pytest"],
     ]
+
+
+def test_trailing_dash_I_does_not_suppress_isolation(tmp_path):
+    assert checks._isolate(["python", "-c", "print(1)", "-I"])[:2] == ["python", "-I"]
+    probe = "import sys;print(sys.flags.isolated)"
+    res = checks.run_checks(str(tmp_path), [[sys.executable, "-c", probe, "-I"]],
+                            allowlist=[[sys.executable]])
+    assert res[0].output.strip() == "1"
+
+
+def test_broad_secret_names_scrubbed(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    monkeypatch.setenv("DB_PASSWORD", "x")
+    env = checks._scrubbed_env()
+    assert not {"OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "DB_PASSWORD"} & set(env)
+    assert "PATH" in env
+
+
+def test_nothing_runs_if_any_entry_disallowed(tmp_path):
+    calls = []
+    with pytest.raises(checks.CheckNotAllowed):
+        checks.run_checks(str(tmp_path), [["python", "-c", "1"], ["rm", "x"]],
+                          allowlist=[["python"]], runner=lambda *a, **k: calls.append(a))
+    assert calls == []
+
+
+def test_missing_tool_becomes_result_and_keeps_earlier_results(tmp_path):
+    res = checks.run_checks(str(tmp_path),
+                            [[sys.executable, "-c", "print(1)"], ["no-such-tool-xyz"]],
+                            allowlist=[[sys.executable], ["no-such-tool-xyz"]])
+    assert res[0].exit_code == 0
+    assert res[1].exit_code != 0 and res[1].output
+
+
+def test_timeout_passed_to_runner(tmp_path):
+    seen = {}
+
+    class P:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake(argv, **kw):
+        seen.update(kw)
+        return P()
+
+    checks.run_checks(str(tmp_path), [["ls"]], allowlist=[["ls"]], runner=fake, timeout=7)
+    assert seen["timeout"] == 7
