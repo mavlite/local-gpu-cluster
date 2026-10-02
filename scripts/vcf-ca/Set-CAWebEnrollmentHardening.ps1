@@ -400,10 +400,36 @@ $actions = @(
                 Write-Ok "removed handler '$($hd.name)' from $loc"
             }
             # Belt and braces: deny the .asp extension outright via request filtering.
-            Add-WebConfigurationProperty -Filter /system.webServer/security/requestFiltering/fileExtensions `
-                -PSPath 'IIS:\' -Location $loc -Name '.' `
-                -Value @{ fileExtension = '.asp'; allowed = 'false' } -ErrorAction SilentlyContinue
-            Write-Ok "request filtering denies .asp under /CertEnroll"
+            #
+            # This MUST check before adding. A duplicate collection entry is a
+            # TERMINATING error from the underlying configuration API, so
+            # -ErrorAction SilentlyContinue does NOT suppress it. Re-running this
+            # script failed here with
+            #   "Cannot add duplicate collection entry of type 'add' with unique
+            #    key attribute 'fileExtension' set to '.asp'"
+            # which aborted the step list and reported the whole hardening run
+            # INCOMPLETE even though the end state was already correct.
+            $aspFilter = "/system.webServer/security/requestFiltering/fileExtensions"
+            $aspDeny = @(Get-WebConfigurationProperty -Filter $aspFilter `
+                            -PSPath 'IIS:\' -Location $loc -Name 'Collection' -ErrorAction SilentlyContinue |
+                         Where-Object { "$($_.fileExtension)" -eq '.asp' })
+            if ($aspDeny.Count -gt 0) {
+                # Present is not the same as denied: an entry that ALLOWS .asp is
+                # worse than no entry at all, so correct it rather than report OK.
+                $permissive = @($aspDeny | Where-Object { "$($_.allowed)" -notmatch '^(?i:false|0)$' })
+                if ($permissive.Count -gt 0) {
+                    Set-WebConfigurationProperty -Filter "$aspFilter/add[@fileExtension='.asp']" `
+                        -PSPath 'IIS:\' -Location $loc -Name 'allowed' -Value 'false' -ErrorAction Stop
+                    Write-Ok "request filtering: flipped an existing PERMISSIVE .asp entry to deny under /CertEnroll"
+                } else {
+                    Write-Ok "request filtering already denies .asp under /CertEnroll"
+                }
+            } else {
+                Add-WebConfigurationProperty -Filter $aspFilter `
+                    -PSPath 'IIS:\' -Location $loc -Name '.' `
+                    -Value @{ fileExtension = '.asp'; allowed = 'false' } -ErrorAction Stop
+                Write-Ok "request filtering denies .asp under /CertEnroll"
+            }
         }
     }
     @{
