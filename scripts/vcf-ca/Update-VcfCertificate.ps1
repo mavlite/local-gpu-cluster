@@ -68,14 +68,13 @@ param(
     [string]$CommonName,
     [string]$ResourceKey,
     [switch]$ListTargets,
-    # Default deliberately SHORT. The workflow this starts has been observed to
-    # fail in ONE SECOND while this script waited 15 minutes, because it polls
-    # the certificate inventory -- which shows no error -- rather than the
-    # request, which shows "Failed". Five attempts burned over an hour of
-    # wall-clock on workflows that were already dead. A long wait here buys
-    # nothing: a successful replacement shows up quickly, and a failed one
-    # never will.
-    [int]$TimeoutMinutes = 4,
+    # A SUCCESSFUL replacement took 9m03s, measured. An earlier revision cut this
+    # default to 4 minutes after observing 1-second failures -- but those were
+    # failing for a MISSING CSR, not failing fast in general, and a 4-minute
+    # window would now abandon a run that was going to succeed. That already
+    # happened once: an 8-minute window gave up about a minute before the
+    # replacement completed. Allow real headroom.
+    [int]$TimeoutMinutes = 20,
     [switch]$Apply
 )
 
@@ -272,6 +271,80 @@ if (-not $Apply) {
     exit 0
 }
 
+# ------------------------------------------------------------------- CSR ----
+# MANDATORY PREREQUISITE. Broadcom TechDocs, "Replace a Certificate with a
+# Configured CA-Signed Certificate", prerequisites, verbatim:
+#   "You must first generate a certificate signing requests for each
+#    certificate you are replacing."
+# Without it the replacement PUT is accepted, returns a real requestId, and the
+# workflow dies in about a second with nothing to submit -- leaving the CA's
+# request table empty and the inventory unchanged, with no error anywhere.
+# Five attempts were lost to this before the prerequisites were read.
+#
+# Note the path: /csrs is a TOP-LEVEL collection under certificate-management,
+# NOT /certificates/csr. Lookup is by query parameter; /csrs/{id} returns 404.
+Write-Step "Certificate signing request"
+$existingCsr = $null
+try {
+    $csrList = Invoke-LabRest -Uri "$base/csrs?certificateId=$key" -Method GET -Headers $hdr -TimeoutSec 60
+    $existingCsr = Select-First (@(Get-Field $csrList 'certificateSignatureInfo' @()))
+} catch {
+    Write-Warn2 "could not list CSRs: $(Get-RestErrorDetail $_)"
+}
+
+if ($existingCsr) {
+    Write-Ok "a CSR already exists for this certificate (id $(Get-Field $existingCsr 'id'))"
+} else {
+    # Reuse the certificate's OWN subject and SANs so the replacement matches
+    # what the appliance already presents -- in particular any IP SAN, which
+    # the issuing template must be able to carry.
+    $subj = @{}
+    foreach ($pair in (($target.issuedTo -split ',') | ForEach-Object { $_.Trim() })) {
+        if ($pair -match '^([A-Za-z]+)=(.*)$') { $subj[$Matches[1].ToUpper()] = $Matches[2].Trim(' "') }
+    }
+    $spec = @{
+        certificateId   = $key
+        generateCsrSpec = @{
+            commonName      = $(if ($subj.ContainsKey('CN')) { $subj['CN'] } else { Get-PrimaryName $target })
+            country         = $(if ($subj.ContainsKey('C'))  { $subj['C'] }  else { 'US' })
+            email           = ''
+            keySize         = 'KEY_2048'
+            keyAlgorithm    = 'RSA'
+            locality        = $(if ($subj.ContainsKey('L'))  { $subj['L'] }  else { 'Palo Alto' })
+            organization    = $(if ($subj.ContainsKey('O'))  { $subj['O'] }  else { 'Broadcom' })
+            orgUnit         = $(if ($subj.ContainsKey('OU')) { $subj['OU'] } else { 'vcfms' })
+            state           = $(if ($subj.ContainsKey('ST')) { $subj['ST'] } else { 'CA' })
+            subjectAltNames = (Get-Field $target 'subjectAlternativeNames' @{})
+        }
+    }
+    if (-not $Apply) {
+        Write-Info "DRY RUN -- would generate a CSR for CN=$($spec.generateCsrSpec.commonName)"
+    } else {
+        Write-Info "generating CSR for CN=$($spec.generateCsrSpec.commonName)"
+        try {
+            $null = Invoke-LabRest -Uri "$base/csrs" -Method POST -Headers $hdr -Body $spec -TimeoutSec 180
+        } catch {
+            Write-Fail "CSR generation failed: $(Get-RestErrorDetail $_)"
+            exit 1
+        }
+        # Accepted is not generated. Poll until the CSR is actually listed.
+        $haveCsr = $false
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 10
+            try {
+                $csrList = Invoke-LabRest -Uri "$base/csrs?certificateId=$key" -Method GET -Headers $hdr -TimeoutSec 60
+                if (Select-First (@(Get-Field $csrList 'certificateSignatureInfo' @()))) { $haveCsr = $true; break }
+            } catch { }
+        }
+        if (-not $haveCsr) {
+            Write-Fail "No CSR appeared for this certificate; refusing to request a replacement."
+            Write-Info  "Without one the replacement fails in about a second with nothing to submit."
+            exit 1
+        }
+        Write-Ok "CSR generated and listed"
+    }
+}
+
 # --------------------------------------------------------------- replace ----
 Write-Step "Requesting replacement from the registered CA"
 $accepted = ''
@@ -341,16 +414,15 @@ if ($after) {
 }
 if (-not $replaced) {
     Write-Fail ("NOT replaced within {0} minutes (waited {1}s)." -f $TimeoutMinutes, [int]((Get-Date) - $started).TotalSeconds)
-    Write-Warn2 "Do NOT read this as 'still running'. The workflow has been seen to fail"
-    Write-Warn2 "in ~1 second while this poll reported nothing for 15 minutes: the"
-    Write-Warn2 "certificate inventory carries no error, so a dead workflow and a slow"
-    Write-Warn2 "one look identical from here."
-    Write-Info  "Check the request's real state in the VCF Operations UI -- the task list"
-    Write-Info  "shows Replace Certificate with a status and duration, and a 1s 'Failed'"
-    Write-Info  "means it never reached the CA at all."
-    Write-Info  "Request id for this attempt: see the accepted response above."
-    Write-Info  "Then confirm from the CA side on the CA host:"
-    Write-Info  "  .\Get-CaIssuanceLog.ps1 -SinceMinutes 20"
+    Write-Warn2 "This is NOT proof of failure. A successful replacement has taken"
+    Write-Warn2 "9m03s, and an 8-minute window once gave up about a minute before one"
+    Write-Warn2 "completed. The inventory carries no error field, so a slow success and"
+    Write-Warn2 "a dead workflow look identical from here."
+    Write-Info  "Check Control Panel > Management Tasks in VCF Operations: 'Replace"
+    Write-Info  "Certificate' shows the real status and duration. About 1s Failed means"
+    Write-Info  "it never reached the CA (usually a missing CSR); several minutes means"
+    Write-Info  "it did."
+    Write-Info  "Then read the endpoint itself, which cannot lie about what it serves." 
     exit 1
 }
 Write-Ok "certificate for $(Get-PrimaryName $target) is now signed by the lab CA"
