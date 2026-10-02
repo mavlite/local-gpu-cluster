@@ -19,7 +19,7 @@ from starlette.routing import Mount
 from scripts.delegate.config import load_config
 from scripts.delegate.ledger import Ledger
 from scripts.delegate.lease import GpuLease
-from scripts.delegate.router_client import InputTooLarge, ProfileBusy, ask_local
+from scripts.delegate.router_client import InputTooLarge, PathNotAllowed, ProfileBusy, ask_local
 
 _ASK_KEYS = ("prompt", "content", "files", "mode")
 
@@ -54,9 +54,11 @@ async def _run_ask_local(cfg, deps, arguments: dict) -> list[TextContent]:
         out = await ask_local(deps.http, cfg, **kwargs)
     except InputTooLarge as e:
         return _text(f"ERROR: {e}")
+    except PathNotAllowed:
+        return _text("ERROR: path not allowed")
     except ProfileBusy as e:
         return _text(f"ERROR: {e}; try later")
-    except (RuntimeError, OSError, httpx.HTTPError) as e:
+    except (RuntimeError, OSError, ValueError, KeyError, httpx.HTTPError) as e:
         return _text(f"ERROR: local call failed ({type(e).__name__}): {str(e)[:300]}")
     finally:
         deps.lease.release()

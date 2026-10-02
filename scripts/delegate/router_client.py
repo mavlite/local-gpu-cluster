@@ -1,5 +1,8 @@
+import os
+
 class InputTooLarge(Exception): ...
 class ProfileBusy(Exception): ...
+class PathNotAllowed(Exception): ...
 
 _ALIAS = {"code": "qwen3.8-think"}
 
@@ -9,16 +12,38 @@ def _alias(mode: str) -> str:
 def _healthz_url(cfg) -> str:
     return cfg.router_url.rsplit("/v1", 1)[0] + "/healthz"
 
+def _check_allowed(path, roots) -> str:
+    if not isinstance(path, str) or not path:
+        raise PathNotAllowed("file entry must be a non-empty string")
+    real = os.path.normcase(os.path.realpath(path))
+    for root in roots:
+        r = os.path.normcase(os.path.realpath(root))
+        try:
+            if os.path.commonpath([real, r]) == r:
+                return real
+        except ValueError:  # different drives / UNC mix
+            continue
+    raise PathNotAllowed("path outside allowed roots")
+
 async def ask_local(http, cfg, *, prompt, content=None, files=None, mode="summarize", read_file=None):
+    if files is not None and not isinstance(files, (list, tuple)):
+        raise PathNotAllowed("files must be a list of paths")
+    cap = cfg.ask_max_input_bytes
     parts = []
+    total = 0
     if content:
+        total += len(content.encode("utf-8"))
+        if total > cap:
+            raise InputTooLarge(f"input exceeds {cap} bytes")
         parts.append(content)
     for path in (files or []):
-        data = (read_file or _default_read)(path)
+        real = _check_allowed(path, cfg.allowed_repo_roots)
+        data = (read_file or _default_read)(real, cap + 1)
+        total += len(data)
+        if total > cap:
+            raise InputTooLarge(f"input exceeds {cap} bytes")
         parts.append(data.decode("utf-8", "replace"))
     joined = "".join(parts)
-    if len(joined.encode("utf-8")) > cfg.ask_max_input_bytes:
-        raise InputTooLarge(f"input exceeds {cfg.ask_max_input_bytes} bytes")
 
     hz = await http.get(_healthz_url(cfg))
     if (hz.json() or {}).get("active_chat_profile") != "qwen3.8":
@@ -41,6 +66,6 @@ async def ask_local(http, cfg, *, prompt, content=None, files=None, mode="summar
             continue
         raise RuntimeError(f"router error {r.status_code}: {r.json()}")
 
-def _default_read(path: str) -> bytes:
+def _default_read(path: str, limit: int) -> bytes:
     with open(path, "rb") as f:
-        return f.read()
+        return f.read(limit)
