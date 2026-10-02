@@ -36,7 +36,10 @@ class GpuLease:
         if self._fh is not None:
             try:
                 self._fh.seek(0)
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                try:
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
             finally:
                 self._fh.close()
                 self._fh = None

@@ -30,3 +30,10 @@ def test_cross_process_exclusion(tmp_path):
     proc.wait(timeout=10)
     assert local.acquire(timeout_s=1) is True            # free after holder exits
     local.release()
+
+def test_sequential_acquire_release_two_instances(tmp_path):
+    p = str(tmp_path / "gpu.lock")
+    a = GpuLease(p); assert a.acquire(timeout_s=0) is True
+    a.release()
+    b = GpuLease(p); assert b.acquire(timeout_s=0) is True
+    b.release()   # must not raise
