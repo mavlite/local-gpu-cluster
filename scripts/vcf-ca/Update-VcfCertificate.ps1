@@ -108,6 +108,19 @@ function Get-Field {
     $Object.$Name
 }
 
+# @(...)[0] on an EMPTY array throws under Set-StrictMode -Version Latest, so
+# "no match" would surface as an index exception rather than a clear message --
+# and inside the polling catch block it would be misreported as a failed
+# inventory read. The fleet inventory is not stable: a License Server appliance
+# entered it and left again within one session, so a target genuinely can
+# vanish mid-rotation and that must read as what it is.
+function Select-First {
+    param($Items)
+    $a = @($Items)
+    if ($a.Count -gt 0) { return $a[0] }
+    $null
+}
+
 function Get-RestErrorDetail {
     param($ErrRecord)
     $msg = $ErrRecord.Exception.Message.Split([Environment]::NewLine)[0]
@@ -206,7 +219,7 @@ if (-not $CommonName -and -not $ResourceKey) {
 }
 $target = $null
 if ($ResourceKey) {
-    $target = @($replaceable | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $ResourceKey })[0]
+    $target = Select-First (@($replaceable | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $ResourceKey }))
     if (-not $target) {
         Write-Fail "No replaceable certificate with key '$ResourceKey'."
         Write-Info  "It may exist but be monitor-only or non-leaf. Check -ListTargets."
@@ -289,10 +302,14 @@ $i = 0
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 20
     $i++
-    try { $now = @(Get-Inventory | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $key })[0] }
+    try { $now = Select-First (@(Get-Inventory | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $key })) }
     catch { Write-Warn2 "inventory read failed: $(Get-RestErrorDetail $_)"; continue }
     if (-not $now) {
-        Write-Warn2 "key $key is no longer listed -- the certificate may have been re-keyed."
+        Write-Warn2 "key $key has LEFT the fleet inventory mid-rotation."
+        Write-Warn2 "Either it was re-keyed, or the appliance is not stably registered with"
+        Write-Warn2 "the fleet. Check whether the appliance still serves TLS: if it does but"
+        Write-Warn2 "its certificates are absent from the inventory, the fleet registration is"
+        Write-Warn2 "the problem and no rotation against it can succeed."
         break
     }
     $issuer = [string](Get-Field $now 'issuedBy')
@@ -309,7 +326,7 @@ while ((Get-Date) -lt $deadline) {
 }
 
 Write-Step "After"
-try { $after = @(Get-Inventory | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $key })[0] } catch { $after = $null }
+try { $after = Select-First (@(Get-Inventory | Where-Object { (Get-Field $_ 'certificateResourceKey') -eq $key })) } catch { $after = $null }
 if ($after) {
     Write-Info "issuedTo     $(Get-Field $after 'issuedTo')"
     Write-Info "issuedBy     $(Get-Field $after 'issuedBy')"
