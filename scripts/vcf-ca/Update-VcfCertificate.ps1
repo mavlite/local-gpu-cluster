@@ -68,7 +68,14 @@ param(
     [string]$CommonName,
     [string]$ResourceKey,
     [switch]$ListTargets,
-    [int]$TimeoutMinutes = 15,
+    # Default deliberately SHORT. The workflow this starts has been observed to
+    # fail in ONE SECOND while this script waited 15 minutes, because it polls
+    # the certificate inventory -- which shows no error -- rather than the
+    # request, which shows "Failed". Five attempts burned over an hour of
+    # wall-clock on workflows that were already dead. A long wait here buys
+    # nothing: a successful replacement shows up quickly, and a failed one
+    # never will.
+    [int]$TimeoutMinutes = 4,
     [switch]$Apply
 )
 
@@ -334,10 +341,16 @@ if ($after) {
 }
 if (-not $replaced) {
     Write-Fail ("NOT replaced within {0} minutes (waited {1}s)." -f $TimeoutMinutes, [int]((Get-Date) - $started).TotalSeconds)
-    Write-Info  "The request was accepted, so this is either a still-running task or a"
-    Write-Info  "silent non-submission. Check the CA's own request table on the CA host --"
-    Write-Info  "if no new row appeared there, Operations never asked for a certificate:"
-    Write-Info  "  certutil -view -restrict ""RequestID>0"" -out ""RequestID,RequesterName,CommonName,Disposition"""
+    Write-Warn2 "Do NOT read this as 'still running'. The workflow has been seen to fail"
+    Write-Warn2 "in ~1 second while this poll reported nothing for 15 minutes: the"
+    Write-Warn2 "certificate inventory carries no error, so a dead workflow and a slow"
+    Write-Warn2 "one look identical from here."
+    Write-Info  "Check the request's real state in the VCF Operations UI -- the task list"
+    Write-Info  "shows Replace Certificate with a status and duration, and a 1s 'Failed'"
+    Write-Info  "means it never reached the CA at all."
+    Write-Info  "Request id for this attempt: see the accepted response above."
+    Write-Info  "Then confirm from the CA side on the CA host:"
+    Write-Info  "  .\Get-CaIssuanceLog.ps1 -SinceMinutes 20"
     exit 1
 }
 Write-Ok "certificate for $(Get-PrimaryName $target) is now signed by the lab CA"
