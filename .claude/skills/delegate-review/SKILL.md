@@ -51,11 +51,18 @@ The result gate flags dangerous or policy-violating changes:
 
 ### Step 5: Record Your Verdict
 
-Call `record_review(job_id, verdict, fix_lines, cause)`:
+Call `record_review(job_id, verdict, claude_tokens, fix_lines, cause)`:
 
 - `verdict`: one of "merged", "fixed_then_merged", "rejected"
+- `claude_tokens`: Claude's token cost for this task (from the Claude Code transcript —
+  the delegated 'heads' arm of the A/B experiment). This is the metric Phase 1 measures.
 - `fix_lines`: number of lines you had to fix (0 if merged as-is)
 - `cause`: reason for rejection or fix (e.g., "test failed", "gate rejected diff", "check mismatch", "incorrect logic")
+
+`record_review` reads the job's own `local_tokens`, `task_type`, and `duration_s` from
+its state file and writes ONE consolidated measurement row (`kind: "review"`,
+`delegated: true`), then removes the job's work dir. It refuses (returns an `error`, keeps
+the work dir) if the job is not terminal.
 
 Example:
 
@@ -63,17 +70,35 @@ Example:
 record_review(
   job_id="abc123",
   verdict="merged",
+  claude_tokens=18234,
   fix_lines=0,
   cause="all checks passed, diff clean"
 )
 ```
+
+### Self-done arm (the coin-flip 'tails' case)
+
+When the coin came up **tails** and you did the task yourself in this conversation
+(no delegation), log the self-done arm instead:
+
+```
+record_direct(
+  task_type="refactor",
+  claude_tokens=42100,
+  note="did it inline; ~250-line diff"
+)
+```
+
+This writes the matching measurement row (`kind: "review"`, `delegated: false`,
+`job_id: null`) so the delegated and self-done arms are joinable in one ledger.
 
 ## A/B Measurement (First ~30 Tasks)
 
 For the first ~30 eligible tasks (≥ 20K input OR ≥ 200-line output), **record Claude's token cost**:
 
 1. Note the task's Claude token cost from the Claude Code transcript (the "used tokens" line after this response)
-2. Call `record_review(…)` — the local LLM's token count goes into the ledger automatically
+2. Pass it as `claude_tokens` to `record_review(…)` (delegated arm) or `record_direct(…)`
+   (self-done arm) — the local LLM's token count is read from the job state automatically
 3. Compare: Is delegating cheaper than doing it in-conversation?
 
 **Eligibility for A/B:**

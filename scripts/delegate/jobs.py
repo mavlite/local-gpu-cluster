@@ -88,10 +88,12 @@ def render_prompt(spec: dict) -> str:
     return "\n".join(parts)
 
 
-def real_deps(cfg):
+def real_deps(cfg, ledger=None):
+    # Accept a shared Ledger so the service hands the SAME instance to the JobStore
+    # and the AgenticTools (one lock-guarded writer behind ledger.jsonl).
     return SimpleNamespace(lease=GpuLease(cfg.lease_path), gitstore=gitstore,
                            overlay=overlay, runner=runner, checks=checks,
-                           resultgate=resultgate, ledger=Ledger(cfg.ledger_path))
+                           resultgate=resultgate, ledger=ledger or Ledger(cfg.ledger_path))
 
 
 def _prepare(cfg, d, spec, job_dir):
@@ -159,6 +161,10 @@ class JobStore:
             os.replace(tmp, self._path(state["id"]))
 
     def get(self, jid) -> dict:
+        # Reject path separators / traversal so a crafted id can't read an arbitrary .json.
+        if not isinstance(jid, str) or not jid or jid in (".", "..") \
+                or os.path.basename(jid) != jid:
+            raise ValueError(f"invalid job id: {jid!r}")
         with self._io, open(self._path(jid), encoding="utf-8") as f:
             return json.load(f)
 
@@ -227,19 +233,11 @@ class JobStore:
             except Exception as e:  # recorded on the job, never swallowed silently
                 out = {"status": "failed", "error": f"{type(e).__name__}: {e}"}
             final = {**st, **out, "finished": time.time()}
-            self._save(final)
-            try:
-                self._ledger(final)
-            except Exception:  # ledger failure must not lose the saved result
-                pass
+            self._save(final)  # the job state file is the sole record of completion;
+            # the A/B measurement ledger is written only by record_review/record_direct,
+            # so there is exactly one joinable measurement row per task.
         finally:
             self.deps.lease.release()
-
-    def _ledger(self, st):
-        led = getattr(self.deps, "ledger", None)
-        if led is not None:
-            led.append({"job": st["id"], "status": st["status"],
-                        "tokens": st.get("tokens")})
 
     def reconcile(self) -> None:
         # NOTE: past-deadline "interrupted" status is deferred.

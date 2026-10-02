@@ -31,10 +31,15 @@ The `local-delegate` MCP service enables Claude to queue agentic coding tasks an
 
 For tasks that meet eligibility, **flip a coin:**
 
-- **Heads:** Delegate to `submit_task(…, checks=[…])` and await review
-- **Tails:** Do it yourself in this conversation
+- **Heads:** Delegate to `submit_task(…, checks=[…])` and await review. The human reviewer
+  later calls `record_review(job_id, verdict, claude_tokens=…, …)` — passing Claude's token
+  cost for the task; the local LLM cost is read from the job state automatically.
+- **Tails:** Do it yourself in this conversation, then call
+  `record_direct(task_type=…, claude_tokens=…, note=…)` to log the self-done arm.
 
-**Record the outcome:** Either way, log the Claude token cost (from the Claude Code transcript) and the local LLM cost (from the result or ledger) to measure which is more efficient.
+**Record the outcome:** Either way, log Claude's token cost (from the Claude Code transcript)
+via `record_review` (delegated) or `record_direct` (self-done) so both arms land in one
+joinable ledger and we can measure which is more efficient.
 
 ## Workflow
 

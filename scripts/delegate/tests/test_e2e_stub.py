@@ -65,10 +65,12 @@ def test_full_pipeline_success_then_accepted_review(tmp_path):
     assert (repo / "a.txt").read_text() == "a\n" and not (repo / "newfile.txt").exists()
     work = os.path.join(cfg.jobs_dir, jid, "work")
     assert os.path.isdir(work)
-    assert tools.record_review(jid, "accepted", 0, "") == {"ok": True}
+    assert tools.record_review(jid, "accepted", claude_tokens=1234, fix_lines=0, cause="") == {"ok": True}
     rows = [r for r in ledger.read_all() if r.get("delegated") is True]
     assert len(rows) == 1 and rows[0]["verdict"] == "accepted" and rows[0]["job_id"] == jid
-    assert rows[0]["task_type"] == "e2e"
+    assert rows[0]["task_type"] == "e2e" and rows[0]["kind"] == "review"
+    assert rows[0]["claude_tokens"] == 1234 and rows[0]["local_tokens"] is not None
+    assert "duration_s" in rows[0]
     assert not os.path.exists(os.path.join(cfg.jobs_dir, jid))
 
 
@@ -81,7 +83,9 @@ def test_failed_run_is_recorded_and_never_merged(tmp_path):
     assert not (repo / "newfile.txt").exists() and (repo / "a.txt").read_text() == "a\n"
     st = store.get(jid)
     assert st["exit_code"] == 3 and "stub failure" in st["stderr_tail"]
-    assert any(r["job"] == jid and r["status"] == "failed" for r in ledger.read_all())
+    # The worker does not touch the measurement ledger; the job state file is the record.
+    # The single measurement row per task is produced only by record_review/record_direct.
+    assert ledger.read_all() == []
 
 
 def test_rejected_run_fails(tmp_path):

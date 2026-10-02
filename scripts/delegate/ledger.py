@@ -1,15 +1,17 @@
-import json, os, datetime
+import json, os, datetime, threading
 
 class Ledger:
     def __init__(self, path: str):
         self.path = path
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     def append(self, record: dict) -> None:
         rec = dict(record)
         rec.setdefault("ts", datetime.datetime.now(datetime.timezone.utc).isoformat())
         line = json.dumps(rec, ensure_ascii=False)
-        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+        # One lock-guarded write so concurrent appends can't interleave a torn JSONL line.
+        with self._lock, open(self.path, "a", encoding="utf-8", newline="\n") as f:
             f.write(line + "\n")
 
     def read_all(self) -> list:

@@ -88,9 +88,15 @@ AGENTIC_TOOLS = [
     _tool("result", "Fetch a job's outcome (diff, checks, gate verdict, summary, tokens).",
           {"job_id": _S}, ["job_id"]),
     _tool("list_jobs", "List jobs, optionally filtered by status.", {"status": _S}, []),
-    _tool("record_review", "Record the review verdict for a job (A/B ledger) and clean its work dir.",
-          {"job_id": _S, "verdict": _S, "fix_lines": {"type": "integer"}, "cause": _S},
-          ["job_id", "verdict"]),
+    _tool("record_review",
+          "Record a delegated job's review verdict + Claude's token cost (A/B ledger) and clean its work dir.",
+          {"job_id": _S, "verdict": _S, "claude_tokens": {"type": "integer"},
+           "fix_lines": {"type": "integer"}, "cause": _S},
+          ["job_id", "verdict", "claude_tokens"]),
+    _tool("record_direct",
+          "Record a self-done (non-delegated) task's Claude token cost (A/B ledger, the coin-flip 'tails' arm).",
+          {"task_type": _S, "claude_tokens": {"type": "integer"}, "note": _S},
+          ["task_type", "claude_tokens"]),
 ]
 _AGENTIC_NAMES = {t.name for t in AGENTIC_TOOLS}
 
@@ -127,14 +133,31 @@ class AgenticTools:
                  "task_type": (s.get("spec") or {}).get("task_type", ""),
                  "ts": s.get("submitted")} for s in self.store.list(status)]
 
-    def record_review(self, job_id, verdict, fix_lines=0, cause="") -> dict:
-        st = self.store.get(job_id)
-        self.ledger.append({"job_id": job_id, "delegated": True, "verdict": verdict,
-                            "fix_lines": fix_lines, "cause": cause,
+    def record_review(self, job_id, verdict, claude_tokens, fix_lines=0, cause="") -> dict:
+        """Delegated ('heads') arm: one consolidated measurement row joinable by job_id.
+
+        Refuses (no rmtree) unless the job is terminal, so a running/queued job's work
+        dir is never deleted out from under the worker.
+        """
+        st = self.store.get(job_id)  # ValueError on a traversal id; OSError if missing
+        if st.get("status") not in _TERMINAL:
+            return {"error": f"job {job_id} not terminal (status={st.get('status')}); not recorded"}
+        dur = (st.get("finished") or 0) - (st.get("started") or 0)
+        self.ledger.append({"ts": time.time(), "kind": "review", "job_id": job_id,
+                            "delegated": True,
                             "task_type": (st.get("spec") or {}).get("task_type", ""),
-                            "tokens": st.get("tokens"), "ts": time.time()})
+                            "verdict": verdict, "fix_lines": fix_lines, "cause": cause,
+                            "claude_tokens": claude_tokens, "local_tokens": st.get("tokens"),
+                            "duration_s": max(dur, 0)})
         if os.path.basename(job_id) == job_id:  # never rmtree outside jobs_dir
             rmtree_force(os.path.join(self.cfg.jobs_dir, job_id))
+        return {"ok": True}
+
+    def record_direct(self, task_type, claude_tokens, note="") -> dict:
+        """Self-done ('tails') arm: logs the task Claude did itself, for the same A/B ledger."""
+        self.ledger.append({"ts": time.time(), "kind": "review", "job_id": None,
+                            "delegated": False, "task_type": task_type,
+                            "claude_tokens": claude_tokens, "note": note})
         return {"ok": True}
 
 
@@ -206,7 +229,8 @@ class _Deps:
 
 if __name__ == "__main__":
     _cfg = load_config(os.environ)
-    _deps = _Deps(httpx.AsyncClient(timeout=_cfg.ask_timeout_s), Ledger(_cfg.ledger_path), GpuLease(_cfg.lease_path))
-    _store = JobStore(_cfg, real_deps(_cfg))
+    _ledger = Ledger(_cfg.ledger_path)  # one shared, lock-guarded writer
+    _deps = _Deps(httpx.AsyncClient(timeout=_cfg.ask_timeout_s), _ledger, GpuLease(_cfg.lease_path))
+    _store = JobStore(_cfg, real_deps(_cfg, ledger=_ledger))
     _store.reconcile()
     uvicorn.run(build_app(_cfg, _deps, _store), host=_cfg.host, port=_cfg.port)

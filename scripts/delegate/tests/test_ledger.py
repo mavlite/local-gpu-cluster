@@ -1,4 +1,5 @@
 import json
+import threading
 from scripts.delegate.ledger import Ledger
 
 def test_append_then_read_roundtrip(tmp_path):
@@ -18,3 +19,25 @@ def test_append_is_one_line_per_record(tmp_path):
     # each line is valid json
     for line in p.read_text(encoding="utf-8").splitlines():
         json.loads(line)
+
+
+def test_concurrent_appends_produce_n_valid_lines(tmp_path):
+    """A single lock-guarded writer: N threads appending yield N intact JSONL lines."""
+    p = tmp_path / "l.jsonl"
+    led = Ledger(str(p))
+    n = 200
+    barrier = threading.Barrier(n)
+
+    def go(i):
+        barrier.wait()  # maximize contention
+        led.append({"i": i, "pad": "x" * 500})  # long records make interleaving visible
+
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln]
+    assert len(lines) == n
+    seen = {json.loads(ln)["i"] for ln in lines}  # every line parses; none torn
+    assert seen == set(range(n))

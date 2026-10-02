@@ -22,6 +22,14 @@ def _write_job(cfg, state):
         json.dump(state, f)
 
 
+def test_get_rejects_path_traversal_ids(tmp_path):
+    import pytest
+    store = jobs.JobStore(_cfg(tmp_path), deps=jobs.make_test_deps())
+    for bad in ("../secret", r"..\secret", "sub/evil", "a/b", ".."):
+        with pytest.raises(ValueError):
+            store.get(bad)
+
+
 def test_single_worker_never_runs_two_at_once(tmp_path):
     store = jobs.JobStore(_cfg(tmp_path), deps=jobs.make_test_deps(sleep=0.2))
     a = store.submit({"task": "t1", "repo": ".", "base_ref": "HEAD", "checks": []})
