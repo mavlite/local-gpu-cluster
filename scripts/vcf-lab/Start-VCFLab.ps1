@@ -168,21 +168,60 @@ if ($stuck.Count -gt 0) {
 
 # --- 2. vCenter ---------------------------------------------------------------
 Write-Step "2. vCenter"
-$vcHost = $null
+# This loop used to end in `catch { }`, which turned every possible cause --
+# a refused connection, a dead session, a permissions error -- into the single
+# unhelpful line "Could not find vcsa on any host." It also never reset $c
+# between iterations, so when Connect-VIServer threw, the Get-VM below ran
+# against the PREVIOUS host's already-disconnected session and quietly found
+# nothing. Report what actually happened, per host.
+$vcHost  = $null
+$probe   = @()
 foreach ($h in $cfg.Hosts) {
+    $c = $null                   # never inherit the previous host's session
     try {
         $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
-        if (Get-VM -Server $c -Name $cfg.VCenter.VmName -ErrorAction SilentlyContinue) { $vcHost = $h; }
-        if ($vcHost) {
+        $found = @(Get-VM -Server $c -Name $cfg.VCenter.VmName -ErrorAction SilentlyContinue)
+        if ($found.Count -gt 0) {
+            $vcHost = $h
             Write-Info "$($cfg.VCenter.VmName) is registered on $($h.Short)"
-            Start-LabVM -Name $cfg.VCenter.VmName -WhatIfMode:$WhatIf | Out-Null
-            Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue
+            # -EsxCredential and -Config so a wedged vCenter power-on can fall
+            # back to the host, exactly as every tier below this one does, and
+            # the RESULT is checked rather than piped to Out-Null: a refused
+            # power-on here used to be invisible and resurfaced as a
+            # full-length vCenter gate timeout with no stated cause.
+            if (-not (Start-LabVM -Name $cfg.VCenter.VmName -EsxCredential $esxCred -Config $cfg -WhatIfMode:$WhatIf)) {
+                Write-Fail "$($cfg.VCenter.VmName) could not be powered on; not waiting on the gate below."
+                exit 1
+            }
             break
         }
-        Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue
-    } catch { }
+        # Record what this host DOES hold, so a miss is self-diagnosing.
+        $probe += [pscustomobject]@{
+            Host  = $h.Short
+            State = 'connected'
+            Names = (@(Get-VM -Server $c -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', ')
+        }
+    } catch {
+        $probe += [pscustomobject]@{
+            Host  = $h.Short
+            State = "ERROR: $(($_.Exception.Message -replace '\s+', ' '))"
+            Names = ''
+        }
+    } finally {
+        if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+    }
 }
-if (-not $vcHost) { Write-Fail "Could not find $($cfg.VCenter.VmName) on any host."; exit 1 }
+if (-not $vcHost) {
+    Write-Fail "Could not find $($cfg.VCenter.VmName) on any host."
+    foreach ($p in $probe) {
+        Write-Warn2 "  $($p.Host): $($p.State)"
+        if ($p.Names) { Write-Info  "    registered there: $($p.Names)" }
+    }
+    Write-Info "If the VM is listed above under a different name, VCenter.VmName in"
+    Write-Info "VCFLab.Config.psd1 does not match the inventory. If a host errored,"
+    Write-Info "that error is the real cause -- it used to be discarded silently."
+    exit 1
+}
 
 if ($WhatIf) { Write-Info 'WHATIF: stopping before the vCenter gate'; exit 0 }
 
