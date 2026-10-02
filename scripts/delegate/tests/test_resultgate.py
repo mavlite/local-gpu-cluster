@@ -57,13 +57,27 @@ def test_husky_and_conftest_rejected(tmp_path):
     assert any("conftest.py" in r for r in rep.reasons)
 
 
-def test_git_named_path_rejected(tmp_path):
+def test_nested_git_path_and_rename_dest_rejected():
+    assert resultgate._REJECT_PATH.search("vendor/.git/config")
+    reasons, flagged = [], []
+    resultgate._check_entry("100644", "100644", ["a.txt", ".github/ci.yml"], reasons, flagged)
+    assert any(".github" in r for r in reasons)
+    reasons2 = []
+    resultgate._check_entry("100644", "100644", [".husky/x", "ok.txt"], reasons2, [])
+    assert any(".husky" in r for r in reasons2)
+
+
+def test_gitattributes_binary_bypass_rejected(tmp_path):
     work, gdir, base = _job(tmp_path)
-    (work / "vendor" / ".git").mkdir(parents=True)
-    (work / "vendor" / ".git" / "config").write_text("x\n")
+    (work / ".gitattributes").write_text("* diff\n")
+    (work / "blob.dat").write_bytes(b"\x00\x00\x00")
     rep = _inspect(work, gdir, base)
-    # git itself refuses to stage nested .git; gate must still never pass it through
-    assert rep.rejected is False or any(".git" in r for r in rep.reasons)
+    assert rep.rejected is True and any(".gitattributes" in r for r in rep.reasons)
+
+
+def test_case_variants_rejected():
+    for p in (".GIT/config", ".Github/x.yml", ".GitAttributes", "d/.gitmodules"):
+        assert resultgate._REJECT_PATH.search(p), p
 
 
 def test_executable_mode_rejected(tmp_path):

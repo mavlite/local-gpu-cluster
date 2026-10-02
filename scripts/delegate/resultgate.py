@@ -12,7 +12,9 @@ class GateReport:
     flagged: list
 
 
-_REJECT_PATH = re.compile(r"(^|/)(\.git|\.github|\.husky)(/|$)|(^|/)conftest\.py$")
+_REJECT_PATH = re.compile(
+    r"(^|/)(\.git|\.github|\.husky)(/|$)|(^|/)(conftest\.py|\.gitattributes|\.gitmodules)$",
+    re.I)
 _FLAG_PATH = re.compile(
     r"(^|/)(package\.json|requirements[^/]*\.txt|[^/]*\.lock|[^/]*lock\.json)$|\.ya?ml$")
 _PATHSPEC = ["--", ".", ":(exclude).opencode", ":(exclude).opencode/**", ":(exclude)opencode.json"]
