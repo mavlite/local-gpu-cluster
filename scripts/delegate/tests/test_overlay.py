@@ -38,19 +38,46 @@ def test_install_overlay_enables_web_when_asked(tmp_path):
     assert "searxng" in (d / "opencode.json").read_text()
 
 
+def _parse_frontmatter(text):
+    """Minimal parse of the delegate.md frontmatter (no yaml dep): nested maps by
+    indentation, scalars, and inline `{ "k": v, ... }` maps."""
+    body = text.split("---")[1]
+    root = {}
+    stack = [(-1, root)]
+    for line in body.strip().splitlines():
+        indent = len(line) - len(line.lstrip())
+        key, _, val = line.strip().partition(":")
+        key = key.strip().strip('"')
+        val = val.strip()
+        while stack[-1][0] >= indent:
+            stack.pop()
+        parent = stack[-1][1]
+        if val == "":
+            parent[key] = {}
+            stack.append((indent, parent[key]))
+        elif val.startswith("{"):
+            parent[key] = {k.strip().strip('"'): v.strip().strip('"') for k, v in
+                           (kv.split(":", 1) for kv in val.strip("{} ").split(","))}
+        else:
+            parent[key] = val.strip('"')
+    return root
+
+
 def test_agent_def_is_locked_down():
     txt = open(os.path.join(CFG.overlay_dir, "agent", "delegate.md"), encoding="utf-8").read()
-    assert "external_directory: deny" in txt
-    assert "webfetch: deny" in txt
-    assert '"*": deny' in txt
-    assert "ask" not in txt.split("---")[1]
+    perm = _parse_frontmatter(txt)["permission"]
+    assert perm["bash"] == {"*": "deny"}  # deny-all: rg --pre / sed e are code-exec
+    assert perm["edit"] == "allow"
+    assert perm["webfetch"] == "deny"
+    assert perm["external_directory"] == "deny"
+    assert perm["skill"] == {"*": "deny", "delegate-*": "allow"}
 
 
-def test_allowlist_is_argv_prefixes():
+def test_allowlist_is_exact_r4_list():
     import tomllib
     with open(os.path.join(CFG.overlay_dir, "allowlist.toml"), "rb") as f:
         allow = tomllib.load(f)["allow"]
-    assert "python -m pytest" in allow and "git" not in allow
+    assert allow == ["cat", "ls", "rg", "sed -n", "bash -n", "shellcheck", "python -m pytest"]
 
 
 def test_opencode_env_is_isolated(tmp_path):

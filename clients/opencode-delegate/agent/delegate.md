@@ -4,10 +4,6 @@ permission:
   edit: allow
   bash:
     "*": deny
-    "cat *": allow
-    "ls *": allow
-    "rg *": allow
-    "sed -n *": allow
   webfetch: deny
   external_directory: deny
   skill: { "*": deny, "delegate-*": allow }

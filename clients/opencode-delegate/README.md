@@ -3,8 +3,8 @@
 Trusted opencode configuration for local-delegate agentic jobs. Consumed by
 `scripts/delegate/overlay.py`; never edited per job.
 
-- `agent/delegate.md` - locked-down `delegate` agent (edit in-dir; bash limited to
-  cat/ls/rg/sed -n; webfetch and external_directory denied; only `delegate-*` skills).
+- `agent/delegate.md` - locked-down `delegate` agent (edit in-dir; bash DENY-ALL
+  (rg --pre / sed e are code-exec; use built-in read/grep/glob tools); webfetch and external_directory denied; only `delegate-*` skills).
 - `allowlist.toml` - argv-prefix allow-list of CHECK commands the server may run
   after a job. Distinct from the agent's own bash permissions.
 - `opencode.json` - base project config; `install_overlay` writes the effective one
