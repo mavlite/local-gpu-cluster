@@ -82,10 +82,18 @@ From the feasibility probe (scripted fake upstream + one live 2-token router cal
   **no metadata filter**. `remember` returns a `chunk_id` that `forget` accepts, but a long entry
   splits into several chunks under one id (**UNVERIFIED**; would complicate any id-based sync — a
   Phase-3 concern only).
-- **Open conflict to resolve in Phase 1:** architecture review reads `router-app.py:1770-1795` as
-  releasing `chat_sem` *before* the stream body runs (so `CHAT_CONCURRENCY` would not serialize
-  opencode streams); feasibility read it as serializing. **Resolve with a direct two-concurrent-
-  stream test before relying on either.**
+- **Router concurrency — resolved by reading the code** (`router-app.py:1754-1783`, `623-692`). The
+  **non-streaming** chat path awaits the upstream POST *inside* `async with chat_sem`, so it is
+  serialized. The **streaming** path (what opencode uses) `return`s a `StreamingResponse` from
+  inside the `async with chat_sem` block; `return` exits the block and releases the semaphore
+  *before* Starlette iterates the generator, and `sse_stream_with_keepalive` opens the upstream
+  connection in a background task with no semaphore of its own. So **`CHAT_CONCURRENCY` does not
+  limit concurrent opencode streams** — only llama-server's `--parallel 1` slot does, by queuing
+  them (KV-cache eviction + re-prefill; each stream's `MAX_STREAM_SECONDS=900` clock runs while it
+  waits). **Design consequence:** the service's single GPU lease (§4) is load-bearing — it is the
+  only thing preventing concurrent local jobs from thrashing the one slot, since the router will
+  not. The thrash *severity* under `--cache-reuse 1024 --cache-ram 16384` is still worth a one-off
+  live two-stream confirmation, but the control-flow fact is settled.
 - **Model quality:** qwen3.8 ~60% on hidden-test agentic coding; expect ~40% of agentic results to
   need Claude's correction. `qwen3.8-think` for code, `qwen3.8-nothink`/`rag-qwen3.8` for summaries.
 
@@ -217,12 +225,13 @@ not production use — stage 2 lands before that changes.
 
 ## 9. Rollout
 
-1. Resolve the §2 `chat_sem` conflict (two-stream test); fold the answer in.
-2. Service skeleton: HTTP+bearer, lease, `ask_local`, ledger. Register in Claude Code; live smoke.
-3. Isolated git store + runner + server-side checks + result gate; stand-in E2E; escape tests.
-4. `submit`/`result`/`list_jobs`/`record_review`; background `wait`/`reap` CLI; CLAUDE.md eligibility
+1. Service skeleton: HTTP+bearer, lease, `ask_local`, ledger. Register in Claude Code; live smoke.
+   (The GPU lease is load-bearing — see §2 router finding; optionally confirm thrash with a
+   two-stream live test.)
+2. Isolated git store + runner + server-side checks + result gate; stand-in E2E; escape tests.
+3. `submit`/`result`/`list_jobs`/`record_review`; background `wait`/`reap` CLI; CLAUDE.md eligibility
    rule; `delegate-review` skill.
-5. Run the randomized A/B for ≥30 tasks. **Go/no-go.**
+4. Run the randomized A/B for ≥30 tasks. **Go/no-go.**
 
 ## 10. Redteam integration — separate later track (summary only)
 
@@ -239,7 +248,8 @@ Phase-1/2 service + boundary; gets its own spec after Phase-1 go/no-go.
 
 ## 11. Open items carried into planning
 
-- The §2 `chat_sem` behaviour (test, don't assume).
+- ~~The §2 `chat_sem` behaviour~~ — **resolved** by code reading (§2): the lease is load-bearing;
+  a live two-stream test is optional confirmation of thrash severity only.
 - Whether a per-agent opt-out of global `instructions` exists, or the overlay must suppress them
   another way (UNVERIFIED).
 - Long-entry vault chunking vs. `forget`-by-id (Phase-3 only; UNVERIFIED).
