@@ -36,3 +36,11 @@ def test_timeout_and_size_env_overrides_take_effect():
                      "LOCAL_DELEGATE_ASK_MAX_INPUT_BYTES": "12345"})
     assert c.job_timeout_s == 90 and c.ask_timeout_s == 45
     assert c.ask_max_input_bytes == 12345
+
+
+def test_overlay_dir_defaults_to_repo_overlay():
+    import os
+    c = load_config(BASE)
+    assert c.overlay_dir.replace("\\", "/").endswith("clients/opencode-delegate")
+    # the default must actually point at the shipped overlay (agent def present)
+    assert os.path.isfile(os.path.join(c.overlay_dir, "agent", "delegate.md"))

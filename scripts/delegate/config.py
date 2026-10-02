@@ -25,6 +25,17 @@ def _default_local_appdata(sub: str) -> str:
     base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
     return os.path.join(base, "local-delegate", sub)
 
+
+def _default_overlay_dir() -> str:
+    # The trusted opencode overlay ships in the repo at
+    # <repo>/clients/opencode-delegate. config.py lives at
+    # <repo>/scripts/delegate/config.py, so parents[2] is the repo root.
+    # Defaulting this means agentic jobs work out of the box without an
+    # extra env var (a missing overlay otherwise fails the first job with a
+    # cryptic relative-path error).
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, "clients", "opencode-delegate")
+
 def load_config(env) -> Config:
     bearer = env.get("LOCAL_DELEGATE_BEARER_TOKEN", "")
     router = env.get("LOCAL_DELEGATE_ROUTER_TOKEN", "")
@@ -42,7 +53,7 @@ def load_config(env) -> Config:
         ledger_path=env.get("LOCAL_DELEGATE_LEDGER", _default_local_appdata("ledger.jsonl")),
         lease_path=env.get("LOCAL_DELEGATE_LEASE", _default_local_appdata("gpu.lock")),
         opencode_exe=env.get("LOCAL_DELEGATE_OPENCODE_EXE", ""),
-        overlay_dir=env.get("LOCAL_DELEGATE_OVERLAY", ""),
+        overlay_dir=env.get("LOCAL_DELEGATE_OVERLAY", "") or _default_overlay_dir(),
         ask_timeout_s=int(env.get("LOCAL_DELEGATE_ASK_TIMEOUT_S", "600")),
         job_timeout_s=int(env.get("LOCAL_DELEGATE_JOB_TIMEOUT_S", "1800")),
         ask_max_input_bytes=int(env.get("LOCAL_DELEGATE_ASK_MAX_INPUT_BYTES", "400000")),
