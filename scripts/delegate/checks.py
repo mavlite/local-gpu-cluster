@@ -50,7 +50,13 @@ def _isolate(argv) -> list:
         base = base[:-4]
     out = list(argv)
     if base.startswith("python"):
-        out.insert(1, "-I")  # unconditional: a trailing script arg "-I" must not suppress it
+        # -E (ignore PYTHON* env) + -P (don't prepend cwd/script dir to sys.path,
+        # so a work-dir sitecustomize.py the agent planted is never imported).
+        # NOT -I: -I also implies -s, which disables user-site packages and hides a
+        # pip --user pytest, breaking checks. usercustomize lives in user-site, which
+        # the agent cannot write, so keeping user-site is safe. Unconditional insert:
+        # a trailing script arg "-E"/"-P" must not suppress interpreter isolation.
+        out[1:1] = ["-E", "-P"]
         if "pytest" in out and "no:cacheprovider" not in out:
             i = out.index("pytest")
             out[i + 1:i + 1] = ["-p", "no:cacheprovider"]

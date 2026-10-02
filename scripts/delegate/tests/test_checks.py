@@ -68,7 +68,7 @@ def test_python_gets_isolation_flag_and_runs_argv_without_shell(tmp_path):
 
     checks.run_checks(str(tmp_path), [["python", "-m", "pytest", "t.py"], ["bash", "-n", "a.sh"]],
                       allowlist=[["python", "-m", "pytest"], ["bash", "-n"]], runner=fake)
-    assert calls[0][0] == ["python", "-I", "-m", "pytest", "-p", "no:cacheprovider", "t.py"]
+    assert calls[0][0] == ["python", "-E", "-P", "-m", "pytest", "-p", "no:cacheprovider", "t.py"]
     assert calls[1][0] == ["bash", "-n", "a.sh"]
     for _, kw in calls:
         assert kw["cwd"] == str(tmp_path) and not kw.get("shell")
@@ -89,12 +89,15 @@ def test_load_allowlist_splits_prefixes():
     ]
 
 
-def test_trailing_dash_I_does_not_suppress_isolation(tmp_path):
-    assert checks._isolate(["python", "-c", "print(1)", "-I"])[:2] == ["python", "-I"]
-    probe = "import sys;print(sys.flags.isolated)"
-    res = checks.run_checks(str(tmp_path), [[sys.executable, "-c", probe, "-I"]],
+def test_trailing_flag_does_not_suppress_isolation(tmp_path):
+    # Isolation flags go right after the interpreter, unconditionally, even if a
+    # script arg looks like a flag. -E (ignore env) + -P (safe sys.path) are the
+    # agent-relevant protections; -I is intentionally NOT used (it hides user-site pytest).
+    assert checks._isolate(["python", "-c", "print(1)", "-E"])[:3] == ["python", "-E", "-P"]
+    probe = "import sys;print(int(sys.flags.ignore_environment), int(sys.flags.safe_path))"
+    res = checks.run_checks(str(tmp_path), [[sys.executable, "-c", probe, "-E"]],
                             allowlist=[[sys.executable]])
-    assert res[0].output.strip() == "1"
+    assert res[0].output.strip() == "1 1"
 
 
 def test_broad_secret_names_scrubbed(monkeypatch):
