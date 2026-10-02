@@ -158,3 +158,13 @@ def test_timeout_passed_to_runner(tmp_path):
 
     checks.run_checks(str(tmp_path), [["ls"]], allowlist=[["ls"]], runner=fake, timeout=7)
     assert seen["timeout"] == 7
+
+
+def test_user_site_pytest_resolvable_in_check_env(tmp_path):
+    """The scrubbed check env must keep APPDATA so Windows can resolve the
+    per-user site-packages (where a pip --user pytest lives); -E -P must not
+    hide it (regression test for the live 'No module named pytest' failure)."""
+    probe = "import importlib.util as u; print(bool(u.find_spec('pytest')))"
+    res = checks.run_checks(str(tmp_path), [[sys.executable, "-c", probe]],
+                            allowlist=[[sys.executable]])
+    assert res[0].output.strip() == "True", res[0].output

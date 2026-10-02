@@ -22,6 +22,10 @@ class CheckResult:
 _ENV_ALLOW = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC",
     "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL", "NUMBER_OF_PROCESSORS",
+    # APPDATA/LOCALAPPDATA are paths (not secrets) that Windows needs to resolve
+    # the per-user site-packages dir; without them `python -m pytest` can't find a
+    # pip --user pytest. See test_user_site_pytest_resolvable_in_check_env.
+    "APPDATA", "LOCALAPPDATA",
 })
 _DEFAULT_TIMEOUT = 300
 
