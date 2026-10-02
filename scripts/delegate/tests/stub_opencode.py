@@ -24,3 +24,14 @@ if scenario == "hang":
     print("started", flush=True)
     time.sleep(60)
     sys.exit(0)
+if scenario in ("write", "exit1"):
+    # End-to-end scenarios: act on the --dir the runner passes, like the real agent.
+    dest = sys.argv[sys.argv.index("--dir") + 1]
+    if scenario == "write":
+        with open(f"{dest}/newfile.txt", "w", encoding="utf-8") as f:
+            f.write("made by stub\n")
+        emit({"type": "step_finish", "part": {"tokens": {"input": 7, "output": 2, "reasoning": 0, "cache": 0}}})
+        emit({"type": "text", "text": "SUMMARY: added newfile.txt"})
+        sys.exit(0)
+    sys.stderr.write("stub failure\n")
+    sys.exit(3)

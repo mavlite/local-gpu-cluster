@@ -7,7 +7,6 @@ import contextlib
 import hmac
 import json
 import os
-import shutil
 import time
 
 import httpx
@@ -20,6 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from scripts.delegate.config import load_config
+from scripts.delegate.gitstore import rmtree_force
 from scripts.delegate.jobs import JobStore, real_deps
 from scripts.delegate.ledger import Ledger
 from scripts.delegate.lease import GpuLease
@@ -134,7 +134,7 @@ class AgenticTools:
                             "task_type": (st.get("spec") or {}).get("task_type", ""),
                             "tokens": st.get("tokens"), "ts": time.time()})
         if os.path.basename(job_id) == job_id:  # never rmtree outside jobs_dir
-            shutil.rmtree(os.path.join(self.cfg.jobs_dir, job_id), ignore_errors=True)
+            rmtree_force(os.path.join(self.cfg.jobs_dir, job_id))
         return {"ok": True}
 
 

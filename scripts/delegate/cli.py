@@ -1,11 +1,11 @@
 """local-delegate CLI: `wait <job_id>` (run in background) and `reap`."""
 import argparse
 import os
-import shutil
 import sys
 import time
 
 from scripts.delegate.config import load_config
+from scripts.delegate.gitstore import rmtree_force
 from scripts.delegate.jobs import JobStore, owner_alive
 
 TERMINAL = ("done", "failed", "abandoned")
@@ -35,7 +35,7 @@ def _prune(cfg, store, days) -> list:
     for st in store.list():
         path = store._path(st["id"])
         if st.get("status") in TERMINAL and os.path.getmtime(path) < cutoff:
-            shutil.rmtree(os.path.join(cfg.jobs_dir, st["id"]), ignore_errors=True)
+            rmtree_force(os.path.join(cfg.jobs_dir, st["id"]))
             os.remove(path)
             pruned.append(st["id"])
     return pruned

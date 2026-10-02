@@ -1,6 +1,7 @@
 import atexit
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -43,6 +44,17 @@ def resolve_ref(repo: str, base_ref: str) -> str:
         raise BadRef(base_ref)
     return _git(repo, "rev-parse", "--verify", "--end-of-options",
                 f"{base_ref}^{{commit}}").strip()
+
+
+def rmtree_force(path: str) -> None:
+    """rmtree that also removes read-only files (git objects are read-only on Windows)."""
+    def _chmod_retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass  # best effort: caller treats cleanup as non-fatal
+    shutil.rmtree(path, onexc=_chmod_retry)
 
 
 _EMPTY_HOOKS = tempfile.mkdtemp(prefix="delegate-nohooks-")
