@@ -67,3 +67,14 @@ def test_spawn_uses_devnull_stdin_command_and_scrubbed_env(monkeypatch):
     assert not any(k.startswith("SSH") for k in env)
     assert env["LOCAL_DELEGATE_ROUTER_TOKEN"] == "r"
     assert env["HOME"].endswith("_opencode_home")
+
+
+def test_token_cache_dict_is_summed_not_crashed():
+    """Real opencode emits tokens.cache as a nested {read,write} dict and a
+    'total' field; the summer must handle that without TypeError (live-found bug)."""
+    tok = {"input": 0, "output": 0, "reasoning": 0, "cache": 0}
+    evt = {"type": "step_finish", "part": {"tokens": {
+        "total": 3940, "input": 17, "output": 26, "reasoning": 0,
+        "cache": {"write": 0, "read": 3897}}}}
+    runner._apply_event(evt, [], tok)
+    assert tok == {"input": 17, "output": 26, "reasoning": 0, "cache": 3897}

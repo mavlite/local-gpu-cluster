@@ -38,14 +38,28 @@ def _kill_tree(pid):
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
 
 
+def _num(v):
+    """Coerce an opencode token value to an int. Real opencode emits some
+    fields (e.g. ``cache``) as a nested dict like ``{"read": N, "write": N}``,
+    so a bare ``int(v)`` raises TypeError; sum nested numeric values instead."""
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, dict):
+        return sum(_num(x) for x in v.values())
+    return 0
+
+
 def _apply_event(evt, texts, tok):
     kind = evt.get("type")
     part = evt.get("part") or {}
     if kind == "text":
         texts.append(evt.get("text") or part.get("text") or "")
     elif kind == "step_finish":
+        toks = part.get("tokens") or {}
         for k in _TOKEN_KEYS:
-            tok[k] += int((part.get("tokens") or {}).get(k, 0) or 0)
+            tok[k] += _num(toks.get(k, 0))
     return kind == "rejected"
 
 
