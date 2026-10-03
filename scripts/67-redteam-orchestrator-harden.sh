@@ -92,5 +92,37 @@ code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-
 [[ "$code" == "200" ]] || die "orchestrator did not come back ( /healthz=$code ) — investigate before continuing"
 ok "orchestrator back up"
 
-# Part A (Task 5) is appended below this line.
-step "Part B done — registration closed, user provisioned, sessions purged, orchestrator restarted"
+step "9 — Part A: enable NIC filtering + write policy"
+# The .fw is inert until net0 opts in with firewall=1 (spec §4.1).
+net0="$(pct config "$CTID" | sed -n 's/^net0: //p')" || die "cannot read net0 of LXC $CTID"
+[[ -n "$net0" ]] || die "LXC $CTID has no net0"
+if grep -q 'firewall=1' <<<"$net0"; then
+  ok "net0 already has firewall=1"
+else
+  pct set "$CTID" --net0 "$(sed 's/firewall=0/firewall=1/; t; s/$/,firewall=1/' <<<"$net0")" \
+    || die "could not set firewall=1 on net0 of LXC $CTID"
+fi
+write_file_if_changed "/etc/pve/firewall/${CTID}.fw" 0640 <<EOF
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: ACCEPT
+
+[RULES]
+IN ACCEPT -p tcp -dport 22 -source ${WORKSTATION_IP}
+IN ACCEPT -p tcp -dport 18000 -source ${WORKSTATION_IP}
+EOF
+pve-firewall compile >/dev/null 2>&1 || die "pve-firewall compile failed — fix ${CTID}.fw"
+pve-firewall restart >/dev/null 2>&1 || die "pve-firewall restart failed"
+
+step "10 — reboot $CTID to materialize the filter bridge"
+# firewall=1 on a running container does not create fwbr until reboot (spec §4.1).
+pct reboot "$CTID" || die "pct reboot $CTID failed"
+for _ in $(seq 1 30); do pct status "$CTID" | grep -q running && break; sleep 2; done
+pct status "$CTID" | grep -q running || die "LXC $CTID did not return to running after reboot"
+sleep 5
+ip -br link show type bridge 2>/dev/null | grep -q "fwbr${CTID}i" \
+  || die "fwbr${CTID}i0 absent after reboot — the .fw is filtering NOTHING; Part A FAILED"
+ok "fwbr${CTID}i0 present — $CTID is filtered"
+
+step "done — registration closed, user provisioned, sessions purged, orchestrator restarted; $CTID filtered to ${WORKSTATION_IP} on :22/:18000 (fwbr${CTID}i0 verified)"
