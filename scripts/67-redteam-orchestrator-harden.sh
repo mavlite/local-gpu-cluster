@@ -36,15 +36,22 @@ do_verify() {
 do_rollback() {
   step "rollback — restoring prior access posture"
   rm -f "/etc/pve/firewall/${CTID}.fw"
-  pct set "$CTID" --net0 "$(pct config "$CTID" | sed -n 's/^net0: //p' | sed 's/firewall=1/firewall=0/')"
+  local net0
+  net0="$(pct config "$CTID" | sed -n 's/^net0: //p')" || net0=""
+  if [[ -n "$net0" ]]; then
+    pct set "$CTID" --net0 "$(sed 's/firewall=1/firewall=0/' <<<"$net0")" || warn "could not revert firewall=1 on net0 of LXC $CTID"
+  else
+    warn "cannot read net0 of LXC $CTID — skipping net0 firewall revert"
+  fi
   pve-firewall restart || true
-  pct exec "$CTID" -- "$BACKEND/.venv/bin/python" -c "import re,io; p='$AUTH_PY'; s=open(p).read(); s=re.sub(r'(?ms)^\\s*# local-gpu-cluster R1 hardening.*?registration disabled\"\\)\\n','',s); open(p,'w',newline='\\n').write(s)" || warn "guard removal failed — edit $AUTH_PY by hand"
+  pct exec "$CTID" -- "$BACKEND/.venv/bin/python" -c "import re,sys; p='$AUTH_PY'; s=open(p).read(); n=re.sub(r'(?ms)^\\s*# local-gpu-cluster R1 hardening.*?registration disabled\"\\)\\n','',s); open(p,'w',newline='\\n').write(n); sys.exit(0 if n!=s else 3)" || warn "guard not found or removal failed — edit $AUTH_PY by hand"
   warn "reboot 157 and restart the orchestrator to fully revert; sessions are not restored"
 }
 
 case "$MODE" in
   --verify)   do_verify; exit 0 ;;
   --rollback) do_rollback; exit 0 ;;
+  --*)        die "unknown mode: $MODE (use --verify or --rollback, or no arg to deploy)" ;;
 esac
 
 step "1 — preflight"
@@ -54,6 +61,7 @@ grep -q running <<<"$ct_status" || die "LXC $CTID is not running"
 pct exec "$CTID" -- test -f "$AUTH_PY" || die "auth.py not found in $CTID — orchestrator layout changed"
 pct exec "$CTID" -- test -x "$ORCH_DIR/run.sh" || die "run.sh not found/executable in $CTID"
 grep -q '^enable: 1' /etc/pve/firewall/cluster.fw || die "datacenter firewall (cluster.fw) is not enabled"
+warn "workstation ${WORKSTATION_IP} is a DHCP lease — a reservation for it must exist, else a lease change strands the workstation (spec 8/9)"
 ok "157 running; orchestrator present; datacenter firewall on"
 
 step "2 — blast-radius guard"
@@ -139,7 +147,7 @@ policy_out: ACCEPT
 IN ACCEPT -p tcp -dport 22 -source ${WORKSTATION_IP}
 IN ACCEPT -p tcp -dport 18000 -source ${WORKSTATION_IP}
 EOF
-pve-firewall compile >/dev/null 2>&1 || die "pve-firewall compile failed — fix ${CTID}.fw"
+err="$(pve-firewall compile 2>&1)" || die "pve-firewall compile failed — fix ${CTID}.fw: $err"
 pve-firewall restart >/dev/null 2>&1 || die "pve-firewall restart failed"
 
 step "10 — reboot $CTID to materialize the filter bridge"
@@ -148,7 +156,8 @@ pct reboot "$CTID" || die "pct reboot $CTID failed"
 for _ in $(seq 1 30); do pct status "$CTID" | grep -q running && break; sleep 2; done
 pct status "$CTID" | grep -q running || die "LXC $CTID did not return to running after reboot"
 sleep 5
-ip -br link show type bridge 2>/dev/null | grep -q "fwbr${CTID}i" \
+bridges="$(ip -br link show type bridge 2>/dev/null || true)"
+grep -q "fwbr${CTID}i0" <<<"$bridges" \
   || die "fwbr${CTID}i0 absent after reboot — the .fw is filtering NOTHING; Part A FAILED"
 ok "fwbr${CTID}i0 present — $CTID is filtered"
 
