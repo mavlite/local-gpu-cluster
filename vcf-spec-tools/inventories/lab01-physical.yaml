@@ -140,7 +140,7 @@ hosts:
       vsanDeviceTb: 4
       vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________C0B2F24E0175A000
       memoryTieringGb: 96
-      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________97EC007189382500
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________97BBB38187382500
       cpuModel: 7945HX
   - name: hyp03
     provisioningMac: "98:b7:85:23:a4:ce"
@@ -155,7 +155,7 @@ hosts:
       vsanDeviceTb: 4
       vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________5995F74E0175A000
       memoryTieringGb: 96
-      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________8AEC007189382500
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________3341B78187382500
       cpuModel: 7945HX
 credentials:
   esxRoot: ${esx_root}
