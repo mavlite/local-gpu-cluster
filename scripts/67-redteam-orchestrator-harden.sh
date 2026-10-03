@@ -20,6 +20,33 @@ AUTH_PY="$BACKEND/app/api/auth.py"
 require_root
 require_pve_host
 
+MODE="${1:-deploy}"
+
+do_verify() {
+  step "verify"
+  local ws ct
+  ws="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 "http://${CT_IP}:18000/healthz" || true)"
+  ct="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 6 http://127.0.0.1:18000/auth/register -X POST -H "Content-Type: application/json" -d "{\"username\":\"p\",\"password\":\"p\"}" || true')"
+  echo "healthz(ws)=$ws register(local)=$ct"
+  [[ "$ct" == "403" ]] || die "registration not closed (got $ct)"
+  ip -br link show type bridge 2>/dev/null | grep -q "fwbr${CTID}i" || warn "fwbr${CTID}i absent — Part A not active"
+  ok "verify complete"
+}
+
+do_rollback() {
+  step "rollback — restoring prior access posture"
+  rm -f "/etc/pve/firewall/${CTID}.fw"
+  pct set "$CTID" --net0 "$(pct config "$CTID" | sed -n 's/^net0: //p' | sed 's/firewall=1/firewall=0/')"
+  pve-firewall restart || true
+  pct exec "$CTID" -- "$BACKEND/.venv/bin/python" -c "import re,io; p='$AUTH_PY'; s=open(p).read(); s=re.sub(r'(?ms)^\\s*# local-gpu-cluster R1 hardening.*?registration disabled\"\\)\\n','',s); open(p,'w',newline='\\n').write(s)" || warn "guard removal failed — edit $AUTH_PY by hand"
+  warn "reboot 157 and restart the orchestrator to fully revert; sessions are not restored"
+}
+
+case "$MODE" in
+  --verify)   do_verify; exit 0 ;;
+  --rollback) do_rollback; exit 0 ;;
+esac
+
 step "1 — preflight"
 require_cmd pct pve-firewall
 ct_status="$(pct status "$CTID")" || die "cannot query status of LXC $CTID"
