@@ -68,17 +68,34 @@ def _arm(vals) -> dict:
 
 
 def report(cfg, target=30) -> dict:
-    """Summarize the Phase-1 A/B measurement from the ledger's review rows."""
+    """Summarize the Phase-1 A/B measurement from the ledger's review rows.
+
+    Rows with no measured claude_tokens (token_source 'unavailable') are counted
+    but excluded from the arm means, so a missing measurement never masquerades as
+    a cheap task and skews the go/no-go."""
     rows = [r for r in Ledger(cfg.ledger_path).read_all() if r.get("kind") == "review"]
-    d = _arm([r.get("claude_tokens") or 0 for r in rows if r.get("delegated")])
-    s = _arm([r.get("claude_tokens") or 0 for r in rows if not r.get("delegated")])
+    measured = [r for r in rows if r.get("claude_tokens") is not None]
+    d = _arm([r["claude_tokens"] for r in measured if r.get("delegated")])
+    s = _arm([r["claude_tokens"] for r in measured if not r.get("delegated")])
     savings = gate = None
     if d["n"] and s["n"] and s["claude_tokens_mean"]:
         savings = (s["claude_tokens_mean"] - d["claude_tokens_mean"]) / s["claude_tokens_mean"] * 100
         gate = savings >= 20
-    return {"n_reviews": len(rows), "delegated": d, "direct": s,
+    return {"n_reviews": len(rows), "n_unmeasured": len(rows) - len(measured),
+            "delegated": d, "direct": s,
             "savings_pct": savings, "meets_20pct_gate": gate,
             "progress": f"{len(rows)}/{target}"}
+
+
+def measure(cfg, *, job_id=None, marker_id=None, session_id=None, transcript=None) -> dict:
+    """Print the Claude-token cost of one task's transcript window (debug/manual use)."""
+    from scripts.delegate import transcript as tx
+    path = transcript or tx.find_transcript(session_id=session_id)
+    if not path:
+        return {"error": "no transcript found"}
+    if job_id:
+        return tx.measure_delegated(path, job_id)
+    return tx.measure_selfdone(path, marker_id)
 
 
 def _fmt_report(rep) -> str:
@@ -100,12 +117,22 @@ def main(argv=None, env=None) -> int:
     sub.add_parser("wait").add_argument("job_id")
     sub.add_parser("reap").add_argument("--days", type=int, default=REAP_DAYS)
     sub.add_parser("report")
+    m = sub.add_parser("measure")
+    m.add_argument("--job")
+    m.add_argument("--marker")
+    m.add_argument("--session")
+    m.add_argument("--transcript")
     args = ap.parse_args(argv)
     cfg = load_config(os.environ if env is None else env)
     if args.cmd == "wait":
         return wait(cfg, args.job_id)
     if args.cmd == "report":
         print(_fmt_report(report(cfg)))
+        return 0
+    if args.cmd == "measure":
+        import json as _json
+        print(_json.dumps(measure(cfg, job_id=args.job, marker_id=args.marker,
+                                  session_id=args.session, transcript=args.transcript)))
         return 0
     print(reap(cfg, args.days))
     return 0

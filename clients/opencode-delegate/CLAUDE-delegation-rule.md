@@ -38,14 +38,15 @@ For tasks that meet eligibility, **flip a real coin** — do not pick, or the ar
     python -c "import secrets; print(secrets.choice(['heads', 'tails']))"
 
 - **Heads:** Delegate to `submit_task(…, checks=[…])`. When the job finishes, review it with the
-  `delegate-review` skill and call `record_review(job_id, verdict, claude_tokens=…, …)` with
-  Claude's token cost for the task; the local LLM cost is read from the job state automatically.
-- **Tails:** Do it yourself in this conversation, then call
-  `record_direct(task_type=…, claude_tokens=…, note=…)` to log the self-done arm.
+  `delegate-review` skill and call `record_review(job_id, verdict, session_id=…, …)`.
+- **Tails:** Call `mark_start(task_type=…)` FIRST (it returns a `marker_id`), do the task yourself,
+  then `record_direct(task_type=…, marker_id=…, session_id=…, note=…)`.
 
-**Record the outcome:** Either way, log Claude's token cost (from the Claude Code transcript)
-via `record_review` (delegated) or `record_direct` (self-done) so both arms land in one
-joinable ledger and we can measure which is more efficient.
+**Do not hand-type token counts.** The service measures Claude's per-task cost from the transcript
+— `record_review` counts the submit turn plus the result→review turns (not the background wait),
+and `record_direct` counts the `mark_start`→`record_direct` window. Pass `session_id` (the UUID in
+your scratchpad path) so it finds the right transcript. Only pass `claude_tokens=…` to override a
+measurement you know is wrong.
 
 ## Workflow
 
@@ -56,12 +57,16 @@ joinable ledger and we can measure which is more efficient.
    - Keep working meanwhile; on the notification, follow `delegate-review` (`result(job_id)`,
      re-run the checks, read the diff, then `record_review(…)`)
 
-2. **Ask Local (ask_local):**
+2. **Self-do (tails):**
+   - Call `mark_start(task_type="...")` before starting; keep the returned `marker_id`
+   - Do the task; then `record_direct(task_type="...", marker_id="...", session_id="...")`
+
+3. **Ask Local (ask_local):**
    - Call `ask_local(prompt="...", content="..." or files=[...], mode="summarize")`
    - Blocks briefly; returns summarized output
    - Useful for logs, config dumps, verbose docs — anywhere input >> output
 
-3. **Do Not:**
+4. **Do Not:**
    - Apply a delegated diff without the `delegate-review` procedure, or when `gate_reasons` is non-empty
    - Delegate design decisions, security code, or anything needing conversation context
    - Queue a task without checks — the result gate will flag it as incomplete

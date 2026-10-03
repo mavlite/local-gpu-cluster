@@ -1,3 +1,4 @@
+import json
 import os
 
 from scripts.delegate import jobs, service
@@ -12,6 +13,29 @@ def _tools(tmp_path, **dep_kw):
     store = jobs.JobStore(cfg, deps=jobs.make_test_deps(**dep_kw))
     led = jobs.MemLedger()
     return store, led, service.AgenticTools(cfg, store, ledger=led)
+
+
+def _transcript(tmp_path, *lines):
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def _assistant(n, tool_uses=None):
+    u = {"input_tokens": n, "output_tokens": 0, "cache_read_input_tokens": 0,
+         "cache_creation_input_tokens": 0}
+    content = [{"type": "text", "text": "x"}]
+    for name, tid, inp in tool_uses or []:
+        content.append({"type": "tool_use", "name": name, "id": tid, "input": inp})
+    return json.dumps({"type": "assistant", "message": {"usage": u, "content": content}})
+
+
+def _result_line(tid, payload):
+    return json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": json.dumps(payload)}]}})
+
+
+_MCP = "mcp__local-delegate__"
 
 
 def test_submit_returns_job_id_and_list_shows_it(tmp_path):
@@ -118,4 +142,65 @@ def test_tools_registered_in_server():
     res = asyncio.run(server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list")))
     names = {t.name for t in res.root.tools}
     assert {"ask_local", "submit_task", "result", "list_jobs", "record_review",
-            "record_direct"} <= names
+            "record_direct", "mark_start"} <= names
+
+
+def test_mark_start_returns_marker_id(tmp_path):
+    _, _, tools = _tools(tmp_path)
+    out = tools.mark_start(task_type="refactor")
+    assert out["marker_id"] and out["task_type"] == "refactor"
+
+
+def test_record_review_auto_measures_when_tokens_omitted(tmp_path):
+    store, led, tools = _tools(tmp_path)
+    store._save({"id": "J", "status": "done", "spec": {"task_type": "fix"},
+                 "tokens": {"output": 5}, "started": 0, "finished": 1})
+    path = _transcript(
+        tmp_path,
+        _assistant(10, [(_MCP + "submit_task", "t1", {"task": "x", "repo": "r"})]),
+        _result_line("t1", {"job_id": "J"}),
+        _assistant(100),  # background — excluded
+        _assistant(5, [(_MCP + "result", "t2", {"job_id": "J"})]),
+        _assistant(7, [(_MCP + "record_review", "t3", {"job_id": "J"})]),
+    )
+    out = tools.record_review(job_id="J", verdict="accepted", transcript=path)
+    assert out == {"ok": True}
+    row = led.rows[-1]
+    assert row["claude_tokens"] == 10 + 5 + 7  # background 100 excluded
+    assert row["token_source"] == "measured"
+    assert row["claude_token_components"]["input"] == 22
+
+
+def test_record_direct_auto_measures_when_tokens_omitted(tmp_path):
+    _, led, tools = _tools(tmp_path)
+    path = _transcript(
+        tmp_path,
+        _assistant(99),  # before the marker — excluded
+        _assistant(10, [(_MCP + "mark_start", "m1", {"task_type": "x"})]),
+        _result_line("m1", {"marker_id": "M"}),
+        _assistant(20),
+        _assistant(5, [(_MCP + "record_direct", "d1", {"marker_id": "M"})]),
+    )
+    out = tools.record_direct(task_type="x", marker_id="M", transcript=path)
+    assert out == {"ok": True}
+    row = led.rows[-1]
+    assert row["claude_tokens"] == 10 + 20 + 5
+    assert row["token_source"] == "measured"
+
+
+def test_explicit_tokens_override_skips_measurement(tmp_path):
+    _, led, tools = _tools(tmp_path)
+    tools.record_direct(task_type="x", claude_tokens=999, transcript="/no/such/file")
+    row = led.rows[-1]
+    assert row["claude_tokens"] == 999 and row["token_source"] == "override"
+
+
+def test_unmeasurable_records_null_tokens_not_a_guess(tmp_path):
+    store, led, tools = _tools(tmp_path)
+    store._save({"id": "J", "status": "done", "spec": {"task_type": "fix"},
+                 "tokens": None, "started": 0, "finished": 1})
+    # No transcript and no override: record the row but mark it, never fabricate a number.
+    out = tools.record_review(job_id="J", verdict="accepted", transcript="/no/such/file")
+    assert out == {"ok": True}
+    row = led.rows[-1]
+    assert row["claude_tokens"] is None and row["token_source"] == "unavailable"

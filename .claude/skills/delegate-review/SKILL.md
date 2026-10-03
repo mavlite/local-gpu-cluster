@@ -51,18 +51,21 @@ The result gate flags dangerous or policy-violating changes:
 
 ### Step 5: Record Your Verdict
 
-Call `record_review(job_id, verdict, claude_tokens, fix_lines, cause)`:
+Call `record_review(job_id, verdict, session_id, fix_lines, cause)`:
 
 - `verdict`: one of "merged", "fixed_then_merged", "rejected"
-- `claude_tokens`: Claude's token cost for this task (from the Claude Code transcript —
-  the delegated 'heads' arm of the A/B experiment). This is the metric Phase 1 measures.
+- `session_id`: the UUID in your scratchpad path, so the service can find this session's
+  transcript and **measure** Claude's token cost for the task — the submit turn plus the
+  result→review turns, excluding the background wait. Do NOT hand-type `claude_tokens`;
+  only pass it to override a measurement you know is wrong.
 - `fix_lines`: number of lines you had to fix (0 if merged as-is)
 - `cause`: reason for rejection or fix (e.g., "test failed", "gate rejected diff", "check mismatch", "incorrect logic")
 
 `record_review` reads the job's own `local_tokens`, `task_type`, and `duration_s` from
-its state file and writes ONE consolidated measurement row (`kind: "review"`,
-`delegated: true`), then removes the job's work dir. It refuses (returns an `error`, keeps
-the work dir) if the job is not terminal.
+its state file, measures `claude_tokens` from the transcript, and writes ONE consolidated
+measurement row (`kind: "review"`, `delegated: true`, plus `token_source` and
+`claude_token_components`), then removes the job's work dir. It refuses (returns an `error`,
+keeps the work dir) if the job is not terminal.
 
 Example:
 
@@ -70,7 +73,7 @@ Example:
 record_review(
   job_id="abc123",
   verdict="merged",
-  claude_tokens=18234,
+  session_id="0e083120-0cb6-4980-8493-748d37699fc5",
   fix_lines=0,
   cause="all checks passed, diff clean"
 )
@@ -78,28 +81,33 @@ record_review(
 
 ### Self-done arm (the coin-flip 'tails' case)
 
-When the coin came up **tails** and you did the task yourself in this conversation
-(no delegation), log the self-done arm instead:
+When the coin comes up **tails**, call `mark_start(task_type="...")` BEFORE doing the task
+(it returns a `marker_id` that anchors the task's start in the transcript). Do the task
+yourself, then log the self-done arm:
 
 ```
 record_direct(
   task_type="refactor",
-  claude_tokens=42100,
+  marker_id="<from mark_start>",
+  session_id="<your session UUID>",
   note="did it inline; ~250-line diff"
 )
 ```
 
-This writes the matching measurement row (`kind: "review"`, `delegated: false`,
-`job_id: null`) so the delegated and self-done arms are joinable in one ledger.
+The service measures `claude_tokens` from the `mark_start`→`record_direct` window. This
+writes the matching measurement row (`kind: "review"`, `delegated: false`, `job_id: null`)
+so the delegated and self-done arms are joinable in one ledger.
 
 ## A/B Measurement (First ~30 Tasks)
 
-For the first ~30 eligible tasks (≥ 20K input OR ≥ 200-line output), **record Claude's token cost**:
+For the first ~30 eligible tasks (≥ 20K input OR ≥ 200-line output), Claude's token cost is
+**measured from the transcript**, not typed:
 
-1. Note the task's Claude token cost from the Claude Code transcript (the "used tokens" line after this response)
-2. Pass it as `claude_tokens` to `record_review(…)` (delegated arm) or `record_direct(…)`
-   (self-done arm) — the local LLM's token count is read from the job state automatically
-3. Compare: Is delegating cheaper than doing it in-conversation?
+1. Pass `session_id` to `record_review(…)` (delegated) or `record_direct(…)` (self-done); the
+   service computes `claude_tokens` for the task's own turns. The local LLM's count comes from
+   the job state automatically.
+2. Check progress and the running comparison with `python -m scripts.delegate.cli report`.
+3. Go/no-go: keep delegation only if it is ≥20% cheaper in Claude tokens on some clear task band.
 
 **Eligibility for A/B:**
 - **ask_local**: Inputs ≥ ~20K tokens (e.g., summarize a long log or document)
@@ -137,8 +145,11 @@ Common gate rejections and how to fix them:
 
 ## Coin-Flip A/B Protocol
 
-For the first ~30 eligible tasks, flip a coin:
-- **Heads:** Delegate (call `submit_task`)
-- **Tails:** Do it yourself
+For the first ~30 eligible tasks, flip a **real** coin (don't pick — it biases the arms):
+
+    python -c "import secrets; print(secrets.choice(['heads', 'tails']))"
+
+- **Heads:** Delegate (call `submit_task`), then review + `record_review(…, session_id=…)`
+- **Tails:** `mark_start(task_type)` first, do it yourself, then `record_direct(…, marker_id=…, session_id=…)`
 
 Measure token cost both ways. Use results to tune future delegation decisions.

@@ -84,3 +84,42 @@ def test_report_summarizes_ab_ledger(tmp_path):
     assert rep["direct"]["n"] == 2 and rep["direct"]["claude_tokens_mean"] == 4200
     assert round(rep["savings_pct"], 1) == 73.8 and rep["meets_20pct_gate"] is True
     assert "A/B measurement" in cli._fmt_report(rep)
+
+
+def test_report_excludes_unmeasured_rows_from_means(tmp_path):
+    from scripts.delegate.config import load_config
+    from scripts.delegate.ledger import Ledger
+    from scripts.delegate import cli
+    led = str(tmp_path / "ledger.jsonl")
+    L = Ledger(led)
+    L.append({"kind": "review", "delegated": True, "claude_tokens": 1000})
+    L.append({"kind": "review", "delegated": True, "claude_tokens": None,
+              "token_source": "unavailable"})  # must not drag the mean to ~500
+    cfg = load_config({"LOCAL_DELEGATE_BEARER_TOKEN": "b", "LOCAL_DELEGATE_ROUTER_TOKEN": "r",
+                       "LOCAL_DELEGATE_LEDGER": led})
+    rep = cli.report(cfg)
+    assert rep["delegated"]["n"] == 1 and rep["delegated"]["claude_tokens_mean"] == 1000
+    assert rep["n_reviews"] == 2 and rep["n_unmeasured"] == 1
+
+
+def test_measure_command_prints_token_total(tmp_path, capsys):
+    from scripts.delegate import cli
+    import json as _json
+    u = {"input_tokens": 10, "output_tokens": 0, "cache_read_input_tokens": 0,
+         "cache_creation_input_tokens": 0}
+    lines = [
+        _json.dumps({"type": "assistant", "message": {"usage": u, "content": [
+            {"type": "text", "text": "x"},
+            {"type": "tool_use", "name": "mcp__local-delegate__mark_start", "id": "m1",
+             "input": {"task_type": "x"}}]}}),
+        _json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "m1", "content": _json.dumps({"marker_id": "M"})}]}}),
+        _json.dumps({"type": "assistant", "message": {"usage": u, "content": [
+            {"type": "text", "text": "y"}]}}),
+    ]
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rc = cli.main(["measure", "--marker", "M", "--transcript", str(p)],
+                  env={"LOCAL_DELEGATE_BEARER_TOKEN": "b", "LOCAL_DELEGATE_ROUTER_TOKEN": "r"})
+    out = capsys.readouterr().out
+    assert rc == 0 and "20" in out  # 10 + 10 input tokens
