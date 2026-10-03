@@ -120,6 +120,33 @@ function Get-Field {
 # inventory read. The fleet inventory is not stable: a License Server appliance
 # entered it and left again within one session, so a target genuinely can
 # vanish mid-rotation and that must read as what it is.
+# Ground truth. The fleet inventory is an eventually-consistent CACHE: after
+# rotating VCF Operations' own certificate it still reported the OLD issuer
+# twenty minutes later, while the appliance was already serving the new one.
+# Polling the inventory alone therefore reports successes as failures. A TLS
+# handshake cannot be stale -- it is whatever the endpoint presents right now.
+function Get-ServedCertificate {
+    param([string]$TargetHost, [int]$Port = 443, [string]$Sni)
+    if (-not $Sni) { $Sni = $TargetHost }
+    $tcp = $null
+    $ssl = $null
+    try {
+        $tcp = New-Object Net.Sockets.TcpClient
+        if (-not $tcp.ConnectAsync($TargetHost, $Port).Wait(8000)) { return $null }
+        $ssl = New-Object Net.Security.SslStream($tcp.GetStream(), $false,
+                   [Net.Security.RemoteCertificateValidationCallback] { param($a,$b,$c,$d) $true })
+        $ssl.AuthenticateAsClient($Sni)
+        $c = New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ssl.RemoteCertificate
+        [pscustomobject]@{ Issuer = $c.Issuer; Subject = $c.Subject; Thumbprint = $c.Thumbprint
+                           NotAfter = $c.NotAfter }
+    } catch {
+        $null
+    } finally {
+        if ($ssl) { try { $ssl.Dispose() } catch { } }
+        if ($tcp) { try { $tcp.Close() } catch { } }
+    }
+}
+
 function Select-First {
     param($Items)
     $a = @($Items)
@@ -245,6 +272,15 @@ if ($ResourceKey) {
 }
 $key = [string](Get-Field $target 'certificateResourceKey')
 
+# Where to probe for ground truth: prefer an IP SAN (no DNS needed -- this
+# workstation cannot resolve lab names), with the DNS SAN as the TLS SNI.
+$sanObj   = Get-Field $target 'subjectAlternativeNames' $null
+$sanDns   = @(Get-Field $sanObj 'dns' @())
+$sanIp    = @(Get-Field $sanObj 'ip'  @())
+$probeSni = if ($sanDns.Count -gt 0) { [string]$sanDns[0] } else { Get-PrimaryName $target }
+$probeHost = if ($sanIp.Count -gt 0) { [string]$sanIp[0] } else { $probeSni }
+Write-Info "ground-truth probe: $probeHost:443 (SNI $probeSni)"
+
 Write-Step "Target"
 Write-Info "appliance    $(Get-Field $target 'displayApplianceType') ($(Get-Field $target 'appliance'))"
 Write-Info "name         $(Get-PrimaryName $target)"
@@ -260,6 +296,18 @@ if ($tip.Count -gt 0) {
 }
 if ((Get-Field $target 'issuedBy') -match 'LabRoot-CA') {
     Write-Ok "already signed by the lab CA -- nothing to do"
+    exit 0
+}
+# ...and ask the endpoint too, because the inventory lags. After rotating VCF
+# Operations' own certificate the inventory still named the OLD issuer while
+# the appliance was already serving the new one, so trusting the inventory here
+# would re-rotate a certificate that is already correct.
+$servedNow = Get-ServedCertificate -TargetHost $probeHost -Sni $probeSni
+if ($servedNow -and $servedNow.Issuer -match 'LabRoot-CA') {
+    Write-Ok "endpoint already serves a lab CA certificate -- nothing to do"
+    Write-Info "  thumbprint $($servedNow.Thumbprint)"
+    Write-Info "  valid until $($servedNow.NotAfter.ToString('yyyy-MM-dd'))"
+    Write-Info "  (the fleet inventory still shows the old issuer; it is a cache)"
     exit 0
 }
 if ((Get-Field $target 'appliance') -eq 'SDDC_MANAGER') {
@@ -395,7 +443,16 @@ while ((Get-Date) -lt $deadline) {
     $issuer = [string](Get-Field $now 'issuedBy')
     $elapsed = [int]((Get-Date) - $started).TotalSeconds
     if ($issuer -match 'LabRoot-CA') {
-        Write-Ok "replaced after ${elapsed}s -- issued by the lab CA"
+        Write-Ok "replaced after ${elapsed}s -- issued by the lab CA (per inventory)"
+        $replaced = $true
+        break
+    }
+    # The inventory can lag the appliance by a long way. Ask the endpoint.
+    $served = Get-ServedCertificate -TargetHost $probeHost -Sni $probeSni
+    if ($served -and $served.Issuer -match 'LabRoot-CA') {
+        Write-Ok "replaced after ${elapsed}s -- endpoint is serving a lab CA certificate"
+        Write-Info "  thumbprint $($served.Thumbprint)"
+        Write-Info "  the fleet inventory still shows the old issuer; it is a cache and lags."
         $replaced = $true
         break
     }
@@ -413,6 +470,16 @@ if ($after) {
     Write-Info "status       $(Get-Field $after 'displayStatus')  daysToExpire=$(Get-Field $after 'daysToExpire')"
 }
 if (-not $replaced) {
+    # Last word goes to the endpoint, not the cache.
+    $served = Get-ServedCertificate -TargetHost $probeHost -Sni $probeSni
+    if ($served -and $served.Issuer -match 'LabRoot-CA') {
+        Write-Ok "endpoint IS serving a lab CA certificate -- the inventory is simply stale"
+        Write-Info "  thumbprint $($served.Thumbprint)"
+        Write-Info "  valid until $($served.NotAfter.ToString('yyyy-MM-dd'))"
+        exit 0
+    }
+    if ($served) { Write-Info "endpoint still serves: $((($served.Issuer) -split ',')[0])" }
+    else { Write-Warn2 "endpoint did not complete a TLS handshake; could not confirm either way" }
     Write-Fail ("NOT replaced within {0} minutes (waited {1}s)." -f $TimeoutMinutes, [int]((Get-Date) - $started).TotalSeconds)
     Write-Warn2 "This is NOT proof of failure. A successful replacement has taken"
     Write-Warn2 "9m03s, and an 8-minute window once gave up about a minute before one"
