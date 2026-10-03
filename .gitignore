@@ -34,3 +34,6 @@ dist/
 
 # SDD subagent-driven-development scratch workspace (ledger, briefs, reports, diffs)
 .superpowers/sdd/
+
+# git worktrees (SDD isolated workspaces)
+.worktrees/
