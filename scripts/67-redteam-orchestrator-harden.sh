@@ -47,5 +47,34 @@ if grep -q '^redteam-orch-run-' <<<"$running"; then
 fi
 ok "no engagement container running — safe to restart/reboot"
 
-# Part B (Task 4) and Part A (Task 5) are appended below this line.
+step "4 — Part B: close registration (apply guard)"
+VENV="$BACKEND/.venv/bin/python"
+pct push "$CTID" "$LGC_DIR/redteam/apply_auth_guard.py" /tmp/apply_auth_guard.py
+pct push "$CTID" "$LGC_DIR/redteam/provision_user.py" /tmp/provision_user.py
+pct exec "$CTID" -- "$VENV" /tmp/apply_auth_guard.py "$AUTH_PY"
+pct exec "$CTID" -- "$VENV" -m py_compile "$AUTH_PY" || die "auth.py no longer compiles after guard — aborting"
+ok "guard applied and auth.py compiles"
+
+step "5 — provision the service user"
+[[ -n "${REDTEAM_ORCH_USER:-}" && -n "${REDTEAM_ORCH_PASSWORD:-}" ]] \
+  || die "set REDTEAM_ORCH_USER and REDTEAM_ORCH_PASSWORD before deploy"
+pct exec "$CTID" -- env REDTEAM_ORCH_USER="$REDTEAM_ORCH_USER" \
+  REDTEAM_ORCH_PASSWORD="$REDTEAM_ORCH_PASSWORD" \
+  sh -c "cd $BACKEND && $VENV /tmp/provision_user.py" || die "provisioning failed"
+ok "service user provisioned"
+
+step "6 — purge sessions minted during the LAN-open window"
+DB="$BACKEND/data/orchestrator.sqlite3"
+pct exec "$CTID" -- "$VENV" -c "import sqlite3,sys; c=sqlite3.connect('$DB'); c.execute('delete from sessions'); c.commit(); print('sessions purged')" \
+  || warn "session purge failed — verify manually"
+
+step "7 — restart orchestrator (stop then start; never bare run.sh)"
+pct exec "$CTID" -- sh -c "cd $ORCH_DIR && ./stop.sh" || warn "stop.sh returned nonzero (may not have been running)"
+pct exec "$CTID" -- sh -c "cd $ORCH_DIR && ./run.sh" || die "run.sh failed — orchestrator may be DOWN (pip/npm on egress-locked box?)"
+sleep 5
+code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 6 http://127.0.0.1:18000/healthz || true')"
+[[ "$code" == "200" ]] || die "orchestrator did not come back ( /healthz=$code ) — investigate before continuing"
+ok "orchestrator back up"
+
+# Part A (Task 5) is appended below this line.
 step "done (preflight only — no changes applied yet)"
