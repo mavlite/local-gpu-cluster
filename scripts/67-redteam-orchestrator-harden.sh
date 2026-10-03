@@ -125,4 +125,25 @@ ip -br link show type bridge 2>/dev/null | grep -q "fwbr${CTID}i" \
   || die "fwbr${CTID}i0 absent after reboot — the .fw is filtering NOTHING; Part A FAILED"
 ok "fwbr${CTID}i0 present — $CTID is filtered"
 
-step "done — registration closed, user provisioned, sessions purged, orchestrator restarted; $CTID filtered to ${WORKSTATION_IP} on :22/:18000 (fwbr${CTID}i0 verified)"
+step "11 — post-reboot orchestrator health gate"
+# The reboot killed the orchestrator started in step 8; it may not be boot-persistent.
+orch_up() {
+  local code
+  for _ in $(seq 1 10); do
+    code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:18000/healthz || true' 2>/dev/null)" || code=""
+    [[ "$code" == "200" ]] && return 0
+    sleep 3
+  done
+  return 1
+}
+if orch_up; then
+  ok "orchestrator up after reboot (autostarted)"
+else
+  warn "orchestrator not answering after reboot — starting it with run.sh"
+  pct exec "$CTID" -- sh -c "cd $ORCH_DIR && ./run.sh" \
+    || die "run.sh failed after reboot — start it manually (cd $ORCH_DIR && ./run.sh) and re-run --verify"
+  orch_up || die "orchestrator did not come up after reboot — start it manually (cd $ORCH_DIR && ./run.sh) and re-run --verify"
+  ok "orchestrator started by run.sh after reboot"
+fi
+
+step "done — registration closed, user provisioned, sessions purged; orchestrator up, $CTID filtered to ${WORKSTATION_IP} on :22/:18000 (fwbr${CTID}i0 verified)"
