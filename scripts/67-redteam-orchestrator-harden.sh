@@ -22,7 +22,8 @@ require_pve_host
 
 step "1 — preflight"
 require_cmd pct pve-firewall
-pct status "$CTID" | grep -q running || die "LXC $CTID is not running"
+ct_status="$(pct status "$CTID")" || die "cannot query status of LXC $CTID"
+grep -q running <<<"$ct_status" || die "LXC $CTID is not running"
 pct exec "$CTID" -- test -f "$AUTH_PY" || die "auth.py not found in $CTID — orchestrator layout changed"
 pct exec "$CTID" -- test -x "$ORCH_DIR/run.sh" || die "run.sh not found/executable in $CTID"
 grep -q '^enable: 1' /etc/pve/firewall/cluster.fw || die "datacenter firewall (cluster.fw) is not enabled"
@@ -40,7 +41,8 @@ done
 ok "only 157/170/172 will be filtered"
 
 step "3 — engagement gate"
-if pct exec "$CTID" -- docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^redteam-orch-run-'; then
+running="$(pct exec "$CTID" -- docker ps --format '{{.Names}}')" || die "cannot query docker in $CTID — refusing to proceed (gate must fail closed)"
+if grep -q '^redteam-orch-run-' <<<"$running"; then
   die "an engagement (redteam-orch-run-*) is running in $CTID — wait for it to finish; the restart/reboot would corrupt it"
 fi
 ok "no engagement container running — safe to restart/reboot"
