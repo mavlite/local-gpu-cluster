@@ -58,23 +58,39 @@ ok "guard applied and auth.py compiles"
 step "5 — provision the service user"
 [[ -n "${REDTEAM_ORCH_USER:-}" && -n "${REDTEAM_ORCH_PASSWORD:-}" ]] \
   || die "set REDTEAM_ORCH_USER and REDTEAM_ORCH_PASSWORD before deploy"
-pct exec "$CTID" -- env REDTEAM_ORCH_USER="$REDTEAM_ORCH_USER" \
-  REDTEAM_ORCH_PASSWORD="$REDTEAM_ORCH_PASSWORD" \
-  sh -c "cd $BACKEND && $VENV /tmp/provision_user.py" || die "provisioning failed"
+# password goes via stdin, never argv
+printf '%s' "$REDTEAM_ORCH_PASSWORD" | pct exec "$CTID" -- sh -c "cd $BACKEND && REDTEAM_ORCH_USER='$REDTEAM_ORCH_USER' REDTEAM_ORCH_PASSWORD=\$(cat) $VENV /tmp/provision_user.py" \
+  || die "provisioning failed"
 ok "service user provisioned"
+pct exec "$CTID" -- rm -f /tmp/apply_auth_guard.py /tmp/provision_user.py \
+  || warn "could not remove helper scripts from /tmp in $CTID"
 
-step "6 — purge sessions minted during the LAN-open window"
-DB="$BACKEND/data/orchestrator.sqlite3"
-pct exec "$CTID" -- "$VENV" -c "import sqlite3,sys; c=sqlite3.connect('$DB'); c.execute('delete from sessions'); c.commit(); print('sessions purged')" \
-  || warn "session purge failed — verify manually"
-
-step "7 — restart orchestrator (stop then start; never bare run.sh)"
+step "6 — stop orchestrator and confirm it is down"
 pct exec "$CTID" -- sh -c "cd $ORCH_DIR && ./stop.sh" || warn "stop.sh returned nonzero (may not have been running)"
+down=0
+for _ in 1 2 3 4 5 6; do
+  code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://127.0.0.1:18000/healthz || true')" \
+    || die "cannot query $CTID while confirming stop"
+  if [[ "$code" != "200" ]]; then down=1; break; fi
+  sleep 2
+done
+[[ "$down" == "1" ]] || die "orchestrator still serving after stop.sh — old code/sessions live; aborting before run.sh"
+ok "orchestrator is down"
+
+step "7 — purge sessions minted during the LAN-open window (server is down)"
+DB="$BACKEND/data/orchestrator.sqlite3"
+left="$(pct exec "$CTID" -- "$VENV" -c "import sqlite3; c=sqlite3.connect('$DB'); c.execute('delete from sessions'); c.commit(); print(c.execute('select count(*) from sessions').fetchone()[0])")" \
+  || die "session purge failed — attacker-minted sessions may remain"
+[[ "$left" == "0" ]] || die "session purge verification failed (remaining=$left) — attacker-minted sessions may remain"
+ok "sessions purged and verified empty"
+
+step "8 — start orchestrator"
 pct exec "$CTID" -- sh -c "cd $ORCH_DIR && ./run.sh" || die "run.sh failed — orchestrator may be DOWN (pip/npm on egress-locked box?)"
 sleep 5
-code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 6 http://127.0.0.1:18000/healthz || true')"
+code="$(pct exec "$CTID" -- sh -c 'curl -s -o /dev/null -w "%{http_code}" --max-time 6 http://127.0.0.1:18000/healthz || true')" \
+  || die "cannot query $CTID for healthz"
 [[ "$code" == "200" ]] || die "orchestrator did not come back ( /healthz=$code ) — investigate before continuing"
 ok "orchestrator back up"
 
 # Part A (Task 5) is appended below this line.
-step "done (preflight only — no changes applied yet)"
+step "Part B done — registration closed, user provisioned, sessions purged, orchestrator restarted"
