@@ -9,7 +9,7 @@ is mostly **Bash** (`scripts/*.sh`) and **Python** (`scripts/rag/`, `scripts/too
 No project-wide linter/formatter is configured. Match the surrounding style; do **not** add
 ruff/black/mypy or change build config without asking.
 
-- **Python tests:** `python3 -m pytest scripts/rag/tests scripts/files/tests -q`
+- **Python tests:** `python3 -m pytest scripts/rag/tests scripts/files/tests scripts/tools/gate/tests -q`
   - Deps: `scripts/rag/requirements.txt` (PyYAML, requests, trafilatura). If imports fail,
     `pip install -r scripts/rag/requirements.txt` first. On the host, the RAG code runs under
     `/opt/vcf-scraper-venv`.
