@@ -1,6 +1,6 @@
 # Minisforum nodes ↔ GPU cluster integration
 
-**Status:** draft for review · **Date:** 2026-10-05
+**Status:** rev 2 — Phase 1 rewritten from measurement · **Date:** 2026-10-05
 **Path:** architectural (brainstorming → spec → plan)
 
 ## 1. Intent
@@ -19,7 +19,7 @@ V620s, and redteam per-role agents.
 | # | Decision | Choice |
 |---|---|---|
 | D1 | Architecture | **Approach A** — router learns named backends; phased |
-| D2 | Phase 1 | Move embed/rerank off the V620s — placement decided by a **benchmark** of Proxmox-host LXC vs Minisforum VM (user: "test ... and compare") |
+| D2 | Phase 1 | ~~Move embed/rerank off the V620s~~ → **fix them in place** (rev 2). The placement benchmark the user asked for ("test ... and compare") showed the V620 wins 6-13× and on parity; see §4 |
 | D3 | Worker routing | Per-node router alias, per-backend semaphore, health check, GPU fallback **on by default** |
 | D4 | opencode | Pinned `worker-1..3` subagents, Qwen3.8 coordinates |
 | D5 | Redteam fast tier | Retarget to CPU workers only after a measured comparison |
@@ -27,10 +27,10 @@ V620s, and redteam per-role agents.
 | D7 | GPUs in the nodes | Later one-node spike, not part of this build |
 
 **Success criteria:**
-- V620 VRAM holds only the chat model; the chat slot count is a profile setting.
-- RAG query latency stays within 20% of today's V620-served baseline (threshold proposed here,
-  not user-set), and embeddings are
-  numerically equivalent (cosine ≥ 0.9998, the existing run-to-run noise floor).
+- Embed/rerank stay on the V620s with their VRAM cut to what the repo specifies; the chat slot
+  count is a profile setting.
+- RAG query-embed latency does not regress (it improves 50× if flash attention is adopted, §4),
+  and stored-vector compatibility is either exact or deliberately re-established by re-embedding.
 - Each worker alias serves requests from its own node with a warm prompt cache across turns.
 - Powering off any or all workers changes no client-visible behaviour beyond speed (fallback).
 - N-1 holds on the VCF cluster with workers running: survivors' active memory ≤ 50% of DRAM.
@@ -58,10 +58,21 @@ Qwen3.8 baseline; 24 GB VM, 16 vCPU, Ryzen 9 7945HX, ik_llama.cpp unless noted):
 
 Caveat: one 15-task hidden suite. Qwen3.6 matches Qwen3.8 on pass rate, not on turn efficiency.
 
+**Settings A/B** (30 hidden runs per arm, ±9 pts sd): baseline 15/30, `--min-p 0` 16/30,
+presence penalty 1.5 + `--repeat-last-n -1` 13/30, thinking ON (coding preset, `preserve_thinking`,
+8K budget, reasoning echoed) 12/30, verify-before-finish system prompt 16/30 at 2× wall-clock.
+**None beats baseline beyond noise.** Thinking scored 0/6 on `chunk_intent` vs 3-5/6 elsewhere.
+Two of five hidden tasks fail 0/6 in every arm (one unstated contract each), so ~60% is this
+suite's ceiling for the model. No loops: 1 turn-cap in 180 runs, 0 tool errors.
+
 **Worker runtime facts:**
 - Config: `-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr
-  --spec-type mtp:n_max=2`, Qwen3.6 sampling (`temp 0.7, top-p 0.8, top-k 20`),
-  `enable_thinking: false`.
+  --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs`, Qwen3.6 sampling (`temp 0.7, top-p 0.8,
+  top-k 20, --min-p 0`), `enable_thinking: false`, no presence penalty.
+- ik defaults verified on build 5f89bfc that the config overrides: `--min-p` **0.1** (Qwen
+  specifies 0) and MTP `p_min` **0.75** (truncated drafts to 1.68 of 2 tokens). The MTP change
+  decodes 26.6-28.6 t/s vs 22.5 (speculative decoding is verified, so quality is unaffected);
+  `-muge` measured 0%.
 - **`-cram 256 -ctx-ckpt 8` are mandatory.** ik's defaults (8 GiB RAM prompt cache, 32 context
   checkpoints × ~63 MiB) OOM-killed the server twice in a 24 GB guest. With both set, RSS held at
   20.8-21.4 GB with ~2.4 GB free.
@@ -71,52 +82,62 @@ Caveat: one 15-task hidden suite. Qwen3.6 matches Qwen3.8 on pass rate, not on t
 **Prompt-cache affinity is mandatory.** CPU prefill runs at ~125-300 tokens/s, so a job whose
 turns move between backends re-prefills its whole context every turn.
 
-**V620 VRAM held by non-chat services today** (`scripts/51-lxc-amd.sh`): embedder
-Qwen3-Embedding-0.6B Q8_0 at 5.24 GB on GPU0 (2 slots × 16384), reranker bge-reranker-v2-m3 at
-1.5 GB on GPU1.
+**V620 VRAM held by non-chat services:** the live embedder had drifted from
+`scripts/51-lxc-amd.sh` (4 slots / 65536 live vs 2 / 32768 in the repo) and held ~9.8 GB on GPU0;
+reconciled to the repo on 2026-10-05 (GPU0 31.8 → 24.9 GB used). Reranker bge-reranker-v2-m3
+holds 1.5 GB on GPU1.
 
-## 4. Phase 1 — free the V620s
+## 4. Phase 1 — fix the V620 embedder in place (rev 2)
 
-### 1a. Placement benchmark (measurement only)
+### What the placement benchmark showed (2026-10-05)
 
-Three placements serve the same models with the same slot contract (per-slot ctx 16384, embed
-`--parallel 2 --ctx-size 32768`, `--pooling last`; rerank ctx 8192 × 4):
+Same model files (SHA-verified copies of LXC 151's), same llama.cpp b11026, same flags; harness
+`bench_embed.py` with distinct texts per rep (repeated texts hit the prompt cache and read ~10 ms):
 
-| Placement | Host |
-|---|---|
-| P0 (baseline) | today's units on LXC 151 (V620) |
-| P1 | new CPU-only LXC on the Proxmox host (192.168.6.175), via the LXC deployment pattern |
-| P2 | a VM on one Minisforum (re-using llmbench01), reached through a temporary CRS309 accept |
+| Metric | P0 V620 | P1 Proxmox-host CPU LXC | P2 Minisforum VM CPU |
+|---|---|---|---|
+| 4K / 16K-token chunk | **2.1 / 14.9 s** | 12 / 108 s | 8.0 / 68 s |
+| Bulk ingest (4 workers, 1K chunks) | **4.0-4.5 chunks/s** | 0.38-0.47 | 0.63-0.71 |
+| Rerank 20 × 300 tokens | **0.59 s** | 7.2-7.6 s | 4.4 s |
+| Vectors vs stored | **bit-exact** | cos 0.9993-0.9998 | cos 0.9993-0.9998 |
 
-Metrics, each driven **through the router** (LXC 153) so network cost is included:
+The CPU is compute-bound (flash attention and 12 threads did not help), and its vectors shift. The
+CPU's one apparent win — fresh-query latency 39-59 ms vs ~605 ms — was a fault in the GPU unit:
 
-1. RAG query embed latency — p50/p95 over 200 queries of real chunk sizes.
-2. Rerank latency — p50/p95 for a 20-candidate rerank.
-3. Bulk ingest throughput — chunks/s on one 50-document tranche, measured from batch 2 onward
-   (batch 1 carries a one-time LanceDB cost).
-4. Embedding parity against P0 — `scripts/tools/embed-dump.py`, cosine on full 1024-dim vectors.
-5. Router → backend RTT (curl, not `/dev/tcp`).
+| LXC 151 embed config (fresh texts, ≥10-token queries) | Query p50 | 16K chunk | Ingest | GPU0 VRAM | Parity |
+|---|---|---|---|---|---|
+| V0 live: 4 slots, ctx 65536, FA off | 603 ms | 14.9 s | 4.0/s | 31.8 GB | exact |
+| V1 repo: 2 slots, ctx 32768, FA off (**live since 2026-10-05**) | 604 ms | ≈V0 | ≈V0 | **24.9 GB** | exact |
+| V2: V1 + `--flash-attn on` | **12 ms** | **4.8 s** | **7.9/s** | 24.9 GB | cos 0.99954 |
 
-**Decision rule:** pick the placement that meets the latency criterion (§1) at the lowest
-operational risk. If P2 wins on performance, it ships only with a P1 standby the router falls
-back to (§2), so P2 wins only by a margin that justifies running both.
+The ~600 ms floor is the non-flash-attention path, not slot count (`kv_unified` was already false).
 
-### 1b. Cutover
+### 1a. Done — repo config applied (V1)
 
-- Deploy the chosen placement as a permanent unit (`llamacpp-embed`, `llamacpp-rerank`) with
-  unchanged aliases (`qwen3-embed`, `bge-rerank`).
-- Repoint the router via `EMBED_URL` / `RERANK_URL` (env only — the router already treats these
-  as independent upstreams).
-- Disable the embed and rerank units on LXC 151.
-- The three-way context alignment (LXC 151 per-slot ctx = router `MAX_EMBED_INPUT_TOKENS` =
-  AnythingLLM `EMBEDDING_MODEL_MAX_CHUNK_LENGTH` = 16384) is preserved by construction, because
-  the slot contract does not change.
-- **Chat slot count becomes a profile setting.** Add `LLAMA_PARALLEL` / `LLAMA_CTX` to each chat
-  profile in `swap-chat-model.sh`. The default stays 1 × 256K, and a `-3slot` profile variant
-  provides 3 × 128K. Redteam mode's unload-embed/rerank step becomes a no-op.
+The live unit now matches the repo (per-slot 16384 kept, so the three-way context alignment
+holds); backup at LXC 151 `/root/llamacpp-embed.service.bak-20261005`. Rollback: restore the
+backup, `daemon-reload`, restart.
+
+### 1b. Adopt flash attention (decision pending)
+
+V2 is better on every axis except parity. Two ways to take it:
+
+- **Re-embed** (recommended): flip `--flash-attn on` in the unit **and in `51-lxc-amd.sh`**, then
+  re-embed every AnythingLLM workspace so stored and query vectors share one space (~21k chunks
+  at ~7.9 chunks/s ≈ 45 min of embedder time; the re-ingest procedure through AnythingLLM still
+  needs to be written and timed).
+- **Accept drift:** flip the flag only. Same-text vectors move by cos ~0.0005; retrieval impact
+  is unmeasured and would need a top-k overlap test on real queries before trusting it.
+
+The reranker (`--flash-attn off`, 0.59 s per 20-doc rerank) likely has the same floor; test it
+the same way (scores and ranking order before and after) before changing it.
+
+### 1c. Chat slots as a profile setting
+
+- Add `LLAMA_PARALLEL` / `LLAMA_CTX` to each chat profile in `swap-chat-model.sh`. The default
+  stays 1 × 256K; a `-3slot` variant provides 3 × 128K if the freed ~7 GB plus existing headroom
+  fits it — measure VRAM at 3 slots before shipping.
 - Router `CHAT_CONCURRENCY` follows the active profile's slot count.
-
-**Rollback:** restore the `EMBED_URL` / `RERANK_URL` env and re-enable the LXC 151 units.
 
 ## 5. Phase 2 — CPU worker aliases
 
@@ -207,15 +228,16 @@ the delegate until then, so the A/B measures one variable.
   recorded calls, not elapsed time.
 - **Deployment scripts:** `bash -n` plus shellcheck.
 - **Live checks per step:** curl through the router to each alias. Kill one worker and confirm
-  the fallback header. Run `embed-dump.py` parity after cutover. Confirm the RAG answer with a
+  the fallback header. Run `embed-dump.py` parity after any embed-unit change (1b). Confirm the RAG answer with a
   citation in AnythingLLM.
 
 ## 8. Rollout order
 
 | Step | Change | Rollback |
 |---|---|---|
-| 1a | Placement benchmark | none (measurement) |
-| 1b | Embed/rerank cutover; slot count as profile setting | env revert + re-enable LXC 151 units |
+| 1a | ✅ Embed unit reconciled to repo (2 slots / 32768) — done 2026-10-05 | restore unit backup |
+| 1b | Embed `--flash-attn on` + corpus re-embed (pending decision); rerank FA test | flip flag back (+ re-embed again if 1b re-embedded) |
+| 1c | Chat slot count as a profile setting | profile default unchanged |
 | 2a | Router backend table (no workers yet → behaviour unchanged) | revert router deploy |
 | 2b | Worker VMs + firewall + keys + N-1 check | power off workers |
 | 2c | opencode worker agents + concurrency probe | remove agent entries |
@@ -237,6 +259,7 @@ the delegate until then, so the A/B measures one variable.
 |---|---|
 | Worker memory bandwidth slows the VCF management plane (CPU shares do not govern bandwidth) | Watch vSAN latency during 2b; low shares; workers are expendable |
 | Lab outage mid-job | Fallback on next request; jobs are retryable by design |
-| Embedding throughput on CPU too low for bulk re-ingest | 1a measures it; slot count can rise to 4 on a CPU host with RAM to spare |
+| Flash attention adopted without re-embedding mixes two vector spaces (cos ~0.9995 apart) | 1b's default is re-embed; "accept drift" requires a top-k overlap test first |
+| Live units drift from the repo again (the 4-slot embed drift went unnoticed) | Deploy unit changes from `51-lxc-amd.sh`, then diff live vs repo after each phase |
 | Alias table drift between repo and live router | Aliases edited in repo, deployed by script (lesson from the nothink alias loss) |
 | Quality claim rests on one 15-task suite | Workers get narrow, checkable tasks; the coordinator verifies |
