@@ -51,6 +51,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 import alias_defaults
 import tavily_cache
+from stream_admission import (AdmissionGate, ClosingStreamingResponse, hold_slot,
+                              refresh_capacity_once)
+from embed_admission import embed_texts, first_oversized
 
 # ---------- Configuration (loaded from EnvironmentFile=/etc/router.env) ----------
 
@@ -180,8 +183,12 @@ CORS_ALLOW_ORIGINS = [
     o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
 ]
 
-# Finite timeouts. Streaming uses timeout=None because long generations are normal.
+# Finite timeouts. Streaming has no READ timeout because long generations are
+# normal (MAX_STREAM_SECONDS caps the whole stream instead), but it does have a
+# CONNECT timeout: with timeout=None a black-holed upstream held the stream --
+# and, now, its chat_sem slot -- for the full MAX_STREAM_SECONDS.
 CHAT_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=5.0)
+STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
 SMALL_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
 
 # ---------- Structured access logging ----------
@@ -322,7 +329,50 @@ async def metrics_ip_allowlist(request: Request, call_next):
 
 # ---------- Admission control semaphores ----------
 
-chat_sem = asyncio.Semaphore(CHAT_CONCURRENCY)
+# Chat admission FOLLOWS the chat server's slot count (llama-server /props
+# total_slots): 1 normally, 3 in redteam mode. A fixed CHAT_CONCURRENCY would
+# serialize redteam's parallel agents now that streams are actually admitted.
+# CHAT_CONCURRENCY is the capacity until the first successful refresh and
+# whenever the slot count cannot be read. CHAT_CONCURRENCY_FOLLOW_SLOTS=0
+# pins it instead.
+CHAT_CONCURRENCY_FOLLOW_SLOTS = os.environ.get("CHAT_CONCURRENCY_FOLLOW_SLOTS", "1") != "0"
+CHAT_SLOT_REFRESH_S = float(os.environ.get("CHAT_SLOT_REFRESH_S", "15"))
+chat_sem = AdmissionGate(CHAT_CONCURRENCY)
+_slot_refresh_task: "asyncio.Task | None" = None
+
+
+async def _fetch_chat_slots() -> Optional[int]:
+    async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
+        r = await c.get(f"{V620_URL}/props", headers=upstream_headers())
+        r.raise_for_status()
+        v = r.json().get("total_slots")
+        return v if isinstance(v, int) else None
+
+
+async def _slot_refresh_loop():
+    while True:
+        await refresh_capacity_once(chat_sem, _fetch_chat_slots)
+        await asyncio.sleep(CHAT_SLOT_REFRESH_S)
+
+
+async def _ensure_slot_refresh() -> None:
+    """Start the refresh loop on first use. Lazy rather than a startup hook,
+    which Starlette 1.x no longer offers via on_event.
+
+    The very first call reads the slot count BEFORE returning (bounded), so a
+    burst arriving in redteam mode is not admitted at the fallback capacity."""
+    global _slot_refresh_task
+    if not CHAT_CONCURRENCY_FOLLOW_SLOTS:
+        return
+    if _slot_refresh_task is None:
+        try:
+            await asyncio.wait_for(refresh_capacity_once(chat_sem, _fetch_chat_slots), 3.0)
+        except asyncio.TimeoutError:
+            pass
+    if _slot_refresh_task is None or _slot_refresh_task.done():
+        _slot_refresh_task = asyncio.get_running_loop().create_task(_slot_refresh_loop())
+
+
 embed_sem = asyncio.Semaphore(EMBED_CONCURRENCY)
 
 # Reverse-lookup from llama-server alias (ALIAS_MAP "backend" field) to the
@@ -649,7 +699,8 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
     with KEEPALIVE_INTERVAL timeout and yields `: ping` on timeout.
 
     Also caps the total stream wall-clock at MAX_STREAM_SECONDS so a
-    wedged upstream can't hold its chat_sem slot forever.
+    wedged upstream can't hold its chat_sem slot forever (the slot itself is
+    held by hold_slot around this generator, for the stream's whole life).
     """
     stream_started = time.monotonic()
 
@@ -667,7 +718,7 @@ async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thin
 
     async def upstream_reader():
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
                 async with client.stream(
                     "POST", upstream_url, json=payload, headers=upstream_headers()
                 ) as r:
@@ -736,7 +787,7 @@ async def sse_passthrough_with_keepalive(upstream_url: str, payload: dict):
 
     async def upstream_reader():
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
                 async with client.stream("POST", upstream_url, json=payload,
                                          headers=upstream_headers()) as r:
                     if r.status_code >= 500:
@@ -1321,7 +1372,7 @@ async def tool_loop_stream(initial_body: dict, strip_thinking: bool, client_ip: 
         finish_reason = None
 
         try:
-            async with httpx.AsyncClient(timeout=None) as c:
+            async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as c:
                 async with c.stream(
                     "POST", f"{V620_URL}/v1/chat/completions",
                     json=per_iter, headers=upstream_headers(),
@@ -1583,6 +1634,9 @@ async def trigger_swap_and_wait(wanted_backend: str) -> bool:
             async with httpx.AsyncClient(timeout=3.0) as c:
                 current = await get_active_backend(c)
             if current == wanted_backend:
+                # A swap can change the slot count (3-slot redteam <-> 1-slot
+                # normal); apply it now rather than up to CHAT_SLOT_REFRESH_S later.
+                await refresh_capacity_once(chat_sem, _fetch_chat_slots)
                 return True
             await asyncio.sleep(1)
         return False
@@ -1604,6 +1658,7 @@ async def chat(
 ):
     global _last_chat_ts
     _last_chat_ts = time.monotonic()      # feed-forward signal for the host fan bridge
+    await _ensure_slot_refresh()
     body = await request.json()
     strip = should_strip_thinking(body, x_strip_thinking)
     stream = body.get("stream", False)
@@ -1698,8 +1753,11 @@ async def chat(
                             200, client_ip,
                             error=f"auto-swap-stream:{active}->{wanted}",
                         )
-                        return StreamingResponse(
-                            _swap_then_stream(), media_type="text/event-stream"
+                        # This path never touched chat_sem at all; it is chat
+                        # traffic like any other, so it is admitted the same way.
+                        return ClosingStreamingResponse(
+                            hold_slot(chat_sem, _swap_then_stream(), KEEPALIVE_INTERVAL),
+                            media_type="text/event-stream",
                         )
 
                     # Non-streaming: block until swap completes, then fall through
@@ -1751,32 +1809,36 @@ async def chat(
     # response, possibly with a pause between iterations while tools execute.
     tool_exec = body.get("tool_execution", TOOL_EXECUTION_DEFAULT)
 
-    async with chat_sem:
+    # Streams take their chat_sem slot INSIDE the response body (hold_slot), so
+    # it is held until the stream ends. Returning a StreamingResponse from
+    # inside `async with chat_sem:` released the slot before the first byte,
+    # leaving every streamed request -- nearly all agent traffic -- unadmitted.
+    if stream:
         if tool_exec == "server":
-            log_access(
-                "/v1/chat/completions", model, token_count,
-                -1 if stream else 0,
-                int((time.monotonic() - started) * 1000), 200, client_ip,
-                error=f"tool_execution=server,stream={stream}",
-            )
-            if stream:
-                return StreamingResponse(
-                    tool_loop_stream(body, strip, client_ip),
-                    media_type="text/event-stream",
-                )
-            data = await tool_loop_nonstream(body, strip, client_ip)
-            return JSONResponse(data, status_code=200)
-
-        if stream:
-            # Streaming responses log only on connection close (we don't get tokens-out
-            # here easily). Log a "stream-started" entry now; rely on access patterns for the rest.
             log_access("/v1/chat/completions", model, token_count, -1,
                        int((time.monotonic() - started) * 1000), 200, client_ip,
-                       error="stream-started")
-            return StreamingResponse(
-                sse_stream_with_keepalive(url, body, strip),
+                       error="tool_execution=server,stream=True")
+            return ClosingStreamingResponse(
+                hold_slot(chat_sem, tool_loop_stream(body, strip, client_ip), KEEPALIVE_INTERVAL),
                 media_type="text/event-stream",
             )
+        # Streaming responses log only on connection close (we don't get tokens-out
+        # here easily). Log a "stream-started" entry now; rely on access patterns for the rest.
+        log_access("/v1/chat/completions", model, token_count, -1,
+                   int((time.monotonic() - started) * 1000), 200, client_ip,
+                   error="stream-started")
+        return ClosingStreamingResponse(
+            hold_slot(chat_sem, sse_stream_with_keepalive(url, body, strip), KEEPALIVE_INTERVAL),
+            media_type="text/event-stream",
+        )
+
+    async with chat_sem:
+        if tool_exec == "server":
+            log_access("/v1/chat/completions", model, token_count, 0,
+                       int((time.monotonic() - started) * 1000), 200, client_ip,
+                       error="tool_execution=server,stream=False")
+            data = await tool_loop_nonstream(body, strip, client_ip)
+            return JSONResponse(data, status_code=200)
 
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
             try:
@@ -1828,6 +1890,7 @@ async def completions(request: Request):
     template assembly, no tool calls, no [CONTEXT N] stripping (FIM responses
     are pure code so the regex would never match anyway).
     """
+    await _ensure_slot_refresh()
     body = await request.json()
     stream = body.get("stream", False)
     url = f"{V620_URL}/v1/completions"
@@ -1866,16 +1929,16 @@ async def completions(request: Request):
             detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
         )
 
-    async with chat_sem:
-        if stream:
-            log_access("/v1/completions", model, token_count, -1,
-                       int((time.monotonic() - started) * 1000), 200, client_ip,
-                       error="stream-started")
-            return StreamingResponse(
-                sse_stream_with_keepalive(url, body, strip_thinking=False),
-                media_type="text/event-stream",
-            )
+    if stream:   # slot held for the stream's life -- see /v1/chat/completions
+        log_access("/v1/completions", model, token_count, -1,
+                   int((time.monotonic() - started) * 1000), 200, client_ip,
+                   error="stream-started")
+        return ClosingStreamingResponse(
+            hold_slot(chat_sem, sse_stream_with_keepalive(url, body, strip_thinking=False), KEEPALIVE_INTERVAL),
+            media_type="text/event-stream",
+        )
 
+    async with chat_sem:
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
             try:
                 r = await c.post(url, json=body, headers=upstream_headers())
@@ -1923,6 +1986,7 @@ async def anthropic_messages(request: Request):
     """
     global _last_chat_ts
     _last_chat_ts = time.monotonic()
+    await _ensure_slot_refresh()
     body = await request.json()
     stream = bool(body.get("stream", False))
     url = f"{V620_URL}/v1/messages"
@@ -1948,15 +2012,15 @@ async def anthropic_messages(request: Request):
             detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
         )
 
+    if stream:   # slot held for the stream's life -- see /v1/chat/completions
+        log_access("/v1/messages", model, token_count, -1,
+                   int((time.monotonic() - started) * 1000), 200, client_ip,
+                   error="stream-started")
+        return ClosingStreamingResponse(
+            hold_slot(chat_sem, sse_passthrough_with_keepalive(url, body), KEEPALIVE_INTERVAL),
+            media_type="text/event-stream",
+        )
     async with chat_sem:
-        if stream:
-            log_access("/v1/messages", model, token_count, -1,
-                       int((time.monotonic() - started) * 1000), 200, client_ip,
-                       error="stream-started")
-            return StreamingResponse(
-                sse_passthrough_with_keepalive(url, body),
-                media_type="text/event-stream",
-            )
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as c:
             try:
                 r = await c.post(url, json=body, headers=upstream_headers())
@@ -2015,23 +2079,31 @@ def _ensure_eot(text: str) -> str:
 async def embeddings(request: Request):
     body = await request.json()
     inp = body.get("input")
+    texts = embed_texts(inp)
     if isinstance(inp, str):
         body["input"] = _ensure_eot(inp)
-        text_for_count = inp
     elif isinstance(inp, list):
         body["input"] = [_ensure_eot(x) if isinstance(x, str) else x for x in inp]
-        text_for_count = "\n".join(x for x in inp if isinstance(x, str))
-    else:
-        text_for_count = ""
 
-    # Token-budget admission control (best-effort). count_tokens returns -1
-    # when /tokenize is unreachable (fail-open).
+    # Token-budget admission control (best-effort), PER INPUT: each input gets
+    # its own slot, so a batch whose SUM passes the limit is fine. Joining the
+    # batch and counting the total rejected AnythingLLM's 8-chunk batches.
+    # count_tokens returns -1 when /tokenize is unreachable (fail-open).
+    tok_sem = asyncio.Semaphore(8)
+
+    async def _count(t: str) -> int:
+        async with tok_sem:
+            return await count_tokens(client, EMBED_URL, t)
+
     async with httpx.AsyncClient() as client:
-        token_count = await count_tokens(client, EMBED_URL, text_for_count)
-    if token_count != -1 and token_count > MAX_EMBED_INPUT_TOKENS:
+        counts = await asyncio.gather(*(_count(t) for t in texts))
+    bad = first_oversized(counts, MAX_EMBED_INPUT_TOKENS)
+    if bad is not None:
+        idx, n = bad
+        where = "input" if isinstance(inp, str) else f"input[{idx}]"
         raise HTTPException(
             status_code=413,
-            detail=f"input is {token_count} tokens, exceeds MAX_EMBED_INPUT_TOKENS={MAX_EMBED_INPUT_TOKENS}",
+            detail=f"{where} is {n} tokens, exceeds MAX_EMBED_INPUT_TOKENS={MAX_EMBED_INPUT_TOKENS}",
         )
 
     async with embed_sem:
@@ -2267,6 +2339,7 @@ async def models():
 
 @app.get("/healthz")
 async def healthz():
+    await _ensure_slot_refresh()
     async with httpx.AsyncClient(timeout=3.0) as c:
         upstream_status = {}
         chat_models_payload = None
@@ -2295,4 +2368,7 @@ async def healthz():
         "upstream": upstream_status,
         "active_chat_profile": active_chat_profile,
         "seconds_since_chat": (time.monotonic() - _last_chat_ts) if _last_chat_ts is not None else None,
+        # Streams are admitted now (hold_slot); capacity follows the chat slots.
+        "chat_admission": {"capacity": chat_sem.capacity, "in_use": chat_sem.in_use,
+                           "follows_slots": CHAT_CONCURRENCY_FOLLOW_SLOTS},
     }
