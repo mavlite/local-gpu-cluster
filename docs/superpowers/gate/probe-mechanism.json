@@ -1,0 +1,23 @@
+{
+ "rc": 0,
+ "worker_calls": 3,
+ "span_s": 4.003107070922852,
+ "serial_s": 12.0,
+ "verdict": "parallel",
+ "worker_tools": [
+  "edit",
+  "glob",
+  "grep",
+  "read",
+  "write"
+ ],
+ "coordinator_tools": [
+  "glob",
+  "grep",
+  "read",
+  "task",
+  "todowrite"
+ ],
+ "escaped": false,
+ "dir": "C:\\Users\\willi\\AppData\\Local\\Temp\\gate-probe-g8lzpw2i"
+}

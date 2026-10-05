@@ -1,0 +1,12 @@
+{
+ "tasks": [
+  "T1-ttl-cache",
+  "T2-semver",
+  "T3-token-bucket",
+  "T4-ini-parser",
+  "T5-ledger-report",
+  "T6-path-router"
+ ],
+ "manifest_sha256": "9415ec687a73e8858226ba4a7423c4098d4f2023fe05727a3b5fd3474cf21e3f",
+ "problems": []
+}
