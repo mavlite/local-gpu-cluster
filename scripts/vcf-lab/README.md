@@ -3,27 +3,72 @@
 Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 
 ```powershell
-.\Start-VCFLab.ps1                 # bring up the VCF stack
+.\Start-VCFLab.ps1                 # Full: bring up the whole VCF stack
+.\Start-VCFLab.ps1 -Mode Minimal   # day to day: hosts + LLM workers only, VCF stack OFF
+.\Start-VCFLab.ps1 -Mode Minimal -WithVCenter   # ...plus vCenter for the UI
 .\Start-VCFLab.ps1 -SkipInventoryRepair   # report inventory drift, do not fix it
-.\Stop-VCFLab.ps1                  # shut down the VCF stack, leave hosts running
-.\Stop-VCFLab.ps1 -IncludeHosts    # also power off the ESX hosts
+.\Stop-VCFLab.ps1                  # shut down the VCF stack, leave hosts + LLM workers running
+.\Stop-VCFLab.ps1 -IncludeHosts    # also stop the LLM workers and power off the hosts
 .\Stop-VCFLab.ps1 -WhatIf          # dry run
 ```
+
+## Two modes
+
+| | Full | Minimal |
+|---|---|---|
+| ESX hosts | up, out of maintenance | up, out of maintenance |
+| vSAN | required | forms, but not required (workers use local datastores) |
+| vCenter, NSX, SDDC Manager, Operations, VSP, License, Collector | started in order | **off** (`-WithVCenter` adds vCenter only) |
+| LLM workers (`LlmWorkers` in the config) | left alone, with a warning if running | started host-direct |
+| RAM held by management VMs | ~167 GB across the cluster | none |
+
+**Full -> Minimal:** `.\Stop-VCFLab.ps1` (stops the VCF stack, leaves hosts and
+workers running), then `.\Start-VCFLab.ps1 -Mode Minimal` to start any worker
+that is off. **Minimal -> Full:** `.\Start-VCFLab.ps1`. Stop the workers first
+if you want the management VMs to have the RAM back -- Full warns if they are up.
+**Everything off from Minimal:** `.\Stop-VCFLab.ps1 -IncludeHosts`; vCenter
+being unreachable is expected there, and the script works host-direct --
+provided no VCF component is running, which it checks and refuses on.
+
+Why Minimal needs no vCenter: the workers' disks are on each host's local
+datastore (`hypXX-local`), and their port group `SDDC-DPortGroup-VM-Mgmt` uses
+**ephemeral** binding, which lets a host attach a VM's NIC without vCenter
+(Broadcom KB 324492). A static-binding port group would not.
+
+**License window.** VCF 9 licenses must be refreshed at least every 180 days
+(connected mode reports usage from VCF Operations every 24 h); miss it and they
+are treated as expired -- hosts disconnect from vCenter and workloads cannot
+start. A Full start alone proves nothing, so the sync is recorded by
+`Stop-VCFLab.ps1`, and only when it finds VCF Operations has been up for
+**24 h or more** (read from the VM's boot time before stopping it). The record
+is `last-license-sync.txt` next to the credential file -- per workstation, so a
+Full run driven from another machine does not count here.
+
+Minimal **fails closed**: it refuses when that record is missing, unreadable,
+future-dated (check the clock), or older than `LicenseWindow.RefuseDays` (150),
+and warns after `WarnDays` (30). `-IgnoreLicenseWindow` overrides it -- e.g.
+the first time, after confirming the license in VCF Operations by hand.
+The config is validated at load: `0 < WarnDays < RefuseDays < 180`, and every
+`LlmWorkers` entry needs a known host, a unique name, and a name that cannot be
+mistaken for a VCF component.
 
 Requires PowerCLI (`Install-Module VMware.PowerCLI -Scope CurrentUser`) and the
 credential file at `%USERPROFILE%\.vcflab\credentials.env`. Credentials are read
 into `PSCredential` objects and never printed, logged, or passed on a command
 line.
 
-## Scope: VCF components only
+## Scope: VCF components, plus the configured LLM workers
 
-These scripts power **only** VCF components. The managed set is computed at run
-time from the config:
+These scripts power **only** VCF components and the `LlmWorkers` group. The
+managed set is computed at run time from the config:
 
 - `VCenter.VmName`
 - every `Appliances.*.VmName` — SDDC Manager, NSX, Operations, License Server,
   Operations Collector
 - VSP nodes matching `Vsp.NamePrefix` inside `Vsp.Folder`
+- `LlmWorkers` — started only by `-Mode Minimal`, stopped only by
+  `-IncludeHosts`; never treated as VCF components (vCenter's shutdown does not
+  wait on them)
 
 Anything else on the cluster — developer VMs, containers, appliances, one-off
 workloads — is never started, never stopped, and never migrated. Both scripts
@@ -183,6 +228,19 @@ Two things about that harness are worth knowing before you extend it:
 What it asserts: the VSP control plane stops before its workers; neither script
 ever touches a non-VCF VM; `-IncludeHosts` refuses (and names the blockers)
 while a foreign VM runs; and it powers the hosts off once the way is clear.
+For the two modes (82 checks in all, refusals asserted by exit code): Full never
+starts a worker and records no license sync; Minimal starts every worker
+host-direct, starts no VCF component, leaves maintenance mode, and refuses --
+before touching maintenance mode -- beside a running VCF stack, with an
+unqueryable host, or on a missing/unreadable/future/expired license record;
+a failed worker exits 1 and is named; `-WhatIf` changes nothing; `-WithVCenter`
+adds vCenter only; a default Stop leaves workers running, records a license sync
+only after 24 h of Operations uptime, and exits 0 with nothing to do in Minimal;
+`-IncludeHosts` stops the workers, including with vCenter down, and refuses
+(naming the VM on its own host, hard-stopping nothing) if a VCF component is up
+without vCenter. The `Get-VM` stub is host-aware, so a VM handled through the
+wrong host fails. Each guard was mutation-tested (disabled, a test failed,
+restored).
 
 ## Status
 

@@ -14,7 +14,43 @@ function Import-VCFLabConfig {
     if (-not (Test-Path $Path)) { throw "Config not found: $Path" }
     $cfg = Import-PowerShellDataFile -Path $Path
     $cfg['CredentialFile'] = Resolve-VCFLabCredentialPath -Config $cfg -ScriptRoot $PSScriptRoot
+    Assert-VCFLabConfig -Config $cfg
     $cfg
+}
+
+<#
+    Fail fast on the optional sections, at load, with a message that names the
+    problem -- under StrictMode a missing key otherwise surfaces later as a bare
+    "property cannot be found" from deep inside a power sequence.
+#>
+function Assert-VCFLabConfig {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ($Config.ContainsKey('LlmWorkers') -and $Config.LlmWorkers) {
+        $hostShorts = @($Config.Hosts | ForEach-Object { $_.Short })
+        $seen = @{}
+        foreach ($w in @($Config.LlmWorkers)) {
+            if ($w -isnot [hashtable] -or -not $w.ContainsKey('VmName') -or -not $w.VmName -or
+                -not $w.ContainsKey('Host') -or -not $w.Host) {
+                $problems.Add("LlmWorkers: every entry needs VmName and Host"); continue
+            }
+            if ($seen.ContainsKey($w.VmName)) { $problems.Add("LlmWorkers: $($w.VmName) is listed twice") }
+            $seen[$w.VmName] = $true
+            if ($hostShorts -notcontains $w.Host) { $problems.Add("LlmWorkers: $($w.VmName) names host '$($w.Host)', not one of $($hostShorts -join ', ')") }
+            # A worker that LOOKS like a VCF component would be counted as one by
+            # the "is the VCF stack down?" check, and Minimal would refuse forever.
+            if (Test-IsVcfName -Config $Config -Name $w.VmName) { $problems.Add("LlmWorkers: $($w.VmName) collides with a VCF component name or the VSP prefix") }
+        }
+    }
+    if ($Config.ContainsKey('LicenseWindow')) {
+        $lw = $Config.LicenseWindow
+        if ($lw -isnot [hashtable] -or -not $lw.ContainsKey('WarnDays') -or -not $lw.ContainsKey('RefuseDays')) {
+            $problems.Add("LicenseWindow needs WarnDays and RefuseDays")
+        } elseif (-not (0 -lt $lw.WarnDays -and $lw.WarnDays -lt $lw.RefuseDays -and $lw.RefuseDays -lt 180)) {
+            $problems.Add("LicenseWindow must satisfy 0 < WarnDays < RefuseDays < 180 (VCF 9 licenses lapse at 180 days)")
+        }
+    }
+    if ($problems.Count -gt 0) { throw ("VCFLab.Config.psd1 is invalid:`n  " + ($problems -join "`n  ")) }
 }
 
 <#
@@ -726,4 +762,225 @@ function Get-VspNodes {
     $cp  = @($all | Where-Object { $_.NumCpu -eq $Config.Vsp.ControlPlaneVcpu } | Sort-Object Name)
     $wk  = @($all | Where-Object { $_.NumCpu -ne $Config.Vsp.ControlPlaneVcpu } | Sort-Object Name)
     [pscustomobject]@{ ControlPlane = $cp; Workers = $wk; All = $all }
+}
+
+# ------------------------------------------------------- LLM workers ----------
+# Minimal mode runs the hosts and the CPU LLM workers with every VCF component
+# OFF, vCenter included. So everything below talks to the hosts directly: the
+# workers sit on local datastores and an ephemeral-binding port group, which a
+# host can attach without vCenter.
+
+<#
+    The configured LLM workers, each resolved to the host that holds it.
+    An older config without LlmWorkers yields an empty list, not an error --
+    under StrictMode a missing hashtable key throws, so it is checked first.
+#>
+function Get-LlmWorkers {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    if (-not $Config.ContainsKey('LlmWorkers') -or -not $Config.LlmWorkers) { return @() }
+    foreach ($w in @($Config.LlmWorkers)) {
+        $h = @($Config.Hosts | Where-Object { $_.Short -eq $w.Host })
+        if ($h.Count -ne 1) { throw "LlmWorkers: $($w.VmName) names host '$($w.Host)', which is not in Hosts" }
+        [pscustomobject]@{ VmName = [string]$w.VmName; HostShort = [string]$h[0].Short; HostIp = [string]$h[0].Ip }
+    }
+}
+
+<#
+    Is this VM name a VCF component? Answerable without vCenter, which is the
+    point: on a host-direct connection there is no folder to check, so VSP
+    nodes are matched by prefix (and the configured names as a fallback).
+#>
+function Test-IsVcfName {
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Name)
+    if ($Name -eq $Config.VCenter.VmName) { return $true }
+    foreach ($k in $Config.Appliances.Keys) { if ($Name -eq $Config.Appliances[$k].VmName) { return $true } }
+    if ($Name -like "$($Config.Vsp.NamePrefix)*") { return $true }
+    ($Config.Vsp.KnownControlPlane + $Config.Vsp.KnownWorkers) -contains $Name
+}
+
+<#
+    Ask every host which VCF components it is RUNNING. Used where vCenter
+    cannot be: before Minimal starts workers beside a stack that is still up,
+    and before a vCenter-less -IncludeHosts powers hosts off. A host that could
+    not be queried is reported, never assumed clear.
+#>
+function Get-RunningVcfOnHosts {
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][pscredential]$EsxCredential,
+        [string[]]$Allow = @()
+    )
+    $running = @(); $unreachable = @()
+    foreach ($h in $Config.Hosts) {
+        $c = $null
+        try {
+            $c = Connect-VIServer -Server $h.Ip -Credential $EsxCredential -Force -ErrorAction Stop
+            foreach ($v in @(Get-VM -Server $c -ErrorAction Stop)) {
+                if ($v.PowerState -eq 'PoweredOn' -and $Allow -notcontains $v.Name -and
+                    (Test-IsVcfName -Config $Config -Name $v.Name)) {
+                    $running += [pscustomobject]@{ Name = $v.Name; Host = $h.Short }
+                }
+            }
+        } catch {
+            $unreachable += $h.Short
+        } finally {
+            if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+        }
+    }
+    [pscustomobject]@{ Running = $running; Unreachable = $unreachable }
+}
+
+function Start-HostVM {
+    param(
+        [Parameter(Mandatory)][string]$HostIp,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][pscredential]$EsxCredential,
+        [switch]$WhatIfMode
+    )
+    $c = $null
+    try {
+        $c = Connect-VIServer -Server $HostIp -Credential $EsxCredential -Force -ErrorAction Stop
+        # The connection itself already succeeded (Stop above), so an empty
+        # result here genuinely means "not registered on this host".
+        $vm = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
+        if ($vm.Count -eq 0) { Write-Fail "$Name : not registered on $HostIp"; return $false }
+        if ($vm[0].PowerState -eq 'PoweredOn') { Write-Info "$Name : already powered on"; return $true }
+        if ($WhatIfMode) { Write-Info "$Name : WHATIF would power on via its host"; return $true }
+        Start-VM -VM $vm[0] -Server $c -Confirm:$false -ErrorAction Stop | Out-Null
+        Write-Ok "$Name : powered on via its host"
+        $true
+    } catch {
+        Write-Fail "$Name : power-on via $HostIp failed -- $(($_.Exception.Message -replace '\s+', ' '))"
+        $false
+    } finally {
+        if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+    }
+}
+
+<#
+    Running, Tools up, and an IPv4 address -- read from the HOST, because in
+    Minimal mode there is no vCenter to ask (Test-VmGuestUp reads vCenter).
+#>
+function Test-HostVmGuestUp {
+    param(
+        [Parameter(Mandatory)][string]$HostIp,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][pscredential]$EsxCredential
+    )
+    $c = $null
+    try {
+        $c = Connect-VIServer -Server $HostIp -Credential $EsxCredential -Force -ErrorAction Stop
+        $v = @(Get-VM -Server $c -Name $Name -ErrorAction Stop)
+        if ($v.Count -eq 0 -or $v[0].PowerState -ne 'PoweredOn') { return $false }
+        $ip = $v[0].Guest.IPAddress | Where-Object { $_ -and $_ -notmatch ':' } | Select-Object -First 1
+        [bool]($v[0].Guest.State -eq 'Running' -and $ip)
+    } catch { $false }
+    finally { if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue } }
+}
+
+<#
+    Guest shutdown via the host, hard stop after the grace period. Workers are
+    stateless inference servers, so a hard stop after grace is acceptable here
+    -- unlike vCenter, which is never hard-killed by default.
+#>
+function Stop-HostVM {
+    param(
+        [Parameter(Mandatory)][string]$HostIp,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][pscredential]$EsxCredential,
+        [int]$GraceSeconds = 120,
+        [switch]$WhatIfMode
+    )
+    $c = $null
+    try {
+        $c = Connect-VIServer -Server $HostIp -Credential $EsxCredential -Force -ErrorAction Stop
+        $vm = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
+        if ($vm.Count -eq 0) { Write-Info "$Name : not registered on $HostIp, skipping"; return $true }
+        if ($vm[0].PowerState -ne 'PoweredOn') { Write-Info "$Name : already $($vm[0].PowerState)"; return $true }
+        if ($WhatIfMode) { Write-Info "$Name : WHATIF would shut down via its host"; return $true }
+
+        $toolsOk = $false
+        try { $toolsOk = ($vm[0].Guest.ExtensionData.ToolsRunningStatus -eq 'guestToolsRunning') }
+        catch { Write-Info "$Name : VMware Tools status unreadable ($($_.Exception.Message -replace '\s+', ' ')) -- treating as not running" }
+        if ($toolsOk) {
+            Write-Info "$Name : guest shutdown requested via its host"
+            Stop-VMGuest -VM $vm[0] -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt $GraceSeconds) {
+                $cur = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
+                if ($cur.Count -eq 0 -or $cur[0].PowerState -eq 'PoweredOff') {
+                    Write-Ok "$Name : off gracefully after $([int]$sw.Elapsed.TotalSeconds)s"; return $true
+                }
+                Start-Sleep -Seconds 5
+            }
+            Write-Warn2 "$Name : still running after ${GraceSeconds}s -- hard power off"
+        } else {
+            Write-Warn2 "$Name : no VMware Tools -- hard power off"
+        }
+        # It may have finished shutting down between the last poll and now.
+        $now = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
+        if ($now.Count -eq 0 -or $now[0].PowerState -eq 'PoweredOff') { Write-Ok "$Name : off"; return $true }
+        Stop-VM -VM $now[0] -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        Start-Sleep -Seconds 5
+        $after = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
+        ($after.Count -eq 0 -or $after[0].PowerState -eq 'PoweredOff')
+    } catch {
+        Write-Fail "$Name : shutdown via $HostIp failed -- $(($_.Exception.Message -replace '\s+', ' '))"
+        $false
+    } finally {
+        if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+    }
+}
+
+# ------------------------------------------------------- license window -------
+# VCF 9 licenses must be refreshed at least every 180 days or they are treated
+# as expired (hosts disconnect from vCenter, workloads cannot start). In
+# connected mode VCF Operations reports usage every 24 h, so a refresh needs
+# Operations UP for a day -- a Full start alone proves nothing. The stamp is
+# therefore written by Stop-VCFLab, and only when it finds Operations has been
+# up for at least LicenseSyncHours before stopping it. Minimal reads its age and
+# fails CLOSED: missing, unreadable or future-dated all refuse.
+
+$script:LicenseSyncHours = 24
+
+function Get-LicenseStampPath {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    Join-Path (Split-Path -Parent $Config.CredentialFile) 'last-license-sync.txt'
+}
+
+function Write-LicenseStamp {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    (Get-Date).ToUniversalTime().ToString('o') | Set-Content -Path (Get-LicenseStampPath -Config $Config) -Encoding utf8
+}
+
+<#
+    State: Missing | Unreadable | Future | Ok, with Days set only for Ok.
+    Never collapses a bad stamp into "no stamp" -- the caller decides, and
+    Minimal refuses on anything but Ok.
+#>
+function Get-LicenseStampAge {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    $p = Get-LicenseStampPath -Config $Config
+    if (-not (Test-Path $p)) { return [pscustomobject]@{ State = 'Missing'; Days = $null; Detail = $p } }
+    try {
+        $t = [datetime]::Parse((Get-Content -Path $p -Raw).Trim(), $null,
+                               [Globalization.DateTimeStyles]::RoundtripKind)
+    } catch {
+        return [pscustomobject]@{ State = 'Unreadable'; Days = $null; Detail = "$p -- $($_.Exception.Message -replace '\s+', ' ')" }
+    }
+    $days = [int][math]::Floor(((Get-Date).ToUniversalTime() - $t.ToUniversalTime()).TotalDays)
+    if ($days -lt 0) { return [pscustomobject]@{ State = 'Future'; Days = $days; Detail = "$p is dated $($t.ToUniversalTime().ToString('u'))" } }
+    [pscustomobject]@{ State = 'Ok'; Days = $days; Detail = $p }
+}
+
+# Hours since a VM booted, read from vCenter; $null when unknown.
+function Get-VmUptimeHours {
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        $vm = Get-VM -Name $Name -ErrorAction Stop
+        if ($vm.PowerState -ne 'PoweredOn') { return $null }
+        $boot = $vm.ExtensionData.Runtime.BootTime
+        if (-not $boot) { return $null }
+        ((Get-Date).ToUniversalTime() - ([datetime]$boot).ToUniversalTime()).TotalHours
+    } catch { $null }
 }

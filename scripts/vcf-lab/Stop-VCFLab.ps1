@@ -78,19 +78,51 @@ $started = Get-Date
 Write-Host "VCF lab power-off  ::  $started" -ForegroundColor White
 if ($WhatIf) { Write-Warn2 "WHATIF mode: no power state will change" }
 
+$workers   = @(Get-LlmWorkers -Config $cfg)
+$workerSet = @($workers | ForEach-Object VmName)
+$workerGrace = if ($cfg.StopGraceSeconds.ContainsKey('LlmWorker')) { $cfg.StopGraceSeconds.LlmWorker } else { 120 }
+
 $vc = $null
+$vcDown = $false
 try { $vc = Connect-VIServer -Server $cfg.VCenter.Ip -Credential $ssoCred -Force -ErrorAction Stop }
 catch {
-    Write-Fail "Cannot reach vCenter at $($cfg.VCenter.Ip)."
-    Write-Info "If vCenter is already down, the VMs cannot be stopped gracefully through it."
-    Write-Info "Connect to each ESX host directly (Connect-VIServer <host-ip>), stop any"
-    Write-Info "running VMs, then put the host in maintenance mode and Stop-VMHost."
-    exit 1
+    # vCenter being down is NORMAL in Minimal mode. With -IncludeHosts the hosts
+    # can still be shut down directly -- but only once they prove that no VCF
+    # component is running, because those cannot be stopped gracefully without
+    # vCenter's ordering and this script will not hard-stop them behind its back.
+    $vcDown = $true
+    Write-Warn2 "vCenter is not reachable -- treating the lab as Minimal and working host-direct."
+    $vcf = Get-RunningVcfOnHosts -Config $cfg -EsxCredential $esxCred
+    if (-not $IncludeHosts -and $vcf.Unreachable.Count -eq 0 -and $vcf.Running.Count -eq 0) {
+        # Minimal mode: no VCF stack is running, so there is genuinely nothing
+        # for a default Stop to do. That is success, not an error.
+        Write-Ok "No VCF component is running (Minimal mode) -- nothing to stop. Hosts and LLM workers left as they are."
+        Write-Info "To stop the LLM workers and power off the hosts, re-run with -IncludeHosts."
+        exit 0
+    }
+    if ($vcf.Unreachable.Count -gt 0) {
+        Write-Fail "Could not list VMs on: $($vcf.Unreachable -join ', '). Refusing to power off hosts blind."
+        exit 1
+    }
+    if ($vcf.Running.Count -gt 0) {
+        Write-Fail "VCF components are running but vCenter is not reachable to stop them in order:"
+        foreach ($r in ($vcf.Running | Sort-Object Name)) { Write-Warn2 ("  running: {0}  on {1}" -f $r.Name, $r.Host) }
+        Write-Info "Bring vCenter back (or stop these by hand), then re-run. Nothing has been changed."
+        exit 1
+    }
 }
-Write-Ok "connected to vCenter"
+if (-not $vcDown) { Write-Ok "connected to vCenter" }
+
+$haWasEnabled = $false
+$failed       = @()
+$managed      = @()
+$foreignOn    = @()
+
+# Everything from here to the hosts section needs vCenter. In Minimal mode it
+# is down and there is no VCF stack running (proven above), so skip straight on.
+if (-not $vcDown) {
 
 # --- HA ------------------------------------------------------------------------
-$haWasEnabled = $false
 if ($DisableHaFirst -and -not $WhatIf) {
     Write-Step "vSphere HA"
     try {
@@ -103,7 +135,6 @@ if ($DisableHaFirst -and -not $WhatIf) {
     } catch { Write-Warn2 "Could not change HA: $($_.Exception.Message)" }
 }
 
-$failed = @()
 function Stop-Tier {
     param([string]$Label, [string[]]$Names, [int]$Grace)
     Write-Step $Label
@@ -119,9 +150,14 @@ $managed = Get-VcfManagedNames -Config $cfg
 Write-Step "Scope"
 Write-Info ("managing: " + ($managed -join ', '))
 $scope0 = Get-VmScope -Config $cfg -ManagedNames $managed
-$foreignOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' })
+$foreignOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -and $workerSet -notcontains $_.Name })
 if ($foreignOn.Count -gt 0) {
     Write-Info ("leaving alone (running, not VCF): " + (($foreignOn | ForEach-Object Name) -join ', '))
+}
+$workersOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -and $workerSet -contains $_.Name })
+if ($workersOn.Count -gt 0) {
+    $fate = if ($IncludeHosts) { 'stopped before the hosts go down' } else { 'left running (Minimal mode)' }
+    Write-Info ("LLM workers, " + $fate + ": " + (($workersOn | ForEach-Object Name) -join ', '))
 }
 
 # --- tail appliances ------------------------------------------------------------
@@ -149,6 +185,19 @@ else {
 }
 
 # --- management appliances ------------------------------------------------------
+# License window for Minimal mode: VCF 9 connected mode reports usage from
+# Operations every 24 h, so only an Operations run of at least that long counts
+# as a license refresh. Read its uptime BEFORE stopping it.
+$opsUp = Get-VmUptimeHours -Name $cfg.Appliances.Operations.VmName
+if ($null -ne $opsUp -and $opsUp -ge $script:LicenseSyncHours) {
+    if ($WhatIf) { Write-Info ("WHATIF: would record a license sync (Operations up {0:N0} h)" -f $opsUp) }
+    else {
+        Write-LicenseStamp -Config $cfg
+        Write-Ok ("Operations was up {0:N0} h -- license sync recorded for Minimal mode's window" -f $opsUp)
+    }
+} elseif ($null -ne $opsUp) {
+    Write-Warn2 ("Operations was up only {0:N1} h (< {1} h): NOT recorded as a license sync." -f $opsUp, $script:LicenseSyncHours)
+}
 Stop-Tier -Label "VCF Operations" -Names @($cfg.Appliances.Operations.VmName)  -Grace $cfg.StopGraceSeconds.Operations
 Stop-Tier -Label "NSX Manager"    -Names @($cfg.Appliances.Nsx.VmName)         -Grace $cfg.StopGraceSeconds.Nsx
 Stop-Tier -Label "SDDC Manager"   -Names @($cfg.Appliances.SddcManager.VmName) -Grace $cfg.StopGraceSeconds.SddcManager
@@ -191,6 +240,11 @@ if (-not $ok) {
     if ($IncludeHosts) { Write-Fail "Not powering off hosts while vCenter is running."; exit 1 }
 }
 
+}   # end: vCenter-dependent section (skipped when vCenter is down)
+
+# Host-level classification needs no vCenter: VCF names by config + VSP prefix.
+$isVcf = { param($n) Test-IsVcfName -Config $cfg -Name $n }
+
 # --- hosts ----------------------------------------------------------------------
 if (-not $IncludeHosts) {
     Write-Info "Hosts left running (pass -IncludeHosts to power them off)"
@@ -207,6 +261,18 @@ if (-not $IncludeHosts) {
     # even though every host is perfectly healthy.
     Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
 
+    # The LLM workers are owned by these scripts, so they are stopped here --
+    # via their hosts, which is the only path that exists in Minimal mode --
+    # rather than being reported as blockers.
+    if ($workers.Count -gt 0) {
+        Write-Step "LLM workers"
+        foreach ($w in $workers) {
+            if (-not (Stop-HostVM -HostIp $w.HostIp -Name $w.VmName -EsxCredential $esxCred -GraceSeconds $workerGrace)) {
+                $failed += $w.VmName
+            }
+        }
+    }
+
     # A host cannot enter maintenance mode with any VM running on it. This
     # script will not stop a VM it does not own just to clear the way, so if
     # anything foreign is still up it refuses and names it. Ask each host
@@ -219,7 +285,7 @@ if (-not $IncludeHosts) {
         try {
             $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
             foreach ($v in @(Get-VM -Server $c)) {
-                if ($v.PowerState -eq 'PoweredOn' -and $managed -notcontains $v.Name) {
+                if ($v.PowerState -eq 'PoweredOn' -and $managed -notcontains $v.Name -and -not (& $isVcf $v.Name)) {
                     $blockers += [pscustomobject]@{ Name = $v.Name; Host = $h.Short }
                 }
             }
@@ -297,6 +363,7 @@ if ($foreignOn.Count -gt 0) {
 
 Write-Step "Result"
 if ($failed.Count -gt 0) { Write-Warn2 ("Items needing attention: " + ($failed -join ', ')) }
+elseif ($vcDown) { Write-Ok "Minimal-mode shutdown complete (no VCF stack was running)" }
 else { Write-Ok "VCF components shut down cleanly" }
 Write-Host "Elapsed: $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
 

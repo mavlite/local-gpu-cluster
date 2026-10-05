@@ -69,8 +69,36 @@
         KnownWorkers      = @('platform-pfnmx','platform-c5t7j','platform-8n62z')
     }
 
+    # ------------------------------------------------------- LLM workers --
+    # CPU-only LLM worker VMs (one per host). NOT VCF components: vCenter's
+    # shutdown never waits on them, and a default Stop-VCFLab leaves them
+    # running -- that is how the lab drops from Full to Minimal. They ARE owned
+    # by these scripts, so -Mode Minimal starts them and -IncludeHosts stops
+    # them before the hosts go down instead of naming them as blockers.
+    #
+    # Each lives on its host's LOCAL datastore and on an ephemeral-binding
+    # port group (SDDC-DPortGroup-VM-Mgmt), so it needs neither vSAN nor
+    # vCenter: power-on is done host-direct. Host is the Hosts[].Short name;
+    # the VM cannot move, so this pairing is fixed.
+    LlmWorkers = @(
+        @{ VmName = 'llmbench01'; Host = 'hyp02' }
+        @{ VmName = 'llmbench02'; Host = 'hyp01' }
+        @{ VmName = 'llmbench03'; Host = 'hyp03' }
+    )
+
+    # VCF 9 licensing must be refreshed at least every 180 days (in connected
+    # mode VCF Operations reports usage every 24 h); miss it and licenses are
+    # treated as expired, hosts disconnect from vCenter and workloads cannot
+    # start. Minimal mode keeps Operations down, so every successful Full
+    # start is recorded, and Minimal warns / refuses as the window ages.
+    LicenseWindow = @{
+        WarnDays   = 30
+        RefuseDays = 150
+    }
+
     # ---------------------------------------------------------------- scope --
-    # These scripts manage VCF components ONLY. Anything else on the cluster --
+    # These scripts manage VCF components plus the LlmWorkers group above, and
+    # nothing else. Anything else on the cluster --
     # developer VMs, containers, appliances, one-off workloads -- is never
     # powered on or off, and never migrated. The managed set is:
     #
@@ -102,6 +130,7 @@
         # database. 0 = wait indefinitely; -Force overrides with this ceiling.
         VCenter      = 0
         VCenterForce = 900
+        LlmWorker    = 120
     }
 
     GateTimeoutSeconds = @{
@@ -115,6 +144,7 @@
         VspWorker     = 900
         Appliance     = 600
         HostShutdown  = 600
+        LlmWorker     = 600
     }
 
     # Where credentials.env lives. A .psd1 must contain static data only -- no

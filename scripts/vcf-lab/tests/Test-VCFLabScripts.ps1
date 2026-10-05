@@ -46,7 +46,7 @@ OPERATIONS_ADMIN_PASS=stub
 $cfgPath = Join-Path $sandbox 'VCFLab.Config.psd1'
 $cfgText = Get-Content $cfgPath -Raw
 $cfgText = [regex]::Replace($cfgText,
-    '(?m)^(\s+(?:HostApi|VsanFormation|VCenterApi|SddcManager|Nsx|Operations|VspControl|VspWorker|Appliance|HostShutdown)\s+=\s+)\d+',
+    '(?m)^(\s+(?:HostApi|VsanFormation|VCenterApi|SddcManager|Nsx|Operations|VspControl|VspWorker|Appliance|HostShutdown|LlmWorker)\s+=\s+)\d+',
     '${1}5')
 Set-Content -Path $cfgPath -Value $cfgText -Encoding utf8
 
@@ -86,9 +86,13 @@ function Note { param($m) $global:Log.Add($m) }
 
 function New-FakeVM {
     param($Name,$Power='PoweredOn',$Cpu=4,$Ip='172.16.10.99',$Folder='Discovered virtual machine',
-          $Tools='guestToolsRunning',$GuestState='Running',$VMHostName='hyp01.lab.knowledgeondemand.net')
+          $Tools='guestToolsRunning',$GuestState='Running',$VMHostName='hyp01.lab.knowledgeondemand.net',
+          $BootTime=(Get-Date).ToUniversalTime().AddHours(-48))
     [pscustomobject]@{
         Name = $Name; PowerState = $Power; NumCpu = $Cpu
+        # Stop-VCFLab reads Operations' boot time to decide whether its run was
+        # long enough (24 h) to count as a VCF license sync.
+        ExtensionData = [pscustomobject]@{ Runtime = [pscustomobject]@{ BootTime = $BootTime } }
         # Start-LabVM's host fallback reads VMHost.Name to know where to go.
         # Without this the fallback cannot run and the wedge test is vacuous.
         VMHost = [pscustomobject]@{ Name = $VMHostName }
@@ -106,8 +110,15 @@ function Import-Module { param([Parameter(ValueFromRemainingArguments)]$a) }
 function Set-PowerCLIConfiguration { param([Parameter(ValueFromRemainingArguments)]$a) }
 function Connect-VIServer {
     param([string]$Server,$Credential,[switch]$Force,[string]$ErrorAction)
+    # Minimal mode leaves vCenter down for days; Stop-VCFLab has to cope.
+    if ($global:VCenterDown -and $Server -eq '172.16.10.129') {
+        throw "Could not resolve the requested VC server. (stub: vCenter is down)"
+    }
+    if ($global:UnreachableHosts -contains $Server) { throw "stub: host $Server unreachable" }
     [pscustomobject]@{ Name = $Server; IsConnected = $true }
 }
+$global:UnreachableHosts = @()
+$global:FailStart = @()
 function Disconnect-VIServer { param([Parameter(ValueFromRemainingArguments)]$a) }
 function Get-VMHost {
     param($VM,[string]$Name,$Server,[Parameter(ValueFromRemainingArguments)]$a)
@@ -131,9 +142,17 @@ function Restart-VMHostService {
 }
 function Get-VM {
     param([string]$Name,$Server,[string]$ErrorAction)
-    if (-not $Name) { return $global:FakeVMs }
-    if ($Name -match '\*') { return @($global:FakeVMs | Where-Object { $_.Name -like $Name }) }
-    @($global:FakeVMs | Where-Object { $_.Name -eq $Name })
+    # Host-aware: a connection to a HOST sees only the VMs registered on that
+    # host, as the real thing does. Without this, a worker started or stopped
+    # through the WRONG host would still pass, and a VCF VM would be reported
+    # "running" on every host at once.
+    $pool = $global:FakeVMs
+    if ($Server -and $Server.Name -and $global:SandboxHostIps -contains [string]$Server.Name) {
+        $pool = @($global:FakeVMs | Where-Object { $global:HostIpByFqdn[[string]$_.VMHost.Name] -eq [string]$Server.Name })
+    }
+    if (-not $Name) { return $pool }
+    if ($Name -match '\*') { return @($pool | Where-Object { $_.Name -like $Name }) }
+    @($pool | Where-Object { $_.Name -eq $Name })
 }
 function Start-VM { param($VM,$Server,[switch]$Confirm,[string]$ErrorAction)
     # Faithful to ESXi: a host in maintenance mode refuses to power on a VM. A
@@ -149,6 +168,7 @@ function Start-VM { param($VM,$Server,[switch]$Confirm,[string]$ErrorAction)
             throw "The operation is not allowed in the current state. The host is in maintenance mode."
         }
     }
+    if ($global:FailStart -contains $VM.Name) { Note "STARTFAIL $($VM.Name)"; throw "stub: power-on of $($VM.Name) failed" }
     Note "START $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOn' } }
 function Stop-VM { param($VM,[switch]$Confirm,[string]$ErrorAction)
     Note "HARDSTOP $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOff' } }
@@ -207,9 +227,22 @@ function Invoke-LabRest { param([Parameter(ValueFromRemainingArguments)]$a)
     } }
 
 $script:Foreign = @('devvm01','devvm02','devvm03','truenas-backup')
+# LLM worker VMs live on LOCAL datastores, so each is pinned to the host named
+# here -- the same pairing as LlmWorkers in VCFLab.Config.psd1.
+$script:Workers = [ordered]@{
+    'llmbench01' = 'hyp02.lab.knowledgeondemand.net'
+    'llmbench02' = 'hyp01.lab.knowledgeondemand.net'
+    'llmbench03' = 'hyp03.lab.knowledgeondemand.net'
+}
+$script:VcfNames = @('vcsa','sddc-manager','nsxa','ops','licsrv','opscollector',
+                     'platform-dlq9c','platform-rptxg','platform-62t8n','platform-pfnmx','platform-c5t7j','platform-8n62z')
+$global:VCenterDown = $false
+$script:StampPath = Join-Path $sandbox '.vcflab\last-license-sync.txt'
+function Set-Stamp { param([int]$DaysAgo)
+    (Get-Date).ToUniversalTime().AddDays(-$DaysAgo).ToString('o') | Set-Content -Path $script:StampPath -Encoding utf8 }
 
 function Reset-Fleet {
-    param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn')
+    param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn',[string]$WorkerPower='PoweredOff')
     $f = 'vcf-management-services'
     $global:FakeVMs = @(
         (New-FakeVM 'vcsa'           $Power 4  '172.16.10.129' $f)
@@ -229,10 +262,30 @@ function Reset-Fleet {
         (New-FakeVM 'devvm03'        $ForeignPower 8 '172.16.72.10')
         (New-FakeVM 'truenas-backup' $ForeignPower 2 '172.16.10.200')
     )
+    $i = 205
+    foreach ($w in $script:Workers.Keys) {
+        $global:FakeVMs += New-FakeVM -Name $w -Power $WorkerPower -Cpu 16 -Ip "172.16.10.$i" -VMHostName $script:Workers[$w]
+        $i++
+    }
     # Hosts start out of maintenance unless a test says otherwise, so the
     # existing cases keep their previous meaning.
     $global:HostState = @{}
+    $global:VCenterDown = $false
+    $global:UnreachableHosts = @()
+    $global:FailStart = @()
     $global:Log.Clear()
+}
+function Get-Started { @($global:Log | Where-Object { $_ -like 'START *' } | ForEach-Object { $_ -replace '^START ','' }) }
+function Get-Stopped { @($global:Log | Where-Object { $_ -match '^(GUESTSTOP|HARDSTOP) ' } | ForEach-Object { ($_ -split ' ',2)[1] }) }
+function Invoke-Lab { param([string]$Script,[hashtable]$Arg = @{})
+    # Records the exit code in $global:LastExit, so a refusal test can tell an
+    # intended `exit 1` from a script that crashed early (-1 here).
+    $o = @()
+    $global:LASTEXITCODE = 0
+    try { $o = & (Join-Path $ScriptDir $Script) @Arg -ErrorAction Stop *>&1; $global:LastExit = $LASTEXITCODE }
+    catch { $o += "SCRIPT ERROR: $($_.Exception.Message)"; $global:LastExit = -1 }
+    $o | Select-Object -Last 6 | ForEach-Object { "   $_" } | Write-Host
+    ($o | ForEach-Object { "$_" }) -join "`n"
 }
 
 function Get-Touched {
@@ -313,6 +366,175 @@ Check "cold start records an explicit exit per host (got $($exited.Count))" ($ex
 Check "vcsa powers on despite the prior maintenance state" (@($global:Log | Where-Object { $_ -eq 'START vcsa' }).Count -gt 0)
 Check "no power-on was refused for maintenance mode" (@($global:Log | Where-Object { $_ -like 'REFUSED-MAINT *' }).Count -eq 0)
 Check "maintenance exit still touches no non-VCF VM" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
+
+# =========================== Minimal mode (hosts + LLM workers) ===============
+# Day-to-day the VCF stack is OFF; only the hosts and the CPU LLM workers run.
+# The workers sit on local datastores and an ephemeral-binding port group, so
+# they need neither vSAN nor vCenter -- the script powers them on host-direct.
+# Refusals assert the EXIT CODE as well as "nothing happened": a script that
+# crashed early also starts nothing, and must not pass as a refusal.
+
+$workerNames = @($script:Workers.Keys)
+function Get-WorkersStarted { @(Get-Started | Where-Object { $workerNames -contains $_ }) }
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Full (default) leaves LLM workers alone ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Remove-Item $script:StampPath -ErrorAction SilentlyContinue
+$null = Invoke-Lab 'Start-VCFLab.ps1'
+Check "full mode exits 0" ($global:LastExit -eq 0)
+Check "full mode starts no LLM worker" ((Get-WorkersStarted).Count -eq 0)
+Check "a Full start alone records NO license sync (Operations must run 24 h)" (-not (Test-Path $script:StampPath))
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal (cold, hosts in maintenance) ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+foreach ($ip in $global:SandboxHostIps) { $global:HostState[$ip] = 'Maintenance' }
+Set-Stamp -DaysAgo 1
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+$st = Get-Started
+Check "minimal exits 0" ($global:LastExit -eq 0)
+foreach ($w in $workerNames) { Check "minimal powers on $w" ($st -contains $w) }
+Check "minimal starts no VCF component" (@($st | Where-Object { $script:VcfNames -contains $_ }).Count -eq 0)
+Check "minimal takes every host out of maintenance" (@($global:SandboxHostIps | Where-Object { $global:HostState[$_] -eq 'Maintenance' }).Count -eq 0)
+Check "minimal had no power-on refused for maintenance" (@($global:Log | Where-Object { $_ -like 'REFUSED-MAINT *' }).Count -eq 0)
+Check "minimal touches no non-VCF, non-worker VM" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
+Check "a fresh license sync does NOT warn (negative control)" ($out -notmatch 'Plan a Full run')
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal -WhatIf ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+foreach ($ip in $global:SandboxHostIps) { $global:HostState[$ip] = 'Maintenance' }
+Set-Stamp -DaysAgo 1
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; WhatIf = $true }
+Check "minimal -WhatIf exits 0" ($global:LastExit -eq 0)
+Check "minimal -WhatIf powers nothing on" ((Get-Started).Count -eq 0)
+Check "minimal -WhatIf leaves maintenance mode alone" (@($global:Log | Where-Object { $_ -like 'SETHOSTSTATE *' }).Count -eq 0)
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal while the VCF stack runs ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff'
+foreach ($ip in $global:SandboxHostIps) { $global:HostState[$ip] = 'Maintenance' }
+Set-Stamp -DaysAgo 1
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "refuses with exit 1" ($global:LastExit -eq 1)
+Check "starts no worker beside a running VCF stack" ((Get-WorkersStarted).Count -eq 0)
+Check "never stops VCF components itself" ((Get-Stopped).Count -eq 0)
+Check "refuses BEFORE touching maintenance mode" (@($global:Log | Where-Object { $_ -like 'SETHOSTSTATE *' }).Count -eq 0)
+Check "says to run Stop-VCFLab first" ($out -match 'Stop-VCFLab')
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal with a host unreachable ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Set-Stamp -DaysAgo 1
+$global:UnreachableHosts = @($global:SandboxHostIps[0])
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "an unqueryable host is never assumed clear (non-zero exit)" ($global:LastExit -ne 0)
+Check "  ...and no worker is started" ((Get-WorkersStarted).Count -eq 0)
+$global:UnreachableHosts = @()
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal, one worker fails to power on ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Set-Stamp -DaysAgo 1
+$global:FailStart = @('llmbench02')
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "a failed worker makes the run exit 1" ($global:LastExit -eq 1)
+Check "  ...the other workers still start" (((Get-WorkersStarted) -contains 'llmbench01') -and ((Get-WorkersStarted) -contains 'llmbench03'))
+Check "  ...and the failed one is named" ($out -match 'Workers not up: .*llmbench02')
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal -WithVCenter ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Set-Stamp -DaysAgo 1
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; WithVCenter = $true }
+$st = Get-Started
+Check "-WithVCenter exits 0" ($global:LastExit -eq 0)
+Check "-WithVCenter starts vcsa" ($st -contains 'vcsa')
+Check "-WithVCenter still starts the workers" (@($workerNames | Where-Object { $st -notcontains $_ }).Count -eq 0)
+Check "-WithVCenter starts no other VCF component" (@($st | Where-Object { $script:VcfNames -contains $_ -and $_ -ne 'vcsa' }).Count -eq 0)
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal, license window (fails closed) ##########" -ForegroundColor Magenta
+$cases = @(
+    @{ Label = '160 days old';  Prep = { Set-Stamp -DaysAgo 160 }; Why = 'lapse' }
+    @{ Label = 'missing';       Prep = { Remove-Item $script:StampPath -ErrorAction SilentlyContinue }; Why = 'No license sync is recorded' }
+    @{ Label = 'unreadable';    Prep = { 'not-a-date' | Set-Content -Path $script:StampPath -Encoding utf8 }; Why = 'cannot be read' }
+    @{ Label = 'future-dated';  Prep = { Set-Stamp -DaysAgo -10 }; Why = 'in the future' }
+)
+foreach ($c in $cases) {
+    Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+    & $c.Prep
+    $out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+    Check "stamp $($c.Label): refuses with exit 1" ($global:LastExit -eq 1)
+    Check "stamp $($c.Label): nothing started" ((Get-Started).Count -eq 0)
+    Check "stamp $($c.Label): says why" ($out -match [regex]::Escape($c.Why))
+}
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Remove-Item $script:StampPath -ErrorAction SilentlyContinue
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; IgnoreLicenseWindow = $true }
+Check "-IgnoreLicenseWindow overrides a missing stamp" ($global:LastExit -eq 0 -and (Get-WorkersStarted).Count -eq $workerNames.Count)
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+Set-Stamp -DaysAgo 40
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "40 days: still starts the workers" ($global:LastExit -eq 0 -and (Get-WorkersStarted).Count -eq $workerNames.Count)
+Check "40 days: warns to plan a Full run" ($out -match 'Plan a Full run')
+
+Write-Host "`n########## Stop-VCFLab.ps1 (default) with LLM workers running ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+Remove-Item $script:StampPath -ErrorAction SilentlyContinue
+$null = Invoke-Lab 'Stop-VCFLab.ps1'
+Check "default stop leaves the LLM workers running (full -> minimal)" (@(Get-Stopped | Where-Object { $workerNames -contains $_ }).Count -eq 0)
+Check "default stop still stops the VCF stack" ((Get-Stopped) -contains 'nsxa')
+Check "Operations up 48 h: license sync recorded" (Test-Path $script:StampPath)
+
+Write-Host "`n########## Stop-VCFLab.ps1 (default), Operations up only 1 h ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff'
+($global:FakeVMs | Where-Object Name -eq 'ops').ExtensionData.Runtime.BootTime = (Get-Date).ToUniversalTime().AddHours(-1)
+Remove-Item $script:StampPath -ErrorAction SilentlyContinue
+$null = Invoke-Lab 'Stop-VCFLab.ps1'
+Check "Operations up 1 h: NO license sync recorded" (-not (Test-Path $script:StampPath))
+
+Write-Host "`n########## Stop-VCFLab.ps1 -WhatIf ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+Remove-Item $script:StampPath -ErrorAction SilentlyContinue
+$null = Invoke-Lab 'Stop-VCFLab.ps1' @{ WhatIf = $true; IncludeHosts = $true }
+Check "stop -WhatIf stops nothing" ((Get-Stopped).Count -eq 0)
+Check "stop -WhatIf powers off no host" (-not ($global:Log -contains 'HOSTOFF'))
+Check "stop -WhatIf writes no license stamp" (-not (Test-Path $script:StampPath))
+
+Write-Host "`n########## Stop-VCFLab.ps1 -IncludeHosts with LLM workers running ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+$null = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "-IncludeHosts stops every LLM worker" (@($workerNames | Where-Object { (Get-Stopped) -notcontains $_ }).Count -eq 0)
+Check "-IncludeHosts treats workers as owned, not blockers (hosts go down)" ($global:Log -contains 'HOSTOFF')
+
+Write-Host "`n########## Stop-VCFLab.ps1 from Minimal mode (vCenter down) ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+$global:VCenterDown = $true
+$out = Invoke-Lab 'Stop-VCFLab.ps1'
+Check "default stop in Minimal: nothing to do, exit 0" ($global:LastExit -eq 0 -and $out -match 'nothing to stop')
+Check "  ...workers and hosts untouched" ((Get-Stopped).Count -eq 0 -and -not ($global:Log -contains 'HOSTOFF'))
+
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+$global:VCenterDown = $true
+$null = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "vCenter down: workers stopped via their hosts" (@($workerNames | Where-Object { (Get-Stopped) -notcontains $_ }).Count -eq 0)
+Check "vCenter down: hosts still powered off" ($global:Log -contains 'HOSTOFF')
+
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+($global:FakeVMs | Where-Object Name -eq 'nsxa').PowerState = 'PoweredOn'
+$global:VCenterDown = $true
+$out = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "vCenter down + a VCF VM still up: exit 1" ($global:LastExit -eq 1)
+Check "  ...no host powered off" (-not ($global:Log -contains 'HOSTOFF'))
+Check "  ...nothing stopped behind vCenter's back" ((Get-Stopped).Count -eq 0)
+Check "  ...the VCF VM is named on its own host only" ($out -match 'nsxa\s+on hyp01' -and $out -notmatch 'nsxa\s+on hyp0[23]')
+$global:VCenterDown = $false
+
+Write-Host "`n########## config validation (fails at load, names the problem) ##########" -ForegroundColor Magenta
+$badCfg = Join-Path $sandbox 'bad.psd1'
+$t = (Get-Content $cfgPath -Raw) -replace "@\{ VmName = 'llmbench03'; Host = 'hyp03' \}", "@{ VmName = 'llmbench01'; Host = 'hyp03' }"
+Set-Content -Path $badCfg -Value $t -Encoding utf8
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; ConfigPath = $badCfg }
+Check "duplicate worker rejected at load" ($out -match 'listed twice' -and (Get-Started).Count -eq 0)
+$t = (Get-Content $cfgPath -Raw) -replace 'RefuseDays\s*=\s*\d+', 'RefuseDays = 200'
+Set-Content -Path $badCfg -Value $t -Encoding utf8
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; ConfigPath = $badCfg }
+Check "RefuseDays beyond 180 rejected at load" ($out -match 'RefuseDays < 180')
 
 # --- 7. vCenter cannot power on: host fallback + vpxa repair -----------------
 Write-Host "`n########## Start-VCFLab.ps1 (vCenter power-on wedged) ##########" -ForegroundColor Magenta

@@ -16,21 +16,48 @@
     The ESX hosts have no BMC. This script cannot power them on -- it waits
     for them and tells you what to do.
 
-    SCOPE: VCF components only -- vCenter, the VCF appliances, and VSP nodes.
-    Developer VMs, containers and any other workload are never touched, and are
-    listed at the end as "left alone". If you want one started, start it
-    yourself, so the decision is visible.
+    SCOPE: VCF components only -- vCenter, the VCF appliances, and VSP nodes --
+    plus, in Minimal mode, the configured LlmWorkers. Developer VMs, containers
+    and any other workload are never touched, and are listed at the end as
+    "left alone". If you want one started, start it yourself, so the decision
+    is visible.
+
+.PARAMETER Mode
+    Full (default): the whole VCF stack, as above. LLM workers are left alone --
+    running them beside the full stack pushes the management VMs onto the
+    memory tier.
+
+    Minimal: day-to-day running. ESX hosts only, out of maintenance mode, then
+    the LlmWorkers powered on host-direct. vCenter, NSX, SDDC Manager,
+    Operations and VSP stay OFF. The workers need neither vSAN nor vCenter
+    (local datastores, ephemeral-binding port group). Refuses if VCF
+    components are still running -- run Stop-VCFLab.ps1 first, which leaves
+    the hosts and workers up. Also refuses -- failing closed -- when the
+    recorded license sync is missing, unreadable, future-dated or older than
+    LicenseWindow.RefuseDays (VCF 9 licenses lapse 180 days after a refresh).
+    Stop-VCFLab records a sync when VCF Operations had been up 24 h or more.
+
+.PARAMETER WithVCenter
+    Minimal only: also start vCenter (for the UI), but nothing else.
+
+.PARAMETER IgnoreLicenseWindow
+    Minimal only: start even though the last Full start is past RefuseDays.
 
 .PARAMETER WhatIf
     Report what would happen without changing power state.
 
 .EXAMPLE
     .\Start-VCFLab.ps1
+.EXAMPLE
+    .\Start-VCFLab.ps1 -Mode Minimal
 #>
 [CmdletBinding()]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword','CredentialPath',
     Justification='This is a filesystem path to the credential file, not a secret. Secrets are read from that file into PSCredential objects and never printed.')]
 param(
+    [ValidateSet('Full','Minimal')][string]$Mode = 'Full',
+    [switch]$WithVCenter,
+    [switch]$IgnoreLicenseWindow,
     [switch]$WhatIf,
     [switch]$SkipInventoryRepair,
     [string]$ConfigPath,
@@ -52,7 +79,49 @@ $nsxCred  = Get-VCFLabCredentialObject -Map $cred -UserKey $null                
 $opsCred  = Get-VCFLabCredentialObject -Map $cred -UserKey 'OPERATIONS_ADMIN_USER' -PassKey 'OPERATIONS_ADMIN_PASS' -DefaultUser 'admin'
 
 $started = Get-Date
-Write-Host "VCF lab power-on  ::  $started" -ForegroundColor White
+Write-Host "VCF lab power-on ($Mode)  ::  $started" -ForegroundColor White
+$minimal = ($Mode -eq 'Minimal')
+if ($WithVCenter -and -not $minimal) { Write-Warn2 "-WithVCenter only applies to -Mode Minimal; Full starts vCenter anyway" }
+
+# --- license window (Minimal) ----------------------------------------------------
+# Minimal keeps VCF Operations down, and VCF 9 licenses lapse after 180 days
+# without a refresh -- hosts then disconnect from vCenter and workloads cannot
+# start. Check before touching anything, so the refusal costs nothing.
+if ($minimal) {
+    Write-Step "License window"
+    $lw = if ($cfg.ContainsKey('LicenseWindow')) { $cfg.LicenseWindow } else { @{ WarnDays = 30; RefuseDays = 150 } }
+    $age = Get-LicenseStampAge -Config $cfg
+    # Fail CLOSED. "I cannot tell when the license was last refreshed" is not a
+    # reason to assume it is fine -- the cost of being wrong is every workload
+    # refusing to start.
+    $refuse = $null
+    switch ($age.State) {
+        'Missing'    { $refuse = "No license sync is recorded on this machine ($($age.Detail))." }
+        'Unreadable' { $refuse = "The license sync record cannot be read: $($age.Detail)" }
+        'Future'     { $refuse = "The license sync record is dated in the future ($($age.Detail)); check this machine's clock." }
+        'Ok' {
+            if ($age.Days -ge $lw.RefuseDays) {
+                $refuse = "The last recorded license sync was $($age.Days) days ago. VCF 9 licenses lapse 180 days after the last refresh."
+            } elseif ($age.Days -ge $lw.WarnDays) {
+                Write-Warn2 "Last license sync $($age.Days) days ago. Plan a Full run before day $($lw.RefuseDays) and keep VCF Operations up 24 h."
+            } else {
+                Write-Ok "last license sync $($age.Days) days ago (refresh window OK)"
+            }
+        }
+    }
+    if ($refuse) {
+        if ($IgnoreLicenseWindow) {
+            Write-Warn2 $refuse
+            Write-Warn2 "Continuing because -IgnoreLicenseWindow was given."
+        } else {
+            Write-Fail $refuse
+            Write-Fail "Run .\Start-VCFLab.ps1 (Full), leave VCF Operations up for 24 h so it can sync the license,"
+            Write-Fail "then .\Stop-VCFLab.ps1 -- it records the sync when it finds Operations was up that long."
+            Write-Info "-IgnoreLicenseWindow overrides this (e.g. after confirming the license in VCF Operations)."
+            exit 1
+        }
+    }
+}
 
 # --- 0. hosts -----------------------------------------------------------------
 # No BMC. Wake-on-LAN can power a host ON if its onboard RTL8125 is cabled and
@@ -94,7 +163,10 @@ foreach ($h in $cfg.Hosts) {
 # Staggered host boots have produced a three-way partition where each host was
 # MASTER of its own 1-member cluster. Do not proceed until quorum is real.
 Write-Step "1. vSAN quorum"
-$ok = Wait-Gate -Name "vSAN reports 3 members on every host" -TimeoutSeconds $cfg.GateTimeoutSeconds.VsanFormation -Test {
+# Minimal without vCenter does not need vSAN (the workers are on local
+# datastores), so it only takes a short look rather than the full wait.
+$vsanTimeout = if ($minimal -and -not $WithVCenter) { [math]::Min(120, $cfg.GateTimeoutSeconds.VsanFormation) } else { $cfg.GateTimeoutSeconds.VsanFormation }
+$ok = Wait-Gate -Name "vSAN reports 3 members on every host" -TimeoutSeconds $vsanTimeout -Test {
     foreach ($h in $cfg.Hosts) {
         try {
             $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
@@ -106,7 +178,37 @@ $ok = Wait-Gate -Name "vSAN reports 3 members on every host" -TimeoutSeconds $cf
     }
     $true
 }
-if (-not $ok) { Write-Fail "vSAN did not form. Check for a partition before continuing."; exit 1 }
+if (-not $ok) {
+    # The LLM workers live on local datastores, so a vSAN problem does not stop
+    # them. Anything that boots from vSAN -- vCenter included -- needs it.
+    if ($minimal -and -not $WithVCenter) {
+        Write-Warn2 "vSAN did not form. Continuing: the LLM workers use local datastores, not vSAN."
+        Write-Warn2 "Investigate the partition before the next Full start."
+    } else { Write-Fail "vSAN did not form. Check for a partition before continuing."; exit 1 }
+}
+
+# --- M1. Minimal: the VCF stack must already be down -------------------------
+# Checked BEFORE anything changes on the hosts, so a refusal leaves them exactly
+# as found. Minimal never stops VCF components itself -- that is Stop-VCFLab's
+# job, with its ordering and grace periods -- and starting workers beside a
+# running stack is the memory squeeze Minimal exists to avoid.
+$workers = @(Get-LlmWorkers -Config $cfg)
+if ($minimal) {
+    Write-Step "M1. VCF components must be down"
+    $allow = if ($WithVCenter) { @($cfg.VCenter.VmName) } else { @() }
+    $vcf = Get-RunningVcfOnHosts -Config $cfg -EsxCredential $esxCred -Allow $allow
+    if ($vcf.Unreachable.Count -gt 0) {
+        Write-Fail "Could not list VMs on: $($vcf.Unreachable -join ', ') -- cannot prove the VCF stack is down."
+        exit 1
+    }
+    if ($vcf.Running.Count -gt 0) {
+        Write-Fail "VCF components are still running; Minimal mode will not start workers beside them:"
+        foreach ($r in ($vcf.Running | Sort-Object Name)) { Write-Warn2 ("  running: {0}  on {1}" -f $r.Name, $r.Host) }
+        Write-Info "Run .\Stop-VCFLab.ps1 first (it stops the VCF stack and leaves hosts and workers up), then re-run."
+        exit 1
+    }
+    Write-Ok "no VCF component running"
+}
 
 # --- 1a. exit maintenance mode -------------------------------------------------
 # Stop-VCFLab.ps1 puts every host into maintenance mode before powering it off,
@@ -164,6 +266,42 @@ if ($stuck.Count -gt 0) {
     Write-Fail "No VM can power on while its host is in maintenance mode, so stopping here"
     Write-Fail "rather than timing out on every gate below."
     exit 1
+}
+
+# --- M. Minimal: LLM workers, host-direct -------------------------------------
+# Everything here talks to the hosts; vCenter is not required and usually not
+# running. The workers' disks are on local datastores and their port group uses
+# ephemeral binding, so the host can attach their NICs without vCenter.
+if ($minimal) {
+    Write-Step "M2. LLM workers"
+    if ($workers.Count -eq 0) { Write-Warn2 "No LlmWorkers configured in VCFLab.Config.psd1 -- nothing to start." }
+    $failedWorkers = @()
+    foreach ($w in $workers) {
+        if (-not (Start-HostVM -HostIp $w.HostIp -Name $w.VmName -EsxCredential $esxCred -WhatIfMode:$WhatIf)) {
+            $failedWorkers += $w.VmName
+        }
+    }
+    if (-not $WhatIf) {
+        $gateTimeout = if ($cfg.GateTimeoutSeconds.ContainsKey('LlmWorker')) { $cfg.GateTimeoutSeconds.LlmWorker } else { 600 }
+        foreach ($w in ($workers | Where-Object { $failedWorkers -notcontains $_.VmName })) {
+            $ok = Wait-Gate -Name "$($w.VmName) guest up (Tools + IPv4, read from $($w.HostShort))" -TimeoutSeconds $gateTimeout -Test {
+                Test-HostVmGuestUp -HostIp $w.HostIp -Name $w.VmName -EsxCredential $esxCred
+            }
+            if (-not $ok) { $failedWorkers += $w.VmName }
+        }
+    }
+
+    if (-not $WithVCenter) {
+        Write-Step "Summary -- Minimal"
+        foreach ($w in $workers) {
+            $state = if ($failedWorkers -contains $w.VmName) { 'NOT UP' } else { 'up' }
+            Write-Host ('  {0,-16} on {1,-6} {2}' -f $w.VmName, $w.HostShort, $state)
+        }
+        Write-Info "vCenter, NSX, SDDC Manager, Operations and VSP are intentionally OFF."
+        Write-Host "`nMinimal power-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
+        if ($failedWorkers.Count -gt 0) { Write-Fail "Workers not up: $($failedWorkers -join ', ')"; exit 1 }
+        exit 0
+    }
 }
 
 # --- 2. vCenter ---------------------------------------------------------------
@@ -253,6 +391,17 @@ if (-not (Confirm-HostInventorySync -Config $cfg -EsxCredential $esxCred -Report
         Write-Info "Restart vpxa by hand on the hosts named above, then re-run."
         exit 1
     }
+}
+
+if ($minimal) {
+    # -WithVCenter: vCenter is up for the UI; everything else stays down.
+    Write-Step "Summary -- Minimal with vCenter"
+    Write-Ok "vCenter and the LLM workers are up; NSX, SDDC Manager, Operations and VSP are intentionally OFF."
+    if ($failedWorkers.Count -gt 0) { Write-Fail "Workers not up: $($failedWorkers -join ', ')" }
+    Write-Host "`nMinimal power-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
+    Disconnect-VIServer -Server $vc -Confirm:$false -ErrorAction SilentlyContinue
+    if ($failedWorkers.Count -gt 0) { exit 1 }
+    exit 0
 }
 
 # --- scope ---------------------------------------------------------------------
@@ -347,6 +496,17 @@ if ($after.Foreign.Count -gt 0) {
         '  {0,-42} {1}' -f $_.Name, $_.PowerState
     } | Write-Host
 }
+
+$workersOn = @($workers | Where-Object { $wk = $_; @(Get-VM -Name $wk.VmName -ErrorAction SilentlyContinue | Where-Object { $_.PowerState -eq 'PoweredOn' }).Count -gt 0 })
+if ($workersOn.Count -gt 0) {
+    Write-Warn2 ("LLM workers are running beside the full stack: " + (($workersOn | ForEach-Object VmName) -join ', '))
+    Write-Warn2 "Their reserved RAM pushes management VMs onto the memory tier. Stop them, or use -Mode Minimal."
+}
+
+# No license stamp here: a Full start proves nothing about the license until
+# VCF Operations has been up long enough to report usage. Stop-VCFLab records
+# the sync when it finds Operations has been up for 24 h.
+Write-Info "To refresh the VCF license window for Minimal mode, leave VCF Operations up for 24 h before Stop-VCFLab."
 
 Write-Host "`nPower-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
 Write-Warn2 "If DRS is set to Manual, nothing will place or balance VMs. Check before relying on automation."
