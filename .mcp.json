@@ -3,13 +3,6 @@
     "memory": {
       "type": "http",
       "url": "http://192.168.6.223:3005/mcp?space=local-gpu-cluster"
-    },
-    "local-delegate": {
-      "type": "http",
-      "url": "http://127.0.0.1:3006/mcp",
-      "headers": {
-        "Authorization": "Bearer ${LOCAL_DELEGATE_BEARER_TOKEN}"
-      }
     }
   }
 }

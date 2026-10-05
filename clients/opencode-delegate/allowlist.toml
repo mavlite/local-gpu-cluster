@@ -1,4 +1,0 @@
-# Check commands the delegate SERVER may run after a job (argv prefixes, split on whitespace).
-# This is the server-side check allow-list, NOT the agent's bash permissions: the agent
-# itself is deny-all for bash (per R8, permission.bash = {"*": "deny"} in agent/delegate.md).
-allow = ["cat", "ls", "rg", "sed -n", "bash -n", "shellcheck", "python -m pytest"]

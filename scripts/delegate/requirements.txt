@@ -1,4 +1,0 @@
-mcp>=1.2,<2
-httpx
-uvicorn
-starlette
