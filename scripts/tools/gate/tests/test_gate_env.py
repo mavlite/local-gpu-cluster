@@ -15,7 +15,7 @@ AMD = {"llamacpp-chat-restart.timer": "active", "llamacpp-embed.service": "activ
        "llamacpp-rerank.service": "active", "llamacpp-fast.service": "inactive",
        "llamacpp-chat.service": "active"}
 HOST = {"redteam-mode-watch.service": "active", "redteam-mode-idle.timer": "active",
-        "redteam-mode-precreate.service": "inactive"}
+        "redteam-mode-precreate.service": "inactive", "rag-refresh.timer": "active"}
 
 # What the real /usr/local/sbin/redteam-mode-{enter,exit}.sh do to unit state (read 2026-10-05).
 ENTER = """#!/usr/bin/env bash

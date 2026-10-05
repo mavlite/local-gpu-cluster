@@ -17,7 +17,9 @@ STATE="$STATE_DIR/state.env"
 SBIN="${GATE_SBIN:-/usr/local/sbin}"
 RT_STATE="${GATE_REDTEAM_STATE:-/run/redteam-mode.state}"
 RATE="${GATE_RATE_LIMIT_CHAT:-1000/minute}"
-HOST_UNITS=(redteam-mode-watch.service redteam-mode-idle.timer redteam-mode-precreate.service)
+# rag-refresh.timer: user ruling 2026-10-05 -- embed/rerank are stopped for the window, so the
+# nightly refresh must not run against them; restored with the rest.
+HOST_UNITS=(redteam-mode-watch.service redteam-mode-idle.timer redteam-mode-precreate.service rag-refresh.timer)
 AMD_UNITS=(llamacpp-chat-restart.timer llamacpp-embed.service llamacpp-rerank.service llamacpp-fast.service)
 
 die() { echo "[gate-env] FATAL: $*" >&2; exit 1; }
