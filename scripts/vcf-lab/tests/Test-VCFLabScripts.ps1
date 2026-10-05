@@ -385,6 +385,30 @@ Check "full mode exits 0" ($global:LastExit -eq 0)
 Check "full mode starts no LLM worker" ((Get-WorkersStarted).Count -eq 0)
 Check "a Full start alone records NO license sync (Operations must run 24 h)" (-not (Test-Path $script:StampPath))
 
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Full while LLM workers run ##########" -ForegroundColor Magenta
+# Workers pin 24 GB of DRAM per host; with the management stack up that pushes
+# vcsa/nsxa/sddc-manager onto the consumer tier drives (ops review C2). Full
+# must refuse -- not warn after the fact.
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+$out = Invoke-Lab 'Start-VCFLab.ps1'
+Check "Full refuses while workers run (exit 1)" ($global:LastExit -eq 1)
+Check "  ...before powering on any VCF component" (@(Get-Started | Where-Object { $script:VcfNames -contains $_ }).Count -eq 0)
+Check "  ...without touching the workers" ((Get-Stopped).Count -eq 0)
+Check "  ...and names -StopLlmWorkers" ($out -match 'StopLlmWorkers')
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Full -StopLlmWorkers ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ StopLlmWorkers = $true }
+$stopped = Get-Stopped
+Check "-StopLlmWorkers stops every worker first" (@($workerNames | Where-Object { $stopped -notcontains $_ }).Count -eq 0)
+Check "  ...then the Full start proceeds (vcsa on, exit 0)" ($global:LastExit -eq 0 -and (Get-Started) -contains 'vcsa')
+$logArr = @($global:Log); $firstStart = -1; $lastWorkerStop = -1
+for ($i = 0; $i -lt $logArr.Count; $i++) {
+    if ($firstStart -lt 0 -and $logArr[$i] -like 'START *') { $firstStart = $i }
+    if ($logArr[$i] -match '^(GUESTSTOP|HARDSTOP) llmbench') { $lastWorkerStop = $i }
+}
+Check "  ...workers are down before anything starts" ($lastWorkerStop -ge 0 -and $firstStart -gt $lastWorkerStop)
+
 Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal (cold, hosts in maintenance) ##########" -ForegroundColor Magenta
 Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff'
 foreach ($ip in $global:SandboxHostIps) { $global:HostState[$ip] = 'Maintenance' }

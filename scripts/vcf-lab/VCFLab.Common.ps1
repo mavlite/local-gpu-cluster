@@ -830,6 +830,31 @@ function Get-RunningVcfOnHosts {
     [pscustomobject]@{ Running = $running; Unreachable = $unreachable }
 }
 
+<#
+    Which LLM workers are RUNNING, asked of each worker's own host (no vCenter
+    needed). A host that cannot be queried is reported, never assumed clear.
+#>
+function Get-RunningLlmWorkers {
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][pscredential]$EsxCredential
+    )
+    $running = @(); $unreachable = @()
+    foreach ($w in @(Get-LlmWorkers -Config $Config)) {
+        $c = $null
+        try {
+            $c = Connect-VIServer -Server $w.HostIp -Credential $EsxCredential -Force -ErrorAction Stop
+            $vm = @(Get-VM -Server $c -Name $w.VmName -ErrorAction SilentlyContinue)
+            if ($vm.Count -gt 0 -and $vm[0].PowerState -eq 'PoweredOn') { $running += $w }
+        } catch {
+            $unreachable += $w.HostShort
+        } finally {
+            if ($c) { Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue }
+        }
+    }
+    [pscustomobject]@{ Running = $running; Unreachable = $unreachable }
+}
+
 function Start-HostVM {
     param(
         [Parameter(Mandatory)][string]$HostIp,

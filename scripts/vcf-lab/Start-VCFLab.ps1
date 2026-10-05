@@ -40,6 +40,12 @@
 .PARAMETER WithVCenter
     Minimal only: also start vCenter (for the UI), but nothing else.
 
+.PARAMETER StopLlmWorkers
+    Full only: shut the LLM workers down (host-direct, graceful) before the
+    stack starts. Without it, Full REFUSES while any worker runs: each pins
+    24 GB of DRAM, which pushes the management VMs onto the consumer tier
+    drives -- the failure class behind the 2026-10-04 outage.
+
 .PARAMETER IgnoreLicenseWindow
     Minimal only: start even though the last Full start is past RefuseDays.
 
@@ -57,6 +63,7 @@
 param(
     [ValidateSet('Full','Minimal')][string]$Mode = 'Full',
     [switch]$WithVCenter,
+    [switch]$StopLlmWorkers,
     [switch]$IgnoreLicenseWindow,
     [switch]$WhatIf,
     [switch]$SkipInventoryRepair,
@@ -208,6 +215,44 @@ if ($minimal) {
         exit 1
     }
     Write-Ok "no VCF component running"
+}
+
+# --- F0. Full: the LLM workers must be off ------------------------------------
+# Checked before anything changes on the hosts. A worker pins 24 GB of DRAM per
+# host; with the management stack up that squeezes vcsa/nsxa/sddc-manager onto
+# the consumer tier drives (ops review C2). Warning after the stack was up was
+# too late, so Full refuses -- or, with -StopLlmWorkers, stops them first.
+if (-not $minimal) {
+    Write-Step "F0. LLM workers must be off for Full mode"
+    $lw = Get-RunningLlmWorkers -Config $cfg -EsxCredential $esxCred
+    if ($lw.Unreachable.Count -gt 0) {
+        Write-Fail "Could not check LLM workers on: $($lw.Unreachable -join ', ') -- cannot prove they are off."
+        exit 1
+    }
+    if ($lw.Running.Count -eq 0) {
+        Write-Ok "no LLM worker running"
+    } elseif (-not $StopLlmWorkers) {
+        Write-Fail ("LLM workers are running: " + (($lw.Running | ForEach-Object { "$($_.VmName) on $($_.HostShort)" }) -join ', '))
+        Write-Fail "Full mode will not start the management stack beside them (each pins 24 GB of DRAM)."
+        Write-Info "Re-run with -StopLlmWorkers to shut them down first, or stop them yourself."
+        exit 1
+    } else {
+        $grace = if ($cfg.StopGraceSeconds.ContainsKey('LlmWorker')) { $cfg.StopGraceSeconds.LlmWorker } else { 120 }
+        foreach ($w in $lw.Running) {
+            if (-not (Stop-HostVM -HostIp $w.HostIp -Name $w.VmName -EsxCredential $esxCred -GraceSeconds $grace -WhatIfMode:$WhatIf)) {
+                Write-Fail "$($w.VmName) did not stop -- not starting the stack beside it."
+                exit 1
+            }
+        }
+        if (-not $WhatIf) {
+            $still = Get-RunningLlmWorkers -Config $cfg -EsxCredential $esxCred
+            if ($still.Running.Count -gt 0 -or $still.Unreachable.Count -gt 0) {
+                Write-Fail "LLM workers still running or unverifiable after the stop -- holding."
+                exit 1
+            }
+            Write-Ok "LLM workers stopped"
+        }
+    }
 }
 
 # --- 1a. exit maintenance mode -------------------------------------------------

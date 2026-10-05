@@ -3,7 +3,8 @@
 Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 
 ```powershell
-.\Start-VCFLab.ps1                 # Full: bring up the whole VCF stack
+.\Start-VCFLab.ps1                 # Full: bring up the whole VCF stack (refuses while LLM workers run)
+.\Start-VCFLab.ps1 -StopLlmWorkers # Full, shutting the LLM workers down first
 .\Start-VCFLab.ps1 -Mode Minimal   # day to day: hosts + LLM workers only, VCF stack OFF
 .\Start-VCFLab.ps1 -Mode Minimal -WithVCenter   # ...plus vCenter for the UI
 .\Start-VCFLab.ps1 -SkipInventoryRepair   # report inventory drift, do not fix it
@@ -19,13 +20,19 @@ Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 | ESX hosts | up, out of maintenance | up, out of maintenance |
 | vSAN | required | forms, but not required (workers use local datastores) |
 | vCenter, NSX, SDDC Manager, Operations, VSP, License, Collector | started in order | **off** (`-WithVCenter` adds vCenter only) |
-| LLM workers (`LlmWorkers` in the config) | left alone, with a warning if running | started host-direct |
+| LLM workers (`LlmWorkers` in the config) | **must be off**: Full refuses, or stops them with `-StopLlmWorkers` | started host-direct |
 | RAM held by management VMs | ~167 GB across the cluster | none |
 
 **Full -> Minimal:** `.\Stop-VCFLab.ps1` (stops the VCF stack, leaves hosts and
 workers running), then `.\Start-VCFLab.ps1 -Mode Minimal` to start any worker
-that is off. **Minimal -> Full:** `.\Start-VCFLab.ps1`. Stop the workers first
-if you want the management VMs to have the RAM back -- Full warns if they are up.
+that is off. **Minimal -> Full:** `.\Start-VCFLab.ps1 -StopLlmWorkers`. Full **refuses** while a
+worker runs -- each pins 24 GB of DRAM, which would push the management VMs onto the
+consumer tier drives (the failure class behind the 2026-10-04 outage). The check runs
+host-direct, before anything is powered on.
+
+`-WithVCenter` is a deliberate exception: vcsa (21 GB) beside one worker (24 GB) fits
+in a host's ~94 GB DRAM, and nothing else of the control plane runs, but it is the one
+Minimal variant where a management VM shares a host with a pinned worker.
 **Everything off from Minimal:** `.\Stop-VCFLab.ps1 -IncludeHosts`; vCenter
 being unreachable is expected there, and the script works host-direct --
 provided no VCF component is running, which it checks and refuses on.
