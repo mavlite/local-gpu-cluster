@@ -65,7 +65,10 @@ try {
     function Get-GuestBytes([string]$Path) {
         $info = $fm.InitiateFileTransferFromGuest($moref, $auth, $Path)
         $url = $info.Url -replace '^https://[^/]+/', "https://$hostIp/"
-        return (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 300).Content
+        $c = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 300).Content
+        if ($c -is [string]) { $c = [Text.Encoding]::UTF8.GetBytes($c) }
+        # Unary comma: a returned byte[] is otherwise unrolled into object[] by the pipeline.
+        return ,[byte[]]$c
     }
 
     switch ($PSCmdlet.ParameterSetName) {

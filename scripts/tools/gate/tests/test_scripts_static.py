@@ -63,3 +63,12 @@ def test_powershell_parses():
 def test_guest_password_never_on_a_command_line_or_from_a_scratch_file():
     s = read("gate_guest.ps1")
     assert "LLM_BENCH_GUEST_PASS" in s and "guest.pass" not in s
+
+
+def test_guest_bytes_are_not_unrolled_into_object_array():
+    # A PowerShell function returning byte[] is unrolled into object[] by the pipeline, so
+    # -Exec printed one ASCII code per line and -Fetch could not write the file (seen live
+    # 2026-10-05). The content must be normalised to byte[] and returned with the unary comma.
+    s = read("gate_guest.ps1")
+    body = s[s.index("function Get-GuestBytes"):s.index("switch ($PSCmdlet.ParameterSetName)")]
+    assert "return ,[byte[]]" in body
