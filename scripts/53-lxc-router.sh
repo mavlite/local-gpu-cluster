@@ -104,6 +104,10 @@ CACHE_SRC="$LGC_DIR/files/tavily_cache.py"
 [[ -r "$CACHE_SRC" ]] || die "tavily_cache.py not found at $CACHE_SRC"
 ALIAS_DEFAULTS_SRC="$LGC_DIR/files/alias_defaults.py"
 [[ -r "$ALIAS_DEFAULTS_SRC" ]] || die "alias_defaults.py not found at $ALIAS_DEFAULTS_SRC"
+ADMISSION_SRC="$LGC_DIR/files/stream_admission.py"
+[[ -r "$ADMISSION_SRC" ]] || die "stream_admission.py not found at $ADMISSION_SRC"
+EMBED_ADMISSION_SRC="$LGC_DIR/files/embed_admission.py"
+[[ -r "$EMBED_ADMISSION_SRC" ]] || die "embed_admission.py not found at $EMBED_ADMISSION_SRC"
 
 phase_7_1_create() {
   step "7.1 — Create LXC $ROUTER_VMID ($ROUTER_HOSTNAME)"
@@ -204,6 +208,10 @@ phase_7_3_deploy_app() {
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/tavily_cache.py
   pct push "$ROUTER_VMID" "$ALIAS_DEFAULTS_SRC" /opt/llm-router/alias_defaults.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/alias_defaults.py
+  pct push "$ROUTER_VMID" "$ADMISSION_SRC" /opt/llm-router/stream_admission.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/stream_admission.py
+  pct push "$ROUTER_VMID" "$EMBED_ADMISSION_SRC" /opt/llm-router/embed_admission.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/embed_admission.py
 }
 
 phase_7_4_systemd() {
