@@ -72,3 +72,39 @@ def test_guest_bytes_are_not_unrolled_into_object_array():
     s = read("gate_guest.ps1")
     body = s[s.index("function Get-GuestBytes"):s.index("switch ($PSCmdlet.ParameterSetName)")]
     assert "return ,[byte[]]" in body
+
+
+def _render_nft(tmp_path, *args):
+    """Run worker_serve.sh with a fake sudo that captures what would be fed to `nft -f -`."""
+    out = tmp_path / "ruleset.nft"
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "sudo").write_text(
+        f'#!/usr/bin/env bash\nif [ "$1" = nft ]; then cat > "{out.as_posix()}"; fi\n', newline="\n")
+    (fake / "sudo").chmod(0o755)
+    script = os.path.join(ROOT, "sh", "worker_serve.sh").replace("\\", "/")
+    p = fake.as_posix()
+    cmd = (f'export PATH="$(cygpath -u "{p}" 2>/dev/null || echo "{p}"):$PATH"; '
+           f'bash "{script}" ' + " ".join(args))
+    r = subprocess.run([BASH, "-c", cmd], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return out.read_text().splitlines()
+
+
+# Both forms below passed `nft -c -f` on the Proxmox host (nftables) on 2026-10-05; the previous
+# one-line "} }" closing failed there and on the workers with "unexpected '}'".
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_learn_ruleset_is_the_form_nft_accepted(tmp_path):
+    assert _render_nft(tmp_path, "learn") == [
+        "table inet gate", "delete table inet gate", "table inet gate {", " chain input {",
+        "  type filter hook input priority 0; policy accept;",
+        '  tcp dport 8090 ct state new log prefix "gate8090 "', " }", "}"]
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_lock_ruleset_is_the_form_nft_accepted(tmp_path):
+    assert _render_nft(tmp_path, "lock", "10.0.0.1", "10.0.0.2") == [
+        "table inet gate", "delete table inet gate", "table inet gate {", " chain input {",
+        "  type filter hook input priority 0; policy accept;",
+        "  tcp dport 8090 ip saddr { 10.0.0.1,10.0.0.2 } accept", "  tcp dport 8090 counter drop",
+        " }", "}"]

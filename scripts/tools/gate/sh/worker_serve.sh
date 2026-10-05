@@ -52,9 +52,12 @@ nft_table() {           # nft_table <rules...>: replace the gate table atomicall
   {
     echo "table inet gate"
     echo "delete table inet gate"
-    echo "table inet gate { chain input { type filter hook input priority 0; policy accept;"
+    echo "table inet gate {"
+    echo " chain input {"
+    echo "  type filter hook input priority 0; policy accept;"
     printf '  %s\n' "$@"
-    echo "} }"
+    echo " }"           # each closing brace on its own line: "} }" is a syntax error to nft
+    echo "}"
   } | sudo nft -f -
 }
 
