@@ -115,11 +115,26 @@ function Connect-VIServer {
         throw "Could not resolve the requested VC server. (stub: vCenter is down)"
     }
     if ($global:UnreachableHosts -contains $Server) { throw "stub: host $Server unreachable" }
+    $global:StubSessions += $Server
     [pscustomobject]@{ Name = $Server; IsConnected = $true }
 }
 $global:UnreachableHosts = @()
 $global:FailStart = @()
-function Disconnect-VIServer { param([Parameter(ValueFromRemainingArguments)]$a) }
+# Faithful to PowerCLI: "-Server *" with no open session fails while BINDING parameters
+# (ServerObnFailureException), which -ErrorAction SilentlyContinue does not suppress -- under
+# $ErrorActionPreference='Stop' it kills the script. Seen live 2026-10-05 in Minimal mode.
+$global:StubSessions = @()
+function Disconnect-VIServer {
+    param($Server,[switch]$Confirm,[string]$ErrorAction)
+    if ($Server -is [string] -and $Server -eq '*') {
+        if (@($global:StubSessions).Count -eq 0) {
+            throw "Could not find any of the servers specified by name. (stub: no open session)"
+        }
+        $global:StubSessions = @()
+        return
+    }
+    foreach ($s in @($Server)) { $global:StubSessions = @($global:StubSessions | Where-Object { $_ -ne $s.Name }) }
+}
 function Get-VMHost {
     param($VM,[string]$Name,$Server,[Parameter(ValueFromRemainingArguments)]$a)
     $key = if ($Server -and $Server.Name) { [string]$Server.Name }
@@ -243,6 +258,7 @@ function Set-Stamp { param([int]$DaysAgo)
 
 function Reset-Fleet {
     param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn',[string]$WorkerPower='PoweredOff')
+    $global:StubSessions = @()
     $f = 'vcf-management-services'
     $global:FakeVMs = @(
         (New-FakeVM 'vcsa'           $Power 4  '172.16.10.129' $f)

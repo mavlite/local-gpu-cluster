@@ -259,7 +259,14 @@ if (-not $IncludeHosts) {
     # holds that dead connection, and the call fails with
     #   "There was no endpoint listening at https://<vcsa>/sdk"
     # even though every host is perfectly healthy.
-    Disconnect-VIServer -Server * -Confirm:$false -ErrorAction SilentlyContinue
+    #
+    # Disconnect only sessions that exist. "-Server *" with none open (Minimal mode: vCenter
+    # was never reached) fails while binding its parameters; -ErrorAction cannot suppress
+    # that, and under $ErrorActionPreference='Stop' it ended the script before any worker
+    # or host was stopped (seen live 2026-10-05).
+    $open = @(Get-Variable -Name DefaultVIServers -Scope Global -ValueOnly -ErrorAction SilentlyContinue |
+              Where-Object { $_ })
+    if ($open.Count -gt 0) { Disconnect-VIServer -Server $open -Confirm:$false -ErrorAction SilentlyContinue }
 
     # The LLM workers are owned by these scripts, so they are stopped here --
     # via their hosts, which is the only path that exists in Minimal mode --
