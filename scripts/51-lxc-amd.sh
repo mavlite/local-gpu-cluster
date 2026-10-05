@@ -198,6 +198,12 @@ EMBED_ALIAS="${EMBED_ALIAS:-qwen3-embed}"
 # Raise back to 4 if bulk ingest throughput ever becomes the bottleneck; with
 # CHAT_CONCURRENCY=1 and a single user, 2 is ample.
 EMBED_CTX="${EMBED_CTX:-32768}"
+# Flash attention ON (measured 2026-10-05 on b11026, V620 gfx1030, fresh texts): with FA off
+# every uncached embed request paid a ~600 ms floor (18-30-token queries took 603 ms); FA on
+# took them to 12 ms, a 16K chunk 14.9 s -> 4.8 s, and ingest 4.0 -> 7.9 chunks/s.
+# FA changes the arithmetic: vectors move to cos ~0.9995 vs FA-off ones, so flipping this
+# without re-embedding the corpus mixes two vector spaces in LanceDB.
+EMBED_FLASH_ATTN="${EMBED_FLASH_ATTN:-on}"
 EMBED_PARALLEL="${EMBED_PARALLEL:-2}"
 EMBED_POOLING="${EMBED_POOLING:-last}"   # CRITICAL: Qwen3-Embedding needs 'last', NOT 'cls'
 
@@ -578,6 +584,7 @@ phase_5_11_4_embed_unit() {
     "EMBED_HF_QUANT=$EMBED_HF_QUANT" \
     "EMBED_ALIAS=$EMBED_ALIAS" \
     "EMBED_CTX=$EMBED_CTX" \
+    "EMBED_FLASH_ATTN=$EMBED_FLASH_ATTN" \
     "EMBED_PARALLEL=$EMBED_PARALLEL" \
     "EMBED_POOLING=$EMBED_POOLING" \
     bash -se <<'GUEST'
@@ -610,7 +617,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --cont-batching \\
     --parallel "${EMBED_PARALLEL}" \\
     --batch-size 2048 --ubatch-size 512 \\
-    --flash-attn off \\
+    --flash-attn "${EMBED_FLASH_ATTN}" \\
     --load-mode mlock \\
     --metrics
 Restart=on-failure
