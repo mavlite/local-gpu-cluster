@@ -15,9 +15,13 @@ BIN="${GATE_IK_BIN:-/opt/bench/src/ik/build/bin/llama-server}"
 MODEL="${GATE_MODEL:-/models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf}"
 PORT=8090
 ETC=/etc/gate
-KEY="$ETC/worker.key"
-LOGDIR=/var/log/gate
-PIDFILE=/run/gate-llama.pid
+KEY="${GATE_KEY_FILE:-$ETC/worker.key}"
+LOGDIR="${GATE_LOGDIR:-/var/log/gate}"
+PIDFILE="${GATE_PIDFILE:-/run/gate-llama.pid}"
+UNIT=gate-llama
+# Below the 32 GB worker VM (24 GB OOM-killed all three under Polyglot load, 2026-10-06) so an
+# OOM, if one ever happens, kills only the server unit -- never VMware Tools or sshd.
+MEMMAX="${GATE_MEMMAX:-30G}"
 # Frozen worker flags (spec §3, shipped config) -- the gate commit pins this exact string.
 WORKER_FLAGS="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0"
 # Mandatory on a 24 GB guest (ik defaults OOM), plus non-thinking sampling (Qwen instruct preset, pp 0).
@@ -84,32 +88,33 @@ cmd_lock() {
 
 cmd_start() {
   [ -r "$KEY" ] || die "$KEY not readable -- run install-key first"
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then die "already running"; fi
+  systemctl is-active --quiet "$UNIT" && die "already running"
   sudo mkdir -p "$LOGDIR"; sudo chown bench:bench "$LOGDIR"
   local logf
   logf="$LOGDIR/server-$(date -u +%Y%m%dT%H%M%SZ).log"
+  sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
+  # Own transient unit with a memory cap. Started from GuestOperations the server otherwise runs
+  # in open-vm-tools.service, whose default OOMPolicy=stop took VMware Tools down with it when the
+  # kernel OOM-killed llama-server (all 3 workers, 2026-10-06).
   # shellcheck disable=SC2086  # the flag strings are intentionally word-split
-  setsid nohup "$BIN" -m "$MODEL" $WORKER_FLAGS $WORKER_EXTRA \
+  sudo systemd-run --quiet --unit="$UNIT" --uid=bench --gid=bench -p MemoryMax="$MEMMAX" \
+    -p StandardOutput="append:$logf" -p StandardError="append:$logf" \
+    "$BIN" -m "$MODEL" $WORKER_FLAGS $WORKER_EXTRA \
     --jinja -np 1 --alias qwen3.6 --chat-template-kwargs '{"enable_thinking":false}' \
-    --host 0.0.0.0 --port "$PORT" --api-key-file "$KEY" \
-    < /dev/null > "$logf" 2>&1 &
-  echo $! | sudo tee "$PIDFILE" >/dev/null
+    --host 0.0.0.0 --port "$PORT" --api-key-file "$KEY" || die "systemd-run failed"
+  systemctl show -p MainPID --value "$UNIT" | sudo tee "$PIDFILE" >/dev/null
   local i
   for i in $(seq 1 300); do
     curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null && { echo "$logf"; return 0; }
-    kill -0 "$(cat "$PIDFILE")" 2>/dev/null || die "llama-server exited; tail: $(tail -n 5 "$logf")"
+    systemctl is-active --quiet "$UNIT" || die "llama-server exited; tail: $(tail -n 5 "$logf")"
     sleep 2
   done
   die "llama-server not healthy after 600 s"
 }
 
 cmd_stop() {
-  [ -f "$PIDFILE" ] || { log "not running"; return 0; }
-  local pid
-  pid="$(cat "$PIDFILE")"
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  kill -9 "$pid" 2>/dev/null || true
+  sudo systemctl stop "$UNIT" 2>/dev/null || true
+  sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
   sudo rm -f "$PIDFILE"
   log "stopped"
 }
