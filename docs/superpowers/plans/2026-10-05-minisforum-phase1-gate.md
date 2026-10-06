@@ -79,7 +79,9 @@ Reviewers should still read the moved code: the plan is not evidence that it is 
   - `llamacpp-chat-restart.timer`;
   - `redteam-mode-watch`, `redteam-mode-idle.timer` and `redteam-mode-precreate`;
   - worker apt timers, with needrestart list-only;
-  - in arm A also `llamacpp-fast`.
+  - in arm A also `llamacpp-fast`;
+  - `rag-refresh.timer` (user ruling 2026-10-05: embed/rerank are down, so the nightly refresh must not run;
+    `gate_env.sh` stops and restores it with the rest).
 - Embed/rerank state is identical in both arms (stopped). RAG is unavailable for the whole window.
 - No run overlaps the 03:15 CDT `rag-refresh` window. Record `/healthz` before and after each run.
 
@@ -476,7 +478,9 @@ git commit -m "chore(gate): frozen gate config (thresholds, endpoints, exercise 
   - `$env:GATE_ROUTER_KEY` and `$env:GATE_WORKER_KEY` (set, never printed);
   - `LLM_BENCH_GUEST_PASS` in the credentials file.
 
-**Shells.** Blocks marked `powershell` run in PowerShell from the repo root. Blocks marked `bash`
+**Shells.** If the executor's tool calls do not share a PowerShell session, put Step 4's lines in a
+session script outside the repo and dot-source it at the top of every call. Blocks marked `powershell` run
+in PowerShell from the repo root. Blocks marked `bash`
 run in Git Bash. Re-run Step 4 in any new PowerShell session: it sets `VCFLAB_ROOT`, both keys,
 `$R` (the results root) and `$G` (the guest helper).
 
@@ -613,7 +617,8 @@ foreach ($ip in '172.16.10.205','172.16.10.206','172.16.10.207') {
   $m = (Invoke-RestMethod -Uri "http://${ip}:8090/v1/chat/completions" -Method Post -Headers $h -Body $body -ContentType 'application/json' -TimeoutSec 600).choices[0].message
   $rc = ($m.PSObject.Properties.Name -contains 'reasoning_content') -and [bool]$m.reasoning_content
   "{0}: content='{1}' reasoning={2} think_tag={3}" -f $ip, $m.content.Trim(), $rc, ($m.content -match '<think>')
-  try { Invoke-WebRequest -Uri "http://${ip}:8090/v1/models" -UseBasicParsing -TimeoutSec 30 | Out-Null; "${ip}: UNAUTHENTICATED ACCESS ALLOWED" }
+  # /health and /v1/models are key-exempt by design in llama-server; test an inference call.
+  try { Invoke-WebRequest -Uri "http://${ip}:8090/v1/chat/completions" -Method Post -Body $body -ContentType 'application/json' -UseBasicParsing -TimeoutSec 60 | Out-Null; "${ip}: UNAUTHENTICATED ACCESS ALLOWED" }
   catch { "${ip}: unauthenticated -> " + [int]$_.Exception.Response.StatusCode }
 }
 ```
@@ -644,7 +649,11 @@ foreach ($ip in '172.16.10.205','172.16.10.206','172.16.10.207') {
 
 Expected: three JSON completions whose `message.content` is `ready`, with no `reasoning_content`.
 
-**If LXC 158 cannot connect** (curl prints nothing, or rc 7 or 28), stop and ask the user to allow
+LXC 158 has no route to VLAN 10 (the workstation and host carry `172.16.0.0/16 via 192.168.6.11`; 158
+only has its default gateway). Before the curls, add the same route, non-persistent (it disappears when 158
+stops): `ssh root@192.168.6.175 "pct exec 158 -- ip route replace 172.16.10.0/24 via 192.168.6.11"`.
+
+**If LXC 158 still cannot connect** (curl prints nothing, or rc 7 or 28), stop and ask the user to allow
 `192.168.6.158 → 172.16.10.205-207 tcp/8090` on their network. **Do not touch the CRS309.** The
 quality sub-gate needs this path.
 
@@ -654,11 +663,13 @@ quality sub-gate needs this path.
 foreach ($vm in 'llmbench01','llmbench02','llmbench03') { "$vm sees:"; powershell -NoProfile -File $G -VmName $vm -Exec 'gate-worker sources' }
 ```
 
-Expected: the same two source IPs on every worker, namely the workstation's address as VLAN 10 sees
-it and LXC 158's. Any third address means something else connected: stop and report it.
+Expected: the same source IPs on every worker: the workstation's address as VLAN 10 sees it,
+LXC 158's, and `127.0.0.1` (the worker's own health checks from `gate-worker start`/`status`). Keep
+`127.0.0.1` in the allowlist, or the cold restarts in Task 10 fail their own health wait. Any other address
+means something else connected: stop and report it.
 
 ```powershell
-$ips = '<workstation-src> <lxc158-src>'      # paste the two addresses printed above
+$ips = '<workstation-src> <lxc158-src> 127.0.0.1'      # paste the addresses printed above
 foreach ($vm in 'llmbench01','llmbench02','llmbench03') { powershell -NoProfile -File $G -VmName $vm -Exec "gate-worker lock $ips" }
 ssh root@192.168.6.175 "curl -s -m 8 -o /dev/null -w '%{http_code}\n' http://172.16.10.205:8090/health; echo rc=`$?"
 ```
