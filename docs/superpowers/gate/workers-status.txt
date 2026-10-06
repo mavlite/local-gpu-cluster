@@ -10,17 +10,20 @@ personally identify any individual.
 For more details: type "help about_ceip" to see the related help article.
 To disable this warning and set your preference use the following command and restart PowerShell: 
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
-pid: 1479
+pid: 9203
 health: {"status":"ok","slots_idle":1,"slots_processing":0}
 key: root:bench 640
-latest log: /var/log/gate/server-20261006T153715Z.log
+latest log: /var/log/gate/server-20261006T172708Z.log
 table inet gate {
 	chain input {
 		type filter hook input priority filter; policy accept;
 		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
-		tcp dport 8090 counter packets 7 bytes 420 drop
+		tcp dport 8090 counter packets 6 bytes 360 drop
 	}
 }
+MemTotal:       32863308 kB
+MainPID=9203
+MemoryMax=32212254720
 version: 1 (5f89bfc)
 built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
 df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
@@ -37,17 +40,20 @@ personally identify any individual.
 For more details: type "help about_ceip" to see the related help article.
 To disable this warning and set your preference use the following command and restart PowerShell: 
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
-pid: 1497
+pid: 1484
 health: {"status":"ok","slots_idle":1,"slots_processing":0}
 key: root:bench 640
-latest log: /var/log/gate/server-20261006T153900Z.log
+latest log: /var/log/gate/server-20261006T172849Z.log
 table inet gate {
 	chain input {
 		type filter hook input priority filter; policy accept;
 		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
-		tcp dport 8090 counter packets 7 bytes 420 drop
+		tcp dport 8090 counter packets 6 bytes 360 drop
 	}
 }
+MemTotal:       32863308 kB
+MainPID=1484
+MemoryMax=32212254720
 version: 1 (5f89bfc)
 built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
 df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
@@ -64,17 +70,20 @@ personally identify any individual.
 For more details: type "help about_ceip" to see the related help article.
 To disable this warning and set your preference use the following command and restart PowerShell: 
 Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
-pid: 1508
+pid: 1492
 health: {"status":"ok","slots_idle":1,"slots_processing":0}
 key: root:bench 640
-latest log: /var/log/gate/server-20261006T154044Z.log
+latest log: /var/log/gate/server-20261006T173033Z.log
 table inet gate {
 	chain input {
 		type filter hook input priority filter; policy accept;
 		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
-		tcp dport 8090 counter packets 7 bytes 420 drop
+		tcp dport 8090 counter packets 6 bytes 360 drop
 	}
 }
+MemTotal:       32863312 kB
+MainPID=1492
+MemoryMax=32212254720
 version: 1 (5f89bfc)
 built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
 df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
