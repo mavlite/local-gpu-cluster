@@ -1,0 +1,214 @@
+"""Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
+
+Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3
+Sandbox VM:   run
+Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
+the throwaway worker key) and are never printed.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import analysis
+import bundle
+import grade
+import oc
+import paths
+import pipeline
+import profiles
+
+
+def resolve_opencode(env):
+    """The real opencode binary (not the npm shim, which survives a timeout kill), or None."""
+    if env.get("WF_OPENCODE"):
+        return env["WF_OPENCODE"]
+    if env.get("APPDATA"):
+        exe = os.path.join(env["APPDATA"], "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
+        if os.path.isfile(exe):
+            return exe
+    return shutil.which("opencode")
+
+
+def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, give=None):
+    """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
+    The opencode home (session DB, logs) is handed to the agent user; the config stays harness-owned."""
+    cfg = profiles.install(os.path.join(oc_dir, "cfg"), profiles.build_config(arm, router_url, worker_urls))
+    home = os.path.join(oc_dir, "home")
+    os.makedirs(home, exist_ok=True)
+    if give:
+        give(home)
+    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg), launcher=launcher)
+
+
+def assert_private(path):
+    """Refuse to run agents as another user if they could read `path` (bundles hold hidden tests)."""
+    mode = os.stat(path).st_mode & 0o777
+    if mode & 0o077:
+        raise SystemExit(f"{path} is mode {oct(mode)}; bundles must be 0700 to the harness user")
+
+
+def chown_tree(user):
+    """give(path): hand a file or directory tree to `user` (POSIX, harness running as root)."""
+    import pwd
+    pw = pwd.getpwnam(user)
+
+    def give(path):
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+        for dirpath, dirnames, files in os.walk(path):
+            for name in dirnames + files:
+                os.chown(os.path.join(dirpath, name), pw.pw_uid, pw.pw_gid, follow_symlinks=False)
+    return give
+
+
+def patch_paths(patch_text):
+    """Paths named by `diff --git` headers (patches are made with --no-renames)."""
+    return sorted({m.group(2) for m in re.finditer(r"^diff --git a/(.+?) b/(.+)$", patch_text, re.M)})
+
+
+def import_patch(repo, patch_file, bundle_dir, run_id):
+    """Check the patch against the task's declared files, apply it to the task's parent commit in a
+    throwaway worktree, and create branch workforce/<run>/<task>. The user merges."""
+    task = grade.load_task(bundle_dir)
+    with open(patch_file, encoding="utf-8") as f:
+        text = f.read()
+    names = patch_paths(text)
+    allowed, dropped = paths.classify([("M", "100644", p) for p in names], task["files"])
+    if dropped or not allowed:
+        raise ValueError(f"refusing {patch_file}: paths not allowed: {dropped or 'empty patch'}")
+    branch = f"workforce/{run_id}/{task['id']}"
+    tmp = tempfile.mkdtemp(prefix="wf-import-")
+    wt = os.path.join(tmp, "wt")
+
+    def git(*args, cwd=repo):
+        return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+    git("worktree", "add", "--detach", wt, task["parent"])
+    try:
+        subprocess.run(["git", "apply", "--check", "--binary", patch_file], cwd=wt, check=True,
+                       capture_output=True, text=True)
+        git("apply", "--binary", patch_file, cwd=wt)
+        git("add", "--", *allowed, cwd=wt)
+        git("commit", "-q", "-m", f"workforce({run_id}): {task['id']}", cwd=wt)
+        git("branch", branch, git("rev-parse", "HEAD", cwd=wt).strip())
+    finally:
+        git("worktree", "remove", "--force", wt)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"branch": branch, "paths": allowed}
+
+
+def _records(run_dir):
+    with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def w1_stats(run_dirs):
+    """Aggregate W1 run directories of one configuration."""
+    out = {"attempts": 0, "looped": 0, "passed": 0, "wall_s": 0.0}
+    for d in run_dirs:
+        s = _records(d)
+        out["attempts"] += s["n_tasks"]
+        out["looped"] += s["looped"]
+        out["passed"] += s["accepted"]
+        out["wall_s"] += s["wall_s"]
+    return out
+
+
+def w3_runs(schedule):
+    """schedule: [{"arm", "run_dir", "valid", "probe_p50", "baseline_p50"}] -> analysis input."""
+    runs = []
+    for item in schedule:
+        s = _records(item["run_dir"])
+        runs.append({"arm": item["arm"], "valid": bool(item["valid"] and s["valid"]),
+                     "accepted": s["accepted_by_task"], "accepted_per_hour": s["accepted_per_hour"],
+                     "probe_p50": item["probe_p50"], "baseline_p50": item["baseline_p50"]})
+    return runs
+
+
+def main(argv=None, env=None):
+    env = dict(os.environ if env is None else env)
+    ap = argparse.ArgumentParser(prog="workforce")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("bundle-build")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--taskdef", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--refs", required=True)
+    p = sub.add_parser("bundle-validate")
+    p.add_argument("--bundles", required=True)
+    p.add_argument("--refs", required=True)
+    p.add_argument("--work", required=True)
+    p = sub.add_parser("manifest")
+    p.add_argument("--bundles", required=True)
+    p = sub.add_parser("run")
+    p.add_argument("--arm", choices=("T", "G"), required=True)
+    p.add_argument("--bundles", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--router", required=True)
+    p.add_argument("--worker", action="append", default=[])
+    p.add_argument("--w1", action="store_true", help="W1 loop check: implement and grade, no review")
+    p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
+    p.add_argument("--agent-user", help="run agents as this user in systemd scopes (the VM; harness as root)")
+    p = sub.add_parser("import")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--patch", required=True)
+    p.add_argument("--bundle", required=True)
+    p.add_argument("--run-id", required=True)
+    p = sub.add_parser("w1")
+    p.add_argument("--config", action="append", required=True, help="ID=run_dir[,run_dir...]")
+    p = sub.add_parser("w3")
+    p.add_argument("--schedule", required=True)
+    p.add_argument("--tasks", required=True, help="bundle root (defines the task list)")
+    a = ap.parse_args(argv)
+
+    if a.cmd == "bundle-build":
+        out = {"bundle": bundle.build(a.repo, a.taskdef, a.out, a.refs)}
+    elif a.cmd == "bundle-validate":
+        problems = []
+        for name in sorted(os.listdir(a.bundles)):
+            problems += bundle.validate(os.path.join(a.bundles, name), os.path.join(a.refs, f"{name}.patch"),
+                                        a.work, grade.LocalRunner())
+        out = {"problems": problems, "manifest": bundle.manifest(a.bundles)}
+    elif a.cmd == "manifest":
+        out = {"manifest": bundle.manifest(a.bundles)}
+    elif a.cmd == "run":
+        if not env.get("WF_ROUTER_KEY") or (a.arm == "T" and not env.get("WF_WORKER_KEY")):
+            raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T) must be set")
+        oc_bin = resolve_opencode(env)
+        if not oc_bin:
+            raise SystemExit("opencode not found; set WF_OPENCODE")
+        grader = (grade.DockerRunner(a.grader.split(":", 1)[1]) if a.grader.startswith("docker:")
+                  else grade.LocalRunner())
+        launcher = give = None
+        if a.agent_user:
+            assert_private(a.bundles)
+            launcher, give = oc.SystemdScopeLauncher(a.agent_user), chown_tree(a.agent_user)
+        opencode = build_opencode(a.arm, a.out + ".opencode", a.router, a.worker, [oc_bin], env,
+                                  launcher=launcher, give=give)
+        bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
+        monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
+        out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1,
+                                monitor=monitor, give=give).run()
+    elif a.cmd == "import":
+        out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
+    elif a.cmd == "w1":
+        results = {}
+        for spec in a.config:
+            cid, dirs = spec.split("=", 1)
+            results[cid] = w1_stats(dirs.split(","))
+        out = analysis.w1_choose(results)
+    else:
+        with open(a.schedule, encoding="utf-8") as f:
+            schedule = json.load(f)
+        tasks = sorted(os.listdir(a.tasks))
+        out = analysis.w3_decide(w3_runs(schedule), tasks)
+    print(json.dumps(out, indent=1, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
