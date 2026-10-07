@@ -254,7 +254,8 @@ Expected: the four scripts are listed.
 ssh root@192.168.6.175 'cd /root/local-gpu-cluster && bash scripts/74-vm-wf-sandbox.sh 2>&1 | tail -5'
 ```
 
-Expected: `VM 176 created and NOT started`. Then confirm:
+Expected: `VM 176 created and NOT started`, with the deny-all `closed` policy already in
+`/etc/pve/firewall/176.fw`. Then confirm:
 - `ip -br addr show vmbrwf` shows 10.79.0.254;
 - `wf-sandbox-net.sh check` returns 0;
 - `/etc/pve/qemu-server/176.conf` has `firewall=1`, `bridge=vmbrwf`.
@@ -262,7 +263,7 @@ Expected: `VM 176 created and NOT started`. Then confirm:
 - [ ] **Step 2:** Apply the build policy, start the VM, and wait for the guest agent:
 
 ```bash
-ssh root@192.168.6.175 'cd /root/local-gpu-cluster && bash scripts/75-vm-wf-sandbox-firewall.sh build | tail -2 && qm start 176 && for i in $(seq 60); do qm guest cmd 176 ping >/dev/null 2>&1 && break; sleep 5; done; qm guest cmd 176 ping && echo agent-up'
+ssh root@192.168.6.175 'set -o pipefail; cd /root/local-gpu-cluster && bash scripts/75-vm-wf-sandbox-firewall.sh build | tail -2 && qm start 176 && for i in $(seq 60); do qm guest cmd 176 ping >/dev/null 2>&1 && break; sleep 5; done; qm guest cmd 176 ping && echo agent-up'
 ```
 
 Expected: `build policy active` and `agent-up`. Cloud-init installs the guest agent over the internet
@@ -282,10 +283,11 @@ Expected: the `/etc/wf-sandbox.json` summary with:
 
 ### Task 5: Lock and prove the boundary
 
-- [ ] **Step 1:** `ssh root@192.168.6.175 'cd /root/local-gpu-cluster && bash scripts/75-vm-wf-sandbox-firewall.sh locked | tail -2'`
-  → `locked policy active`.
-- [ ] **Step 2:** Reboot the VM so that no connection from build mode survives (Review Focus 1):
-  `qm reboot 176`, then wait for the guest agent as in Task 4 Step 2.
+- [ ] **Step 1:** Stop the VM, then lock it. `75 locked` refuses while the VM runs; it flushes the
+  sandbox's conntrack entries and proves none survive (Review Focus 1; security review HIGH):
+  `ssh root@192.168.6.175 'set -o pipefail; cd /root/local-gpu-cluster && qm shutdown 176 --timeout 120 && bash scripts/75-vm-wf-sandbox-firewall.sh locked | tail -3'`
+  → `conntrack flushed …` and `locked policy active`.
+- [ ] **Step 2:** `qm start 176`, then wait for the guest agent as in Task 4 Step 2.
 - [ ] **Step 3:** Run the proof before any window, with the workers skipped:
 
 ```bash
@@ -294,7 +296,8 @@ ssh root@192.168.6.175 'cd /root/local-gpu-cluster && WF_PROOF_WORKERS=skip bash
 
 Expected:
 - `"failed": []` and three skipped worker checks;
-- every deny row `timeout` or `unreachable`;
+- every deny row `timeout` (only a timeout passes: a PVE DROP is always a timeout);
+- `ipv6` gives `disabled`;
 - `router /metrics without a key` gives `403`;
 - the agent checks give `denied`, the scope kill `killed`, the grader `no-network`;
 - `rc=0`.
@@ -304,7 +307,7 @@ Expected:
 - [ ] **Step 4:** Tamper check for Review Focus 2.
   1. Append `# drift` to `/etc/pve/firewall/176.fw`.
   2. Run `76 proof`. It must refuse with "needs the locked policy".
-  3. Re-run `75 locked`.
+  3. Restore it: `qm shutdown 176`, `75 locked`, `qm start 176`.
 
 ### Task 6: Docker grading parity (Plan C Review Focus 3)
 
