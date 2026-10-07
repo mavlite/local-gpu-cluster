@@ -68,10 +68,15 @@ iface ${WF_BRIDGE} inet static
 	bridge-ports none
 	bridge-stp off
 	bridge-fd 0
+	post-up sysctl -qw net.ipv6.conf.${WF_BRIDGE}.disable_ipv6=1
 EOF
   ifup "$WF_BRIDGE" || die "ifup $WF_BRIDGE failed"
 fi
 ip -4 addr show "$WF_BRIDGE" | grep -q "${WF_GW}/" || die "$WF_GW is not on $WF_BRIDGE"
+# No IPv6 on the sandbox bridge: in build mode the policy is IPv4-only, and link-local IPv6 would
+# otherwise reach host services (security review MEDIUM).
+sysctl -qw "net.ipv6.conf.${WF_BRIDGE}.disable_ipv6=1"
+[[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/disable_ipv6")" == "1" ]] || die "IPv6 still enabled on $WF_BRIDGE"
 [[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/forwarding" 2>/dev/null || echo 0)" == "0" ]] \
   || die "net.ipv6.conf.${WF_BRIDGE}.forwarding is not 0. Stop."
 ok "$WF_BRIDGE up with $WF_GW"

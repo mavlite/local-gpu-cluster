@@ -7,7 +7,9 @@ exits 1 if any check fails. Stdlib only.
 Network checks: the router's chat port and the three CPU workers must be reachable; everything else
 in spec §5.2 must NOT be. A denied destination passes only on a timeout (silently dropped) or an
 `unreachable` error -- "connection refused" means the packet reached the destination, so the
-firewall did not stop it. The router's /metrics must answer 403: the sandbox is SNATed to its own
+firewall did not stop it; "unreachable" can come from the VM's own routing, and a PVE DROP is always a
+timeout, so only a timeout passes. Every probe distinguishes "blocked" from "the probe itself broke"
+(security review): a broken probe reports an error, which fails. The router's /metrics must answer 403: the sandbox is SNATed to its own
 address (192.168.6.79), not the host's, which the router allowlists for /metrics.
 
 Agent checks (Plan C Review Focus 1-2): an agent user cannot read bundles, run records or the
@@ -38,6 +40,7 @@ TIMEOUT = float(os.environ.get("WF_PROOF_TIMEOUT", "4"))
 SKIP_WORKERS = os.environ.get("WF_PROOF_WORKERS") == "skip"
 
 _UNREACHABLE = {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EACCES, errno.EPERM}
+IPV6_FLAG = "/proc/sys/net/ipv6/conf/all/disable_ipv6"
 
 
 # ---- probes ---------------------------------------------------------------------------------------
@@ -94,20 +97,25 @@ def resolve(name):
 
 
 def ipv6():
-    """unreachable when the VM has no global IPv6 address and cannot connect over IPv6."""
+    """disabled | enabled -- IPv6 must be switched off in the guest (the policy is IPv4-only)."""
     try:
-        with open("/proc/net/if_inet6") as f:
-            has_global = any(line.split()[3] == "00" for line in f if line.strip())
-    except OSError:
-        has_global = False
-    got = tcp("2606:4700:4700::1111", 443, family=socket.AF_INET6) if has_global else "unreachable"
-    return "open" if got == "open" else "unreachable"
+        with open(IPV6_FLAG) as f:
+            return "disabled" if f.read().strip() == "1" else "enabled"
+    except OSError as e:
+        return f"error: {e}"
 
 
 def run_as(user, argv):
-    """denied | allowed -- runs argv as `user` (runuser, from root)."""
+    """denied | allowed | error -- runs argv as `user` (runuser, from root). "denied" needs the user to
+    exist and the failure to be a permission error; any other failure is an error, never a pass."""
+    if subprocess.run(["id", "-u", user], capture_output=True, text=True).returncode != 0:
+        return f"error: no such user {user}"
     r = subprocess.run(["runuser", "-u", user, "--", *argv], capture_output=True, text=True, timeout=30)
-    return "allowed" if r.returncode == 0 else "denied"
+    if r.returncode == 0:
+        return "allowed"
+    if "Permission denied" in (r.stderr or ""):
+        return "denied"
+    return f"error: rc {r.returncode}: {(r.stderr or '').strip()[:200]}"
 
 
 def scope_kill(user):
@@ -128,11 +136,22 @@ def scope_kill(user):
 
 
 def grader_network():
-    """no-network | network"""
-    code = f"import socket; socket.create_connection(('{ROUTER}', {ROUTER_PORT}), 3)"
+    """no-network | network | error -- the container itself must run and report the network error."""
+    if subprocess.run(["docker", "image", "inspect", GRADER], capture_output=True).returncode != 0:
+        return f"error: grader image {GRADER} not present"
+    code = ("import socket\n"
+            "try:\n"
+            f"    socket.create_connection(('{ROUTER}', {ROUTER_PORT}), 3)\n"
+            "    print('CONNECTED')\n"
+            "except OSError:\n"
+            "    print('NONET')\n")
     r = subprocess.run(["docker", "run", "--rm", "--network", "none", GRADER, "python3", "-c", code],
                        capture_output=True, text=True, timeout=120)
-    return "no-network" if r.returncode != 0 else "network"
+    if r.returncode != 0:
+        return f"error: docker run rc {r.returncode}"
+    if "NONET" in r.stdout:
+        return "no-network"
+    return "network" if "CONNECTED" in r.stdout else "error: no verdict from the container"
 
 
 # ---- fixtures for the agent checks ----------------------------------------------------------------
@@ -195,7 +214,7 @@ def checks():
         deny("worker ssh", WORKERS[0], 22),
         deny("vcf lab gateway", "172.16.10.1", 443),
         deny("lan gateway 192.168.6.11", "192.168.6.11", 80),
-        {"name": "ipv6", "expect": "deny", "probe": ipv6},
+        {"name": "ipv6", "expect": "disabled", "probe": ipv6},
         {"name": "agent cannot read bundles", "expect": "denied",
          "probe": lambda: run_as(impl1, ["cat", os.path.join(bundle, "secret")])},
         {"name": "agent cannot list run records", "expect": "denied",
@@ -212,7 +231,7 @@ def checks():
 
 def passes(expect, got):
     if expect == "deny":
-        return got in ("timeout", "unreachable")
+        return got == "timeout"
     if expect == "allow":
         return got == "open"
     return got == expect

@@ -58,7 +58,12 @@ for role in impl-1 impl-2 impl-3 lead; do
   u="$PREFIX-$role"
   id "$u" >/dev/null 2>&1 || useradd --system --create-home --shell /bin/bash "$u"
   if id -nG "$u" | tr ' ' '\n' | grep -qxE 'docker|sudo|adm'; then die "$u is in a privileged group"; fi
+  chmod 0700 "$(getent passwd "$u" | cut -d: -f6)"       # agents cannot read each other's homes
 done
+
+log "lock the cloud-init admin and ssh (the guest agent is the only way in)"
+if id wfadmin >/dev/null 2>&1; then passwd -l wfadmin >/dev/null; rm -f /etc/sudoers.d/90-cloud-init-users; fi
+systemctl disable --now ssh.service ssh.socket >/dev/null 2>&1 || true
 
 log "layout"
 install -d -m 0711 -o root -g root /srv/wf /srv/wf/runs

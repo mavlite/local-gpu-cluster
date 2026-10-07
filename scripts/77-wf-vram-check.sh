@@ -9,7 +9,8 @@
 # the fit test. Always restores the normal layout with redteam-mode-exit.sh, even on failure.
 #
 # PRODUCTION-IMPACTING: chat restarts twice (~1 min each); RAG is down for the first switch.
-# Prints one JSON verdict; exit 0 if it fits, 1 if not, 2 if the check itself failed.
+# Prints one JSON verdict; exit 0 if it fits, 1 if not, 2 if the check itself failed (including a
+# failed restore). GPU readings are data, parsed by files/wf-vram-verdict.py -- never code.
 set -Eeuo pipefail
 
 LGC_DIR="${LGC_DIR:-$(cd "$(dirname "$0")" && pwd)}"
@@ -43,28 +44,30 @@ vram() { pct exec "$AMD" -- rocm-smi --showmeminfo vram --json 2>/dev/null || ec
 [[ ! -f /run/redteam-mode.state ]] || die "redteam mode is active; exit it first"
 
 restored=0
+restore_failed=0
 restore() {
   [[ $restored -eq 1 ]] && return
   restored=1
-  "$EXIT" >/dev/null 2>&1 || warn "redteam-mode-exit.sh failed — check the chat layout by hand"
+  "$EXIT" >/dev/null 2>&1 || { restore_failed=1; warn "redteam-mode-exit.sh failed — check the chat layout by hand"; }
   rm -f /run/redteam-mode.last
 }
 trap restore EXIT
 
 step "1 — enter 3 x 128K (embed + rerank stop)"
 date +%s > /run/redteam-mode.last
-"$ENTER" >/dev/null
+"$ENTER" >/dev/null || { echo '{"fits": null, "error": "redteam-mode-enter.sh failed"}'; exit 2; }
 wait_for 'd["chat_admission"]["capacity"] == 3 and d["upstream"]["chat"] == "ok"' 300 \
   || { echo '{"fits": null, "error": "chat never reached capacity 3"}'; exit 2; }
-before="$(vram)"
+tmpd="$(mktemp -d)"
+vram > "$tmpd/before.json"
 
 step "2 — start embed + rerank on top"
 pct exec "$AMD" -- systemctl start llamacpp-embed llamacpp-rerank || true
 fits=true
 wait_for 'd["upstream"]["embed"] == "ok" and d["upstream"]["rerank"] == "ok" and d["upstream"]["chat"] == "ok"' 240 \
   || fits=false
-after="$(vram)"
-units="$(pct exec "$AMD" -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank | tr '\n' ' ')"
+vram > "$tmpd/after.json"
+units="$(pct exec "$AMD" -- systemctl is-active llamacpp-chat llamacpp-embed llamacpp-rerank | tr '\n' ' ' || true)"
 
 step "3 — three concurrent chats + one embedding"
 concurrent="skipped"
@@ -77,13 +80,12 @@ fi
 
 step "4 — restore the normal layout"
 restore
+normal=1
 wait_for 'd["chat_admission"]["capacity"] == 1 and d["upstream"]["embed"] == "ok" and d["upstream"]["rerank"] == "ok"' 300 \
-  || warn "normal layout not confirmed within 5 min — check /healthz"
+  || { normal=0; warn "normal layout not confirmed within 5 min — check /healthz"; }
+rm -f /run/redteam-mode.last                       # wait_for refreshed it; nothing should keep it now
 
-python3 - "$fits" "$units" "$concurrent" <<EOF
-import json, sys
-print(json.dumps({"fits": sys.argv[1] == "true", "units_with_rag": sys.argv[2].split(),
-                  "concurrent_probe": sys.argv[3], "vram_3slot_no_rag": $before, "vram_3slot_with_rag": $after},
-                 indent=1))
-EOF
+python3 "$LGC_DIR/files/wf-vram-verdict.py" "$fits" "$units" "$concurrent" "$tmpd/before.json" "$tmpd/after.json"
+rm -rf "$tmpd"
+[[ $restore_failed -eq 0 && $normal -eq 1 ]] || exit 2
 $fits

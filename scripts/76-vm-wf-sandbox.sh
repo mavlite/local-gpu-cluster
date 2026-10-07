@@ -60,6 +60,9 @@ policy_mode() {
 
 [[ "$(qm status "$WF_VMID" 2>/dev/null | awk '{print $2}')" == "running" ]] || die "VM $WF_VMID is not running"
 qm guest cmd "$WF_VMID" ping >/dev/null 2>&1 || die "VM $WF_VMID's guest agent does not answer"
+# The policy file alone proves nothing: the firewall must be running and this VM's NIC filtered.
+pve-firewall status 2>&1 | grep -q "enabled/running" || die "pve-firewall is not enabled/running"
+ip -br link show type bridge | grep -q "^fwbr${WF_VMID}i" || die "VM $WF_VMID's NIC is not filtered (no fwbr${WF_VMID}i*)"
 
 case "$CMD" in
   provision)
@@ -79,6 +82,12 @@ case "$CMD" in
     ;;
   proof)
     [[ "$(policy_mode)" == "locked" ]] || die "the boundary proof needs the locked policy: run 75-vm-wf-sandbox-firewall.sh locked"
+    allowed="${WF_ROUTER:-192.168.6.153}:${WF_ROUTER_PORT:-8000}"
+    for w in ${WF_WORKERS:-172.16.10.205 172.16.10.206 172.16.10.207}; do allowed+=" $w:${WF_WORKER_PORT:-8090}"; done
+    # Host side, before the proof creates its own flows: nothing but allowed flows may be tracked.
+    # shellcheck disable=SC2086
+    conntrack -L -s "${WF_CIDR:-10.79.0.0/24}" 2>/dev/null | python3 "$LGC_DIR/files/wf-conntrack-check.py" $allowed \
+      || die "the host tracks disallowed sandbox flows (see above)"
     vm_push "$LGC_DIR/files/wf_boundary_proof.py" "/root/wf_boundary_proof.py"
     vm_run 600 env "WF_PROOF_WORKERS=${WF_PROOF_WORKERS:-}" /opt/wfpy/bin/python3 /root/wf_boundary_proof.py
     ;;
@@ -91,7 +100,7 @@ case "$CMD" in
     vm_run 30 install -d -m 0700 "$PUSH" >/dev/null
     vm_push "$tmp/bundles.tar" "$PUSH/bundles.tar"
     vm_push "$tmp/refs.tar" "$PUSH/refs.tar"
-    vm_run 120 sh -c "rm -rf /srv/wf/bundles/* /root/wf-refs && install -d -m 0700 /root/wf-refs && tar -x -C /srv/wf/bundles --no-same-owner -f $PUSH/bundles.tar && tar -x -C /root/wf-refs --no-same-owner -f $PUSH/refs.tar && chmod 0700 /srv/wf/bundles" >/dev/null
+    vm_run 120 sh -c "rm -rf /srv/wf/bundles/* /root/wf-refs && install -d -m 0700 /root/wf-refs && tar -x -C /srv/wf/bundles --no-same-owner -f $PUSH/bundles.tar && tar -x -C /root/wf-refs --no-same-owner -f $PUSH/refs.tar && chmod 0700 /srv/wf/bundles && rm -f $PUSH/bundles.tar $PUSH/refs.tar" >/dev/null
     vm_run 1800 /usr/local/sbin/wf-run bundle-validate --bundles /srv/wf/bundles --refs /root/wf-refs \
       --work /root/wf-validate --grader docker:wf-grader:1
     ;;
