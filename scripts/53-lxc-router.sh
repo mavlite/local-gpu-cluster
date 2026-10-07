@@ -108,6 +108,8 @@ ADMISSION_SRC="$LGC_DIR/files/stream_admission.py"
 [[ -r "$ADMISSION_SRC" ]] || die "stream_admission.py not found at $ADMISSION_SRC"
 EMBED_ADMISSION_SRC="$LGC_DIR/files/embed_admission.py"
 [[ -r "$EMBED_ADMISSION_SRC" ]] || die "embed_admission.py not found at $EMBED_ADMISSION_SRC"
+WEB_FETCH_GUARD_SRC="$LGC_DIR/files/web_fetch_guard.py"
+[[ -r "$WEB_FETCH_GUARD_SRC" ]] || die "web_fetch_guard.py not found at $WEB_FETCH_GUARD_SRC"
 
 phase_7_1_create() {
   step "7.1 — Create LXC $ROUTER_VMID ($ROUTER_HOSTNAME)"
@@ -212,6 +214,8 @@ phase_7_3_deploy_app() {
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/stream_admission.py
   pct push "$ROUTER_VMID" "$EMBED_ADMISSION_SRC" /opt/llm-router/embed_admission.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/embed_admission.py
+  pct push "$ROUTER_VMID" "$WEB_FETCH_GUARD_SRC" /opt/llm-router/web_fetch_guard.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/web_fetch_guard.py
 }
 
 phase_7_4_systemd() {
