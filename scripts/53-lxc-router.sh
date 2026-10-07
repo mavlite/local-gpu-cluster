@@ -230,7 +230,14 @@ phase_7_3_deploy_app() {
   # only. Created empty when absent; an existing file (issued keys) is never overwritten.
   pct push "$ROUTER_VMID" "$ROUTER_KEYS_CLI_SRC" /usr/local/sbin/router-keys --perms 0750
   # No nested quoting through pct/sh (repo footgun): write the empty file on the host, push it.
-  if ! pct exec "$ROUTER_VMID" -- test -e /etc/router-keys.json; then
+  # Only `test -e` exiting 1 means absent; any other failure (CT down, attach error) must not be
+  # mistaken for "absent" and overwrite issued keys.
+  keys_rc=0
+  pct exec "$ROUTER_VMID" -- test -e /etc/router-keys.json || keys_rc=$?
+  if [[ "$keys_rc" -ne 0 && "$keys_rc" -ne 1 ]]; then
+    die "cannot check /etc/router-keys.json in CT $ROUTER_VMID (rc=$keys_rc); refusing to touch issued keys"
+  fi
+  if [[ "$keys_rc" -eq 1 ]]; then
     empty_keys="$(mktemp)"
     printf '%s\n' '{"keys": []}' > "$empty_keys"
     pct push "$ROUTER_VMID" "$empty_keys" /etc/router-keys.json --perms 0640

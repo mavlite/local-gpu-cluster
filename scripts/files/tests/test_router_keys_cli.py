@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import threading
 
 import pytest
 
@@ -83,3 +84,39 @@ def test_revoke_all_clears_everything(tmp_path, capsys):
              "--out", str(tmp_path / f"{n}.key")], capsys)
     assert run(["--keys-file", str(keys), "revoke", "--all"], capsys)[0] == 0
     assert json.loads(keys.read_text())["keys"] == []
+
+
+def test_concurrent_add_cannot_resurrect_a_revoked_key(tmp_path, capsys, monkeypatch):
+    # Security review M1: `add` loaded the file, a `revoke` completed, then `add` saved its stale
+    # copy -- the revoked key came back while the operator had been told "revoked 1 key(s)".
+    keys = tmp_path / "k.json"
+    assert rk.main(["--keys-file", str(keys), "add", "--name", "compromised", "--aliases", "m",
+                    "--ttl-hours", "1", "--out", str(tmp_path / "c.key")]) == 0
+    real_save, state = rk._save, {"first": True, "rc": []}
+
+    def save_with_a_revoke_in_between(path, data):
+        if state["first"]:
+            state["first"] = False
+            t = threading.Thread(target=lambda: state["rc"].append(
+                rk.main(["--keys-file", str(keys), "revoke", "--name", "compromised"])))
+            t.start()
+            t.join(0.5)                  # without a lock the revoke finishes here, before add saves
+            state["t"] = t
+        real_save(path, data)
+
+    monkeypatch.setattr(rk, "_save", save_with_a_revoke_in_between)
+    assert rk.main(["--keys-file", str(keys), "add", "--name", "wf-run-2", "--aliases", "m",
+                    "--ttl-hours", "1", "--out", str(tmp_path / "w.key")]) == 0
+    state["t"].join(10)
+    assert state["rc"] == [0]
+    assert [e["name"] for e in json.loads(keys.read_text())["keys"]] == ["wf-run-2"]
+
+
+@pytest.mark.parametrize("name", ["owner", "Owner", "bad\tname", "a b", "", "-x", "x" * 65, "../x"])
+def test_add_refuses_unsafe_or_reserved_names(tmp_path, capsys, name):
+    # Security review L5: a scoped key named "owner" was indistinguishable from the owner in the
+    # access log; tabs/newlines broke `list`.
+    out = tmp_path / "x.key"
+    rc, _ = run(["--keys-file", str(tmp_path / "k.json"), "add", f"--name={name}", "--aliases", "m",
+                 "--ttl-hours", "1", "--out", str(out)], capsys)
+    assert rc != 0 and not out.exists()

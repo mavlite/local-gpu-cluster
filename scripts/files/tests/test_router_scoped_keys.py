@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -78,7 +79,8 @@ def env(tmp_path_factory):
     up = Upstream()
     keys = tmp / "router-keys.json"
     keys.write_text(json.dumps({"keys": [{"name": "wf-test", "sha256": hashlib.sha256(SCOPED.encode()).hexdigest(),
-                                          "aliases": ["qwen3.8-nothink", "devstral"], "expires": None}]}))
+                                          "aliases": ["qwen3.8-nothink", "devstral"],
+                                          "expires": time.time() + 3600}]}))
     saved = dict(os.environ)
     os.environ.update({
         "ROUTER_API_KEY": OWNER, "LLAMACPP_API_KEY": "x", "V620_URL": up.url, "ROUTER_KEYS_FILE": str(keys),
@@ -183,3 +185,67 @@ def test_revocation_takes_effect_on_the_next_request(env):
         keys.write_text(saved)
         st = os.stat(keys)
         os.utime(keys, (st.st_atime + 20, st.st_mtime + 20))
+
+
+class _LaneThatClosesWhileWaiting:
+    """Capacity looked open at the pre-check, then the layout shrank while the request waited."""
+    capacity, in_use = 1, 0
+
+    async def acquire(self):
+        from workforce_lane import LaneClosed
+        raise LaneClosed()
+
+    async def release(self):
+        pass
+
+
+def test_lane_closing_while_waiting_gives_503_and_streams_end_with_an_error_frame(env, monkeypatch):
+    # Security review L2: was HTTP 500 (non-stream) and an empty 200 with no [DONE] (stream).
+    monkeypatch.setattr(env["mod"], "workforce_lane", _LaneThatClosesWhileWaiting())
+    r = chat(env, SCOPED)
+    assert r.status_code == 503 and "workforce_lane_closed" in r.text
+    r = chat(env, SCOPED, stream=True)
+    assert "workforce_lane_closed" in r.text and r.text.rstrip().endswith("data: [DONE]")
+
+
+def test_scoped_and_owner_traffic_have_separate_rate_limit_buckets(env):
+    # Security review M2: one per-IP bucket let workforce traffic (and its refused requests) spend
+    # the owner's chat budget -- the owner got 429 from the same source IP.
+    from starlette.requests import Request
+    import access_keys as ak
+    mod = env["mod"]
+
+    def req(principal):
+        return Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": [],
+                        "client": ("10.0.0.9", 5), "state": {"principal": principal}})
+
+    scoped = ak.Principal("wf-test", "scoped", frozenset({"m"}), None)
+    assert mod.limiter._key_func is mod._rate_limit_key
+    assert mod._rate_limit_key(req(ak.OWNER)) == "10.0.0.9"
+    assert mod._rate_limit_key(req(scoped)) not in ("10.0.0.9", mod._rate_limit_key(req(ak.OWNER)))
+
+
+def test_scoped_key_refused_endpoints_are_audited(env):
+    # Security review L6: a sandboxed agent probing other endpoints left no trace in the access log.
+    env["client"].post("/v1/embeddings", json={}, headers={"Authorization": f"Bearer {SCOPED}"})
+    lines = [json.loads(line) for line in env["log"].read_text().splitlines() if line.strip()]
+    assert any(e.get("principal") == "wf-test" and e.get("status") == 403
+               and e.get("error") == "endpoint_forbidden" for e in lines)
+
+
+def test_chat_without_an_authenticated_principal_is_refused(env):
+    # Security review L7: the handler fell back to OWNER when no principal was set; fail closed.
+    import asyncio
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    body = json.dumps({"model": "qwen3.8-nothink", "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    req = Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "query_string": b"",
+                   "headers": [(b"content-type", b"application/json")], "client": ("127.0.0.1", 1),
+                   "server": ("test", 80), "scheme": "http", "root_path": "", "app": env["mod"].app}, receive)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(env["mod"].chat(request=req, x_strip_thinking=None))
+    assert ei.value.status_code == 403

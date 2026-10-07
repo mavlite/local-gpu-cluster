@@ -4,10 +4,12 @@ Two kinds of principal:
   owner   -- ROUTER_API_KEY from /etc/router.env; full access, unchanged behaviour.
   scoped  -- per-run keys in ROUTER_KEYS_FILE (JSON, SHA-256 hashes only): may call only chat
              completions and the model list, only their allowlisted aliases, never server-side
-             tools, never trigger a profile swap; expire at `expires` (epoch seconds, or null).
+             tools, never trigger a profile swap; expire at `expires` (epoch seconds, required).
 
-The keys file is re-read whenever its mtime changes, so `router-keys.py revoke` takes effect on the
-next request. A missing or malformed file fails closed for scoped keys; the owner key still works.
+The keys file is re-read whenever it is replaced or changes (inode, mtime or size), so `router-keys.py revoke` takes effect on the
+next request. A missing or malformed file fails closed for scoped keys; the owner key still works. An entry that
+fails validation (hash not 64 hex chars, aliases not a non-empty list of strings, expiry not a
+finite number, reserved or unsafe name) is skipped; the other entries keep working.
 Key file shape:
     {"keys": [{"name": "wf-run-1", "sha256": "<hex>", "aliases": ["qwen3.8-nothink"],
                "expires": 1791500000.0}]}
@@ -16,7 +18,9 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -41,24 +45,43 @@ OWNER = Principal("owner", "owner", frozenset(), None)
 # (method, path) a scoped key may call; everything else is refused.
 SCOPED_ENDPOINTS = frozenset({("POST", "/v1/chat/completions"), ("GET", "/v1/models")})
 
+# Same rule as router-keys.py: names appear in the access log, so "owner" is reserved.
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _parse_entry(e) -> tuple:
+    """(sha256, Principal) for a valid keys-file entry; ValueError otherwise."""
+    name, digest, aliases, expires = e["name"], e["sha256"], e["aliases"], e["expires"]
+    if not (isinstance(name, str) and NAME_RE.fullmatch(name) and name != OWNER.name):
+        raise ValueError("name")
+    if not (isinstance(digest, str) and _SHA256_RE.fullmatch(digest.lower())):
+        raise ValueError("sha256")
+    if not (isinstance(aliases, list) and aliases and all(isinstance(a, str) and a for a in aliases)):
+        raise ValueError("aliases")
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)) or not math.isfinite(expires):
+        raise ValueError("expires")
+    return digest.lower(), Principal(name, "scoped", frozenset(aliases), float(expires))
+
 
 class KeyStore:
     def __init__(self, path: str, owner_key: str, clock: Callable[[], float] = time.time):
         self._path = path
         self._owner = owner_key or ""
         self._clock = clock
-        self._mtime: Optional[float] = None
+        self._sig: Optional[tuple] = None
         self._entries: tuple = ()
 
     def _reload_if_changed(self) -> None:
         try:
-            mtime = os.path.getmtime(self._path)
+            st = os.stat(self._path)
         except OSError:
-            self._mtime, self._entries = None, ()
+            self._sig, self._entries = None, ()
             return
-        if mtime == self._mtime:
+        sig = (st.st_ino, st.st_mtime_ns, st.st_size)     # router-keys replaces the file: new inode
+        if sig == self._sig:
             return
-        self._mtime = mtime
+        self._sig = sig
         try:
             with open(self._path, encoding="utf-8") as f:
                 raw = json.load(f).get("keys", [])
@@ -69,9 +92,7 @@ class KeyStore:
         entries = []
         for e in raw if isinstance(raw, list) else []:
             try:
-                entries.append((str(e["sha256"]).lower(),
-                                Principal(str(e["name"]), "scoped", frozenset(e["aliases"]),
-                                          None if e.get("expires") is None else float(e["expires"]))))
+                entries.append(_parse_entry(e))
             except (KeyError, TypeError, ValueError):
                 log.error("router keys file: skipping malformed entry")
         self._entries = tuple(entries)
@@ -102,7 +123,8 @@ def chat_violation(principal: Principal, body: dict) -> Optional[str]:
     """None if the chat request is allowed for this principal, else an error code."""
     if principal.is_owner:
         return None
-    if body.get("model") not in principal.aliases:
+    model = body.get("model")
+    if not isinstance(model, str) or model not in principal.aliases:
         return "model_not_allowed"
     if body.get("tool_execution") == "server":
         return "server_tools_not_allowed"

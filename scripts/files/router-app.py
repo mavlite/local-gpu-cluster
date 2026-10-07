@@ -54,7 +54,7 @@ import alias_defaults
 import contextvars
 import tavily_cache
 import web_fetch_guard
-from workforce_lane import ReservedLane, gate_for
+from workforce_lane import ReservedLane, admitted, gate_for, refuse_on_lane_closed
 from stream_admission import (AdmissionGate, ClosingStreamingResponse, hold_slot,
                               refresh_capacity_once)
 from embed_admission import embed_texts, first_oversized
@@ -236,7 +236,16 @@ def log_access(route: str, model: str, input_tokens: int, output_tokens: int,
 
 # ---------- App + middleware ----------
 
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
+def _rate_limit_key(request: Request) -> str:
+    """Scoped keys get a bucket of their own (named by key), so workforce traffic -- including
+    requests the policy refuses -- never spends the owner's per-IP budget."""
+    principal = getattr(request.state, "principal", None)
+    if principal is not None and not principal.is_owner:
+        return f"key:{principal.name}"
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key, default_limits=[])
 app = FastAPI(title="LLM Cluster Router (V620-only)")
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
@@ -315,6 +324,10 @@ async def require_bearer(request: Request, call_next):
     if principal is None:
         return JSONResponse(_error_body("unauthorized", "invalid Bearer token"), status_code=403)
     if not access_keys.endpoint_allowed(principal, request.method, request.url.path):
+        # Audited: a sandboxed agent probing other endpoints is exactly what the logs must show.
+        _principal_name.set(principal.name)
+        log_access(request.url.path, "-", -1, 0, 0, 403,
+                   request.client.host if request.client else "?", error="endpoint_forbidden")
         return JSONResponse(_error_body("forbidden", "this key may not call this endpoint"),
                             status_code=403)
     request.state.principal = principal
@@ -680,6 +693,15 @@ DEGRADED_FRAME = (
     + "\n\n"
 ).encode()
 DONE_FRAME = b"data: [DONE]\n\n"
+LANE_CLOSED_DETAIL = ("workforce_lane_closed: no chat slot is available to scoped keys in the "
+                      "current layout")
+LANE_CLOSED_FRAMES = (
+    "data: " + json.dumps(_error_body("service_unavailable", LANE_CLOSED_DETAIL)) + "\n\n"
+).encode() + DONE_FRAME
+
+
+def _lane_closed_error() -> HTTPException:
+    return HTTPException(status_code=503, detail=LANE_CLOSED_DETAIL)
 
 
 async def sse_stream_with_keepalive(upstream_url: str, payload: dict, strip_thinking: bool):
@@ -1603,10 +1625,12 @@ async def chat(
     x_strip_thinking: Optional[str] = Header(default=None, alias="X-Strip-Thinking"),
 ):
     global _last_chat_ts
+    principal = getattr(request.state, "principal", None)
+    if principal is None:                 # only require_bearer grants a principal; never default to owner
+        raise HTTPException(status_code=403, detail="unauthenticated")
     _last_chat_ts = time.monotonic()      # feed-forward signal for the host fan bridge
     await _ensure_slot_refresh()
     body = await request.json()
-    principal = getattr(request.state, "principal", access_keys.OWNER)
     violation = access_keys.chat_violation(principal, body)
     if violation is not None:
         log_access("/v1/chat/completions", str(body.get("model", "?")), -1, 0, 0, 403,
@@ -1614,7 +1638,7 @@ async def chat(
         raise HTTPException(status_code=403, detail=violation)
     body = access_keys.apply_chat_policy(principal, body)
     if not principal.is_owner and workforce_lane.capacity == 0:
-        raise HTTPException(status_code=503, detail="workforce_lane_closed: no chat slot is available to scoped keys in the current layout")
+        raise _lane_closed_error()
     gate = gate_for(principal, chat_sem, workforce_lane)
     strip = should_strip_thinking(body, x_strip_thinking)
     stream = body.get("stream", False)
@@ -1775,7 +1799,9 @@ async def chat(
                        int((time.monotonic() - started) * 1000), 200, client_ip,
                        error="tool_execution=server,stream=True")
             return ClosingStreamingResponse(
-                hold_slot(gate, tool_loop_stream(body, strip, client_ip), KEEPALIVE_INTERVAL),
+                refuse_on_lane_closed(
+                    hold_slot(gate, tool_loop_stream(body, strip, client_ip), KEEPALIVE_INTERVAL),
+                    LANE_CLOSED_FRAMES),
                 media_type="text/event-stream",
             )
         # Streaming responses log only on connection close (we don't get tokens-out
@@ -1784,11 +1810,13 @@ async def chat(
                    int((time.monotonic() - started) * 1000), 200, client_ip,
                    error="stream-started")
         return ClosingStreamingResponse(
-            hold_slot(gate, sse_stream_with_keepalive(url, body, strip), KEEPALIVE_INTERVAL),
+            refuse_on_lane_closed(
+                hold_slot(gate, sse_stream_with_keepalive(url, body, strip), KEEPALIVE_INTERVAL),
+                LANE_CLOSED_FRAMES),
             media_type="text/event-stream",
         )
 
-    async with gate:
+    async with admitted(gate, _lane_closed_error):
         if tool_exec == "server":
             log_access("/v1/chat/completions", model, token_count, 0,
                        int((time.monotonic() - started) * 1000), 200, client_ip,

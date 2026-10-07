@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import access_keys as ak  # noqa: E402
 from stream_admission import AdmissionGate, hold_slot  # noqa: E402
-from workforce_lane import LaneClosed, ReservedLane, gate_for  # noqa: E402
+from workforce_lane import (LaneClosed, ReservedLane, admitted, gate_for,  # noqa: E402
+                            refuse_on_lane_closed)
 
 SCOPED = ak.Principal("wf", "scoped", frozenset({"m"}), None)
 
@@ -128,4 +129,72 @@ def test_client_disconnect_mid_stream_releases_lane_and_chat_slot():
         assert lane.in_use == 1 and chat.in_use == 1
         await stream.aclose()                     # what Starlette does on client disconnect
         assert lane.in_use == 0 and chat.in_use == 0
+    run(go())
+
+
+def test_stream_waiting_in_the_lane_ends_with_closing_frames_if_the_lane_closes():
+    # Security review L2: LaneClosed raised while waiting ended the stream as an empty 200 (no error
+    # frame, no [DONE]) -- a harness could record that as a blank completion.
+    async def body():
+        yield b"never"
+
+    async def go():
+        chat = AdmissionGate(2)
+        lane = ReservedLane(chat, reserve=1)
+        holder = gate_for(SCOPED, chat, lane)
+        await holder.acquire()                   # the lane (capacity 1) is full
+        stream = refuse_on_lane_closed(hold_slot(gate_for(SCOPED, chat, lane), body(), keepalive_s=0.05),
+                                       b"CLOSED")
+        out = []
+
+        async def consume():
+            async for c in stream:
+                out.append(c)
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.1)
+        await chat.set_capacity(1)               # lane capacity -> 0 while the request waits
+        await asyncio.wait_for(task, 3.0)
+        assert out[-1] == b"CLOSED" and b"never" not in out
+        await holder.release()
+        assert lane.in_use == 0 and chat.in_use == 0
+    run(go())
+
+
+def test_closing_the_guarded_stream_mid_body_releases_both_slots():
+    async def body():
+        yield b"first"
+        await asyncio.sleep(10)
+        yield b"never"
+
+    async def go():
+        chat = AdmissionGate(3)
+        lane = ReservedLane(chat, reserve=1)
+        stream = refuse_on_lane_closed(hold_slot(gate_for(SCOPED, chat, lane), body(), keepalive_s=0.05),
+                                       b"CLOSED")
+        assert await stream.__anext__() == b"first"
+        assert lane.in_use == 1 and chat.in_use == 1
+        await stream.aclose()                     # what Starlette does on client disconnect
+        assert lane.in_use == 0 and chat.in_use == 0
+    run(go())
+
+
+def test_admitted_raises_the_callers_error_when_the_lane_is_closed_and_releases_on_exit():
+    class Refused(Exception):
+        pass
+
+    async def go():
+        one = AdmissionGate(1)
+        with pytest.raises(Refused):
+            async with admitted(gate_for(SCOPED, one, ReservedLane(one, reserve=1)), Refused):
+                pass
+        assert one.in_use == 0
+        chat = AdmissionGate(3)
+        lane = ReservedLane(chat, reserve=1)
+        async with admitted(gate_for(SCOPED, chat, lane), Refused):
+            assert lane.in_use == 1 and chat.in_use == 1
+        assert lane.in_use == 0 and chat.in_use == 0
+        async with admitted(chat, Refused):      # the owner's plain chat gate works the same way
+            assert chat.in_use == 1
+        assert chat.in_use == 0
     run(go())

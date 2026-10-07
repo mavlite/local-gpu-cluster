@@ -7,8 +7,14 @@ a scoped request is refused immediately with LaneClosed rather than queued.
 
 `gate_for` returns an object with the same acquire()/release() contract hold_slot() and
 `async with` expect, so the chat handler swaps `chat_sem` for `gate_for(principal, ...)`.
+
+The lane can also close while a request is already waiting (the chat layout shrank). `admitted`
+and `refuse_on_lane_closed` turn that into a proper refusal instead of an HTTP 500 or an empty
+stream.
 """
 import asyncio
+import contextlib
+import inspect
 
 POLL_S = 0.5      # lane waiters re-check capacity this often (chat capacity changes elsewhere)
 
@@ -84,3 +90,31 @@ class _LaneThenChat:
 def gate_for(principal, chat_gate, lane: ReservedLane):
     """The admission gate a request from `principal` must hold."""
     return chat_gate if principal.is_owner else _LaneThenChat(lane, chat_gate)
+
+
+@contextlib.asynccontextmanager
+async def admitted(gate, refused):
+    """Hold `gate` for the block. LaneClosed while waiting raises `refused()` instead (an HTTP 503)."""
+    try:
+        await gate.acquire()
+    except LaneClosed:
+        raise refused() from None
+    try:
+        yield
+    finally:
+        r = gate.release()                   # sync or async, as in hold_slot
+        if inspect.isawaitable(r):
+            await r
+
+
+async def refuse_on_lane_closed(stream, closing: bytes):
+    """Pass `stream` through. If admission fails with LaneClosed, end with `closing` (an error frame
+    and [DONE]) rather than an empty body. Always closes `stream` -- `async for` does not -- so a
+    client disconnect still releases its slots."""
+    try:
+        async for chunk in stream:
+            yield chunk
+    except LaneClosed:
+        yield closing
+    finally:
+        await stream.aclose()

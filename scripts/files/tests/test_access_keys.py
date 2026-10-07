@@ -79,7 +79,7 @@ def test_malformed_or_missing_file_fails_closed_for_scoped_keys_only(store, tmp_
 
 def test_entry_missing_fields_is_ignored_not_crashing(tmp_path):
     p = tmp_path / "k.json"
-    write(p, [{"name": "bad"}, {"name": "ok", "sha256": h(WF), "aliases": ["a"], "expires": None}])
+    write(p, [{"name": "bad"}, {"name": "ok", "sha256": h(WF), "aliases": ["a"], "expires": 20.0}])
     s = ak.KeyStore(str(p), OWNER, clock=lambda: 10.0)
     assert s.authenticate(WF).name == "ok"
 
@@ -156,4 +156,80 @@ def test_deploy_block_creates_valid_empty_keys_file_and_never_overwrites(tmp_pat
     assert json.loads(keys.read_text()) == {"keys": []}
     keys.write_text('{"keys": [{"name": "issued"}]}\n')
     subprocess.run([bash, str(runner)], check=True)
+    assert json.loads(keys.read_text()) == {"keys": [{"name": "issued"}]}
+
+
+def test_invalid_entries_are_skipped_and_never_break_valid_keys(tmp_path):
+    # Security review L3: a hand-edited entry must not 500 every scoped request, widen an
+    # allowlist (a string is not a list of aliases) or remove expiry (nan/inf/null/bool).
+    good = {"name": "ok", "sha256": h(WF), "aliases": ["m"], "expires": 20.0}
+    bad = [
+        {"name": "nonhex", "sha256": "é" * 64, "aliases": ["m"], "expires": 20.0},
+        {"name": "short", "sha256": "ab", "aliases": ["m"], "expires": 20.0},
+        {"name": "stralias", "sha256": h("wf_stralias"), "aliases": "m", "expires": 20.0},
+        {"name": "noalias", "sha256": h("wf_noalias"), "aliases": [], "expires": 20.0},
+        {"name": "nan", "sha256": h("wf_nan"), "aliases": ["m"], "expires": "nan"},
+        {"name": "inf", "sha256": h("wf_inf"), "aliases": ["m"], "expires": float("inf")},
+        {"name": "never", "sha256": h("wf_never"), "aliases": ["m"], "expires": None},
+        {"name": "bool", "sha256": h("wf_bool"), "aliases": ["m"], "expires": True},
+        {"name": "owner", "sha256": h("wf_owner"), "aliases": ["m"], "expires": 20.0},
+    ]
+    p = tmp_path / "k.json"
+    write(p, bad + [good])
+    s = ak.KeyStore(str(p), OWNER, clock=lambda: 10.0)
+    assert s.authenticate(WF).name == "ok"
+    for k in ("wf_stralias", "wf_noalias", "wf_nan", "wf_inf", "wf_never", "wf_bool", "wf_owner", "junk"):
+        assert s.authenticate(k) is None, k
+
+
+def test_revocation_is_seen_even_when_mtime_and_size_are_unchanged(tmp_path):
+    # Security review L4: an atomic replace that keeps mtime and size must still reload.
+    p = tmp_path / "k.json"
+    write(p, [{"name": "wf-run-1", "sha256": h(WF), "aliases": ["m"], "expires": 2000.0}])
+    st = os.stat(p)
+    s = ak.KeyStore(str(p), OWNER, clock=lambda: 1000.0)
+    assert s.authenticate(WF) is not None
+    tmp = tmp_path / "k.tmp"
+    write(tmp, [{"name": "wf-run-2", "sha256": h(WF + "X"), "aliases": ["m"], "expires": 2000.0}])
+    assert os.path.getsize(tmp) == st.st_size
+    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(tmp, p)
+    assert os.stat(p).st_mtime_ns == st.st_mtime_ns
+    assert s.authenticate(WF) is None
+
+
+def test_non_string_model_is_refused_without_crashing():
+    # Security review L8: an unhashable model raised TypeError (HTTP 500).
+    scoped = ak.Principal("wf", "scoped", frozenset({"m"}), None)
+    for model in (["m"], {"m": 1}, None, 3):
+        assert ak.chat_violation(scoped, {"model": model}) == "model_not_allowed"
+
+
+def test_deploy_block_leaves_issued_keys_alone_when_the_existence_check_errors(tmp_path):
+    # Security review L9: only "does not exist" (exit 1) may create the file; any other failure
+    # of `pct exec ... test -e` (container not running, attach error) must abort, not overwrite.
+    import shutil
+    import subprocess
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    root = os.path.join(os.path.dirname(__file__), "..", "..")
+    src = open(os.path.join(root, "53-lxc-router.sh"), encoding="utf-8").read()
+    tail = "  pct exec \"$ROUTER_VMID\" -- chmod 0640 /etc/router-keys.json\n"
+    block = tmp_path / "block.sh"
+    block.write_text(src[src.index("  # No nested quoting through pct/sh"):src.index(tail) + len(tail)], newline="\n")
+    ct = tmp_path / "ct"
+    (ct / "etc").mkdir(parents=True)
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        f'ROOT="{ct.as_posix()}"\n'
+        'die() { echo "$*" >&2; exit 1; }\n'
+        'pct() { case "$1" in\n'
+        '  exec) shift 3; [ "$1" = test ] && return 255; return 0;;\n'
+        '  push) cp "$3" "$ROOT$4";; esac; }\n'
+        f'ROUTER_VMID=153\n. "{block.as_posix()}"\n', newline="\n")
+    keys = ct / "etc" / "router-keys.json"
+    keys.write_text('{"keys": [{"name": "issued"}]}\n')
+    r = subprocess.run([bash, str(runner)], capture_output=True, text=True)
+    assert r.returncode != 0
     assert json.loads(keys.read_text()) == {"keys": [{"name": "issued"}]}

@@ -8,11 +8,15 @@ Runs inside the router LXC as root, installed as /usr/local/sbin/router-keys:
 
 The plaintext key goes ONLY to the --out file (created 0600, must not exist); stdout never shows it.
 The keys file stores SHA-256 hashes and is replaced atomically; the router re-reads it on change.
+add and revoke hold an exclusive lock (<keys file>.lock) across load-modify-save, so overlapping
+invocations serialise instead of one silently undoing the other's change.
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -20,6 +24,34 @@ import time
 
 DEFAULT_KEYS_FILE = os.environ.get("ROUTER_KEYS_FILE", "/etc/router-keys.json")
 MAX_TTL_HOURS = 24 * 14
+# Same rule as access_keys.NAME_RE: names are logged as the request's principal.
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+RESERVED_NAMES = {"owner"}
+LOCK_TIMEOUT_S = 30.0
+
+
+@contextlib.contextmanager
+def _locked(path: str):
+    """Exclusive lock on <path>.lock for one load-modify-save (flock on Linux, msvcrt elsewhere)."""
+    fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except ImportError:                 # Windows (off-box tests)
+            import msvcrt
+            deadline = time.monotonic() + LOCK_TIMEOUT_S
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise SystemExit(f"{path}.lock: timed out waiting for the lock")
+                    time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)                        # closing releases flock and msvcrt locks
 
 
 def _load(path: str) -> dict:
@@ -53,6 +85,9 @@ def _save(path: str, data: dict) -> None:
 
 
 def cmd_add(a) -> int:
+    if not NAME_RE.fullmatch(a.name) or a.name in RESERVED_NAMES:
+        print("refusing: --name must match [a-z0-9][a-z0-9._-]{0,63} and not be 'owner'", file=sys.stderr)
+        return 2
     aliases = [x.strip() for x in a.aliases.split(",") if x.strip()]
     if not aliases:
         print("refusing: --aliases is empty", file=sys.stderr)
@@ -60,6 +95,11 @@ def cmd_add(a) -> int:
     if not (0 < a.ttl_hours <= MAX_TTL_HOURS):
         print(f"refusing: --ttl-hours must be in (0, {MAX_TTL_HOURS}]", file=sys.stderr)
         return 2
+    with _locked(a.keys_file):
+        return _add_locked(a, aliases)
+
+
+def _add_locked(a, aliases) -> int:
     data = _load(a.keys_file)
     if any(e.get("name") == a.name for e in data["keys"]):
         print(f"refusing: a key named {a.name!r} already exists", file=sys.stderr)
@@ -91,6 +131,11 @@ def cmd_list(a) -> int:
 
 
 def cmd_revoke(a) -> int:
+    with _locked(a.keys_file):
+        return _revoke_locked(a)
+
+
+def _revoke_locked(a) -> int:
     data = _load(a.keys_file)
     if a.all:
         n = len(data["keys"])
