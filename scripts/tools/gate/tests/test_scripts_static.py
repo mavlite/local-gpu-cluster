@@ -152,3 +152,11 @@ def test_stop_stops_the_unit(tmp_path):
     r, calls = _run_worker(tmp_path, "stop")
     assert r.returncode == 0, r.stderr
     assert "systemctl stop gate-llama" in calls
+
+
+# v2 experiment (2026-10-07): the CPU workers looped with presence_penalty 0 while the GPU alias
+# (router-injected Qwen preset, presence_penalty 1.5) did not. Workers now run the same preset.
+def test_worker_runs_qwen_nonthinking_preset_including_presence_penalty():
+    m = re.search(r'^WORKER_EXTRA="([^"]*)"$', read("sh", "worker_serve.sh"), re.M)
+    assert m and "--presence-penalty 1.5" in m.group(1)
+    assert "--repeat-last-n" not in m.group(1)       # default 64-token window, same as the GPU side

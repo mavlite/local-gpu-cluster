@@ -26,9 +26,13 @@ Edit only files inside that folder. You cannot run commands. Finish with a line 
 with SUMMARY: that says what you implemented."""
 
 _DENY_ALL = {"edit": "deny", "bash": {"*": "deny"}, "webfetch": "deny",
-             "external_directory": "deny", "skill": {"*": "deny"}}
+             "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny"}
 _WORKER_PERMS = {"edit": "allow", "bash": {"*": "deny"}, "webfetch": "deny",
-                 "external_directory": "deny", "skill": {"*": "deny"}}
+                 "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny"}
+# Loop guards (v2). `steps` is honoured by opencode 1.18.34 but is advisory: at the limit it asks the
+# model for text only and still offers tools, so the presence penalty is the primary fix.
+WORKER_STEPS = 30
+COORDINATOR_STEPS = 40
 
 
 def _model_entry(name, context, output):
@@ -58,9 +62,9 @@ def build_config(arm, router_url, worker_urls=()):
             "mcp": {}, "permission": _DENY_ALL}
 
 
-def _agent_md(description, mode, model, perms, prompt):
+def _agent_md(description, mode, model, perms, prompt, steps):
     lines = ["---", f"description: {description}", f"mode: {mode}", f"model: {model}",
-             "permission:"]
+             f"steps: {steps}", "permission:"]
     for k, v in perms.items():
         lines.append(f"  {k}: {json.dumps(v)}")
     return "\n".join(lines + ["---", prompt, ""])
@@ -78,11 +82,13 @@ def install(arm, dest, router_url, worker_urls=()):
     os.makedirs(adir, exist_ok=True)
     with open(os.path.join(adir, "coordinator.md"), "w", encoding="utf-8") as f:
         f.write(_agent_md("Gate coordinator: dispatches tasks, never implements", "primary",
-                          f"router/{ROUTER_MODEL}", _DENY_ALL, COORDINATOR_PROMPT))
+                          f"router/{ROUTER_MODEL}", _DENY_ALL, COORDINATOR_PROMPT,
+                          COORDINATOR_STEPS))
     for i in range(1, N_WORKERS + 1):
         with open(os.path.join(adir, f"worker-{i}.md"), "w", encoding="utf-8") as f:
             f.write(_agent_md(f"Gate worker {i}: implements one task", "subagent",
-                              worker_model(arm, i), _WORKER_PERMS, WORKER_PROMPT))
+                              worker_model(arm, i), _WORKER_PERMS, WORKER_PROMPT,
+                              WORKER_STEPS))
 
 
 def opencode_env(base_env, iso_home):

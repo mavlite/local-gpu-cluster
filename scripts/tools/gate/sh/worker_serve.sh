@@ -24,8 +24,9 @@ UNIT=gate-llama
 MEMMAX="${GATE_MEMMAX:-30G}"
 # Frozen worker flags (spec §3, shipped config) -- the gate commit pins this exact string.
 WORKER_FLAGS="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0"
-# Mandatory on a 24 GB guest (ik defaults OOM), plus non-thinking sampling (Qwen instruct preset, pp 0).
-WORKER_EXTRA="-cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20"
+# Mandatory memory flags (ik defaults OOM), plus the Qwen non-thinking preset -- the same values the
+# router injects for the GPU alias, presence penalty included (v2, 2026-10-07: workers without it looped).
+WORKER_EXTRA="-cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 1.5"
 APT_UNITS=(apt-daily.timer apt-daily-upgrade.timer)
 
 die() { echo "[worker-serve] FATAL: $*" >&2; exit 1; }
