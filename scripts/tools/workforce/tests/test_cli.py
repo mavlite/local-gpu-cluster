@@ -138,3 +138,16 @@ def test_w3_refuses_runs_whose_tasks_do_not_match_the_bundle_set(tmp_path):
     sched.write_text(json.dumps([{"arm": "G", "run_dir": g, "valid": True, "probe_p50": 1, "baseline_p50": 1}]))
     with pytest.raises(SystemExit):
         cli.main(["w3", "--schedule", str(sched), "--tasks", str(tmp_path / "bundles")])
+
+
+def test_bundle_validate_can_use_the_docker_grader(tmp_path, repo, monkeypatch, capsys):
+    # Plan B: Docker grading must reproduce local grading for every bundle (Plan C Review Focus 3).
+    built(tmp_path, repo)
+    seen = []
+    real = cli.bundle.validate
+    monkeypatch.setattr(cli.bundle, "validate", lambda b, ref, work, runner: (seen.append(runner), real(
+        b, ref, work, cli.grade.LocalRunner()))[1])
+    cli.main(["bundle-validate", "--bundles", str(tmp_path / "bundles"), "--refs", str(tmp_path / "refs"),
+              "--work", str(tmp_path / "w"), "--grader", "docker:wf-grader:1"])
+    assert isinstance(seen[0], cli.grade.DockerRunner) and seen[0].image == "wf-grader:1"
+    assert json.loads(capsys.readouterr().out)["grader"] == "docker:wf-grader:1"
