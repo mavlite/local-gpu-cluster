@@ -110,6 +110,12 @@ EMBED_ADMISSION_SRC="$LGC_DIR/files/embed_admission.py"
 [[ -r "$EMBED_ADMISSION_SRC" ]] || die "embed_admission.py not found at $EMBED_ADMISSION_SRC"
 WEB_FETCH_GUARD_SRC="$LGC_DIR/files/web_fetch_guard.py"
 [[ -r "$WEB_FETCH_GUARD_SRC" ]] || die "web_fetch_guard.py not found at $WEB_FETCH_GUARD_SRC"
+ACCESS_KEYS_SRC="$LGC_DIR/files/access_keys.py"
+[[ -r "$ACCESS_KEYS_SRC" ]] || die "access_keys.py not found at $ACCESS_KEYS_SRC"
+WORKFORCE_LANE_SRC="$LGC_DIR/files/workforce_lane.py"
+[[ -r "$WORKFORCE_LANE_SRC" ]] || die "workforce_lane.py not found at $WORKFORCE_LANE_SRC"
+ROUTER_KEYS_CLI_SRC="$LGC_DIR/files/router-keys.py"
+[[ -r "$ROUTER_KEYS_CLI_SRC" ]] || die "router-keys.py not found at $ROUTER_KEYS_CLI_SRC"
 
 phase_7_1_create() {
   step "7.1 — Create LXC $ROUTER_VMID ($ROUTER_HOSTNAME)"
@@ -216,6 +222,22 @@ phase_7_3_deploy_app() {
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/embed_admission.py
   pct push "$ROUTER_VMID" "$WEB_FETCH_GUARD_SRC" /opt/llm-router/web_fetch_guard.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/web_fetch_guard.py
+  pct push "$ROUTER_VMID" "$ACCESS_KEYS_SRC" /opt/llm-router/access_keys.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/access_keys.py
+  pct push "$ROUTER_VMID" "$WORKFORCE_LANE_SRC" /opt/llm-router/workforce_lane.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/workforce_lane.py
+  # Scoped per-run keys (workforce rev 2 sec 5.3): CLI for root, keys file readable by the router
+  # only. Created empty when absent; an existing file (issued keys) is never overwritten.
+  pct push "$ROUTER_VMID" "$ROUTER_KEYS_CLI_SRC" /usr/local/sbin/router-keys --perms 0750
+  # No nested quoting through pct/sh (repo footgun): write the empty file on the host, push it.
+  if ! pct exec "$ROUTER_VMID" -- test -e /etc/router-keys.json; then
+    empty_keys="$(mktemp)"
+    printf '%s\n' '{"keys": []}' > "$empty_keys"
+    pct push "$ROUTER_VMID" "$empty_keys" /etc/router-keys.json --perms 0640
+    rm -f "$empty_keys"
+  fi
+  pct exec "$ROUTER_VMID" -- chown root:router /etc/router-keys.json
+  pct exec "$ROUTER_VMID" -- chmod 0640 /etc/router-keys.json
 }
 
 phase_7_4_systemd() {
