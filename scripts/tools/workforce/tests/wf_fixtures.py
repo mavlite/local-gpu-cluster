@@ -68,8 +68,10 @@ class FakeOpencode:
     def __init__(self, script):
         self.script, self.calls, self.lock = script, [], threading.Lock()
         self.turns, self.sessions = {}, {}
+        self.owners = None                         # set to a dict to record path ownership at call time
 
-    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None):
+    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None,
+            user=None):
         tid = _task_of(workdir)
         s = self.script[tid]
         role = "review" if agent == "reviewer" else "fix" if agent == "fixer" else "impl"
@@ -80,7 +82,8 @@ class FakeOpencode:
             self.sessions[sid] = tid
             self.calls.append({"task": tid, "agent": agent, "role": role, "session": sid,
                                "resumed": session is not None, "message": message, "attach": attach,
-                               "workdir": workdir, "home": home})
+                               "workdir": workdir, "home": home, "user": user,
+                               "owner": self.owners.get(workdir) if self.owners is not None else None})
         if s.get("raise_on") == role:
             raise RuntimeError(f"scripted failure in {role}")
         with open(events_path, "w") as f:                   # the harness-captured --format json stream
@@ -100,6 +103,9 @@ class FakeOpencode:
                 f.write("reviewers can run bash; this must not reach the workspace\n")
             return oc.RunResult(0, False, sid, text, 0.01)
         files = s["fix"] if role == "fix" else s["impl"][n]
+        for path, raw in (s.get("binary", {}) if role == "impl" else {}).items():
+            with open(os.path.join(workdir, path), "wb") as f:
+                f.write(raw)
         for path, content in files.items():
             p = os.path.join(workdir, path)
             os.makedirs(os.path.dirname(p), exist_ok=True)

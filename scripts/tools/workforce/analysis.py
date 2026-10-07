@@ -43,6 +43,9 @@ def w1_choose(results, limit=W1_LIMIT):
     table = {}
     for cid, r in results.items():
         n = r["attempts"]
+        if n == 0:                                   # no valid attempts: nothing to choose on
+            table[cid] = {"loop_rate": None, "loop_upper": 1.0, "pass_rate": None, "s_per_attempt": None}
+            continue
         table[cid] = {"loop_rate": r["looped"] / n, "loop_upper": cp_upper(r["looped"], n),
                       "pass_rate": r["passed"] / n, "s_per_attempt": r["wall_s"] / n}
     eligible = [c for c, t in table.items() if t["loop_upper"] <= limit]

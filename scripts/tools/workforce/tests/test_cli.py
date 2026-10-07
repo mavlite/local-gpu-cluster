@@ -49,7 +49,7 @@ def test_run_requires_the_workforce_keys(tmp_path):
 def write_run(d, **s):
     os.makedirs(d)
     base = {"n_tasks": 6, "looped": 0, "accepted": 4, "wall_s": 600.0, "valid": True,
-            "accepted_by_task": {}, "accepted_per_hour": 1.0}
+            "accepted_by_task": {}, "accepted_per_hour": 1.0, "outcomes": {"implemented": 6}}
     base.update(s)
     with open(os.path.join(d, "run.json"), "w") as f:
         json.dump(base, f)
@@ -61,7 +61,7 @@ def test_w1_aggregates_run_directories_per_configuration(tmp_path, capsys):
     b = write_run(str(tmp_path / "c0b"), looped=1)
     c = write_run(str(tmp_path / "c2a"))
     stats = cli.w1_stats([a, b])
-    assert stats == {"attempts": 12, "looped": 1, "passed": 8, "wall_s": 1200.0}
+    assert stats == {"attempts": 12, "looped": 1, "passed": 8, "wall_s": 1200.0, "invalid_runs": 0}
     cli.main(["w1", "--config", f"C0={a},{b}", "--config", f"C2={c}"])
     out = json.loads(capsys.readouterr().out)
     assert out["table"]["C0"]["loop_rate"] == pytest.approx(1 / 12) and "chosen" in out
@@ -106,3 +106,35 @@ def test_patch_paths_also_reads_body_paths_that_git_apply_honours():
     text = ("diff --git a/pkg/calc.py b/pkg/calc.py\n--- a/pkg/calc.py\n+++ b/conftest.py\n"
             "diff --git a/x b/y\nrename from x\nrename to y\ncopy from p\ncopy to q\n")
     assert cli.patch_paths(text) == ["conftest.py", "p", "pkg/calc.py", "q", "x", "y"]
+
+
+def test_agent_user_runs_refuse_the_local_grader(tmp_path):
+    # Final review CRITICAL: the local grader runs agent code as the harness (root on the VM).
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1", "--agent-user-prefix", "wfagent"],
+                 env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"})
+    assert "grader" in str(e.value)                           # refused for the grader, not by argparse
+
+
+def test_role_users():
+    assert cli.role_user("wfagent", "impl-2") == "wfagent-impl-2"
+    assert cli.role_user("wfagent", "lead") == "wfagent-lead"
+    assert cli.role_user("wfagent", None) == "root"
+
+
+def test_w1_counts_only_valid_runs_and_real_attempts(tmp_path):
+    # Final review Important-4: harness-error / infra-error attempts were counted as loop-free.
+    a = write_run(str(tmp_path / "a"), outcomes={"implemented": 5, "harness-error": 1}, looped=0, accepted=3)
+    b = write_run(str(tmp_path / "b"), outcomes={"implemented": 6}, looped=2, accepted=4, valid=False)
+    assert cli.w1_stats([a, b]) == {"attempts": 5, "looped": 0, "passed": 3, "wall_s": 600.0, "invalid_runs": 1}
+
+
+def test_w3_refuses_runs_whose_tasks_do_not_match_the_bundle_set(tmp_path):
+    # Final review: a name mismatch made every difference zero and the quality clause passed silently.
+    (tmp_path / "bundles" / "t1").mkdir(parents=True)
+    g = write_run(str(tmp_path / "g"), accepted_by_task={"other": True})
+    sched = tmp_path / "s.json"
+    sched.write_text(json.dumps([{"arm": "G", "run_dir": g, "valid": True, "probe_p50": 1, "baseline_p50": 1}]))
+    with pytest.raises(SystemExit):
+        cli.main(["w3", "--schedule", str(sched), "--tasks", str(tmp_path / "bundles")])

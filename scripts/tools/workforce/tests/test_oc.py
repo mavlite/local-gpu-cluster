@@ -4,6 +4,8 @@ import os
 import sys
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import oc  # noqa: E402
@@ -53,9 +55,12 @@ def test_parse_events_without_text_or_session():
 def test_systemd_scope_launcher_runs_as_the_agent_user_in_its_own_scope_and_kills_the_scope(tmp_path):
     calls = []
     launcher = oc.SystemdScopeLauncher("wfagent", memory_max="8G", run=lambda argv: calls.append(argv))
-    argv = launcher.argv(["/usr/bin/opencode", "run", "x"], "wf-t1-impl-r0")
+    argv = launcher.argv(["/usr/bin/opencode", "run", "x"], "wf-t1-impl-r0", "impl-1")
     assert argv[:3] == ["systemd-run", "--scope", "--quiet"]
-    assert "--uid=wfagent" in argv and "--gid=wfagent" in argv and "--unit=wf-t1-impl-r0" in argv
+    assert "--uid=wfagent-impl-1" in argv and "--gid=wfagent-impl-1" in argv and "--unit=wf-t1-impl-r0" in argv
+    assert "--uid=wfagent-lead" in launcher.argv(["x"], "n", "lead")
+    with pytest.raises(ValueError):
+        launcher.argv(["x"], "n", None)                       # never fall back to a shared user
     assert "MemoryMax=8G" in argv and argv[argv.index("--") + 1:] == ["/usr/bin/opencode", "run", "x"]
     launcher.kill("wf-t1-impl-r0", proc=None)
     assert calls == [["systemctl", "kill", "--signal=SIGKILL", "wf-t1-impl-r0.scope"],
@@ -66,7 +71,7 @@ def test_opencode_passes_a_unique_unit_name_to_the_launcher(tmp_path):
     seen = []
 
     class Recorder(oc.DirectLauncher):
-        def argv(self, argv, name):
+        def argv(self, argv, name, role=None):
             seen.append(name)
             return argv
 

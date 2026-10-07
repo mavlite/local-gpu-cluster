@@ -186,3 +186,15 @@ def test_load_task_rejects_paths_that_leave_the_tree(tmp_path):
         b = make_bundle(str(tmp_path / f"b{len(os.listdir(tmp_path))}"), **over)
         with pytest.raises(ValueError):
             grade.load_task(b)
+
+
+def test_docker_runner_kills_its_container_on_timeout_and_caps_cpu(tmp_path, monkeypatch):
+    # Final review Important-5: killing the docker client left the container running.
+    killed = tmp_path / "killed.txt"
+    monkeypatch.setenv("FAKE_DOCKER_KILLED", str(killed))
+    fake = [sys.executable, os.path.join(os.path.dirname(__file__), "fake_docker.py")]
+    runner = grade.DockerRunner("img:1", docker=fake, cpus=2)
+    argv = runner.argv("/t", ["-m", "pytest"], name="wf-grade-x")
+    assert argv[argv.index("--name") + 1] == "wf-grade-x" and argv[argv.index("--cpus") + 1] == "2"
+    rc, out, timed_out = runner.run(str(tmp_path), ["-m", "pytest"], timeout=2)
+    assert timed_out and killed.read_text().strip().startswith("wf-grade-")

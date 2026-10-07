@@ -6,6 +6,7 @@ can change what the harness sees as the agent's changes.
 """
 import os
 import shutil
+import stat
 import subprocess
 import tarfile
 
@@ -34,12 +35,13 @@ def unpack(tar_path, dest):
         t.extractall(dest, filter="data")
 
 
-def apply_patch(root, patch_text):
-    """Apply a `git diff --binary` patch to a plain directory tree."""
-    if not patch_text:
+def apply_patch(root, patch):
+    """Apply a `git diff --binary` patch (bytes, or str) to a plain directory tree."""
+    if not patch:
         return
+    data = patch if isinstance(patch, bytes) else patch.encode("utf-8", "surrogateescape")
     r = subprocess.run(["git", *_ID, "apply", "--binary", "--whitespace=nowarn", "-"], cwd=root,
-                       input=patch_text.encode(), capture_output=True,
+                       input=data, capture_output=True,
                        env=_git_env(os.path.dirname(os.path.abspath(root))))
     if r.returncode != 0:
         raise PatchError(r.stderr.decode(errors="replace").strip())
@@ -68,7 +70,8 @@ class Workspace:
     def changes(self):
         """[(status, new_mode, path)] relative to the baseline, ignored files included."""
         self._git("add", "-A", "-f")
-        raw = self._git("diff", "--cached", "--raw", "-z", "--no-renames", self.baseline).decode()
+        raw = self._git("diff", "--cached", "--raw", "-z", "--no-renames", self.baseline).decode(
+            "utf-8", "surrogateescape")                    # any bytes in names survive the round trip
         fields = [f for f in raw.split("\0") if f != ""]
         out = []
         for meta, path in zip(fields[0::2], fields[1::2]):
@@ -77,13 +80,21 @@ class Workspace:
         return out
 
     def patch(self, paths):
-        """Binary-safe patch of `paths` against the baseline ("" if there is nothing to export)."""
+        """Byte-exact patch of `paths` against the baseline (b"" if there is nothing to export). Bytes:
+        workspace files need not be UTF-8."""
         if not paths:
-            return ""
+            return b""
         self._git("add", "-A", "-f")
-        return self._git("diff", "--cached", "--binary", "--no-renames", self.baseline, "--",
-                         *paths).decode()
+        return self._git("diff", "--cached", "--binary", "--no-renames", self.baseline, "--", *paths)
 
     def copy_to(self, dest):
-        shutil.copytree(self.root, dest, symlinks=True)
+        """Copy the workspace, skipping FIFOs, sockets and device files (copying them would block or fail)."""
+        def special(directory, names):
+            out = []
+            for name in names:
+                mode = os.lstat(os.path.join(directory, name)).st_mode
+                if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                    out.append(name)
+            return out
+        shutil.copytree(self.root, dest, symlinks=True, ignore=special)
         return dest

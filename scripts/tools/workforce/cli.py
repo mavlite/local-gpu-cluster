@@ -34,14 +34,12 @@ def resolve_opencode(env):
     return shutil.which("opencode")
 
 
-def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, give=None):
+def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
-    The opencode home (session DB, logs) is handed to the agent user; the config stays harness-owned."""
+    Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
     cfg = profiles.install(os.path.join(oc_dir, "cfg"), profiles.build_config(arm, router_url, worker_urls))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
-    if give:
-        give(home)
     return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=profiles.keys_for(arm)),
                        launcher=launcher)
 
@@ -53,17 +51,25 @@ def assert_private(path):
         raise SystemExit(f"{path} is mode {oct(mode)}; bundles must be 0700 to the harness user")
 
 
-def chown_tree(user):
-    """give(path): hand a file or directory tree to `user` (POSIX, harness running as root)."""
-    import pwd
-    pw = pwd.getpwnam(user)
+def role_user(prefix, role):
+    """OS user for a role: one per implementer slot and one for the lead; None is the harness (root)."""
+    return "root" if role is None else f"{prefix}-{role}"
 
-    def give(path):
-        os.chown(path, pw.pw_uid, pw.pw_gid)
+
+def chown_tree(prefix):
+    """own(path, role): hand a file or tree to the role's user, private to it (POSIX, harness as root).
+    Symlinks are never followed, so an agent cannot aim a chown at a file outside its tree."""
+    import pwd
+
+    def own(path, role):
+        pw = pwd.getpwnam(role_user(prefix, role))
+        os.chown(path, pw.pw_uid, pw.pw_gid, follow_symlinks=False)
         for dirpath, dirnames, files in os.walk(path):
             for name in dirnames + files:
                 os.chown(os.path.join(dirpath, name), pw.pw_uid, pw.pw_gid, follow_symlinks=False)
-    return give
+        if not os.path.islink(path):
+            os.chmod(path, 0o700 if os.path.isdir(path) else 0o600)
+    return own
 
 
 _PATCH_PATH_RES = (re.compile(r"^diff --git a/(.+?) b/(.+)$", re.M), re.compile(r"^--- a/(.+)$", re.M),
@@ -117,22 +123,30 @@ def _records(run_dir):
 
 
 def w1_stats(run_dirs):
-    """Aggregate W1 run directories of one configuration."""
-    out = {"attempts": 0, "looped": 0, "passed": 0, "wall_s": 0.0}
+    """Aggregate W1 run directories of one configuration. Invalid runs are excluded, and only real
+    attempts count (outcome `implemented`; harness- and infra-errors are not loop-free attempts)."""
+    out = {"attempts": 0, "looped": 0, "passed": 0, "wall_s": 0.0, "invalid_runs": 0}
     for d in run_dirs:
         s = _records(d)
-        out["attempts"] += s["n_tasks"]
+        if not s["valid"]:
+            out["invalid_runs"] += 1
+            continue
+        out["attempts"] += s["outcomes"].get("implemented", 0)
         out["looped"] += s["looped"]
         out["passed"] += s["accepted"]
         out["wall_s"] += s["wall_s"]
     return out
 
 
-def w3_runs(schedule):
-    """schedule: [{"arm", "run_dir", "valid", "probe_p50", "baseline_p50"}] -> analysis input."""
+def w3_runs(schedule, tasks=None):
+    """schedule: [{"arm", "run_dir", "valid", "probe_p50", "baseline_p50"}] -> analysis input. With
+    `tasks`, every run must cover exactly that task set (a mismatch would score every task as a tie)."""
     runs = []
     for item in schedule:
         s = _records(item["run_dir"])
+        if tasks is not None and set(s["accepted_by_task"]) != set(tasks):
+            raise SystemExit(f"{item['run_dir']}: its tasks {sorted(s['accepted_by_task'])} do not match "
+                             f"the bundle set {sorted(tasks)}")
         runs.append({"arm": item["arm"], "valid": bool(item["valid"] and s["valid"]),
                      "accepted": s["accepted_by_task"], "accepted_per_hour": s["accepted_per_hour"],
                      "probe_p50": item["probe_p50"], "baseline_p50": item["baseline_p50"]})
@@ -162,7 +176,8 @@ def main(argv=None, env=None):
     p.add_argument("--worker", action="append", default=[])
     p.add_argument("--w1", action="store_true", help="W1 loop check: implement and grade, no review")
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
-    p.add_argument("--agent-user", help="run agents as this user in systemd scopes (the VM; harness as root)")
+    p.add_argument("--agent-user-prefix",
+                   help="run each role as OS user <prefix>-<role> in systemd scopes (the VM; harness as root)")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -188,21 +203,24 @@ def main(argv=None, env=None):
     elif a.cmd == "run":
         if not env.get("WF_ROUTER_KEY") or (a.arm == "T" and not env.get("WF_WORKER_KEY")):
             raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T) must be set")
+        if a.agent_user_prefix and not a.grader.startswith("docker:"):
+            raise SystemExit("--agent-user-prefix needs --grader docker:<image>: the local grader would run "
+                             "agent code as the harness user (root on the VM)")
         oc_bin = resolve_opencode(env)
         if not oc_bin:
             raise SystemExit("opencode not found; set WF_OPENCODE")
         grader = (grade.DockerRunner(a.grader.split(":", 1)[1]) if a.grader.startswith("docker:")
                   else grade.LocalRunner())
-        launcher = give = None
-        if a.agent_user:
+        launcher = own = None
+        if a.agent_user_prefix:
             assert_private(a.bundles)
-            launcher, give = oc.SystemdScopeLauncher(a.agent_user), chown_tree(a.agent_user)
+            launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
         opencode = build_opencode(a.arm, a.out + ".opencode", a.router, a.worker, [oc_bin], env,
-                                  launcher=launcher, give=give)
+                                  launcher=launcher)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1,
-                                monitor=monitor, give=give).run()
+                                monitor=monitor, own=own).run()
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "w1":
@@ -215,7 +233,7 @@ def main(argv=None, env=None):
         with open(a.schedule, encoding="utf-8") as f:
             schedule = json.load(f)
         tasks = sorted(os.listdir(a.tasks))
-        out = analysis.w3_decide(w3_runs(schedule), tasks)
+        out = analysis.w3_decide(w3_runs(schedule, tasks), tasks)
     print(json.dumps(out, indent=1, default=str))
     return 0
 

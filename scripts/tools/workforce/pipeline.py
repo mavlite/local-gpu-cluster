@@ -6,14 +6,22 @@ times); after that the lead fixes it in a fresh session (`lead-fixed`). The fini
 filtered to the declared paths, exported as a patch, graded from the pristine snapshot, and the
 implementer's session is scored for loops.
 
-Layout: <run>/agent/<id>/ holds what agents may touch (workspace, review copies, packets) and is
-handed to the agent user with `give`; <run>/tasks/<id>/ (0700) holds the baseline git, events,
-grading tree and records, which the agent user cannot read.
+Who owns what (on the VM each role is its own OS user; `own(path, role)` hands paths over, role None
+meaning the harness): a task's workspace belongs to its implementer only while that implementer's
+turn runs, to the lead only during the fix, and to the harness otherwise. Reviews get their own copy
+owned by the lead. No agent code ever runs as the harness: the test runs shown to the lead go
+through the grader (the network-less container on the VM), on the pristine snapshot plus the
+filtered patch, exactly like the final grade.
+
+Layout: <run>/agent/<id>/ holds what agents may touch (workspace, review copies, packets, opencode
+homes); <run>/tasks/<id>/ (0700) holds the baseline git, events, check and grading trees and records.
 
 Scheduling: one thread per implementer, one lead thread. Rework goes back to the implementer that
 did the task, ahead of new tasks; while a task waits for review its implementer takes the next new
 task. The lead reviews in arrival order. With review=False (W1) implementers' work is graded
-directly.
+directly. An implementer run that fails outright (non-zero exit, not a timeout -- e.g. its worker is
+down) is retried and never counts as a round; after `retries` failures the task is an infrastructure
+error and the run is invalid.
 """
 import json
 import os
@@ -34,6 +42,7 @@ import workspace
 
 UNREACHABLE_LIMIT_S = 300            # spec §9: worker unreachable for 5 minutes -> run invalid
 _NOISE = ("__pycache__/", ".pytest_cache/")
+LEAD = "lead"
 
 
 @dataclass
@@ -43,6 +52,8 @@ class Limits:
     fix_s: int = 1800
     tests_s: int = 600
     max_rounds: int = 2
+    retries: int = 3                 # failed (non-timeout) implementer runs retried per turn
+    retry_wait_s: float = 60.0
 
 
 @dataclass
@@ -54,10 +65,11 @@ class _Task:
     dir: str                                         # harness-private
     adir: str                                        # agent area
     ws: object = None
-    home: str = None                                 # this task's own opencode home (agent area)
+    homes: dict = None                               # opencode home per role (agent area)
     agent: str = None
     session: str = None
     rounds: list = field(default_factory=list)       # implementer turns
+    impl_failures: list = field(default_factory=list)
     reviews: list = field(default_factory=list)
     history: list = field(default_factory=list)      # feedback lines for the fixer
     fix: dict = None
@@ -109,30 +121,33 @@ class HealthMonitor:
 
 class Pipeline:
     def __init__(self, arm, bundle_dirs, opencode, run_dir, grader, review=True, limits=None,
-                 monitor=None, check_runner=None, give=None):
+                 monitor=None, own=None):
+        loaded = []
+        for b in bundle_dirs:
+            t = grade.load_task(b)
+            with open(os.path.join(b, t["request"]), encoding="utf-8") as f:
+                loaded.append((b, t, f.read()))
+        ids = [t["id"] for _, t, _ in loaded]
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"duplicate task ids: {dupes}")
         os.makedirs(run_dir)                               # never reuse a run directory
         for sub_dir, mode in (("agent", 0o711), ("tasks", 0o700)):
             os.makedirs(os.path.join(run_dir, sub_dir))
             os.chmod(os.path.join(run_dir, sub_dir), mode)
         os.chmod(run_dir, 0o711)
-        self.give = give or (lambda path: None)
+        self.own = own or (lambda path, role: None)
         self.arm, self.oc, self.run_dir, self.grader = arm, opencode, run_dir, grader
         self.review, self.limits, self.monitor = review, limits or Limits(), monitor
-        self.check = check_runner or grade.LocalRunner()
         self.impls = profiles.implementers(arm)
-        self.tasks = []
-        for b in bundle_dirs:
-            t = grade.load_task(b)
-            with open(os.path.join(b, t["request"]), encoding="utf-8") as f:
-                req = f.read()
-            self.tasks.append(_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
-                                    os.path.join(run_dir, "agent", t["id"])))
+        self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
+                            os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
         self.cond = threading.Condition()
         self.pending = list(self.tasks)
         self.rework = {a: [] for a in self.impls}
         self.lead_q = []
         self.done = 0
-        self.records, self.errors = {}, []
+        self.records, self.errors, self.infra = {}, [], []
 
     # ---- scheduling ---------------------------------------------------------------------------
     def _finished(self):
@@ -165,16 +180,43 @@ class Pipeline:
         try:
             fn(*args)
         except Exception as e:                             # spec §9: a harness exception invalidates
-            self.errors.append(f"{t.id}: {type(e).__name__}: {e}")
+            with self.cond:
+                self.errors.append(f"{t.id}: {type(e).__name__}: {e}")
             try:
                 os.makedirs(t.dir, exist_ok=True)
                 with open(os.path.join(t.dir, "harness-error.txt"), "w", encoding="utf-8") as f:
                     f.write(traceback.format_exc())
                 self._write_record(t, "harness-error", None, {}, None)
             except Exception as e2:                        # never let error handling kill the thread
-                self.errors.append(f"{t.id}: recording the error failed: {type(e2).__name__}: {e2}")
+                with self.cond:
+                    self.errors.append(f"{t.id}: recording the error failed: {type(e2).__name__}: {e2}")
             finally:
                 self._complete(t, self._record(t, "harness-error", None, {}, None))   # no-op if done
+
+    # ---- helpers ------------------------------------------------------------------------------
+    def _run_as(self, role, workdir, fn):
+        """Hand `workdir` to `role` for the duration of fn(), then take it back."""
+        self.own(workdir, role)
+        try:
+            return fn()
+        finally:
+            self.own(workdir, None)
+
+    def _filtered_patch(self, t):
+        allowed, dropped = paths.classify(t.ws.changes(), t.task["files"])
+        dropped = {p: why for p, why in dropped.items() if not any(x in p for x in _NOISE)}
+        return t.ws.patch(allowed), dropped
+
+    def _diff_for_reader(self, t):
+        changed = [c[2] for c in t.ws.changes() if not any(x in c[2] for x in _NOISE)]
+        return t.ws.patch(changed).decode("utf-8", errors="replace")
+
+    def _visible_tests(self, t, name):
+        """The visible tests on pristine snapshot + filtered patch, run by the grader (never as the
+        harness, never with the agent's conftest), for the lead to read."""
+        patch, _ = self._filtered_patch(t)
+        return grade.check_visible(t.bundle, patch, os.path.join(t.dir, name), self.grader,
+                                   self.limits.tests_s)
 
     # ---- steps --------------------------------------------------------------------------------
     def _implement(self, t, agent, feedback):
@@ -183,16 +225,36 @@ class Pipeline:
             os.makedirs(t.adir, exist_ok=True)
             t.ws = workspace.Workspace.materialize(os.path.join(t.bundle, "snapshot.tar"),
                                                    os.path.join(t.adir, "ws"), os.path.join(t.dir, "git"))
-            self.give(t.ws.root)
-            t.home = os.path.join(t.adir, "home")
-            os.makedirs(t.home)
-            self.give(t.home)
+            self.own(t.ws.root, None)
+            t.homes = {}
+            for role in (agent, LEAD):
+                t.homes[role] = os.path.join(t.adir, f"home-{role}")
+                os.makedirs(t.homes[role])
+                self.own(t.homes[role], role)
             t.agent, t.t_start = agent, time.time()
         n = len(t.rounds)
         msg = review.implement_message(t.task, t.request) if feedback is None else review.revise_message(feedback)
-        t0 = time.time()
-        r = self.oc.run(agent, t.ws.root, msg, self.limits.impl_s, os.path.join(t.dir, f"impl-r{n}.jsonl"),
-                        session=t.session, home=t.home)
+        events = os.path.join(t.dir, f"impl-r{n}.jsonl")
+        for attempt in range(self.limits.retries + 1):
+            t0 = time.time()
+            r = self._run_as(agent, t.ws.root, lambda: self.oc.run(
+                agent, t.ws.root, msg, self.limits.impl_s, events, session=t.session,
+                home=t.homes[agent], user=agent))
+            if r.rc == 0 or r.timed_out:
+                break
+            failed = f"{events[:-6]}-fail{attempt}.jsonl"
+            if os.path.exists(events):
+                os.replace(events, failed)
+            t.impl_failures.append({"round": n, "attempt": attempt, "rc": r.rc, "t_start": t0,
+                                    "t_end": time.time(), "events": os.path.basename(failed)})
+            if attempt < self.limits.retries:
+                time.sleep(self.limits.retry_wait_s)
+        else:
+            with self.cond:
+                self.infra.append(f"{t.id}: implementer runs failed {len(t.impl_failures)} times "
+                                  f"(last rc {r.rc}) on {agent}")
+            self._write_record(t, "infra-error", None, {}, None)
+            return
         t.session = t.session or r.session_id
         t.rounds.append({"round": n, "agent": agent, "session": r.session_id, "rc": r.rc,
                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time(), "summary": r.text[-500:]})
@@ -203,23 +265,10 @@ class Pipeline:
             self.lead_q.append(t)
             self.cond.notify_all()
 
-    def _diff_for_reader(self, t):
-        changed = [c[2] for c in t.ws.changes() if not any(x in c[2] for x in _NOISE)]
-        return t.ws.patch(changed)
-
-    def _visible_tests(self, t, tree):
-        """The task's visible tests (pristine copies) run against the current change, for the lead."""
-        grade.restore_visible_tests(t.bundle, t.task, tree)
-        _rc, out, timed_out = self.check.run(tree, ["-m", "pytest", "-q", "-p", "no:cacheprovider",
-                                                    *t.task["tests"]], self.limits.tests_s)
-        if timed_out:
-            return f"(tests did not finish within {self.limits.tests_s} s)"
-        return "\n".join(out.strip().splitlines()[-200:])
-
     def _review(self, t):
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
-        test_out = self._visible_tests(t, tree)
+        test_out = self._visible_tests(t, f"review-r{n}-check")
         diff = self._diff_for_reader(t)
         text, truncated = review.packet(t.task, t.request, diff, test_out)
         if truncated:
@@ -229,12 +278,11 @@ class Pipeline:
         pkt = os.path.join(t.adir, f"review-r{n}.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
-        self.give(tree)
-        self.give(pkt)
+        self.own(pkt, LEAD)
         t0 = time.time()
-        r = self.oc.run("reviewer", tree, "REVIEW the change described in the attached packet.",
-                        self.limits.review_s, os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt,
-                        home=t.home)
+        r = self._run_as(LEAD, tree, lambda: self.oc.run(
+            "reviewer", tree, "REVIEW the change described in the attached packet.", self.limits.review_s,
+            os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt, home=t.homes[LEAD], user=LEAD))
         shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
         verdict, feedback = review.parse_verdict(r.text)
         t.reviews.append({"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
@@ -253,32 +301,29 @@ class Pipeline:
         self._lead_fix(t)
 
     def _lead_fix(self, t):
-        tree = t.ws.copy_to(os.path.join(t.dir, "fix-probe"))      # harness-only: runs the tests
-        test_out = self._visible_tests(t, tree)
-        shutil.rmtree(tree, ignore_errors=True)
+        test_out = self._visible_tests(t, "fix-check")
         text, _ = review.packet(t.task, t.request, self._diff_for_reader(t), test_out, history=t.history)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
-        self.give(pkt)
+        self.own(pkt, LEAD)
         t0 = time.time()
-        r = self.oc.run("fixer", t.ws.root, "FIX: finish the request; the attached packet has the details.",
-                        self.limits.fix_s, os.path.join(t.dir, "fix.jsonl"), attach=pkt, home=t.home)
-        t.fix = {"session": r.session_id, "timed_out": r.timed_out, "t_start": t0, "t_end": time.time()}
+        r = self._run_as(LEAD, t.ws.root, lambda: self.oc.run(
+            "fixer", t.ws.root, "FIX: finish the request; the attached packet has the details.",
+            self.limits.fix_s, os.path.join(t.dir, "fix.jsonl"), attach=pkt, home=t.homes[LEAD], user=LEAD))
+        t.fix = {"session": r.session_id, "rc": r.rc, "timed_out": r.timed_out, "t_start": t0,
+                 "t_end": time.time()}
         self._finalize(t, "lead-fixed")
 
     def _finalize(self, t, outcome):
-        changes = t.ws.changes()
-        allowed, dropped = paths.classify(changes, t.task["files"])
-        dropped = {p: why for p, why in dropped.items() if not any(x in p for x in _NOISE)}
-        patch = t.ws.patch(allowed)
+        patch, dropped = self._filtered_patch(t)
         os.makedirs(os.path.join(self.run_dir, "patches"), exist_ok=True)
-        with open(os.path.join(self.run_dir, "patches", f"{t.id}.patch"), "w", encoding="utf-8") as f:
+        with open(os.path.join(self.run_dir, "patches", f"{t.id}.patch"), "wb") as f:
             f.write(patch)
         g = grade.grade(t.bundle, patch, os.path.join(t.dir, "grade"), self.grader)
         loop = self._score_loops(t)
-        for name, session in (("impl", t.session), ("fix", (t.fix or {}).get("session"))):
-            self._archive_export(t, name, session)
+        for name, session, role in (("impl", t.session, t.agent), ("fix", (t.fix or {}).get("session"), LEAD)):
+            self._archive_export(t, name, session, role)
         self._write_record(t, outcome, g, dropped, loop)
 
     def _score_loops(self, t):
@@ -293,12 +338,12 @@ class Pipeline:
         s["steps_per_turn"] = steps
         return s
 
-    def _archive_export(self, t, name, session):
+    def _archive_export(self, t, name, session, role):
         """Keep `opencode export` for reading later; it is agent-writable, so nothing is scored from it."""
         if not session:
             return
         try:
-            doc = self.oc.export(session, home=t.home)
+            doc = self.oc.export(session, home=t.homes[role])
         except Exception as e:                             # an export failure is recorded, not fatal
             doc = {"export_error": f"{type(e).__name__}: {e}"}
         with open(os.path.join(t.dir, f"export-{name}.json"), "w", encoding="utf-8") as f:
@@ -307,10 +352,10 @@ class Pipeline:
     def _record(self, t, outcome, g, dropped, loop):
         accepted = bool(g and g["pass"] and outcome in ("implementer-accepted", "lead-fixed", "implemented"))
         return {"id": t.id, "arm": self.arm, "implementer": t.agent, "outcome": outcome, "accepted": accepted,
-               "grade": g, "dropped": dropped, "loops": loop, "rounds": t.rounds, "reviews": t.reviews,
-               "rework_rounds": max(0, len(t.rounds) - 1), "fix": t.fix,
-               "time_cap_hits": sum(1 for r in t.rounds if r["timed_out"]) + int(bool(t.fix and t.fix["timed_out"])),
-               "t_start": t.t_start, "t_end": time.time()}
+                "grade": g, "dropped": dropped, "loops": loop, "rounds": t.rounds, "reviews": t.reviews,
+                "impl_failures": t.impl_failures, "rework_rounds": max(0, len(t.rounds) - 1), "fix": t.fix,
+                "time_cap_hits": sum(1 for r in t.rounds if r["timed_out"]) + int(bool(t.fix and t.fix["timed_out"])),
+                "t_start": t.t_start, "t_end": time.time()}
 
     def _write_record(self, t, outcome, g, dropped, loop):
         rec = self._record(t, outcome, g, dropped, loop)
@@ -344,6 +389,7 @@ class Pipeline:
         health = self.monitor.stop() if self.monitor else {"max_unreachable_s": {}}
         recs = [self.records[t.id] for t in self.tasks]
         invalid = [f"harness exception: {e}" for e in self.errors]
+        invalid += [f"infrastructure: {e}" for e in self.infra]
         invalid += [f"worker {u} unreachable for {s:.0f} s" for u, s in health["max_unreachable_s"].items()
                     if s >= UNREACHABLE_LIMIT_S]
         impl_acc = sum(1 for r in recs if r["accepted"] and r["outcome"] == "implementer-accepted")

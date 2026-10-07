@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import uuid
 import xml.etree.ElementTree as ET
 
 import workspace
@@ -162,21 +163,26 @@ class LocalRunner:
 
 
 class DockerRunner:
-    """A fresh, network-less container per grade (spec §5.5); only the grading tree is mounted."""
+    """A fresh, network-less, CPU- and memory-capped container per grade (spec §5.5); only the grading
+    tree is mounted. On a timeout the container itself is killed: killing the docker client alone
+    leaves it running."""
 
-    def __init__(self, image, docker="docker"):
-        self.image, self.docker = image, docker
+    def __init__(self, image, docker="docker", cpus=4):
+        self.image, self.cpus = image, cpus
+        self.docker = [docker] if isinstance(docker, str) else list(docker)
 
-    def argv(self, tree, args):
-        return [self.docker, "run", "--rm", "--network", "none", "--memory", "4g", "--pids-limit", "512",
-                "-v", f"{tree}:/w", "-w", "/w", "-e", "PYTHONDONTWRITEBYTECODE=1", self.image,
-                "python3", *args]
+    def argv(self, tree, args, name="wf-grade"):
+        return [*self.docker, "run", "--rm", "--name", name, "--network", "none", "--cpus", str(self.cpus),
+                "--memory", "4g", "--pids-limit", "512", "-v", f"{tree}:/w", "-w", "/w",
+                "-e", "PYTHONDONTWRITEBYTECODE=1", self.image, "python3", *args]
 
     def run(self, tree, args, timeout):
+        name = f"wf-grade-{uuid.uuid4().hex[:12]}"
         try:
-            r = subprocess.run(self.argv(os.path.abspath(tree), args), capture_output=True, text=True,
+            r = subprocess.run(self.argv(os.path.abspath(tree), args, name), capture_output=True, text=True,
                                timeout=timeout)
         except subprocess.TimeoutExpired:
+            subprocess.run([*self.docker, "kill", name], capture_output=True)
             return None, "", True
         return r.returncode, r.stdout + r.stderr, False
 
@@ -184,6 +190,29 @@ class DockerRunner:
 def _tail(text):
     lines = [x for x in text.strip().splitlines() if x.strip()]
     return lines[-1] if lines else ""
+
+
+def check_visible(bundle_dir, patch, workdir, runner, timeout):
+    """Output of the task's VISIBLE tests on pristine snapshot + patch, run by `runner` exactly like a
+    grade (harness ini, --noconftest unless needed). Shown to the lead; never the hidden tests."""
+    task = load_task(bundle_dir)
+    tree = os.path.join(workdir, "tree")
+    if os.path.exists(tree):
+        shutil.rmtree(tree)
+    workspace.unpack(os.path.join(bundle_dir, "snapshot.tar"), tree)
+    try:
+        workspace.apply_patch(tree, patch)
+    except workspace.PatchError as e:
+        return f"(the change does not apply to the task's snapshot: {str(e)[-300:]})"
+    restore_visible_tests(bundle_dir, task, tree)
+    with open(os.path.join(tree, INI), "w", encoding="utf-8") as f:
+        f.write("[pytest]\n")
+    args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q"]
+    args += [] if task["needs_conftest"] else ["--noconftest"]
+    _rc, out, timed_out = runner.run(tree, args + list(task.get("pytest_args") or task["tests"]), timeout)
+    if timed_out:
+        return f"(tests did not finish within {timeout} s)"
+    return "\n".join(out.strip().splitlines()[-200:])
 
 
 def grade(bundle_dir, patch_text, workdir, runner):

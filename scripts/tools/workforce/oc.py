@@ -74,9 +74,10 @@ def _kill_tree(proc):
 
 
 class DirectLauncher:
-    """Runs opencode as the harness's own user in a new process group (tests, workstation)."""
+    """Runs opencode as the harness's own user in a new process group (tests, workstation). The
+    role is ignored: there is only one user."""
 
-    def argv(self, argv, name):
+    def argv(self, argv, name, role=None):
         return argv
 
     def popen_kwargs(self):
@@ -93,15 +94,22 @@ class DirectLauncher:
 
 
 class SystemdScopeLauncher:
-    """Runs opencode as `user` in a transient systemd scope named `name`; kill = the whole cgroup."""
+    """Runs opencode as the OS user `<prefix>-<role>` (one user per implementer slot and one for the
+    lead) in a transient systemd scope named `name`; kill = the whole cgroup."""
 
-    def __init__(self, user, memory_max="8G", tasks_max=512, run=None):
-        self.user, self.memory_max, self.tasks_max = user, memory_max, tasks_max
+    def __init__(self, prefix, memory_max="8G", tasks_max=512, run=None):
+        self.prefix, self.memory_max, self.tasks_max = prefix, memory_max, tasks_max
         self.run = run or (lambda argv: subprocess.run(argv, capture_output=True))
 
-    def argv(self, argv, name):
-        return ["systemd-run", "--scope", "--quiet", f"--unit={name}", f"--uid={self.user}",
-                f"--gid={self.user}", "-p", f"MemoryMax={self.memory_max}", "-p", f"TasksMax={self.tasks_max}",
+    def user(self, role):
+        if not role:
+            raise ValueError("every agent run needs a role")
+        return f"{self.prefix}-{role}"
+
+    def argv(self, argv, name, role=None):
+        user = self.user(role)
+        return ["systemd-run", "--scope", "--quiet", f"--unit={name}", f"--uid={user}",
+                f"--gid={user}", "-p", f"MemoryMax={self.memory_max}", "-p", f"TasksMax={self.tasks_max}",
                 "--", *argv]
 
     def popen_kwargs(self):
@@ -119,8 +127,10 @@ class Opencode:
         self.cmd, self.env = list(cmd), env
         self.launcher = launcher or DirectLauncher()
 
-    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None):
-        """home: this task's own opencode home (sessions are resumed from the same home)."""
+    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None,
+            user=None):
+        """home: this task's opencode home for the role (sessions resume from it); user: the role whose
+        OS user the launcher runs opencode as."""
         env = profiles.with_home(self.env, home) if home else self.env
         argv = [*self.cmd, "run", "--pure", "--agent", agent, "--dir", workdir, "--format", "json"]
         if session:
@@ -132,7 +142,7 @@ class Opencode:
         t0 = time.monotonic()
         with open(events_path, "w", encoding="utf-8") as out, \
                 open(events_path + ".stderr", "w", encoding="utf-8") as err:
-            proc = subprocess.Popen(self.launcher.argv(argv, name), env=env, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(self.launcher.argv(argv, name, user), env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, **self.launcher.popen_kwargs())
             try:
                 rc, timed_out = proc.wait(timeout=timeout_s), False

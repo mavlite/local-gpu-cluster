@@ -49,7 +49,7 @@ def test_patch_contains_only_the_requested_paths_and_applies_to_a_fresh_copy(ws,
     with open(os.path.join(ws.root, "other.txt"), "w") as f:
         f.write("not exported\n")
     patch = ws.patch(["pkg/mod.py"])
-    assert "pkg/mod.py" in patch and "other.txt" not in patch
+    assert b"pkg/mod.py" in patch and b"other.txt" not in patch
     fresh = workspace.Workspace.materialize(str(tmp_path / "snapshot.tar"), str(tmp_path / "ws2"),
                                             str(tmp_path / "git2"))
     workspace.apply_patch(fresh.root, patch)
@@ -58,7 +58,7 @@ def test_patch_contains_only_the_requested_paths_and_applies_to_a_fresh_copy(ws,
 
 
 def test_empty_selection_gives_an_empty_patch(ws):
-    assert ws.patch([]) == ""
+    assert ws.patch([]) == b""
 
 
 def test_an_agent_made_git_repo_inside_the_workspace_does_not_confuse_the_baseline(ws):

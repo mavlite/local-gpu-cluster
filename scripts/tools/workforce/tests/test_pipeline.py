@@ -173,13 +173,24 @@ def test_health_monitor_reports_the_longest_unreachable_stretch():
     assert m.max_down == {"w1": 200.0, "w2": 0.0}
 
 
-def test_an_implementer_run_that_dies_without_a_session_still_flows_through_review(tmp_path):
-    script = {"q": {"impl": [{}, {"pkg/q.py": SOL}], "fail_impl_turns": 1,
-                    "review": ["REVISE: nothing was changed", "ACCEPT"]}}
-    summary, fake = run_pipeline(tmp_path, "G", script)
+def test_a_failed_implementer_run_is_retried_without_burning_a_review_round(tmp_path):
+    # Final review Important-3: opencode exits rc 1 within ~66 s when a worker is down; that turn went
+    # to review, burned a round and left no trace.
+    script = {"q": {"impl": [{}, {"pkg/q.py": SOL}], "fail_impl_turns": 1, "review": ["ACCEPT"]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, limits=pipeline.Limits(retry_wait_s=0))
     r = record(tmp_path, "q")
-    assert r["rounds"][0]["rc"] == 1 and r["rounds"][0]["session"] is None
+    assert [c["role"] for c in fake.calls] == ["impl", "impl", "review"]
+    assert len(r["rounds"]) == 1 and r["rounds"][0]["rc"] == 0 and len(r["impl_failures"]) == 1
     assert r["outcome"] == "implementer-accepted" and r["accepted"] and summary["valid"]
+
+
+def test_an_implementer_that_keeps_failing_is_an_infrastructure_error_that_invalidates_the_run(tmp_path):
+    script = {"k": {"impl": [{}] * 5, "fail_impl_turns": 5, "review": []}}
+    summary, fake = run_pipeline(tmp_path, "G", script, limits=pipeline.Limits(retry_wait_s=0, retries=2))
+    r = record(tmp_path, "k")
+    assert r["outcome"] == "infra-error" and not r["accepted"] and len(r["impl_failures"]) == 3
+    assert [c["role"] for c in fake.calls] == ["impl"] * 3
+    assert summary["valid"] is False and any("implementer runs failed" in x for x in summary["invalid_reasons"])
 
 
 def test_a_diff_too_big_for_the_packet_leaves_the_full_packet_in_the_reviewers_copy(tmp_path):
@@ -196,7 +207,8 @@ def test_agent_area_and_harness_private_area_are_separate_and_handed_over(tmp_pa
     script = {"p": {"impl": [{"pkg/p.py": "x = 1\n"}, {"pkg/p.py": SOL}], "review": ["REVISE: no", "ACCEPT"]}}
     bundles = [make_bundle(str(tmp_path / "bundles"), "p")]
     fake = FakeOpencode(script)
-    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), give=given.append).run()
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(),
+                      own=lambda path, role: given.append(path)).run()
     run = str(tmp_path / "run")
     agent = os.path.join(run, "agent", "p")
     assert os.path.join(agent, "ws") in given                                   # workspace handed over
@@ -239,10 +251,88 @@ def test_each_task_gets_its_own_opencode_home_kept_across_its_rounds(tmp_path):
               "s": {"impl": [{"pkg/s.py": SOL}], "review": ["ACCEPT"]}}
     bundles = [make_bundle(str(tmp_path / "bundles"), tid) for tid in script]
     fake = FakeOpencode(script)
-    pipeline.Pipeline("T", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), give=given.append).run()
+    pipeline.Pipeline("T", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(),
+                      own=lambda path, role: given.append(path)).run()
     homes = {}
     for c in fake.calls:
-        homes.setdefault(c["task"], set()).add(c["home"])
-    assert all(len(h) == 1 for h in homes.values()) and homes["r"] != homes["s"]
+        if c["role"] == "impl":
+            homes.setdefault(c["task"], set()).add(c["home"])
+    assert all(len(h) == 1 for h in homes.values()) and homes["r"] != homes["s"]      # per task, kept across rounds
     for tid, (home,) in homes.items():
-        assert home == os.path.join(str(tmp_path / "run"), "agent", tid, "home") and home in given
+        assert home.startswith(os.path.join(str(tmp_path / "run"), "agent", tid, "home-")) and home in given
+
+
+class OwnRecorder:
+    """Stand-in for chown: records who owns each path, and checks agents only touch their own."""
+
+    def __init__(self, fake):
+        self.owner = {}
+        fake.owners = self.owner
+
+    def __call__(self, path, role):
+        self.owner[path] = role
+
+
+def test_each_role_runs_as_its_own_user_and_owns_the_workspace_only_during_its_turn(tmp_path):
+    # Final review Important-1: the reviewer's copy and the live workspace were siblings owned by one
+    # agent user, so the lead could edit ../ws; every task's workspace was writable by every agent.
+    script = {"u": {"impl": [{"pkg/u.py": "x\n"}, {"pkg/u.py": "x\n"}, {"pkg/u.py": "x\n"}],
+                    "review": ["REVISE: a", "REVISE: b", "REVISE: c"], "fix": {"pkg/u.py": SOL}}}
+    bundles = [make_bundle(str(tmp_path / "bundles"), "u")]
+    fake = FakeOpencode(script)
+    own = OwnRecorder(fake)
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), own=own).run()
+    ws = os.path.join(str(tmp_path / "run"), "agent", "u", "ws")
+    for c in fake.calls:
+        expected = "lead" if c["role"] in ("review", "fix") else "impl-1"
+        assert c["user"] == expected and c["owner"] == expected, c          # runs as, and owns, its role
+        if c["role"] == "review":
+            assert c["workdir"] != ws
+    assert own.owner[ws] is None                                             # handed back to the harness
+    homes = {c["role"]: c["home"] for c in fake.calls}
+    assert homes["impl"] != homes["review"] == homes["fix"]
+
+
+def test_review_time_tests_never_run_agent_code_outside_the_grader(tmp_path):
+    # Final review CRITICAL: visible tests ran on the agent's copy as the harness user (root on the VM),
+    # with the agent's own conftest.py. They now run through the grader on pristine snapshot + filtered patch.
+    class Recording(grade.LocalRunner):
+        def __init__(self):
+            super().__init__()
+            self.trees = []
+
+        def run(self, tree, args, timeout):
+            self.trees.append((tree, os.path.exists(os.path.join(tree, "conftest.py")), list(args)))
+            return super().run(tree, args, timeout)
+
+    script = {"v": {"impl": [{"pkg/v.py": SOL, "conftest.py": "raise SystemExit('agent code ran')\n"}],
+                    "review": ["ACCEPT"]}}
+    bundles = [make_bundle(str(tmp_path / "bundles"), "v")]
+    runner = Recording()
+    fake = FakeOpencode(script)
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), runner).run()
+    private = os.path.join(str(tmp_path / "run"), "tasks", "v")
+    assert len(runner.trees) == 2                                            # review-time check + final grade
+    for tree, has_conftest, args in runner.trees:
+        assert tree.startswith(private) and not has_conftest and "--noconftest" in args
+    rev = [c for c in fake.calls if c["role"] == "review"][0]
+    assert "1 passed" in open(rev["attach"]).read()
+
+
+def test_a_non_utf8_file_in_the_workspace_does_not_invalidate_the_run(tmp_path):
+    # Final review Important-2: strict UTF-8 decoding of git's diff raised -> harness-error.
+    script = {"b": {"impl": [{"pkg/b.py": SOL}], "review": ["ACCEPT"], "binary": {"notes.txt": "café, latin-1 text\n".encode("latin-1")}}}
+    summary, _ = run_pipeline(tmp_path, "G", script)
+    r = record(tmp_path, "b")
+    assert r["outcome"] == "implementer-accepted" and r["accepted"] and summary["valid"]
+    assert r["dropped"] == {"notes.txt": "undeclared"}
+
+
+def test_duplicate_task_ids_are_refused_up_front(tmp_path):
+    b1 = make_bundle(str(tmp_path / "one"), "d")
+    b2 = make_bundle(str(tmp_path / "two"), "d")
+    try:
+        pipeline.Pipeline("G", [b1, b2], FakeOpencode({}), str(tmp_path / "run"), grade.LocalRunner())
+    except ValueError:
+        return
+    raise AssertionError("duplicate task ids accepted")

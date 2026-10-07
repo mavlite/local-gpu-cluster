@@ -41,9 +41,25 @@ sandbox VM (Plan B) runs `cli.py run`; the workstation builds bundles and import
 - The session DB is agent-writable: loops are scored from the `--format json` events the harness
   captured into its private directory, and each task gets its own opencode home (HIGH-2).
 - Completing a task is exactly-once, even if recording an error fails, so a run always ends (HIGH-3).
+- No agent code runs as the harness: the visible-test output shown to the lead is produced by the
+  grader (the network-less container on the VM) on pristine snapshot + filtered patch, never on the
+  agent's copy (final review CRITICAL). `run --agent-user-prefix` refuses `--grader local`.
+- Each role is its own OS user on the VM (`<prefix>-impl-N`, `<prefix>-lead`): a workspace belongs to
+  its implementer only during that implementer's turn, to the lead only during the fix, otherwise to
+  root; reviews get their own lead-owned copy. A shared agent user let the reviewer edit `../ws`.
+- An implementer run that fails outright (rc != 0, not a timeout -- opencode exits after ~66 s when
+  its worker is down) is retried (`Limits.retries`, `retry_wait_s`) and is never a review round;
+  persistent failure is `infra-error` and invalidates the run.
+- Patches are bytes end to end (workspace files need not be UTF-8); FIFOs and sockets are skipped
+  when copying a workspace. Grading containers are named, CPU-capped and killed on timeout.
+
+## VM requirements (Plan B)
+Users `<prefix>-impl-1..3` and `<prefix>-lead`; harness as root; bundles 0700; Docker + grader image
+(`python3`, `pytest`, the repo's test deps); `systemd-run`; opencode 1.18.34 at `WF_OPENCODE`.
+Run: `cli.py run --arm T|G ... --grader docker:<image> --agent-user-prefix <prefix>`.
 
 ## Tests
-`python3 -m pytest scripts/tools/workforce/tests -q` (109 tests; on Windows the POSIX permission test skips, on Linux the opencode end-to-end test skips; also green on Python 3.12.3).
+`python3 -m pytest scripts/tools/workforce/tests -q` (119 tests; on Windows the POSIX permission test skips, on Linux the opencode end-to-end test skips; also green on Python 3.12.3).
 `test_e2e_opencode.py` drives the real opencode binary against a scripted model server and skips
 when opencode is not installed (`WF_OPENCODE` forces a path). Docker grading is only argv-tested
 here; Plan B verifies it on the VM.
