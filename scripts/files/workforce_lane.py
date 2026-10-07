@@ -58,7 +58,8 @@ class ReservedLane:
 
 class _LaneThenChat:
     """Acquire the lane, then the chat gate; release in reverse. Cancellation-safe: a cancel while
-    waiting for the chat gate gives the lane slot back."""
+    waiting for the chat gate gives the lane slot back. A request whose chat slot arrives after the
+    layout shrank below its lane share is refused (LaneClosed), never admitted over the reserve."""
 
     def __init__(self, lane: ReservedLane, chat_gate):
         self._lane, self._chat = lane, chat_gate
@@ -70,6 +71,11 @@ class _LaneThenChat:
         except BaseException:
             await asyncio.shield(self._lane.release())
             raise
+        if self._lane.in_use > self._lane.capacity:
+            # The layout shrank while we waited on the chat gate: taking this slot would leave the
+            # owner without one. Give both back and refuse, as a new request would be refused.
+            await asyncio.shield(self.release())
+            raise LaneClosed()
         return True
 
     async def release(self) -> None:

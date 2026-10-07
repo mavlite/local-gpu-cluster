@@ -198,3 +198,28 @@ def test_admitted_raises_the_callers_error_when_the_lane_is_closed_and_releases_
             assert chat.in_use == 1
         assert chat.in_use == 0
     run(go())
+
+
+def test_a_request_admitted_after_a_shrink_never_takes_the_owners_last_slot():
+    # Final review: a scoped request already past the lane but waiting on the chat gate, when the
+    # layout shrank 3 -> 1, was admitted to the only slot ahead of the owner -- breaking "workforce
+    # holds at most total_slots - reserve". It must be refused instead.
+    async def go():
+        chat = AdmissionGate(3)
+        lane = ReservedLane(chat, reserve=1)
+        await chat.acquire()
+        await chat.acquire()                      # the owner holds 2 slots
+        a = gate_for(SCOPED, chat, lane)
+        await a.acquire()                         # scoped A holds the third
+        b = asyncio.ensure_future(gate_for(SCOPED, chat, lane).acquire())
+        await asyncio.sleep(0.05)
+        assert lane.in_use == 2 and not b.done()  # B is past the lane, waiting on the chat gate
+        await chat.set_capacity(1)
+        await chat.release()
+        await chat.release()
+        await a.release()                         # everything drains; B would now get the only slot
+        with pytest.raises(LaneClosed):
+            await asyncio.wait_for(b, 2.0)
+        assert lane.in_use == 0 and chat.in_use == 0
+        await asyncio.wait_for(chat.acquire(), 0.5)   # the owner gets the slot at once
+    run(go())
