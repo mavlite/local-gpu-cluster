@@ -1047,8 +1047,8 @@ async def _tool_web_fetch(args: dict) -> dict:
     All checks live in web_fetch_guard: http(s) only, denied hosts, and every resolved address
     must be globally routable -- for the original URL and for each redirect, which is followed
     manually (the previous version checked only the first host and let httpx follow redirects,
-    so a public URL redirecting to a LAN address was fetched unchecked). A narrow DNS-rebinding
-    window between resolution and connect remains for a single-shot GET with no keepalive.
+    so a public URL redirecting to a LAN address was fetched unchecked). Each connection is pinned
+    to the vetted IP (Host header + SNI keep the original name), closing DNS rebinding.
     """
     headers = {
         "User-Agent": "local-gpu-cluster-router/1.0 (web_fetch)",
@@ -1057,11 +1057,13 @@ async def _tool_web_fetch(args: dict) -> dict:
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(WEB_FETCH_TIMEOUT_SECONDS),
         follow_redirects=False,
+        trust_env=False,            # never route through proxy env vars
     ) as c:
         try:
             return await web_fetch_guard.guarded_get(
                 args.get("url"), client=c, headers=headers, max_bytes=WEB_FETCH_MAX_SIZE_BYTES)
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+        except httpx.HTTPError as e:
+            # Exception class only: never echo upstream/transport detail back to the model.
             return {"error": "unreachable", "message": type(e).__name__}
 
 
