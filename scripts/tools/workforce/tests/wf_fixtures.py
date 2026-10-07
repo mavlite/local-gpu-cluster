@@ -69,7 +69,7 @@ class FakeOpencode:
         self.script, self.calls, self.lock = script, [], threading.Lock()
         self.turns, self.sessions = {}, {}
 
-    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None):
+    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None):
         tid = _task_of(workdir)
         s = self.script[tid]
         role = "review" if agent == "reviewer" else "fix" if agent == "fixer" else "impl"
@@ -80,11 +80,15 @@ class FakeOpencode:
             self.sessions[sid] = tid
             self.calls.append({"task": tid, "agent": agent, "role": role, "session": sid,
                                "resumed": session is not None, "message": message, "attach": attach,
-                               "workdir": workdir})
+                               "workdir": workdir, "home": home})
         if s.get("raise_on") == role:
             raise RuntimeError(f"scripted failure in {role}")
-        with open(events_path, "w") as f:
-            f.write("")
+        with open(events_path, "w") as f:                   # the harness-captured --format json stream
+            if role == "impl" and n == 0:
+                for tool, inp in s.get("tool_calls", []):
+                    f.write(json.dumps({"type": "step_start", "sessionID": sid}) + "\n")
+                    f.write(json.dumps({"type": "tool_use", "sessionID": sid, "part": {
+                        "type": "tool", "tool": tool, "state": {"status": "completed", "input": inp}}}) + "\n")
         if role == "impl" and n < s.get("fail_impl_turns", 0):
             return oc.RunResult(1, False, None, "", 0.01)          # opencode died: no session, rc 1
         if role == "review":
@@ -103,10 +107,6 @@ class FakeOpencode:
                 f.write(content)
         return oc.RunResult(0, False, sid, "SUMMARY: done", 0.01)
 
-    def export(self, session_id, timeout=120):
-        tid = self.sessions[session_id]
-        msgs = [{"info": {"role": "user"}, "parts": []}]
-        for tool, inp in self.script[tid].get("tool_calls", []):
-            msgs.append({"info": {"role": "assistant"},
-                         "parts": [{"type": "tool", "tool": tool, "state": {"status": "completed", "input": inp}}]})
-        return {"info": {"id": session_id}, "messages": msgs}
+    def export(self, session_id, timeout=120, home=None):
+        # The session DB is agent-writable on the VM: model one the agent has scrubbed clean.
+        return {"info": {"id": session_id}, "messages": [{"info": {"role": "user"}, "parts": []}]}

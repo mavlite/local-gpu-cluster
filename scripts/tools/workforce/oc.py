@@ -17,6 +17,8 @@ import signal
 import subprocess
 import time
 import uuid
+
+import profiles
 from dataclasses import dataclass
 from typing import Optional
 
@@ -117,7 +119,9 @@ class Opencode:
         self.cmd, self.env = list(cmd), env
         self.launcher = launcher or DirectLauncher()
 
-    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None):
+    def run(self, agent, workdir, message, timeout_s, events_path, session=None, attach=None, home=None):
+        """home: this task's own opencode home (sessions are resumed from the same home)."""
+        env = profiles.with_home(self.env, home) if home else self.env
         argv = [*self.cmd, "run", "--pure", "--agent", agent, "--dir", workdir, "--format", "json"]
         if session:
             argv += ["--session", session]
@@ -128,7 +132,7 @@ class Opencode:
         t0 = time.monotonic()
         with open(events_path, "w", encoding="utf-8") as out, \
                 open(events_path + ".stderr", "w", encoding="utf-8") as err:
-            proc = subprocess.Popen(self.launcher.argv(argv, name), env=self.env, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(self.launcher.argv(argv, name), env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, **self.launcher.popen_kwargs())
             try:
                 rc, timed_out = proc.wait(timeout=timeout_s), False
@@ -139,7 +143,8 @@ class Opencode:
             sid, text = parse_events(f.read())
         return RunResult(rc, timed_out, sid, text, time.monotonic() - t0)
 
-    def export(self, session_id, timeout=120):
-        r = subprocess.run([*self.cmd, "export", session_id], env=self.env, stdin=subprocess.DEVNULL,
+    def export(self, session_id, timeout=120, home=None):
+        env = profiles.with_home(self.env, home) if home else self.env
+        r = subprocess.run([*self.cmd, "export", session_id], env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=timeout, check=True)
         return json.loads(r.stdout[r.stdout.index("{"):])

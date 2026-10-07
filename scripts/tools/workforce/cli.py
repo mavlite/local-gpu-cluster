@@ -42,7 +42,8 @@ def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launc
     os.makedirs(home, exist_ok=True)
     if give:
         give(home)
-    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg), launcher=launcher)
+    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=profiles.keys_for(arm)),
+                       launcher=launcher)
 
 
 def assert_private(path):
@@ -65,9 +66,18 @@ def chown_tree(user):
     return give
 
 
+_PATCH_PATH_RES = (re.compile(r"^diff --git a/(.+?) b/(.+)$", re.M), re.compile(r"^--- a/(.+)$", re.M),
+                   re.compile(r"^\+\+\+ b/(.+)$", re.M), re.compile(r"^(?:rename|copy) (?:from|to) (.+)$", re.M))
+
+
 def patch_paths(patch_text):
-    """Paths named by `diff --git` headers (patches are made with --no-renames)."""
-    return sorted({m.group(2) for m in re.finditer(r"^diff --git a/(.+?) b/(.+)$", patch_text, re.M)})
+    """Every path a patch names: `diff --git` headers AND the `---`/`+++`/rename/copy lines that
+    `git apply` actually follows (security review LOW: they can disagree)."""
+    names = set()
+    for rx in _PATCH_PATH_RES:
+        for m in rx.finditer(patch_text):
+            names.update(g for g in m.groups() if g)
+    return sorted(names)
 
 
 def import_patch(repo, patch_file, bundle_dir, run_id):

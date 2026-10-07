@@ -99,3 +99,10 @@ def test_an_agent_user_run_refuses_bundles_readable_by_others(tmp_path):
         cli.assert_private(str(b))
     os.chmod(b, 0o700)
     cli.assert_private(str(b))
+
+
+def test_patch_paths_also_reads_body_paths_that_git_apply_honours():
+    # Security review LOW: the header says one path, the body another; git apply follows the body.
+    text = ("diff --git a/pkg/calc.py b/pkg/calc.py\n--- a/pkg/calc.py\n+++ b/conftest.py\n"
+            "diff --git a/x b/y\nrename from x\nrename to y\ncopy from p\ncopy to q\n")
+    assert cli.patch_paths(text) == ["conftest.py", "p", "pkg/calc.py", "q", "x", "y"]

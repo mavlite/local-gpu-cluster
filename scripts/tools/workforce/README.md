@@ -35,9 +35,15 @@ sandbox VM (Plan B) runs `cli.py run`; the workstation builds bundles and import
 - Sessions live in `opencode.db` (SQLite); `opencode export <id>` prints a status line, then JSON.
 - A grader that cannot find pytest reports "failed" too: a test asserts the failure summary is a
   real test failure (`2 failed`), not `No module named pytest`.
+- Exit code 0 is not a pass: code under test runs inside pytest, and `os._exit(0)` at import ends
+  it with 0 before any test runs. A pass needs pytest's JUnit report to list every expected test
+  (read from the test files with `ast`) as passed (security review CRITICAL-1).
+- The session DB is agent-writable: loops are scored from the `--format json` events the harness
+  captured into its private directory, and each task gets its own opencode home (HIGH-2).
+- Completing a task is exactly-once, even if recording an error fails, so a run always ends (HIGH-3).
 
 ## Tests
-`python3 -m pytest scripts/tools/workforce/tests -q` (99 tests: 98 run on Windows, where the POSIX permission test skips; 98 on Linux, where the opencode end-to-end test skips; also green on Python 3.12.3).
+`python3 -m pytest scripts/tools/workforce/tests -q` (109 tests; on Windows the POSIX permission test skips, on Linux the opencode end-to-end test skips; also green on Python 3.12.3).
 `test_e2e_opencode.py` drives the real opencode binary against a scripted model server and skips
 when opencode is not installed (`WF_OPENCODE` forces a path). Docker grading is only argv-tested
 here; Plan B verifies it on the VM.

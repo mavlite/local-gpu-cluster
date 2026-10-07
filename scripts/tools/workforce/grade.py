@@ -7,6 +7,11 @@ their destination), and pytest runs with a harness-owned ini, `-p no:cacheprovid
 `--noconftest` unless the task declares `needs_conftest` (conftest.py is a protected path, so the
 conftest files in the tree are always the pristine ones).
 
+A pass needs more than pytest's exit code: the code under test runs inside the pytest process, and
+`os._exit(0)` at import ends it with code 0 before any test runs (security review CRITICAL-1). So
+pytest writes a JUnit report and every expected test -- read from the test files with `ast` -- must
+appear in it as passed, with no failure, error or skip anywhere.
+
 Bundle layout (one directory per task):
     task.json      {"id", "commit", "parent", "request", "files", "tests", "hidden", "needs_conftest",
                     "timeout_s", optional "pytest_args"}
@@ -14,18 +19,29 @@ Bundle layout (one directory per task):
     snapshot.tar   the workspace snapshot (parent commit, stripped, visible tests included)
     hidden/        hidden tests; task.json "hidden" maps file name -> destination path in the tree
 """
+import ast
 import json
 import os
+import posixpath
 import shutil
 import subprocess
 import sys
 import tarfile
+import xml.etree.ElementTree as ET
 
 import workspace
 
 INI = ".workforce_pytest.ini"
+JUNIT = ".workforce_junit.xml"
 _REQUIRED = {"id": str, "commit": str, "parent": str, "request": str, "files": list, "tests": list,
              "hidden": dict, "needs_conftest": bool, "timeout_s": int}
+
+
+def _safe_rel(path):
+    """A relative, normalised posix path inside the tree."""
+    return (isinstance(path, str) and path and "\\" not in path and ":" not in path
+            and not path.startswith("/") and posixpath.normpath(path) == path
+            and path != ".." and not path.startswith("../"))
 
 
 def load_task(bundle_dir):
@@ -34,6 +50,11 @@ def load_task(bundle_dir):
     for key, typ in _REQUIRED.items():
         if not isinstance(task.get(key), typ):
             raise ValueError(f"{bundle_dir}: task.json '{key}' missing or not {typ.__name__}")
+    paths = list(task["files"]) + list(task["tests"]) + list(task["hidden"].values()) +         [a.split("::")[0] for a in task.get("pytest_args") or []]
+    bad = [p for p in paths if not _safe_rel(p)]
+    bad += [n for n in task["hidden"] if not isinstance(n, str) or "/" in n or "\\" in n or n in ("", ".", "..")]
+    if bad:
+        raise ValueError(f"{task.get('id')}: unsafe paths in task.json: {bad}")
     overlap = set(task["files"]) & (set(task["tests"]) | set(task["hidden"].values()))
     if overlap:
         raise ValueError(f"{task['id']}: declared files overlap its tests: {sorted(overlap)}")
@@ -42,11 +63,54 @@ def load_task(bundle_dir):
     return task
 
 
+def expected_tests(source):
+    """{"test_x", "TestY::test_z"} defined in a test module's source."""
+    out = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            out.add(node.name)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            out |= {f"{node.name}::{f.name}" for f in node.body
+                    if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and f.name.startswith("test")}
+    return out
+
+
+def _targets(task):
+    return list(task.get("pytest_args") or task["tests"]) + sorted(task["hidden"].values())
+
+
+def expected_ids(task, tree):
+    """{(module_dotted, "Class::name" | "name")} every test the grade must see pass."""
+    out = set()
+    for target in _targets(task):
+        path, _, node = target.partition("::")
+        module = path[:-3].replace("/", ".")
+        if node:
+            out.add((module, node))
+        else:
+            with open(os.path.join(tree, path), encoding="utf-8") as f:
+                out |= {(module, name) for name in expected_tests(f.read())}
+    return out
+
+
+def junit_results(path):
+    """{(module_dotted, "Class::name" | "name"): passed?} from a pytest JUnit report; parametrised
+    cases fold into their function (all must pass)."""
+    results = {}
+    for case in ET.parse(path).getroot().iter("testcase"):
+        cls, name = case.get("classname", ""), case.get("name", "").split("[")[0]
+        last = cls.rsplit(".", 1)[-1]
+        module, key = (cls.rsplit(".", 1)[0], f"{last}::{name}") if last.startswith("Test") else (cls, name)
+        ok = not any(case.find(tag) is not None for tag in ("failure", "error", "skipped"))
+        results[(module, key)] = results.get((module, key), True) and ok
+    return results
+
+
 def pytest_args(task):
-    args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q"]
+    args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q", f"--junitxml={JUNIT}"]
     if not task["needs_conftest"]:
         args.append("--noconftest")
-    return args + list(task.get("pytest_args") or task["tests"]) + sorted(task["hidden"].values())
+    return args + _targets(task)
 
 
 def restore_visible_tests(bundle_dir, task, tree):
@@ -132,9 +196,21 @@ def grade(bundle_dir, patch_text, workdir, runner):
         prepare_tree(bundle_dir, task, patch_text, tree)
     except workspace.PatchError as e:
         return {"pass": False, "stage": "apply", "summary": str(e)[-300:], "rc": None}
+    expected = expected_ids(task, tree)                    # read before any agent code runs
+    junit = os.path.join(tree, JUNIT)
+    if os.path.lexists(junit):
+        os.remove(junit)
     rc, out, timed_out = runner.run(tree, pytest_args(task), task["timeout_s"])
     with open(os.path.join(workdir, "pytest.out"), "w", encoding="utf-8") as f:
         f.write(out)
     if timed_out:
         return {"pass": False, "stage": "timeout", "summary": f"over {task['timeout_s']} s", "rc": None}
-    return {"pass": rc == 0, "stage": "tests", "summary": _tail(out), "rc": rc}
+    try:
+        results = junit_results(junit)
+    except (OSError, ET.ParseError):
+        results = {}
+    passed = sum(1 for k in expected if results.get(k))
+    ok = rc == 0 and bool(expected) and passed == len(expected) and all(results.values())
+    summary = _tail(out) or "no pytest summary (the test process ended early)"
+    return {"pass": ok, "stage": "tests", "summary": summary, "rc": rc,
+            "tests": {"expected": len(expected), "passed": passed}}

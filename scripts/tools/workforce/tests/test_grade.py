@@ -153,3 +153,36 @@ def test_load_task_rejects_a_task_whose_declared_files_include_its_tests(tmp_pat
     b = make_bundle(str(tmp_path / "b"), files=[MOD, VISIBLE])
     with pytest.raises(ValueError):
         grade.load_task(b)
+
+
+def test_a_module_that_exits_the_test_process_at_import_does_not_pass(bundle, tmp_path):
+    # Security review CRITICAL-1: os._exit(0) during collection gave rc 0 and no tests ran.
+    p = patch_for(tmp_path, {MOD: "import os\nos._exit(0)\ndef add(a, b):\n    return 0\n"})
+    r = run(bundle, p, tmp_path)
+    assert r["pass"] is False and r["stage"] == "tests", r
+
+
+def test_a_module_level_skip_does_not_pass(bundle, tmp_path):
+    p = patch_for(tmp_path, {MOD: "import pytest\npytest.skip('nope', allow_module_level=True)\n"})
+    assert run(bundle, p, tmp_path)["pass"] is False
+
+
+def test_every_expected_test_must_be_reported_passed(bundle, tmp_path):
+    p = patch_for(tmp_path, {MOD: "def add(a, b):\n    return a + b\n"})
+    r = run(bundle, p, tmp_path)
+    assert r["pass"] is True and r["tests"] == {"expected": 2, "passed": 2}, r
+
+
+def test_expected_tests_are_read_from_the_test_files():
+    src = ("import pytest\n\ndef test_a():\n    pass\n\ndef helper():\n    pass\n\n"
+           "class TestX:\n    def test_b(self):\n        pass\n\n    def other(self):\n        pass\n\n"
+           "class Plain:\n    def test_c(self):\n        pass\n")
+    assert grade.expected_tests(src) == {"test_a", "TestX::test_b"}
+
+
+def test_load_task_rejects_paths_that_leave_the_tree(tmp_path):
+    for over in ({"files": ["../evil.py"]}, {"tests": ["/etc/passwd"]}, {"hidden": {"../x.py": "pkg/tests/x.py"}},
+                 {"hidden": {"test_calc_hidden.py": "../../outside.py"}}, {"files": ["pkg\\calc.py"]}):
+        b = make_bundle(str(tmp_path / f"b{len(os.listdir(tmp_path))}"), **over)
+        with pytest.raises(ValueError):
+            grade.load_task(b)

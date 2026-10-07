@@ -54,6 +54,7 @@ class _Task:
     dir: str                                         # harness-private
     adir: str                                        # agent area
     ws: object = None
+    home: str = None                                 # this task's own opencode home (agent area)
     agent: str = None
     session: str = None
     rounds: list = field(default_factory=list)       # implementer turns
@@ -165,10 +166,15 @@ class Pipeline:
             fn(*args)
         except Exception as e:                             # spec §9: a harness exception invalidates
             self.errors.append(f"{t.id}: {type(e).__name__}: {e}")
-            os.makedirs(t.dir, exist_ok=True)
-            with open(os.path.join(t.dir, "harness-error.txt"), "w", encoding="utf-8") as f:
-                f.write(traceback.format_exc())
-            self._write_record(t, "harness-error", None, {}, None)
+            try:
+                os.makedirs(t.dir, exist_ok=True)
+                with open(os.path.join(t.dir, "harness-error.txt"), "w", encoding="utf-8") as f:
+                    f.write(traceback.format_exc())
+                self._write_record(t, "harness-error", None, {}, None)
+            except Exception as e2:                        # never let error handling kill the thread
+                self.errors.append(f"{t.id}: recording the error failed: {type(e2).__name__}: {e2}")
+            finally:
+                self._complete(t, self._record(t, "harness-error", None, {}, None))   # no-op if done
 
     # ---- steps --------------------------------------------------------------------------------
     def _implement(self, t, agent, feedback):
@@ -178,12 +184,15 @@ class Pipeline:
             t.ws = workspace.Workspace.materialize(os.path.join(t.bundle, "snapshot.tar"),
                                                    os.path.join(t.adir, "ws"), os.path.join(t.dir, "git"))
             self.give(t.ws.root)
+            t.home = os.path.join(t.adir, "home")
+            os.makedirs(t.home)
+            self.give(t.home)
             t.agent, t.t_start = agent, time.time()
         n = len(t.rounds)
         msg = review.implement_message(t.task, t.request) if feedback is None else review.revise_message(feedback)
         t0 = time.time()
         r = self.oc.run(agent, t.ws.root, msg, self.limits.impl_s, os.path.join(t.dir, f"impl-r{n}.jsonl"),
-                        session=t.session)
+                        session=t.session, home=t.home)
         t.session = t.session or r.session_id
         t.rounds.append({"round": n, "agent": agent, "session": r.session_id, "rc": r.rc,
                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time(), "summary": r.text[-500:]})
@@ -224,7 +233,8 @@ class Pipeline:
         self.give(pkt)
         t0 = time.time()
         r = self.oc.run("reviewer", tree, "REVIEW the change described in the attached packet.",
-                        self.limits.review_s, os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt)
+                        self.limits.review_s, os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt,
+                        home=t.home)
         shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
         verdict, feedback = review.parse_verdict(r.text)
         t.reviews.append({"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
@@ -253,7 +263,7 @@ class Pipeline:
         self.give(pkt)
         t0 = time.time()
         r = self.oc.run("fixer", t.ws.root, "FIX: finish the request; the attached packet has the details.",
-                        self.limits.fix_s, os.path.join(t.dir, "fix.jsonl"), attach=pkt)
+                        self.limits.fix_s, os.path.join(t.dir, "fix.jsonl"), attach=pkt, home=t.home)
         t.fix = {"session": r.session_id, "timed_out": r.timed_out, "t_start": t0, "t_end": time.time()}
         self._finalize(t, "lead-fixed")
 
@@ -266,35 +276,54 @@ class Pipeline:
         with open(os.path.join(self.run_dir, "patches", f"{t.id}.patch"), "w", encoding="utf-8") as f:
             f.write(patch)
         g = grade.grade(t.bundle, patch, os.path.join(t.dir, "grade"), self.grader)
-        loop = self._loops(t, t.session, "impl")
-        if t.fix and t.fix.get("session"):
-            self._loops(t, t.fix["session"], "fix")
+        loop = self._score_loops(t)
+        for name, session in (("impl", t.session), ("fix", (t.fix or {}).get("session"))):
+            self._archive_export(t, name, session)
         self._write_record(t, outcome, g, dropped, loop)
 
-    def _loops(self, t, session, name):
-        if not session:
-            return None
-        try:
-            doc = self.oc.export(session)
-        except Exception as e:                             # an export failure is recorded, not fatal
-            return {"error": f"{type(e).__name__}: {e}"}
-        with open(os.path.join(t.dir, f"export-{name}.json"), "w", encoding="utf-8") as f:
-            json.dump(doc, f)
-        s = loops.summarize(doc)
-        s["steps_per_turn"] = loops.steps_per_turn(doc)
+    def _score_loops(self, t):
+        """Loops over all implementer rounds, from the events this harness captured itself."""
+        calls, steps = [], []
+        for n in range(len(t.rounds)):
+            with open(os.path.join(t.dir, f"impl-r{n}.jsonl"), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            calls += loops.tool_calls_from_events(text)
+            steps.append(loops.steps_from_events(text))
+        s = loops.summarize_calls(calls)
+        s["steps_per_turn"] = steps
         return s
 
-    def _write_record(self, t, outcome, g, dropped, loop):
+    def _archive_export(self, t, name, session):
+        """Keep `opencode export` for reading later; it is agent-writable, so nothing is scored from it."""
+        if not session:
+            return
+        try:
+            doc = self.oc.export(session, home=t.home)
+        except Exception as e:                             # an export failure is recorded, not fatal
+            doc = {"export_error": f"{type(e).__name__}: {e}"}
+        with open(os.path.join(t.dir, f"export-{name}.json"), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+
+    def _record(self, t, outcome, g, dropped, loop):
         accepted = bool(g and g["pass"] and outcome in ("implementer-accepted", "lead-fixed", "implemented"))
-        rec = {"id": t.id, "arm": self.arm, "implementer": t.agent, "outcome": outcome, "accepted": accepted,
+        return {"id": t.id, "arm": self.arm, "implementer": t.agent, "outcome": outcome, "accepted": accepted,
                "grade": g, "dropped": dropped, "loops": loop, "rounds": t.rounds, "reviews": t.reviews,
                "rework_rounds": max(0, len(t.rounds) - 1), "fix": t.fix,
                "time_cap_hits": sum(1 for r in t.rounds if r["timed_out"]) + int(bool(t.fix and t.fix["timed_out"])),
                "t_start": t.t_start, "t_end": time.time()}
+
+    def _write_record(self, t, outcome, g, dropped, loop):
+        rec = self._record(t, outcome, g, dropped, loop)
         os.makedirs(t.dir, exist_ok=True)
         with open(os.path.join(t.dir, "record.json"), "w", encoding="utf-8") as f:
             json.dump(rec, f, indent=1)
+        self._complete(t, rec)
+
+    def _complete(self, t, rec):
+        """Count a task as finished exactly once; the run ends when every task is finished."""
         with self.cond:
+            if t.id in self.records:
+                return
             self.records[t.id] = rec
             self.done += 1
             self.cond.notify_all()

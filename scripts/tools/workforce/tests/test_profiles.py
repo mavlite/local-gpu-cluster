@@ -76,3 +76,10 @@ def test_env_locks_out_project_config_and_passes_only_the_workforce_keys(tmp_pat
     assert env["WF_ROUTER_KEY"] == "r" and env["WF_WORKER_KEY"] == "w"
     assert "ROUTER_API_KEY" not in env and "OPENCODE_CONFIG_CONTENT" not in env
     assert env["HOME"] == str(tmp_path / "home")
+
+
+def test_only_the_keys_an_arm_needs_reach_the_agents(tmp_path):
+    base = {"WF_ROUTER_KEY": "r", "WF_WORKER_KEY": "w"}
+    env = profiles.opencode_env(base, str(tmp_path), "/cfg", keys=profiles.keys_for("G"))
+    assert env["WF_ROUTER_KEY"] == "r" and "WF_WORKER_KEY" not in env
+    assert profiles.keys_for("T") == ("WF_ROUTER_KEY", "WF_WORKER_KEY")

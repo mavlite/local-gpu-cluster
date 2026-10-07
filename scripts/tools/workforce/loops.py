@@ -7,6 +7,10 @@ A loop episode is either
 Only identical calls form an episode, so test runs separated by real edits never do: an edit with
 new arguments breaks the run. Re-running the same tests with nothing changed in between, or
 re-applying the same edit, is a loop. `invalid` calls (a tool the agent was not offered) count.
+
+The harness scores the `--format json` events it captured itself (written to its private directory),
+not `opencode export`: the session DB belongs to the agent user, who could scrub it (security review
+HIGH-2). Both carry the same tool-call records.
 """
 import json
 
@@ -24,6 +28,32 @@ def tool_calls(export):
                 out.append({"tool": part.get("tool"), "input": st.get("input") or {},
                             "status": st.get("status")})
     return out
+
+
+def tool_calls_from_events(text):
+    """Tool calls, in order, from captured `opencode run --format json` output."""
+    out = []
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") == "tool_use":
+            part = ev.get("part") or {}
+            st = part.get("state") or {}
+            out.append({"tool": part.get("tool"), "input": st.get("input") or {}, "status": st.get("status")})
+    return out
+
+
+def steps_from_events(text):
+    """Model steps in one `opencode run` (one step_start event each)."""
+    n = 0
+    for line in text.splitlines():
+        try:
+            n += json.loads(line).get("type") == "step_start"
+        except ValueError:
+            continue
+    return n
 
 
 def key(call):
@@ -69,6 +99,11 @@ def steps_per_turn(export):
         elif role == "assistant" and out:
             out[-1] += 1
     return out
+
+
+def summarize_calls(calls):
+    eps = episodes(calls)
+    return {"n_calls": len(calls), "episodes": len(eps), "looped": bool(eps), "detail": eps}
 
 
 def summarize(export):

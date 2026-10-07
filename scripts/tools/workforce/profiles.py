@@ -100,14 +100,26 @@ def install(cfg_dir, config):
     return path
 
 
-def opencode_env(base_env, home, config_path):
-    """Isolated HOME/XDG, the lock-down switches, and only the workforce keys from base_env."""
-    env = {k: v for k, v in base_env.items() if k.upper() in _PASS_ENV}
-    env.update({k: base_env[k] for k in KEY_ENV if k in base_env})
-    env.update(LOCK_ENV)
-    env.update({"HOME": home, "USERPROFILE": home, "OPENCODE_CONFIG": config_path,
+def with_home(env, home):
+    """A copy of env whose opencode home (session DB, logs, snapshots) is `home`."""
+    out = dict(env)
+    out.update({"HOME": home, "USERPROFILE": home,
                 "XDG_CONFIG_HOME": os.path.join(home, ".config"),
                 "XDG_DATA_HOME": os.path.join(home, ".local", "share"),
                 "XDG_STATE_HOME": os.path.join(home, ".local", "state"),
                 "XDG_CACHE_HOME": os.path.join(home, ".cache")})
-    return env
+    return out
+
+
+def keys_for(arm):
+    """The keys an arm's agents need: arm G has no CPU workers, so no worker key."""
+    return KEY_ENV if arm == "T" else ("WF_ROUTER_KEY",)
+
+
+def opencode_env(base_env, home, config_path, keys=KEY_ENV):
+    """Isolated HOME/XDG, the lock-down switches, and only the given workforce keys from base_env."""
+    env = {k: v for k, v in base_env.items() if k.upper() in _PASS_ENV}
+    env.update({k: base_env[k] for k in keys if k in base_env})
+    env.update(LOCK_ENV)
+    env["OPENCODE_CONFIG"] = config_path
+    return with_home(env, home)

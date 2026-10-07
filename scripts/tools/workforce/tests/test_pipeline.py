@@ -207,3 +207,42 @@ def test_agent_area_and_harness_private_area_are_separate_and_handed_over(tmp_pa
         assert c["attach"] is None or c["attach"].startswith(os.path.join(run, "agent"))
     assert os.path.isdir(os.path.join(run, "tasks", "p", "git"))                # baseline stays private
     assert os.path.isfile(os.path.join(run, "tasks", "p", "record.json"))
+
+
+def test_a_failure_while_recording_an_error_still_ends_the_run(tmp_path):
+    # Security review HIGH-3: an I/O error inside the error handler killed the thread and run() hung.
+    import threading
+
+    class Brittle(pipeline.Pipeline):
+        def _write_record(self, t, outcome, *a, **kw):
+            if outcome == "harness-error":
+                raise OSError("disk full while recording the error")
+            return super()._write_record(t, outcome, *a, **kw)
+
+    script = {"x": {"impl": [{"pkg/x.py": SOL}], "review": ["ACCEPT"], "raise_on": "review"},
+              "y": {"impl": [{"pkg/y.py": SOL}], "review": ["ACCEPT"]}}
+    bundles = [make_bundle(str(tmp_path / "bundles"), tid) for tid in script]
+    p = Brittle("T", bundles, FakeOpencode(script), str(tmp_path / "run"), grade.LocalRunner())
+    out = {}
+    th = threading.Thread(target=lambda: out.update(s=p.run()), daemon=True)
+    th.start()
+    th.join(60)
+    assert not th.is_alive(), "run() deadlocked"
+    assert out["s"]["valid"] is False and out["s"]["n_tasks"] == 2
+    assert out["s"]["accepted_by_task"] == {"x": False, "y": True}
+
+
+def test_each_task_gets_its_own_opencode_home_kept_across_its_rounds(tmp_path):
+    # Security review HIGH-2: one shared, agent-writable opencode home for every task.
+    given = []
+    script = {"r": {"impl": [{"pkg/r.py": "x\n"}, {"pkg/r.py": SOL}], "review": ["REVISE: no", "ACCEPT"]},
+              "s": {"impl": [{"pkg/s.py": SOL}], "review": ["ACCEPT"]}}
+    bundles = [make_bundle(str(tmp_path / "bundles"), tid) for tid in script]
+    fake = FakeOpencode(script)
+    pipeline.Pipeline("T", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), give=given.append).run()
+    homes = {}
+    for c in fake.calls:
+        homes.setdefault(c["task"], set()).add(c["home"])
+    assert all(len(h) == 1 for h in homes.values()) and homes["r"] != homes["s"]
+    for tid, (home,) in homes.items():
+        assert home == os.path.join(str(tmp_path / "run"), "agent", tid, "home") and home in given
