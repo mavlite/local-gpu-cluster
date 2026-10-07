@@ -51,6 +51,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 import alias_defaults
 import tavily_cache
+import web_fetch_guard
 from stream_admission import (AdmissionGate, ClosingStreamingResponse, hold_slot,
                               refresh_capacity_once)
 from embed_admission import embed_texts, first_oversized
@@ -157,14 +158,7 @@ TOOL_EXECUTION_DEFAULT = os.environ.get("TOOL_EXECUTION_DEFAULT", "client")
 # Max response size cap and timeout cap prevent runaway downloads.
 WEB_FETCH_MAX_SIZE_BYTES = int(os.environ.get("WEB_FETCH_MAX_SIZE_KB", "1024")) * 1024
 WEB_FETCH_TIMEOUT_SECONDS = int(os.environ.get("WEB_FETCH_TIMEOUT_SECONDS", "15"))
-WEB_FETCH_DENY_HOSTS = {
-    # Cloud metadata endpoints — block to prevent SSRF to instance creds.
-    "169.254.169.254", "metadata.google.internal", "metadata", "169.254.170.2",
-    # Loopback / link-local. The cluster is on 192.168.6.0/24 but a tool
-    # call to one of our own LXCs (e.g., the router itself) would be a
-    # weird recursion vector. Block by default.
-    "localhost", "127.0.0.1", "::1", "0.0.0.0",
-}
+WEB_FETCH_DENY_HOSTS = web_fetch_guard.DENY_HOSTS  # single source: web_fetch_guard.py
 
 # /metrics IP allowlist (comma-separated)
 METRICS_ALLOWED_IPS = {
@@ -1048,95 +1042,29 @@ async def _tool_tavily_map(args: dict) -> dict:
 
 
 async def _tool_web_fetch(args: dict) -> dict:
-    """HTTPS (or HTTP) GET with SSRF guards and size cap.
+    """HTTPS (or HTTP) GET with SSRF guards on EVERY hop and a streamed size cap.
 
-    SSRF strategy: resolve the hostname via getaddrinfo and reject if ANY
-    returned address is private/loopback/link-local/reserved, then connect
-    normally. This covers IPv4, IPv6 (including IPv4-mapped IPv6 like
-    ::ffff:192.168.x.x and ULA fc00::/7), and avoids the brittle prefix-string
-    matching the earlier guard used. A narrow DNS-rebinding window still
-    exists between resolution and connect, but for a single-shot GET with no
-    keepalive the gap is small enough not to be a usable primitive without
-    sub-millisecond TTLs the kernel resolver caches over anyway.
+    All checks live in web_fetch_guard: http(s) only, denied hosts, and every resolved address
+    must be globally routable -- for the original URL and for each redirect, which is followed
+    manually (the previous version checked only the first host and let httpx follow redirects,
+    so a public URL redirecting to a LAN address was fetched unchecked). Each connection is pinned
+    to the vetted IP (Host header + SNI keep the original name), closing DNS rebinding.
     """
-    import urllib.parse
-    import ipaddress
-    import socket
-
-    url = args.get("url")
-    if not isinstance(url, str) or not url.strip():
-        return {"error": "missing 'url' field"}
-
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except Exception as e:
-        return {"error": "invalid_url", "message": str(e)}
-
-    if parsed.scheme not in ("http", "https"):
-        return {"error": "scheme_not_allowed", "scheme": parsed.scheme}
-
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return {"error": "missing_host"}
-    if host in WEB_FETCH_DENY_HOSTS:
-        return {"error": "host_denied", "host": host}
-
-    # Resolve and inspect every returned address. Reject if any is non-global.
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(
-            host, port, type=socket.SOCK_STREAM
-        )
-    except socket.gaierror as e:
-        return {"error": "dns_resolution_failed", "message": str(e)}
-
-    for info in infos:
-        sockaddr = info[4]
-        addr_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(addr_str)
-        except ValueError:
-            return {"error": "host_denied_unparseable_ip", "host": host, "addr": addr_str}
-        # `is_global` is True only for routable public addresses. Excludes
-        # private, loopback, link-local, multicast, reserved, unspecified,
-        # and (for IPv6) site-local + ULA. Also blocks IPv4-mapped IPv6
-        # forms like ::ffff:192.168.x.x because ipaddress unwraps them.
-        if not ip.is_global:
-            return {
-                "error": "host_denied_private_range",
-                "host": host,
-                "resolved": addr_str,
-            }
-
     headers = {
         "User-Agent": "local-gpu-cluster-router/1.0 (web_fetch)",
         "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
     }
-
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(WEB_FETCH_TIMEOUT_SECONDS),
-        follow_redirects=True,
+        follow_redirects=False,
+        trust_env=False,            # never route through proxy env vars
     ) as c:
         try:
-            r = await c.get(url, headers=headers)
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as e:
+            return await web_fetch_guard.guarded_get(
+                args.get("url"), client=c, headers=headers, max_bytes=WEB_FETCH_MAX_SIZE_BYTES)
+        except httpx.HTTPError as e:
+            # Exception class only: never echo upstream/transport detail back to the model.
             return {"error": "unreachable", "message": type(e).__name__}
-
-    body_bytes = (r.content or b"")[:WEB_FETCH_MAX_SIZE_BYTES]
-    truncated = bool(r.content and len(r.content) > WEB_FETCH_MAX_SIZE_BYTES)
-    try:
-        body_text = body_bytes.decode("utf-8", errors="replace")
-    except Exception:
-        body_text = repr(body_bytes)
-
-    return {
-        "status": r.status_code,
-        "url": str(r.url),
-        "content_type": r.headers.get("content-type", ""),
-        "content_length": len(r.content) if r.content else 0,
-        "truncated": truncated,
-        "body": body_text,
-    }
 
 
 TOOLS: dict[str, dict] = {
