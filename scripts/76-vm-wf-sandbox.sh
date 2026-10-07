@@ -24,7 +24,7 @@ load_config
 CMD="${1:-}"
 WF_VMID="${WF_VMID:-176}"
 PUSH=/root/wf-push
-require_cmd qm python3 base64 tar
+require_cmd qm python3 base64 tar split stat conntrack pve-firewall
 
 # Run argv in the guest; print its stdout; return its exit code.
 vm_run() {
@@ -74,6 +74,7 @@ case "$CMD" in
     vm_push "$tmp/workforce.tar" "$PUSH/workforce.tar"
     vm_push "$LGC_DIR/files/wf-grader.Dockerfile" "$PUSH/wf-grader.Dockerfile"
     vm_push "$LGC_DIR/rag/requirements.txt" "$PUSH/requirements.txt"
+    vm_push "$LGC_DIR/files/wf-sandbox-requirements.txt" "$PUSH/extra-requirements.txt"
     vm_push "$LGC_DIR/files/wf-sandbox-provision.sh" "$PUSH/provision.sh"
     ok "pushed harness, grader Dockerfile, requirements, provision script"
     step "provision (apt, venv, opencode, users, grader image) — several minutes"

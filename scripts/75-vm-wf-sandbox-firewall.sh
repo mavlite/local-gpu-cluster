@@ -21,13 +21,15 @@ require_pve_host
 load_config
 
 MODE="${1:-}"
-[[ "$MODE" == "build" || "$MODE" == "locked" ]] || die "usage: 75-vm-wf-sandbox-firewall.sh build|locked"
+[[ "$MODE" == "build" || "$MODE" == "locked" || "$MODE" == "closed" ]] \
+  || die "usage: 75-vm-wf-sandbox-firewall.sh closed|build|locked"
 WF_VMID="${WF_VMID:-176}"
 WF_BRIDGE="${WF_BRIDGE:-vmbrwf}"
 # Guests whose NICs are filtered by design (70: SE QA, 72: tester, this sandbox).
 WF_FILTERED_OK="${WF_FILTERED_OK:-170 172 $WF_VMID}"
 WF_CIDR="${WF_CIDR:-10.79.0.0/24}"
-require_cmd pve-firewall qm ip conntrack python3
+require_cmd pve-firewall qm ip python3
+[[ "$MODE" != "locked" ]] || require_cmd conntrack
 
 step "1 — preflight"
 conf="/etc/pve/qemu-server/${WF_VMID}.conf"
@@ -36,16 +38,15 @@ nic="$(grep -E '^net[0-9]+:.*firewall=1' "$conf" | head -1)"
 [[ -n "$nic" ]] || die "VM $WF_VMID has no NIC with firewall=1"
 [[ "$nic" == *"bridge=${WF_BRIDGE}"* ]] || die "VM $WF_VMID's filtered NIC is not on ${WF_BRIDGE}: $nic"
 [[ "$(grep -cE '^net[0-9]+:' "$conf")" == "1" ]] || die "VM $WF_VMID has more than one NIC"
-for ifc in all vmbr0 "$WF_BRIDGE"; do
-  p="/proc/sys/net/ipv6/conf/${ifc}/forwarding"
-  [[ ! -r "$p" || "$(cat "$p")" == "0" ]] || die "net.ipv6.conf.${ifc}.forwarding is not 0. Stop."
-done
+# The IPv6 guarantee is the sandbox bridge itself (see 74): disabled, and not forwarding.
 [[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/disable_ipv6" 2>/dev/null)" == "1" ]] \
   || die "IPv6 is enabled on ${WF_BRIDGE} — re-run 74-vm-wf-sandbox.sh"
+[[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/forwarding" 2>/dev/null)" == "0" ]] \
+  || die "IPv6 forwarding is on for ${WF_BRIDGE} — re-run 74-vm-wf-sandbox.sh"
 if [[ "$MODE" == "locked" && "$(qm status "$WF_VMID" | awk '{print $2}')" != "stopped" ]]; then
   die "locking needs VM $WF_VMID stopped (connections from build mode would survive): qm shutdown $WF_VMID"
 fi
-ok "one filtered NIC on ${WF_BRIDGE}; IPv6 forwarding off; IPv6 disabled on ${WF_BRIDGE}"
+ok "one filtered NIC on ${WF_BRIDGE}; IPv6 disabled and not forwarded on ${WF_BRIDGE}"
 
 step "2 — blast-radius guard"
 others=""

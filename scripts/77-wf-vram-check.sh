@@ -43,6 +43,9 @@ vram() { pct exec "$AMD" -- rocm-smi --showmeminfo vram --json 2>/dev/null || ec
   || die "chat is not in the normal 1-slot layout; refusing to start from an unknown state"
 [[ ! -f /run/redteam-mode.state ]] || die "redteam mode is active; exit it first"
 
+# Any unexpected failure means the CHECK failed (exit 2), never "does not fit" (exit 1). The EXIT trap
+# below still restores the layout.
+trap 'echo "{\"fits\": null, \"error\": \"check failed at line $LINENO\"}"; exit 2' ERR
 restored=0
 restore_failed=0
 restore() {
@@ -88,4 +91,4 @@ rm -f /run/redteam-mode.last                       # wait_for refreshed it; noth
 python3 "$LGC_DIR/files/wf-vram-verdict.py" "$fits" "$units" "$concurrent" "$tmpd/before.json" "$tmpd/after.json"
 rm -rf "$tmpd"
 [[ $restore_failed -eq 0 && $normal -eq 1 ]] || exit 2
-$fits
+if $fits; then exit 0; else exit 1; fi

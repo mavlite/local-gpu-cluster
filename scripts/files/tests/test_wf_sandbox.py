@@ -152,3 +152,11 @@ def test_del_removes_both(fakes):
 def test_net_refuses_an_unknown_command(fakes):
     env, _ = fakes
     assert net(env, "flush").returncode != 0
+
+
+def test_closed_mode_denies_everything_both_ways():
+    # Final review I2: VM 176 must never boot without a policy; 74 writes `closed` as soon as it exists.
+    r = policy("closed")
+    assert r.returncode == 0, r.stderr
+    assert options(r.stdout) == {"enable": "1", "policy_in": "DROP", "policy_out": "DROP"}
+    assert rules(r.stdout) == []

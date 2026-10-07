@@ -48,11 +48,11 @@ step "1 — preflight"
 pvesm status | awk 'NR>1 {print $1}' | grep -qx "$WF_STORAGE" || die "storage '$WF_STORAGE' not found"
 [[ -x "$LGC_DIR/files/wf-sandbox-net.sh" || -r "$LGC_DIR/files/wf-sandbox-net.sh" ]] \
   || die "missing $LGC_DIR/files/wf-sandbox-net.sh"
-for ifc in all vmbr0; do
-  [[ "$(cat "/proc/sys/net/ipv6/conf/${ifc}/forwarding" 2>/dev/null || echo 0)" == "0" ]] \
-    || die "net.ipv6.conf.${ifc}.forwarding is not 0 — the sandbox policy is IPv4-only. Stop."
-done
-ok "storage present, IPv6 forwarding off"
+# IPv6: ifupdown2 sets forwarding=1 on bridges at every boot (vmbr0 reads 1; memory: tester VM 172
+# rebuild drift), so host-wide forwarding cannot be the guarantee. The guarantee is the sandbox's own
+# bridge: IPv6 disabled and forwarding 0 on vmbrwf (step 2), so no IPv6 packet from the guest is ever
+# processed or routed by the host. The guest disables IPv6 too.
+ok "storage and helper present"
 
 step "2 — bridge $WF_BRIDGE ($WF_GW)"
 if ip -br link show "$WF_BRIDGE" >/dev/null 2>&1; then
@@ -69,16 +69,16 @@ iface ${WF_BRIDGE} inet static
 	bridge-stp off
 	bridge-fd 0
 	post-up sysctl -qw net.ipv6.conf.${WF_BRIDGE}.disable_ipv6=1
+	post-up sysctl -qw net.ipv6.conf.${WF_BRIDGE}.forwarding=0
 EOF
   ifup "$WF_BRIDGE" || die "ifup $WF_BRIDGE failed"
 fi
 ip -4 addr show "$WF_BRIDGE" | grep -q "${WF_GW}/" || die "$WF_GW is not on $WF_BRIDGE"
 # No IPv6 on the sandbox bridge: in build mode the policy is IPv4-only, and link-local IPv6 would
 # otherwise reach host services (security review MEDIUM).
-sysctl -qw "net.ipv6.conf.${WF_BRIDGE}.disable_ipv6=1"
+sysctl -qw "net.ipv6.conf.${WF_BRIDGE}.disable_ipv6=1" "net.ipv6.conf.${WF_BRIDGE}.forwarding=0"
 [[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/disable_ipv6")" == "1" ]] || die "IPv6 still enabled on $WF_BRIDGE"
-[[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/forwarding" 2>/dev/null || echo 0)" == "0" ]] \
-  || die "net.ipv6.conf.${WF_BRIDGE}.forwarding is not 0. Stop."
+[[ "$(cat "/proc/sys/net/ipv6/conf/${WF_BRIDGE}/forwarding")" == "0" ]] || die "IPv6 forwarding still on for $WF_BRIDGE"
 ok "$WF_BRIDGE up with $WF_GW"
 
 step "3 — dedicated LAN identity (192.168.6.79) via wf-sandbox-net.service"
@@ -115,6 +115,11 @@ else
 fi
 
 step "5 — VM $WF_VMID ($WF_NAME)"
+# A deny-all policy exists BEFORE the VM does, so VM 176 can never start unfiltered, even if 75 is
+# skipped or fails (final review I2). 76 refuses to act on it (neither build nor locked).
+if [[ ! -f "/etc/pve/firewall/${WF_VMID}.fw" ]]; then
+  write_file_if_changed "/etc/pve/firewall/${WF_VMID}.fw" 0640 < <(bash "$LGC_DIR/files/wf-sandbox-policy.sh" closed)
+fi
 if qm status "$WF_VMID" >/dev/null 2>&1; then
   skip "VM $WF_VMID exists"
 else

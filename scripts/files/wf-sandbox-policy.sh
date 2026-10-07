@@ -3,6 +3,8 @@
 # sandbox VM (workforce spec §5.2; Plan B).
 #
 #   build   provisioning only: the internet, and NO private space (apt, npm, docker pulls).
+#   closed  deny-all both ways: written by 74 the moment the VM exists, so it can never run unfiltered
+#   closed  deny-all both ways: written by 74 the moment the VM exists, so it can never run unfiltered
 #   locked  measured runs: the router's chat port and the three CPU workers -- nothing else. No DNS,
 #           no package proxy, no nested lab, no host, no LAN (decisions 2026-10-07).
 #
@@ -28,6 +30,9 @@ port "$worker_port" || die "WF_WORKER_PORT '$worker_port' is not a port"
 for w in $workers; do ipv4 "$w" || die "WF_WORKERS entry '$w' is not a single IPv4 address"; done
 
 case "$mode" in
+  closed)
+    printf '[OPTIONS]\nenable: 1\npolicy_in: DROP\npolicy_out: DROP\n\n[RULES]\n'
+    ;;
   locked)
     printf '[OPTIONS]\nenable: 1\npolicy_in: DROP\npolicy_out: DROP\n\n[RULES]\n'
     echo "OUT ACCEPT -p tcp -dest $router -dport $router_port # router chat API (scoped key)"
@@ -43,5 +48,5 @@ case "$mode" in
     echo "OUT DROP -dest 100.64.0.0/10 # CGNAT"
     echo "OUT DROP -dest 169.254.0.0/16 # link-local and metadata"
     ;;
-  *) die "usage: wf-sandbox-policy.sh build|locked" ;;
+  *) die "usage: wf-sandbox-policy.sh closed|build|locked" ;;
 esac

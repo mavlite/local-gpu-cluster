@@ -25,7 +25,7 @@ export DEBIAN_FRONTEND=noninteractive
 die() { echo "[provision] FATAL: $*" >&2; exit 1; }
 log() { echo "[provision] $*" >&2; }
 [[ $EUID -eq 0 ]] || die "run as root"
-for f in workforce.tar wf-grader.Dockerfile requirements.txt; do
+for f in workforce.tar wf-grader.Dockerfile requirements.txt extra-requirements.txt; do
   [[ -s "$PUSH/$f" ]] || die "missing $PUSH/$f (push it first)"
 done
 
@@ -42,7 +42,7 @@ sysctl -q --system
 log "python venv + test deps (frozen for the grader image)"
 python3 -m venv /opt/wfpy
 /opt/wfpy/bin/pip install -q --upgrade pip
-/opt/wfpy/bin/pip install -q pytest -r "$PUSH/requirements.txt"
+/opt/wfpy/bin/pip install -q pytest -r "$PUSH/requirements.txt" -r "$PUSH/extra-requirements.txt"
 /opt/wfpy/bin/pip freeze --exclude pip > "$PUSH/constraints.txt"
 install -m 0644 "$PUSH/constraints.txt" /opt/wfpy/constraints.txt
 
