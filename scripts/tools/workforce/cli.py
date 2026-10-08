@@ -1,6 +1,6 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
-Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3
+Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule
 Sandbox VM:   run
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
@@ -21,6 +21,7 @@ import oc
 import paths
 import pipeline
 import profiles
+import runmeta
 
 
 def resolve_opencode(env):
@@ -198,6 +199,18 @@ def main(argv=None, env=None):
     p = sub.add_parser("w3")
     p.add_argument("--schedule", required=True)
     p.add_argument("--tasks", required=True, help="bundle root (defines the task list)")
+    p = sub.add_parser("run-meta", help="judge one harvested W3 run; writes <run-dir>/meta.json")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--stamps", required=True, help="wf-window.sh stamp file (before-/after-<label>)")
+    p.add_argument("--label", required=True)
+    p.add_argument("--probe", required=True, help="wf-user-probe.py output")
+    p.add_argument("--journal", required=True, help="llamacpp-chat journal over the run")
+    p.add_argument("--fail-s", type=float, default=120.0, help="latency a failed probe counts as")
+    p = sub.add_parser("w3-schedule", help="assemble the schedule `w3` reads, in run order")
+    p.add_argument("--baseline-probe", required=True, help="probe output from the idle baseline")
+    p.add_argument("--run", action="append", required=True, help="ARM=run_dir, in schedule order")
+    p.add_argument("--out", required=True)
+    p.add_argument("--fail-s", type=float, default=120.0)
     a = ap.parse_args(argv)
 
     if a.cmd == "bundle-build":
@@ -232,6 +245,18 @@ def main(argv=None, env=None):
                                 monitor=monitor, own=own).run()
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
+    elif a.cmd == "run-meta":
+        out = runmeta.run_meta(a.run_dir, a.stamps, a.label, a.probe, a.journal, a.fail_s)
+    elif a.cmd == "w3-schedule":
+        runs = []
+        for spec in a.run:
+            arm, d = spec.split("=", 1)
+            if arm not in ("G", "T"):
+                raise SystemExit(f"--run {spec!r}: arm must be G or T")
+            runs.append((arm, d))
+        out = runmeta.w3_schedule(a.baseline_probe, runs, a.fail_s)
+        with open(a.out, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=1)
     elif a.cmd == "w1":
         results = {}
         for spec in a.config:
