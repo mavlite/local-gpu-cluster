@@ -6,7 +6,8 @@
 #   worker_serve.sh learn               log (do not filter) new :8090 connections
 #   worker_serve.sh sources             print the source IPs seen since `learn`
 #   worker_serve.sh lock <ip>...        accept :8090 only from <ip>..., drop everyone else
-#   worker_serve.sh start               launch llama-server with the frozen flags; print the log path
+#   worker_serve.sh start [CONFIG]      launch llama-server; print the log path. No CONFIG: the frozen
+#                                       gate flags. C0-C3: the workforce W1 configurations (below)
 #   worker_serve.sh stop | status | teardown
 # Spec: docs/superpowers/specs/2026-10-05-minisforum-cluster-integration-design.md §3, §5.0.3, §5.5, §5.8
 set -Eeuo pipefail
@@ -28,6 +29,37 @@ WORKER_FLAGS="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 
 # router injects for the GPU alias, presence penalty included (v2, 2026-10-07: workers without it looped).
 WORKER_EXTRA="-cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 1.5"
 APT_UNITS=(apt-daily.timer apt-daily-upgrade.timer)
+
+# Workforce W1 configurations (docs/superpowers/specs/2026-10-07-distributed-workforce-design.md §7).
+#   C0 ik_llama.cpp, MTP on,  non-thinking     C1 mainline b11026, MTP only if GATE_C1_MTP=1
+#   C2 ik_llama.cpp, MTP off, non-thinking     C3 ik_llama.cpp, MTP on, thinking + preserve_thinking
+# All four run presence penalty 0 (the spec's table) with the Qwen model-card sampling for their mode
+# (scripts/files/alias_defaults.py). The mainline memory flags are checked against the built binary's
+# --help before the W1 pre-registration.
+ML_BIN="${GATE_MAINLINE_BIN:-/opt/bench/src/llama.cpp/build/bin/llama-server}"
+CONFIG_FILE="${GATE_CONFIG_FILE:-$ETC/config}"
+WF_BASE="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0"
+IK_MEM="-rtr -cram 256 -ctx-ckpt 8"
+ML_MEM="-cram 256 --ctx-checkpoints 8"
+IK_MTP="--spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs"
+ML_MTP="--spec-type draft-mtp --spec-draft-n-max 3"
+NOTHINK="--temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0"
+THINK="--temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 0"
+KW_NOTHINK='{"enable_thinking":false}'
+KW_THINK='{"enable_thinking":true,"preserve_thinking":true}'
+
+select_config() {      # select_config <gate|C0|C1|C2|C3>: sets SRV_BIN, SRV_FLAGS, SRV_KWARGS
+  SRV_BIN="$BIN"; SRV_KWARGS="$KW_NOTHINK"
+  case "$1" in
+    gate) SRV_FLAGS="$WORKER_FLAGS $WORKER_EXTRA" ;;
+    C0)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $NOTHINK" ;;
+    C1)   SRV_BIN="$ML_BIN"; SRV_FLAGS="$WF_BASE $ML_MEM $NOTHINK"
+          if [ "${GATE_C1_MTP:-0}" = 1 ]; then SRV_FLAGS="$SRV_FLAGS $ML_MTP"; fi ;;
+    C2)   SRV_FLAGS="$WF_BASE $IK_MEM $NOTHINK" ;;
+    C3)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $THINK"; SRV_KWARGS="$KW_THINK" ;;
+    *)    die "unknown config '$1' (gate|C0|C1|C2|C3)" ;;
+  esac
+}
 
 die() { echo "[worker-serve] FATAL: $*" >&2; exit 1; }
 log() { echo "[worker-serve] $*"; }
@@ -88,6 +120,8 @@ cmd_lock() {
 }
 
 cmd_start() {
+  local cfg="${1:-gate}"
+  select_config "$cfg"
   [ -r "$KEY" ] || die "$KEY not readable -- run install-key first"
   systemctl is-active --quiet "$UNIT" && die "already running"
   sudo mkdir -p "$LOGDIR"; sudo chown bench:bench "$LOGDIR"
@@ -100,10 +134,12 @@ cmd_start() {
   # shellcheck disable=SC2086  # the flag strings are intentionally word-split
   sudo systemd-run --quiet --unit="$UNIT" --uid=bench --gid=bench -p MemoryMax="$MEMMAX" \
     -p StandardOutput="append:$logf" -p StandardError="append:$logf" \
-    "$BIN" -m "$MODEL" $WORKER_FLAGS $WORKER_EXTRA \
-    --jinja -np 1 --alias qwen3.6 --chat-template-kwargs '{"enable_thinking":false}' \
+    "$SRV_BIN" -m "$MODEL" $SRV_FLAGS \
+    --jinja -np 1 --alias qwen3.6 --chat-template-kwargs "$SRV_KWARGS" \
     --host 0.0.0.0 --port "$PORT" --api-key-file "$KEY" || die "systemd-run failed"
   systemctl show -p MainPID --value "$UNIT" | sudo tee "$PIDFILE" >/dev/null
+  echo "$cfg $SRV_BIN $SRV_FLAGS $SRV_KWARGS" | sudo tee "$CONFIG_FILE" >/dev/null
+  log "config $cfg"
   local i
   for i in $(seq 1 300); do
     curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null && { echo "$logf"; return 0; }
@@ -122,6 +158,7 @@ cmd_stop() {
 
 cmd_status() {
   echo "pid: $(cat "$PIDFILE" 2>/dev/null || echo none)"
+  echo "config: $(cat "$CONFIG_FILE" 2>/dev/null || echo none)"
   echo "health: $(curl -s -m 3 "http://127.0.0.1:$PORT/health" || echo down)"
   echo "key: $(stat -c '%U:%G %a' "$KEY" 2>/dev/null || echo absent)"
   echo "latest log: $(ls -1t "$LOGDIR"/server-*.log 2>/dev/null | head -1)"
@@ -150,9 +187,9 @@ case "${1:-}" in
   learn) cmd_learn ;;
   sources) cmd_sources ;;
   lock) shift; cmd_lock "$@" ;;
-  start) cmd_start ;;
+  start) shift; cmd_start "$@" ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
   teardown) cmd_teardown ;;
-  *) echo "usage: $0 quiet|install-key <f>|learn|sources|lock <ip>...|start|stop|status|teardown" >&2; exit 2 ;;
+  *) echo "usage: $0 quiet|install-key <f>|learn|sources|lock <ip>...|start [C0|C1|C2|C3]|stop|status|teardown" >&2; exit 2 ;;
 esac

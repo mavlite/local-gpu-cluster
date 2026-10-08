@@ -34,7 +34,7 @@ def test_worker_extra_has_the_mandatory_memory_flags():
 def test_worker_server_is_keyed_non_thinking_and_single_slot():
     s = read("sh", "worker_serve.sh")
     assert '--api-key-file "$KEY"' in s and "-np 1" in s
-    assert """--chat-template-kwargs '{"enable_thinking":false}'""" in s
+    assert """KW_NOTHINK='{"enable_thinking":false}'""" in s and '--chat-template-kwargs "$SRV_KWARGS"' in s
 
 
 @pytest.mark.skipif(BASH is None, reason="bash not available")
@@ -110,7 +110,7 @@ def test_lock_ruleset_is_the_form_nft_accepted(tmp_path):
         " }", "}"]
 
 
-def _run_worker(tmp_path, *args):
+def _run_worker(tmp_path, *args, env=""):
     """Run worker_serve.sh with fake sudo/systemctl/systemd-run/curl that record their argv."""
     rec = tmp_path / "calls.log"
     fake = tmp_path / "fbin"
@@ -125,7 +125,7 @@ def _run_worker(tmp_path, *args):
         (fake / tool).chmod(0o755)
     p = fake.as_posix()
     env = (f'export GATE_KEY_FILE="{key.as_posix()}" GATE_LOGDIR="{(tmp_path / "log").as_posix()}" '
-           f'GATE_PIDFILE="{(tmp_path / "pid").as_posix()}"; ')
+           f'GATE_PIDFILE="{(tmp_path / "pid").as_posix()}" GATE_CONFIG_FILE="{(tmp_path / "config").as_posix()}" {env}; ')
     script = os.path.join(ROOT, "sh", "worker_serve.sh").replace("\\", "/")
     cmd = (env + f'export PATH="$(cygpath -u "{p}" 2>/dev/null || echo "{p}"):$PATH"; '
            f'bash "{script}" ' + " ".join(args))
