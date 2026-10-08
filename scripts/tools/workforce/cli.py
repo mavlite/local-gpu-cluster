@@ -86,6 +86,15 @@ def patch_paths(patch_text):
     return sorted(names)
 
 
+def make_grader(spec):
+    """'local' or 'docker:<image>'."""
+    if spec.startswith("docker:"):
+        return grade.DockerRunner(spec.split(":", 1)[1])
+    if spec == "local":
+        return grade.LocalRunner()
+    raise SystemExit(f"--grader must be 'local' or 'docker:<image>', not {spec!r}")
+
+
 def import_patch(repo, patch_file, bundle_dir, run_id):
     """Check the patch against the task's declared files, apply it to the task's parent commit in a
     throwaway worktree, and create branch workforce/<run>/<task>. The user merges."""
@@ -166,6 +175,7 @@ def main(argv=None, env=None):
     p.add_argument("--bundles", required=True)
     p.add_argument("--refs", required=True)
     p.add_argument("--work", required=True)
+    p.add_argument("--grader", default="local", help="'local' or 'docker:<image>' (the VM's grader)")
     p = sub.add_parser("manifest")
     p.add_argument("--bundles", required=True)
     p = sub.add_parser("run")
@@ -193,11 +203,11 @@ def main(argv=None, env=None):
     if a.cmd == "bundle-build":
         out = {"bundle": bundle.build(a.repo, a.taskdef, a.out, a.refs)}
     elif a.cmd == "bundle-validate":
-        problems = []
+        problems, runner = [], make_grader(a.grader)
         for name in sorted(os.listdir(a.bundles)):
             problems += bundle.validate(os.path.join(a.bundles, name), os.path.join(a.refs, f"{name}.patch"),
-                                        a.work, grade.LocalRunner())
-        out = {"problems": problems, "manifest": bundle.manifest(a.bundles)}
+                                        a.work, runner)
+        out = {"problems": problems, "manifest": bundle.manifest(a.bundles), "grader": a.grader}
     elif a.cmd == "manifest":
         out = {"manifest": bundle.manifest(a.bundles)}
     elif a.cmd == "run":
@@ -209,8 +219,7 @@ def main(argv=None, env=None):
         oc_bin = resolve_opencode(env)
         if not oc_bin:
             raise SystemExit("opencode not found; set WF_OPENCODE")
-        grader = (grade.DockerRunner(a.grader.split(":", 1)[1]) if a.grader.startswith("docker:")
-                  else grade.LocalRunner())
+        grader = make_grader(a.grader)
         launcher = own = None
         if a.agent_user_prefix:
             assert_private(a.bundles)

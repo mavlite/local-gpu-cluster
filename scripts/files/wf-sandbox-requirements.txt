@@ -1,0 +1,12 @@
+# Extra test dependencies for the workforce sandbox venv and grader image (Plan B, final review I3):
+# the router's own pins (Plan A, LXC 153 venv), so tasks touching scripts/files/router-app.py can run
+# their tests offline. Installed together with scripts/rag/requirements.txt and pytest.
+fastapi==0.141.1
+starlette==1.6.0
+httpx==0.28.1
+httpcore==1.0.9
+slowapi==0.1.10
+prometheus-fastapi-instrumentator==8.1.0
+uvicorn==0.52.4
+anyio==4.13.0
+pydantic==2.13.4
