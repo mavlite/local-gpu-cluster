@@ -90,7 +90,9 @@ def w3_decide(runs, tasks, latency_factor=W3_LATENCY_FACTOR, n_boot=10000, seed=
                                [r["accepted_per_hour"] for r in by["G"]])
     clauses["win"] = {"diff": d, "lo": lo, "hi": hi, "ok": lo > 0}
 
-    slow = [i for i, r in enumerate(by["T"]) if r["probe_p50"] > latency_factor * r["baseline_p50"]]
+    # A T run without probe samples cannot show the user lane was protected: it counts as slow.
+    slow = [i for i, r in enumerate(by["T"])
+            if r["probe_p50"] is None or r["probe_p50"] > latency_factor * r["baseline_p50"]]
     clauses["user"] = {"slow_t_runs": slow, "ok": not slow}
 
     failed = [c for c in ("quality", "win", "user") if not clauses[c]["ok"]]

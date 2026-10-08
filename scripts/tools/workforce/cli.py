@@ -1,6 +1,6 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
-Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3
+Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan
 Sandbox VM:   run
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
@@ -21,6 +21,8 @@ import oc
 import paths
 import pipeline
 import profiles
+import runmeta
+import scan
 
 
 def resolve_opencode(env):
@@ -147,17 +149,38 @@ def w1_stats(run_dirs):
     return out
 
 
-def w3_runs(schedule, tasks=None):
+def _implementer_accepted(run_dir, task_ids):
+    n = 0
+    for tid in task_ids:
+        path = os.path.join(run_dir, "tasks", tid, "record.json")
+        if not os.path.isfile(path):
+            raise SystemExit(f"{path} missing: cannot recompute throughput without the voided task")
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+        n += bool(rec["accepted"] and rec["outcome"] == "implementer-accepted")
+    return n
+
+
+def w3_runs(schedule, tasks=None, void=()):
     """schedule: [{"arm", "run_dir", "valid", "probe_p50", "baseline_p50"}] -> analysis input. With
-    `tasks`, every run must cover exactly that task set (a mismatch would score every task as a tie)."""
+    `tasks`, every run must cover exactly that task set (a mismatch would score every task as a tie).
+    `void`: tasks the transcript scan found tainted (spec §8). They leave every run of both arms, and
+    accepted-per-hour is recomputed without them from the per-task records."""
+    void = set(void)
+    if void and (tasks is None or not void <= set(tasks)):
+        raise SystemExit(f"cannot void {sorted(void - set(tasks or ()))}: not in the task set")
     runs = []
     for item in schedule:
         s = _records(item["run_dir"])
         if tasks is not None and set(s["accepted_by_task"]) != set(tasks):
             raise SystemExit(f"{item['run_dir']}: its tasks {sorted(s['accepted_by_task'])} do not match "
                              f"the bundle set {sorted(tasks)}")
+        accepted = {t: v for t, v in s["accepted_by_task"].items() if t not in void}
+        per_hour = s["accepted_per_hour"]
+        if void:
+            per_hour = _implementer_accepted(item["run_dir"], accepted) / (s["wall_s"] / 3600)
         runs.append({"arm": item["arm"], "valid": bool(item["valid"] and s["valid"]),
-                     "accepted": s["accepted_by_task"], "accepted_per_hour": s["accepted_per_hour"],
+                     "accepted": accepted, "accepted_per_hour": per_hour,
                      "probe_p50": item["probe_p50"], "baseline_p50": item["baseline_p50"]})
     return runs
 
@@ -198,6 +221,24 @@ def main(argv=None, env=None):
     p = sub.add_parser("w3")
     p.add_argument("--schedule", required=True)
     p.add_argument("--tasks", required=True, help="bundle root (defines the task list)")
+    p.add_argument("--void", action="append", default=[], help="task the scan found tainted (repeatable)")
+    p = sub.add_parser("scan", help="transcript scan of a harvested run: tainted (leak) and suspect tasks")
+    p.add_argument("--run", required=True)
+    p.add_argument("--bundles", required=True)
+    p.add_argument("--refs", required=True)
+    p = sub.add_parser("run-meta", help="judge one harvested W3 run; writes <run-dir>/meta.json")
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--stamps", required=True, help="wf-window.sh stamp file (before-/after-<label>)")
+    p.add_argument("--label", required=True)
+    p.add_argument("--probe", required=True, help="wf-user-probe.py output")
+    p.add_argument("--journal", required=True, help="llamacpp-chat journal over the run")
+    p.add_argument("--fail-s", type=float, default=120.0, help="latency a failed probe counts as")
+    p = sub.add_parser("w3-schedule", help="assemble the schedule `w3` reads, in run order")
+    p.add_argument("--baseline-probe", required=True, help="probe output from the idle baseline")
+    p.add_argument("--run", action="append", required=True,
+                   help="ARM=run_dir[@baseline_probe_file], in schedule order (@: that run's own window baseline)")
+    p.add_argument("--out", required=True)
+    p.add_argument("--fail-s", type=float, default=120.0)
     a = ap.parse_args(argv)
 
     if a.cmd == "bundle-build":
@@ -232,6 +273,21 @@ def main(argv=None, env=None):
                                 monitor=monitor, own=own).run()
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
+    elif a.cmd == "scan":
+        out = scan.scan_run(a.run, a.bundles, a.refs)
+    elif a.cmd == "run-meta":
+        out = runmeta.run_meta(a.run_dir, a.stamps, a.label, a.probe, a.journal, a.fail_s)
+    elif a.cmd == "w3-schedule":
+        runs = []
+        for spec in a.run:
+            arm, rest = spec.split("=", 1)
+            if arm not in ("G", "T"):
+                raise SystemExit(f"--run {spec!r}: arm must be G or T")
+            d, _, own = rest.partition("@")
+            runs.append((arm, d, own or None))
+        out = runmeta.w3_schedule(a.baseline_probe, runs, a.fail_s)
+        with open(a.out, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=1)
     elif a.cmd == "w1":
         results = {}
         for spec in a.config:
@@ -242,7 +298,9 @@ def main(argv=None, env=None):
         with open(a.schedule, encoding="utf-8") as f:
             schedule = json.load(f)
         tasks = sorted(os.listdir(a.tasks))
-        out = analysis.w3_decide(w3_runs(schedule, tasks), tasks)
+        runs = w3_runs(schedule, tasks, void=a.void)
+        out = analysis.w3_decide(runs, [t for t in tasks if t not in set(a.void)])
+        out["voided"] = sorted(set(a.void))
     print(json.dumps(out, indent=1, default=str))
     return 0
 

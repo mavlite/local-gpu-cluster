@@ -11,6 +11,15 @@
 #              `wf-run bundle-validate --grader docker:wf-grader:1` in the VM: Docker grading must
 #              reproduce local grading (Plan C Review Focus 3)
 #   status     /etc/wf-sandbox.json and the active policy mode
+#   push-control           install files/wf-run-control.sh as /usr/local/sbin/wf-run-control (Plan D)
+#   push-bundles B         replace /srv/wf/bundles with bundle dir B (0700) -- the frozen task set
+#   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
+#              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
+#              the guest on stdin only -- never argv
+#   run-status ID          the run's unit state, record presence and log tail
+#   harvest ID DEST        pack the finished run in the VM, pull it out in chunks, verify its sha256,
+#              unpack into DEST/ID
+#   clear-keys             delete any leftover key file in the VM (window teardown)
 # proof honours WF_PROOF_WORKERS=skip (pre-window: worker checks reported as skipped).
 set -Eeuo pipefail
 
@@ -50,6 +59,26 @@ vm_push() {
   [[ "$(vm_run 30 stat -c %s "$dest")" == "$(stat -c %s "$src")" ]] || die "$dest size differs after push"
 }
 
+# Like vm_run, with stdin passed to the guest command (qm guest exec --pass-stdin; under 1 MiB).
+vm_run_stdin() {
+  local timeout="$1"; shift
+  local out
+  out="$(qm guest exec "$WF_VMID" --pass-stdin 1 --timeout "$timeout" -- "$@")" || die "qm guest exec failed: $*"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); sys.stdout.write(d.get("out-data","")); sys.stderr.write(d.get("err-data","")); sys.exit(d.get("exitcode", 1))' <<<"$out"
+}
+
+# Copy a guest file out, byte-exact: base64 slices of CHUNK bytes through guest exec's out-data.
+vm_pull() {
+  local src="$1" dest="$2" size="$3" chunk=524288 i n
+  n=$(( (size + chunk - 1) / chunk ))
+  : > "$dest"
+  for (( i = 0; i < n; i++ )); do
+    vm_run 120 sh -c "dd if='$src' bs=$chunk skip=$i count=1 status=none | base64 -w0" | base64 -d >> "$dest" \
+      || die "pull of $src failed at chunk $i"
+  done
+  [[ "$(stat -c %s "$dest")" == "$size" ]] || die "$dest size differs after pull"
+}
+
 policy_mode() {
   local fw="/etc/pve/firewall/${WF_VMID}.fw"
   for m in build locked; do
@@ -76,6 +105,8 @@ case "$CMD" in
     vm_push "$LGC_DIR/rag/requirements.txt" "$PUSH/requirements.txt"
     vm_push "$LGC_DIR/files/wf-sandbox-requirements.txt" "$PUSH/extra-requirements.txt"
     vm_push "$LGC_DIR/files/wf-sandbox-provision.sh" "$PUSH/provision.sh"
+    vm_push "$LGC_DIR/files/wf-run-control.sh" "/usr/local/sbin/wf-run-control"
+    vm_run 30 chmod 0700 /usr/local/sbin/wf-run-control >/dev/null
     ok "pushed harness, grader Dockerfile, requirements, provision script"
     step "provision (apt, venv, opencode, users, grader image) — several minutes"
     vm_run 0 bash "$PUSH/provision.sh"
@@ -109,5 +140,50 @@ case "$CMD" in
     echo "policy: $(policy_mode)"
     vm_run 30 cat /etc/wf-sandbox.json || true
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status" ;;
+  push-control)
+    vm_push "$LGC_DIR/files/wf-run-control.sh" "/usr/local/sbin/wf-run-control"
+    vm_run 30 chmod 0700 /usr/local/sbin/wf-run-control >/dev/null
+    ok "wf-run-control installed"
+    ;;
+  push-bundles)
+    bundles="${2:-}"
+    [[ -d "$bundles" ]] || die "usage: 76-vm-wf-sandbox.sh push-bundles <bundles-dir>"
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    tar -C "$bundles" -cf "$tmp/bundles.tar" .
+    vm_run 30 install -d -m 0700 "$PUSH" >/dev/null
+    vm_push "$tmp/bundles.tar" "$PUSH/bundles.tar"
+    vm_run 120 sh -c "rm -rf /srv/wf/bundles/* && tar -x -C /srv/wf/bundles --no-same-owner -f $PUSH/bundles.tar && chmod 0700 /srv/wf/bundles && rm -f $PUSH/bundles.tar" >/dev/null
+    ok "bundles pushed: $(vm_run 30 sh -c 'ls /srv/wf/bundles | wc -l') task(s)"
+    ;;
+  start-run)
+    id="${2:-}"; arm="${3:-}"
+    [[ -n "$id" && -n "$arm" ]] || die "usage: 76-vm-wf-sandbox.sh start-run <run-id> <T|G> [--w1]"
+    [[ "$(policy_mode)" == "locked" ]] || die "measured runs need the locked policy: run 75-vm-wf-sandbox-firewall.sh locked"
+    keys="${WF_KEY_DIR:-/root/wf/keys}"
+    [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
+    [[ "$arm" == G || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
+    # The keys go to the guest on stdin, built by shell builtins: never on any command line.
+    {
+      printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
+      if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
+    } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start "$id" "$arm" "${@:4}"
+    ;;
+  run-status)
+    vm_run 30 /usr/local/sbin/wf-run-control status "${2:?usage: run-status <run-id>}"
+    ;;
+  harvest)
+    id="${2:-}"; dest="${3:-}"
+    [[ -n "$id" && -n "$dest" ]] || die "usage: 76-vm-wf-sandbox.sh harvest <run-id> <dest-dir>"
+    read -r src size sha < <(vm_run 600 /usr/local/sbin/wf-run-control pack "$id")
+    [[ "$size" =~ ^[0-9]+$ && "$sha" =~ ^[0-9a-f]{64}$ ]] || die "pack of $id returned no size/sha256"
+    mkdir -p "$dest"
+    vm_pull "$src" "$dest/$id.tgz" "$size"
+    [[ "$(sha256sum "$dest/$id.tgz" | cut -d' ' -f1)" == "$sha" ]] || die "$dest/$id.tgz sha256 differs from the guest's"
+    tar -C "$dest" -xzf "$dest/$id.tgz"
+    ok "harvested $id into $dest/$id ($size bytes, sha256 $sha)"
+    ;;
+  clear-keys)
+    vm_run 30 /usr/local/sbin/wf-run-control clear-keys
+    ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-bundles|start-run|run-status|harvest|clear-keys" ;;
 esac
