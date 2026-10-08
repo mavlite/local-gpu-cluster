@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 56-fan-control.sh — Phase 5.13.3-5.13.4 of setup-runbook.md.
 #
-# Installs the HOST-side fan-control bridge that reads the V620 max edge
-# temperature published by LXC 151 (via the bind-mounted /var/lib/v620-temps)
-# and writes a PWM duty cycle to one or more motherboard fan headers.
+# Installs the HOST-side fan-control bridge (scripts/files/v620-fan-bridge.sh) that reads the
+# hotter V620's JUNCTION temperature published by LXC 151 (v620-temp-publish.sh, via the
+# bind-mounted /var/lib/v620-temps) and writes a PWM duty cycle to one or more motherboard fan
+# headers. The duty curve lives in the bridge file, next to the sweep data it came from.
 #
 # Two supported topologies:
 #   (a) ONE shared PWM that drives everything (Lancool 217 hub model — all V620
@@ -43,9 +44,20 @@ FAN_BOOST_WINDOW="${FAN_BOOST_WINDOW:-20}"   # seconds since last chat to keep b
 # 204 (80%) since the 180 W cap (66-v620-powercap.sh) cut the prefill spike: the boost
 # only needs a head start; the temperature curve above still takes the fans to 100%.
 FAN_BOOST_PWM="${FAN_BOOST_PWM:-204}"        # PWM while boosting (255 = 100%)
-for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM FAN_BOOST_WINDOW FAN_BOOST_PWM; do
+# A missing, stale (> FAN_TEMP_MAX_AGE s) or unparsable junction reading drives FAN_FAILSAFE_PWM.
+# 255: the 2026-10-08 sweep showed anything below 90% overheats GPU0 under sustained load.
+FAN_TEMP_MAX_AGE="${FAN_TEMP_MAX_AGE:-10}"
+FAN_FAILSAFE_PWM="${FAN_FAILSAFE_PWM:-255}"
+for _v in FAN_POLL_SECS FAN_DECAY_STEP FAN_MIN_PWM FAN_BOOST_WINDOW FAN_BOOST_PWM FAN_TEMP_MAX_AGE FAN_FAILSAFE_PWM; do
   [[ "${!_v}" =~ ^[0-9]+$ ]] || die "$_v must be a non-negative integer (got '${!_v}')"
 done
+for _v in FAN_MIN_PWM FAN_BOOST_PWM FAN_FAILSAFE_PWM; do
+  (( 10#${!_v} <= 255 )) || die "$_v must be a PWM duty 0-255 (got '${!_v}')"
+done
+(( 10#$FAN_FAILSAFE_PWM >= 230 )) || die "FAN_FAILSAFE_PWM must be >= 230 (90%): below it GPU0 overheats under load (got $FAN_FAILSAFE_PWM)"
+(( 10#$FAN_POLL_SECS >= 1 ))      || die "FAN_POLL_SECS must be >= 1 (0 is a busy loop)"
+(( 10#$FAN_DECAY_STEP >= 1 ))     || die "FAN_DECAY_STEP must be >= 1 (0 never ramps down)"
+(( 10#$FAN_TEMP_MAX_AGE >= 4 ))   || die "FAN_TEMP_MAX_AGE must be >= 4 s (the publisher writes every 2 s)"
 
 if [[ -z "$FAN_PWM_PATH" ]]; then
   step "Fan PWM discovery"
@@ -70,11 +82,26 @@ fi
 # Normalize to a space-separated list (accept comma-separated for convenience)
 FAN_PWMS="${FAN_PWM_PATH//,/ }"
 
-# Validate every path
+# Validate every path. hwmonN numbering drifts across boots (config said hwmon12, the chip was
+# hwmon14 on 2026-10-08), and the bridge resolves chips by name at runtime anyway — so a path
+# whose hwmonN moved falls back to the same pwmN on whichever nct67xx chip has it.
+resolve_live_pwm() {
+  local want="$1" pwm h
+  [[ -w "$want" ]] && { echo "$want"; return 0; }
+  pwm="$(basename "$want")"
+  for h in /sys/class/hwmon/hwmon*; do
+    [[ "$(cat "$h/name" 2>/dev/null)" == nct67* && -w "$h/$pwm" ]] && { echo "$h/$pwm"; return 0; }
+  done
+  return 1
+}
+_live_pwms=""
 for p in $FAN_PWMS; do
-  [[ -w "$p" ]] || die "PWM not writable: $p"
-  [[ -w "${p}_enable" ]] || die "${p}_enable missing — wrong PWM file?"
+  q="$(resolve_live_pwm "$p")" || die "PWM not writable: $p (and no nct67xx chip has $(basename "$p"))"
+  [[ "$q" == "$p" ]] || warn "$p is now $q (hwmon numbering drifted) — using $q; consider updating config.env"
+  [[ -w "${q}_enable" ]] || die "${q}_enable missing — wrong PWM file?"
+  _live_pwms+="$q "
 done
+FAN_PWMS="${_live_pwms% }"
 
 apt_install_if_missing lm-sensors
 
@@ -114,116 +141,23 @@ PAIRS="${PAIRS% }"
 
 step "Install host fan-bridge script + service ($(echo "$FAN_PWMS" | wc -w) PWM target(s)) [resolver pairs: $PAIRS]"
 
-# Use printf so we can safely interpolate the host's PAIRS list into the script body
-write_file_if_changed /usr/local/bin/v620-fan-bridge.sh 0755 <<EOF
-#!/bin/bash
-# v620-fan-bridge.sh — reads /var/lib/v620-temps/current-temp (published by
-# the LXC 151 publisher) and translates max V620 edge temp into a PWM duty
-# cycle applied to every PWM target resolved below.
-#
-# PAIR format is "<chip-name-glob>:<pwmN>", e.g. "nct67??:pwm5". The chip side
-# is a bash case-glob so we tolerate kernel-driver name drift across boots
-# (nct6798 vs nct6799 for the same NCT6798D silicon). hwmonN numbering is
-# also not stable, so we walk /sys/class/hwmon/* and match by chip name.
+[[ -r "$LGC_DIR/files/v620-fan-bridge.sh" ]] || die "missing $LGC_DIR/files/v620-fan-bridge.sh"
+[[ "$FAN_BOOST_URL" =~ ^https?://[A-Za-z0-9.:/_-]+$ ]] || die "FAN_BOOST_URL looks malformed: '$FAN_BOOST_URL'"
+write_file_if_changed /usr/local/bin/v620-fan-bridge.sh 0755 < "$LGC_DIR/files/v620-fan-bridge.sh"
 
-TEMP_FILE="/var/lib/v620-temps/current-temp"
-PAIRS=( $PAIRS )
-
-resolve_pair() {
-    local pair="\$1"
-    local chip_pat="\${pair%%:*}"
-    local suffix="\${pair#*:}"
-    local chip
-    for h in /sys/class/hwmon/hwmon*; do
-        chip="\$(cat \$h/name 2>/dev/null)" || continue
-        case "\$chip" in
-            \$chip_pat)
-                [ -w "\$h/\$suffix" ] && { echo "\$h/\$suffix"; return 0; }
-                ;;
-        esac
-    done
-    return 1
-}
-
-PWMS=()
-for pair in "\${PAIRS[@]}"; do
-    p="\$(resolve_pair "\$pair")"
-    if [ -n "\$p" ] && [ -w "\$p" ]; then
-        PWMS+=( "\$p" )
-        echo "v620-fan-bridge: \$pair -> \$p" >&2
-    else
-        echo "v620-fan-bridge: WARNING could not resolve \$pair — skipping" >&2
-    fi
-done
-
-if [ "\${#PWMS[@]}" -eq 0 ]; then
-    echo "v620-fan-bridge: FATAL no PWMs resolved, exiting" >&2
-    exit 1
-fi
-
-# Fan tunables (baked at install from config.env)
-POLL_SECS=$FAN_POLL_SECS
-DECAY_STEP=$FAN_DECAY_STEP
-MIN_PWM=$FAN_MIN_PWM
-BOOST_URL="$FAN_BOOST_URL"
-BOOST_WINDOW=$FAN_BOOST_WINDOW
-BOOST_PWM=$FAN_BOOST_PWM
-
-# Curve: max V620 edge temp -> target PWM duty (0-255). Shifted ~8C earlier than
-# the original so 100% engages at 72C (was 80C), keeping the cards clear of the
-# ~85C alarm line under load spikes.
-target_pwm() {
-    local t="\$1"
-    if   [ "\$t" -lt 44 ]; then echo 64    # <44C   25%  (idle)
-    elif [ "\$t" -lt 54 ]; then echo 102   # 44-53  40%
-    elif [ "\$t" -lt 62 ]; then echo 153   # 54-61  60%
-    elif [ "\$t" -lt 72 ]; then echo 204   # 62-71  80%
-    else                        echo 255   # >=72  100%
-    fi
-}
-
-# Switch every PWM to manual mode
-for p in "\${PWMS[@]}"; do
-    echo 1 > "\${p}_enable" 2>/dev/null || true
-done
-
-# Response shaping. TARGET = max(temperature curve, feed-forward boost).
-#  - Feed-forward: if the router reports a chat request within BOOST_WINDOW s,
-#    drive BOOST_PWM. The router stamps this the instant a request ARRIVES
-#    (before the slot/queue, before any GPU work), so fans lead the prefill
-#    heat and the 1-2s thermal-alarm chirp never has time to fire.
-#  - Ramp UP to TARGET instantly; ramp DOWN by at most DECAY_STEP per poll so
-#    the fan eases off slowly. At DECAY_STEP=4 / POLL=1s a 100%->25% glide ~=48s.
-CUR=192   # start ~75% on boot; the curve settles it within a minute
-while true; do
-    if [ -r "\$TEMP_FILE" ]; then
-        TEMP=\$(cat "\$TEMP_FILE" 2>/dev/null)
-        TEMP=\${TEMP:-65}
-        TARGET=\$(target_pwm "\$TEMP")
-    else
-        TARGET=192   # temp file missing (LXC down) — safe 75%
-    fi
-
-    # Feed-forward: poll the router for recent chat activity. Graceful — any
-    # failure / missing field just leaves the temperature curve in charge.
-    SSC=\$(curl -s -m 1 "\$BOOST_URL" 2>/dev/null | grep -oE '"seconds_since_chat":[0-9.]+' | head -1 | cut -d: -f2)
-    if [ -n "\$SSC" ] && awk "BEGIN{exit !(\$SSC < \$BOOST_WINDOW)}"; then
-        [ "\$BOOST_PWM" -gt "\$TARGET" ] && TARGET=\$BOOST_PWM
-    fi
-
-    if [ "\$TARGET" -ge "\$CUR" ]; then
-        CUR=\$TARGET
-    else
-        CUR=\$(( CUR - DECAY_STEP ))
-        [ "\$CUR" -lt "\$TARGET" ] && CUR=\$TARGET
-    fi
-    [ "\$CUR" -lt "\$MIN_PWM" ] && CUR=\$MIN_PWM
-
-    for p in "\${PWMS[@]}"; do
-        echo "\$CUR" > "\$p"
-    done
-    sleep "\$POLL_SECS"
-done
+# Tunables reach the bridge through the unit's EnvironmentFile (every value validated above).
+write_file_if_changed /etc/default/v620-fan-bridge 0644 <<EOF
+# Written by 56-fan-control.sh — edit config.env and re-run it instead.
+FAN_PAIRS="$PAIRS"
+FAN_TEMP_FILE=/var/lib/v620-temps/current-junction
+FAN_TEMP_MAX_AGE=$FAN_TEMP_MAX_AGE
+FAN_FAILSAFE_PWM=$FAN_FAILSAFE_PWM
+FAN_POLL_SECS=$FAN_POLL_SECS
+FAN_DECAY_STEP=$FAN_DECAY_STEP
+FAN_MIN_PWM=$FAN_MIN_PWM
+FAN_BOOST_URL=$FAN_BOOST_URL
+FAN_BOOST_WINDOW=$FAN_BOOST_WINDOW
+FAN_BOOST_PWM=$FAN_BOOST_PWM
 EOF
 
 write_file_if_changed /etc/systemd/system/v620-fan-bridge.service 0644 <<'EOF'
@@ -233,7 +167,10 @@ After=multi-user.target
 
 [Service]
 Type=simple
+EnvironmentFile=/etc/default/v620-fan-bridge
 ExecStart=/usr/local/bin/v620-fan-bridge.sh
+# The chip holds its last duty forever once the bridge is gone; this also runs after SIGKILL.
+ExecStopPost=/usr/local/bin/v620-fan-bridge.sh --failsafe
 Restart=always
 RestartSec=10
 
@@ -242,8 +179,10 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now v620-fan-bridge.service
+systemctl enable v620-fan-bridge.service
+systemctl restart v620-fan-bridge.service   # a running bridge keeps the old curve until restarted
 systemctl status v620-fan-bridge.service --no-pager || true
+[[ -s /var/lib/v620-temps/current-junction ]]   || warn "/var/lib/v620-temps/current-junction is missing — the blowers run at fail-safe ${FAN_FAILSAFE_PWM}/255 until the LXC ${AMD_VMID:-151} publisher (51-lxc-amd.sh, 5.13) is updated."
 
 ok "Fan bridge active. PWM target(s): $FAN_PWMS"
 echo "  Stress test to confirm:"

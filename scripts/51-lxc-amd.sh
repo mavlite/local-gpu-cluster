@@ -736,26 +736,13 @@ phase_5_13_publisher() {
   pct_set_if_changed "$AMD_VMID" mp1 "/var/lib/v620-temps,mp=/var/lib/v620-temps"
   ensure_lxc_started "$AMD_VMID"
 
+  # The publisher is a real file (scripts/files/v620-temp-publish.sh, unit-tested) pushed into the
+  # LXC: it publishes the hotter card's junction temp, which the host fan bridge drives from.
+  [[ -r "$LGC_DIR/files/v620-temp-publish.sh" ]] || die "missing $LGC_DIR/files/v620-temp-publish.sh"
+  pct push "$AMD_VMID" "$LGC_DIR/files/v620-temp-publish.sh" /usr/local/bin/v620-temp-publish.sh --perms 0755
+
   pct exec "$AMD_VMID" -- bash -se <<'GUEST'
     set -Eeuo pipefail
-    cat > /usr/local/bin/v620-temp-publish.sh <<'EOF'
-#!/bin/bash
-# Publish max V620 edge temp every 2 seconds. Read by host fan bridge.
-# (2s, dropped from 5s on 2026-06-05, halves the temp-data staleness so the
-#  host fan bridge can react to load spikes before the V620 thermal alarm chirps.)
-mkdir -p /var/lib/v620-temps
-while true; do
-    T1=$(rocm-smi -d 0 --showtemp 2>/dev/null | awk '/Temperature.*edge/ {print int($NF); exit}')
-    T2=$(rocm-smi -d 1 --showtemp 2>/dev/null | awk '/Temperature.*edge/ {print int($NF); exit}')
-    [ -z "$T1" ] && T1=60
-    [ -z "$T2" ] && T2=60
-    MAX=$(( T1 > T2 ? T1 : T2 ))
-    echo "$MAX" > /var/lib/v620-temps/current-temp.tmp
-    mv /var/lib/v620-temps/current-temp.tmp /var/lib/v620-temps/current-temp
-    sleep 2
-done
-EOF
-    chmod +x /usr/local/bin/v620-temp-publish.sh
 
     cat > /etc/systemd/system/v620-temp-publish.service <<'EOF'
 [Unit]
@@ -773,7 +760,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now v620-temp-publish.service
+    systemctl enable v620-temp-publish.service
+    systemctl restart v620-temp-publish.service   # pick up a changed publisher
 GUEST
 }
 

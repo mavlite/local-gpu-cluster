@@ -74,7 +74,7 @@ curl -sf http://192.168.6.153:8000/healthz | jq
 pct exec 151 -- rocminfo 2>/dev/null | grep -c "Device Type:.*GPU"   # expect 2
 
 # Fan-bridge (only if 56-fan-control.sh was run)
-systemctl is-active v620-fan-bridge.service 2>/dev/null && cat /var/lib/v620-temps/current-temp
+systemctl is-active v620-fan-bridge.service 2>/dev/null && cat /var/lib/v620-temps/current-junction   # fans follow this
 
 # /tank disk usage
 zfs list tank tank/models tank/anythingllm tank/rag-state tank/backups
@@ -311,7 +311,8 @@ The LXC-side publisher also has to be running:
 
 ```bash
 pct exec 151 -- systemctl status v620-temp-publish.service
-cat /var/lib/v620-temps/current-temp   # should be a number, updated every 5s
+cat /var/lib/v620-temps/current-junction   # hotter card's junction, updated every 2s; 105 = a card could not be read
+stat -c %y /var/lib/v620-temps/current-junction   # older than 10s => bridge runs the blowers at fail-safe 100%
 ```
 
 ### § 3.8 Client Bearer-auth failures

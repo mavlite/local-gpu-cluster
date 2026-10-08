@@ -1447,6 +1447,14 @@ curl -s -o /dev/null -w "%{http_code}\n" http://$LLAMACPP_AMD_IP:8080/props
 
 ### Step 5.13 — V620 fan control software bridge (Approach A from Step 1.9.1)
 
+> **Current implementation (2026-10-08):** the publisher and bridge are the tested files
+> `scripts/files/v620-temp-publish.sh` and `scripts/files/v620-fan-bridge.sh`, installed by
+> `51-lxc-amd.sh` (5.13) and `56-fan-control.sh`. The fans follow the hotter card's **junction**
+> temperature (`current-junction`), not edge. The curve comes from a loaded sweep with the
+> BFB1012SHA01 blowers at the 180 W cap: 90% PWM is the lowest duty that holds GPU0 at
+> 81-84 °C, and 85% reaches 88 °C in 3 minutes. A missing, stale or unreadable temperature
+> runs the blowers at 100%. The inline scripts below show the original design only.
+
 This sets up the systemd services that read V620 temperatures from inside LXC 151 and translate them into motherboard PWM duty cycle, giving you V620-temp-driven fan speed control. The motherboard PWM signal then feeds the **Lancool 217's built-in 6-channel PWM fan hub**, which mirrors the duty cycle to all connected fans (4× NF-A8 on V620 shrouds + the case's stock fans wired into the hub).
 
 **Architecture:**
