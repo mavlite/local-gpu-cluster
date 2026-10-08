@@ -171,6 +171,7 @@ EnvironmentFile=/etc/default/v620-fan-bridge
 ExecStart=/usr/local/bin/v620-fan-bridge.sh
 # The chip holds its last duty forever once the bridge is gone; this also runs after SIGKILL.
 ExecStopPost=/usr/local/bin/v620-fan-bridge.sh --failsafe
+SuccessExitStatus=143   # the TERM trap exits 143 after writing fail-safe; a stop is not a failure
 Restart=always
 RestartSec=10
 

@@ -228,3 +228,9 @@ def test_main_runs_the_loop_and_a_stop_leaves_the_blowers_at_full(sysfs, temp_fi
     r = run(prog, env)
     assert r.stdout.split()[:2] == ["64", "1"], r.stdout + r.stderr
     assert read() == {"pwm5": ("255", "1"), "pwm6": ("255", "1")}   # the exit trap failed safe
+
+
+def test_installer_unit_counts_a_stop_as_success():
+    # The bridge exits 143 on TERM (after writing fail-safe); a deliberate stop must not read "failed".
+    installer = open(os.path.join(FILES, "..", "56-fan-control.sh"), encoding="utf-8").read()
+    assert "SuccessExitStatus=143" in installer
