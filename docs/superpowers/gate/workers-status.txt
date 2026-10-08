@@ -1,0 +1,90 @@
+﻿== llmbench01
+WARNING: Please consider joining the VMware Customer Experience Improvement Program, so you can help us make PowerCLI a
+ better product. You can join using the following command:
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true
+VMware's Customer Experience Improvement Program ("CEIP") provides VMware with information that enables VMware to 
+improve its products and services, to fix problems, and to advise you on how best to deploy and use our products.  As 
+part of the CEIP, VMware collects technical information about your organizationâ€™s use of VMware products and services
+ on a regular basis in association with your organizationâ€™s VMware license key(s).  This information does not 
+personally identify any individual.
+For more details: type "help about_ceip" to see the related help article.
+To disable this warning and set your preference use the following command and restart PowerShell: 
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
+pid: 9203
+health: {"status":"ok","slots_idle":1,"slots_processing":0}
+key: root:bench 640
+latest log: /var/log/gate/server-20261006T172708Z.log
+table inet gate {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
+		tcp dport 8090 counter packets 6 bytes 360 drop
+	}
+}
+MemTotal:       32863308 kB
+MainPID=9203
+MemoryMax=32212254720
+version: 1 (5f89bfc)
+built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
+df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
+/opt/bench/src/ik/build/bin/llama-server -m /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0 -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --jinja -np 1 --alias qwen3.6 --chat-template-kwargs {"enable_thinking":false} --host 0.0.0.0 --port 8090 --api-key-file /etc/gate/worker.key
+== llmbench02
+WARNING: Please consider joining the VMware Customer Experience Improvement Program, so you can help us make PowerCLI a
+ better product. You can join using the following command:
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true
+VMware's Customer Experience Improvement Program ("CEIP") provides VMware with information that enables VMware to 
+improve its products and services, to fix problems, and to advise you on how best to deploy and use our products.  As 
+part of the CEIP, VMware collects technical information about your organizationâ€™s use of VMware products and services
+ on a regular basis in association with your organizationâ€™s VMware license key(s).  This information does not 
+personally identify any individual.
+For more details: type "help about_ceip" to see the related help article.
+To disable this warning and set your preference use the following command and restart PowerShell: 
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
+pid: 1484
+health: {"status":"ok","slots_idle":1,"slots_processing":0}
+key: root:bench 640
+latest log: /var/log/gate/server-20261006T172849Z.log
+table inet gate {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
+		tcp dport 8090 counter packets 6 bytes 360 drop
+	}
+}
+MemTotal:       32863308 kB
+MainPID=1484
+MemoryMax=32212254720
+version: 1 (5f89bfc)
+built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
+df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
+/opt/bench/src/ik/build/bin/llama-server -m /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0 -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --jinja -np 1 --alias qwen3.6 --chat-template-kwargs {"enable_thinking":false} --host 0.0.0.0 --port 8090 --api-key-file /etc/gate/worker.key
+== llmbench03
+WARNING: Please consider joining the VMware Customer Experience Improvement Program, so you can help us make PowerCLI a
+ better product. You can join using the following command:
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true
+VMware's Customer Experience Improvement Program ("CEIP") provides VMware with information that enables VMware to 
+improve its products and services, to fix problems, and to advise you on how best to deploy and use our products.  As 
+part of the CEIP, VMware collects technical information about your organizationâ€™s use of VMware products and services
+ on a regular basis in association with your organizationâ€™s VMware license key(s).  This information does not 
+personally identify any individual.
+For more details: type "help about_ceip" to see the related help article.
+To disable this warning and set your preference use the following command and restart PowerShell: 
+Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $true or $false.
+pid: 1492
+health: {"status":"ok","slots_idle":1,"slots_processing":0}
+key: root:bench 640
+latest log: /var/log/gate/server-20261006T173033Z.log
+table inet gate {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		tcp dport 8090 ip saddr { 127.0.0.1, 192.168.6.158, 192.168.6.226 } accept
+		tcp dport 8090 counter packets 6 bytes 360 drop
+	}
+}
+MemTotal:       32863312 kB
+MainPID=1492
+MemoryMax=32212254720
+version: 1 (5f89bfc)
+built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
+df27a780435b7b45c2597536112ea3cb091f8544c3d0c3318d9f4258b31f7adf  /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf
+/opt/bench/src/ik/build/bin/llama-server -m /models/Qwen3.6-35B-A3B-MTP-UD-IQ4_XS.gguf -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0 -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --jinja -np 1 --alias qwen3.6 --chat-template-kwargs {"enable_thinking":false} --host 0.0.0.0 --port 8090 --api-key-file /etc/gate/worker.key

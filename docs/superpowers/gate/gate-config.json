@@ -1,0 +1,108 @@
+{
+ "spec": "docs/superpowers/specs/2026-10-05-minisforum-cluster-integration-design.md rev 3.1 §5",
+ "thresholds": {
+  "one_task_fraction": 0.029411764705882353,
+  "latency_factor": 1.5,
+  "quality_task_margin": 1,
+  "variance_sd_tasks": 1,
+  "variance_cv": 0.15
+ },
+ "runs_per_arm": 3,
+ "run_order": [
+  "A",
+  "B",
+  "B",
+  "A",
+  "A",
+  "B"
+ ],
+ "router_url": "http://192.168.6.153:8000/v1",
+ "coordinator_alias": "qwen3.8-nothink",
+ "worker_alias": "qwen3.6",
+ "worker_urls": [
+  "http://172.16.10.205:8090/v1",
+  "http://172.16.10.206:8090/v1",
+  "http://172.16.10.207:8090/v1"
+ ],
+ "worker_vms": [
+  "llmbench01",
+  "llmbench02",
+  "llmbench03"
+ ],
+ "probe": {
+  "interval_s": 20,
+  "baseline_samples": 30,
+  "max_failed": 0,
+  "prompt": "Reply with the single word: ready"
+ },
+ "capacity_timeout_s": 14400,
+ "large_prefill_min": 4096,
+ "polyglot": {
+  "languages": "python",
+  "threads": 1,
+  "edit_format": "whole",
+  "aider_commit": "5dc9490",
+  "benchmark_commit": "7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f",
+  "exercises": [
+   "affine-cipher",
+   "beer-song",
+   "book-store",
+   "bottle-song",
+   "bowling",
+   "connect",
+   "dominoes",
+   "dot-dsl",
+   "food-chain",
+   "forth",
+   "go-counting",
+   "grade-school",
+   "grep",
+   "hangman",
+   "list-ops",
+   "paasio",
+   "phone-number",
+   "pig-latin",
+   "poker",
+   "pov",
+   "proverb",
+   "react",
+   "rest-api",
+   "robot-name",
+   "scale-generator",
+   "sgf-parsing",
+   "simple-linked-list",
+   "transpose",
+   "tree-building",
+   "two-bucket",
+   "variable-length-quantity",
+   "wordy",
+   "zebra-puzzle",
+   "zipper"
+  ]
+ },
+ "worker_flags": "-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0",
+ "worker_extra": "-cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --jinja -np 1 --alias qwen3.6 --chat-template-kwargs {\"enable_thinking\":false}",
+ "opencode_version": "1.18.34",
+ "contexts": {
+  "arm_a_coordinator_and_workers": 120000,
+  "arm_b_coordinator": 200000,
+  "arm_b_workers": 57344
+ },
+ "task_manifest_sha256": "9415ec687a73e8858226ba4a7423c4098d4f2023fe05727a3b5fd3474cf21e3f",
+ "worker_vm_memory_gb": 32,
+ "amendments": [
+  {
+   "date": "2026-10-06",
+   "before_cross_arm_data": true,
+   "change": "worker VMs 24 GB -> 32 GB (full reservation); llama-server runs in its own systemd unit (gate-llama, MemoryMax=30G); worker flags UNCHANGED",
+   "reason": "all 3 workers were OOM-killed during their first Polyglot quality runs at 24 GB (anon-rss ~24.0 GB): ik keeps one prompt in the RAM prompt cache even when it exceeds -cram 256 (890-1119 MiB observed). Started via GuestOperations the server lived in open-vm-tools.service, so the OOM also stopped VMware Tools.",
+   "evidence": "llmbench01 controlled replay (frozen flags, 6 prompts to ~50K tokens): 24 GB VM -> OOM at 23.35 GB RSS; -cram 0 -> peak 22.6 GB; 32 GB VM with frozen flags -> peak 23.7 GB, 0 OOM, 12.5 GB free at idle",
+   "user_decision": "diagnose then amend; 'we have more memory ... don't reduce performance by forcing ourselves to stick to 24GB'",
+   "invalidated_runs": [
+    "gate-w1-01",
+    "gate-w2-01",
+    "gate-w3-01 (partial, kept as evidence, not scored)"
+   ]
+  }
+ ]
+}

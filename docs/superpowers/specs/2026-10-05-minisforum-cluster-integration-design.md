@@ -1,265 +1,466 @@
 # Minisforum nodes ↔ GPU cluster integration
 
-**Status:** rev 2 — Phase 1 rewritten from measurement · **Date:** 2026-10-05
-**Path:** architectural (brainstorming → spec → plan)
+**Status:** rev 3.1 — measure-first gate (runnable); Phase 0 shipped; Phase 2 is requirements
+**Date:** 2026-10-05 · **Path:** architectural (brainstorming → spec → plan)
+
+> **Revision history**
+>
+> - **Rev 3** answered four adversarial reviews of rev 2: 59 findings, 5 critical.
+> - **Rev 3.1** answers two re-reviews of rev 3:
+>   - *disposition check:* 18 resolved, 6 claimed but not resolved, 10 reasonable deferrals,
+>     16 new issues;
+>   - *gate methodology:* 3 blockers, the rev 3 §5 was not runnable.
+> - **Rev 3.1 makes three changes:**
+>   - It **ships the Full-mode refusal now**, not in Phase 2, so "workers plus full stack" cannot
+>     happen (§4).
+>   - It replaces §5 with a **runnable** gate. There are two sub-gates on their own harnesses, a
+>     variance check first, a pinned environment, and minimum security for the arm-B benchmark.
+>   - It corrects the merge claim, the resilience criterion and the contention figures.
+> - **§11** gives the disposition of every critical/high finding. **§12** carries every medium/low
+>   finding forward as a checklist.
 
 ## 1. Intent
 
-**Outcome:** the three Minisforum hosts (hyp01-03, the VCF lab's management cluster) add
-capacity to the GPU cluster so that more work runs in parallel, the V620s spend their VRAM on the
-main model, and nothing user-facing breaks when the lab goes down.
-
-**What the user asked for (2026-10-04/05):** use the nodes alongside the GPU cluster — as
-subagent workers coordinated by the GPU model, possibly as standalone GPU nodes. All four
-candidate uses were judged plausible: opencode subagents, Claude Code delegation, freeing the
-V620s, and redteam per-role agents.
+**Outcome.** The three Minisforum hosts (hyp01-03) add parallel agent capacity to the GPU cluster.
+Qwen3.8 on the V620s coordinates. Nothing user-facing breaks when the lab is down.
 
 **User decisions:**
 
 | # | Decision | Choice |
 |---|---|---|
-| D1 | Architecture | **Approach A** — router learns named backends; phased |
-| D2 | Phase 1 | ~~Move embed/rerank off the V620s~~ → **fix them in place** (rev 2). The placement benchmark the user asked for ("test ... and compare") showed the V620 wins 6-13× and on parity; see §4 |
-| D3 | Worker routing | Per-node router alias, per-backend semaphore, health check, GPU fallback **on by default** |
-| D4 | opencode | Pinned `worker-1..3` subagents, Qwen3.8 coordinates |
-| D5 | Redteam fast tier | Retarget to CPU workers only after a measured comparison |
-| D6 | Delegate pool | Phase 3, **gated on** and **kept out of** the local-delegate Phase-1 A/B |
-| D7 | GPUs in the nodes | Later one-node spike, not part of this build |
+| D1 | Architecture | Router learns named backends; phased |
+| D2 | Embed/rerank | Stay on the V620s, fixed in place (§3) |
+| D3 | Worker routing | One router alias per node, per-backend admission, health, GPU fallback, under §6.3 rules |
+| D4 | opencode | `worker-1..3` subagents pinned to aliases; Qwen3.8 coordinates |
+| D5 | Redteam fast tier | Move only after a measured comparison |
+| D6 | Delegate pool | Phase 3, gated (§7) |
+| D7 | GPUs in the nodes | A later one-node spike |
+| D8 | Lab operating mode | **Minimal day to day** (hosts plus, if the gate passes, LLM workers; VCF stack off). Full only for VCF work, and **Full refuses while workers run** (shipped, §4). Tiering stays on, DRS stays PartiallyAutomated, nsxa's reservation stays removed |
+| D9 | Build order | **Measure first:** Phase 2 only if the §5 gate passes. **If it fails, the workers stay powered off and Minimal means hosts only** |
 
-**Success criteria:**
-- Embed/rerank stay on the V620s with their VRAM cut to what the repo specifies; the chat slot
-  count is a profile setting.
-- RAG query-embed latency does not regress (it improves 50× if flash attention is adopted, §4),
-  and stored-vector compatibility is either exact or deliberately re-established by re-embedding.
-- Each worker alias serves requests from its own node with a warm prompt cache across turns.
-- Powering off any or all workers changes no client-visible behaviour beyond speed (fallback).
-- N-1 holds on the VCF cluster with workers running: survivors' active memory ≤ 50% of DRAM.
+**Success criteria (measurable):**
+- **Gate:** the §5.7 rule, applied to data collected under the §5.0 pinned environment.
+- **Resilience:**
+  - If a worker or the whole lab disappears, no GPU profile swap happens and the coordinator
+    keeps working.
+  - New requests to a dead worker fall back, or fail with the router's error envelope, within one
+    probe interval (≤15 s).
+  - An in-flight stream to a backend marked down is aborted within one further probe interval
+    (§6.3). A dead worker cannot be told apart from a slow CPU prefill by byte-silence alone, so
+    the abort is probe-driven, not a read timeout.
+- **Lab safety:**
+  - On every host with a worker: consumed DRAM + 24 GB + overhead ≤ 75 GB.
+  - Tier `BlocksWritten`/day does not rise in the 48 h after workers start.
+  - Full mode never runs with a worker on. This is enforced by the scripts.
 
-## 2. Governing principle
+## 2. Governing principles
 
-**The lab only hosts work whose loss degrades the cluster, never breaks it.** The Minisforums are
-a VCF lab that lost vcsa and cascaded HA restarts as recently as 2026-10-04 (tier-drive failure),
-and the lab network (172.16.10.0/24) reaches the cluster LAN (192.168.6.0/24) only through narrow
-CRS309 accepts. Anything on the critical path of RAG/chat either stays off the lab or gains a
-fallback that does not touch the lab.
+1. **The lab only hosts work whose loss degrades the cluster, never breaks it.**
+2. **Never load the cluster hosting its own control plane.**
+   - In Minimal mode the control plane is off.
+   - Full refuses while workers run, so the two never coexist.
+   - The one exception is `-WithVCenter`, which runs vcsa (21 GB) beside one worker (24 GB). It is
+     accepted because it fits a host's ~94 GB DRAM and nothing else of the control plane runs.
+3. **Measure before building.** Every phase gate is decided by numbers collected before the phase,
+   under a pinned environment, with the rule committed first.
+4. **Repo is the source of truth for live units.** Live changes are merged and deployable from
+   `main`. The host checkout must be pulled after every merge.
 
-## 3. Evidence this design rests on (measured 2026-10-03..05)
+## 3. Evidence (measured 2026-10-03..05)
 
-**Worker model — agentic eval** (agent-eval-v3 with hidden-test grading, same protocol as the
-Qwen3.8 baseline; 24 GB VM, 16 vCPU, Ryzen 9 7945HX, ik_llama.cpp unless noted):
+**Worker model:** Qwen3.6-35B-A3B UD-IQ4_XS on ik_llama.cpp with MTP. Rejected:
+- Gemma 4 (same pass rate, ~12× slower);
+- gpt-oss-20b (malformed harmony output on both runtimes);
+- LFM2-24B (not usable as an agent).
 
-| Model | Hidden set | Visible (all sets) | Mean turns | Min/task | Verdict |
-|---|---|---|---|---|---|
-| **Qwen3.6-35B-A3B UD-IQ4_XS + ik MTP** | **9/15 (60%)** | 28/28 | 7.6 | 0.6 | **worker model** |
-| Gemma 4 26B-A4B q4_0 | 9/15 (60%) | 20/21 | 11.4 | 8.0 | ~12× slower (600-900 tokens/turn); RSS 23.2 GB at the VM limit |
-| gpt-oss-20b MXFP4 (low effort) | 5/15 (33%), ik and mainline | 19/28 | 8.4-9.4 | 0.9 | malformed harmony output in ~1/3 of runs on both runtimes |
-| LFM2-24B-A2B Q4_K_M | 0/15, ik and mainline | 6-8/28 | 8-14 | 0.7-2.1 | not an agent |
-| *reference: Qwen3.8-27B on V620s* | *9/15 (60%)* | | *~5* | | *coordinator* |
+**Limits of the agentic suite.** The hidden set has 5 tasks.
+- Two fail in every arm because each depends on an unstated contract. Three discriminate.
+- On those three, Qwen3.6, Gemma and the earlier Qwen3.8 figure are statistically
+  indistinguishable (Fisher p ≈ 1).
+- **"Qwen3.6 matches Qwen3.8" is not established. "Thinking hurts" is not supported.**
+- The shipped config scored 16/30.
+- Tasks are single-file and under 5K tokens. Real work is unmeasured, which is why §5 includes a
+  Polyglot quality sub-gate.
 
-Caveat: one 15-task hidden suite. Qwen3.6 matches Qwen3.8 on pass rate, not on turn efficiency.
+**Worker runtime (shipped config).**
+- Flags:
+  `-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --min-p 0`,
+  plus non-thinking sampling.
+- `-cram 256 -ctx-ckpt 8` are mandatory: ik's defaults OOM a 24 GB guest.
+- Old MTP setting (`n_max=2`, default p_min): **22.5 gen / 188 prefill t/s with the VCF stack
+  running, 26.0 / 227 in Minimal**. So the stack costs 16% of generation and 21% of prefill.
+- Shipped setting in Minimal: **30.1-30.4 / 226-232** (all 3 nodes within 1%).
 
-**Settings A/B** (30 hidden runs per arm, ±9 pts sd): baseline 15/30, `--min-p 0` 16/30,
-presence penalty 1.5 + `--repeat-last-n -1` 13/30, thinking ON (coding preset, `preserve_thinking`,
-8K budget, reasoning echoed) 12/30, verify-before-finish system prompt 16/30 at 2× wall-clock.
-**None beats baseline beyond noise.** Thinking scored 0/6 on `chunk_intent` vs 3-5/6 elsewhere.
-Two of five hidden tasks fail 0/6 in every arm (one unstated contract each), so ~60% is this
-suite's ceiling for the model. No loops: 1 turn-cap in 180 runs, 0 tool errors.
+**Throughput (back-of-envelope; §5 replaces it with measurement).** Assume a delegated job: 12K
+start, ~15 turns, ending at ~45K.
+- A CPU worker takes ~9-10 min with perfect caching.
+- One GPU stream takes ~2.5 min.
 
-**Worker runtime facts:**
-- Config: `-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr
-  --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs`, Qwen3.6 sampling (`temp 0.7, top-p 0.8,
-  top-k 20, --min-p 0`), `enable_thinking: false`, no presence penalty.
-- ik defaults verified on build 5f89bfc that the config overrides: `--min-p` **0.1** (Qwen
-  specifies 0) and MTP `p_min` **0.75** (truncated drafts to 1.68 of 2 tokens). The MTP change
-  decodes 26.6-28.6 t/s vs 22.5 (speculative decoding is verified, so quality is unaffected);
-  `-muge` measured 0%.
-- **`-cram 256 -ctx-ckpt 8` are mandatory.** ik's defaults (8 GiB RAM prompt cache, 32 context
-  checkpoints × ~63 MiB) OOM-killed the server twice in a 24 GB guest. With both set, RSS held at
-  20.8-21.4 GB with ~2.4 GB free.
-- MTP n=2: +44% generation at ~90% acceptance. ik prefill is ~2× mainline.
-- Turn cost (2K in / 300 out): ~23 s at 8K context depth, ~30 s at 32K.
+So per job the CPU is ~4× slower. Its only case is **additive capacity**: work done without slowing
+the coordinator. §5.7 therefore leads with that.
 
-**Prompt-cache affinity is mandatory.** CPU prefill runs at ~125-300 tokens/s, so a job whose
-turns move between backends re-prefills its whole context every turn.
+**Embed/rerank:**
+- The V620 beats CPU 6-13× and keeps parity.
+- The ~600 ms query floor was flash-attention-off.
+- The reranker stays FA-off: FA reorders rankings for a 3% gain.
 
-**V620 VRAM held by non-chat services:** the live embedder had drifted from
-`scripts/51-lxc-amd.sh` (4 slots / 65536 live vs 2 / 32768 in the repo) and held ~9.8 GB on GPU0;
-reconciled to the repo on 2026-10-05 (GPU0 31.8 → 24.9 GB used). Reranker bge-reranker-v2-m3
-holds 1.5 GB on GPU1.
+## 4. Phase 0 — shipped 2026-10-05
 
-## 4. Phase 1 — fix the V620 embedder in place (rev 2)
+| Item | Where | Verified |
+|---|---|---|
+| Embed unit reconciled to repo (2 slots / 32768, −7 GB VRAM) | live; backup on LXC 151 | parity exact against the FA-off store at the time |
+| Embedder `--flash-attn on` | `a7a307f`, **merged into local `main`** | 12 ms query p50 live |
+| Corpus re-embed (offline LanceDB vector rewrite, 19,891 chunks) | scripts in `scripts/tools/allm-reembed/` | 1.5 min outage; top-12 overlap 95-97%; self-retrieval 96→99/100; 25 GB → 0.1 GB |
+| Router: streams hold their admission slot; capacity follows chat `total_slots`; stream connect timeout | `5d942d7`, **merged into local `main`** | e2e: 1 slot → 1 stream, 3 slots → 3; live chat OK; 26 admission tests |
+| Router: embedding budget per input (fixes the silent 413 detach since ~10-03) | `5d942d7`, merged | 8×3K batch 413 → 200 live |
+| VCF lab Minimal/Full modes; workers owned; 180-day license guard (fails closed) | `6661191`, **branch `feat/9-1-1-right-sized-capacity`, NOT merged** | 82 offline checks; live Stop 14 min / Minimal start 1 min |
+| **Full refuses while LLM workers run; `-StopLlmWorkers`** | `61d3d2c`, same branch, NOT merged | 89 checks; refusal mutation-tested |
 
-### What the placement benchmark showed (2026-10-05)
+**Not yet pushed.** Pushing needs the user's command: `main` plus 4 branches. After that, the host
+checkout must run `git pull --ff-only`. Until it does, re-running `51-lxc-amd.sh` or
+`53-lxc-router.sh` would revert the embedder FA and the router fixes.
 
-Same model files (SHA-verified copies of LXC 151's), same llama.cpp b11026, same flags; harness
-`bench_embed.py` with distinct texts per rep (repeated texts hit the prompt cache and read ~10 ms):
+The vcf-lab scripts run from a workstation and are not deployed by the host. Their branch also
+carries 72 commits of separate VCF-CA work, so merging it is the user's decision.
 
-| Metric | P0 V620 | P1 Proxmox-host CPU LXC | P2 Minisforum VM CPU |
-|---|---|---|---|
-| 4K / 16K-token chunk | **2.1 / 14.9 s** | 12 / 108 s | 8.0 / 68 s |
-| Bulk ingest (4 workers, 1K chunks) | **4.0-4.5 chunks/s** | 0.38-0.47 | 0.63-0.71 |
-| Rerank 20 × 300 tokens | **0.59 s** | 7.2-7.6 s | 4.4 s |
-| Vectors vs stored | **bit-exact** | cos 0.9993-0.9998 | cos 0.9993-0.9998 |
+**Re-embed rollback** expires **2026-10-12**. Until then these exist:
+- `lancedb.fa-off`;
+- `vector-cache.fa-off`;
+- snapshot `tank/anythingllm@pre-reembed-20261005-1155`;
+- `/root/anythingllm-pre-reembed-20261005-1155`.
 
-The CPU is compute-bound (flash attention and 12 threads did not help), and its vectors shift. The
-CPU's one apparent win — fresh-query latency 39-59 ms vs ~605 ms — was a fault in the GPU unit:
+## 5. Phase 1 — the measurement gate (no router change, no persistent service)
 
-| LXC 151 embed config (fresh texts, ≥10-token queries) | Query p50 | 16K chunk | Ingest | GPU0 VRAM | Parity |
-|---|---|---|---|---|---|
-| V0 live: 4 slots, ctx 65536, FA off | 603 ms | 14.9 s | 4.0/s | 31.8 GB | exact |
-| V1 repo: 2 slots, ctx 32768, FA off (**live since 2026-10-05**) | 604 ms | ≈V0 | ≈V0 | **24.9 GB** | exact |
-| V2: V1 + `--flash-attn on` | **12 ms** | **4.8 s** | **7.9/s** | 24.9 GB | cos 0.99954 |
+The gate has two sub-gates, each **measured on its own harness**:
+- a **quality ruler**, Aider Polyglot via aider: per-model, single endpoint;
+- a **capacity probe**, opencode coordinator fan-out.
 
-The ~600 ms floor is the non-flash-attention path, not slot count (`kv_unified` was already false).
+They are never fused into one wall-clock number. aider drives one endpoint and has no subagents;
+opencode has no Polyglot grader.
 
-### 1a. Done — repo config applied (V1)
+### 5.0 Preconditions (all must hold before any timed run)
 
-The live unit now matches the repo (per-slot 16384 kept, so the three-way context alignment
-holds); backup at LXC 151 `/root/llamacpp-embed.service.bak-20261005`. Rollback: restore the
-backup, `daemon-reload`, restart.
+1. **Freeze the task sets** and commit them, with hashes, in the **gate commit**.
+   - Quality set: the Aider Polyglot Python subset on LXC 158 (`run-polyglot.sh <alias> <run>
+     python`).
+   - Capacity set: **N ≥ 6 self-contained worker tasks** with machine-checkable `checks`, authored
+     now and committed under `docs/superpowers/gate/worker-tasks/`. There are no recorded real
+     delegations to replay: the delegate has never completed a real job.
+2. **Benchmark-only opencode profile** (`~/.config/opencode/config.bench.json`, never the
+   default). It contains:
+   - `worker-1..3` provider entries by **IP** (`http://172.16.10.{205,206,207}:8090/v1`, with
+     `limit.context = 65536 − output` and explicit non-thinking sampling);
+   - a `coordinator` agent that dispatches via `task`.
+3. **Security minimums for arm B**, which exposes plaintext workers to the workstation:
+   - the worker agents get **deny-by-default permissions**: no `bash` and no `webfetch`, `edit`
+     only inside a scratch worktree;
+   - each worker VM's firewall accepts `:8090` only from the benchmark client's IP;
+   - keys are throwaway, in a root-only file per VM;
+   - llama-server is stopped and the keys removed at teardown;
+   - the coordinator runs in a scratch clone, not a real repo.
+4. **Reachability, verified by running.**
+   - From the workstation and from LXC 158, `curl` each worker by IP with an **authenticated
+     completion**, not just `/health`.
+   - If any worker is unreachable, stop.
+5. **Pin the environment and record it in the gate commit:**
+   - router SHA and effective `/healthz` `chat_admission`;
+   - `RATE_LIMIT_CHAT`, set to 1000/minute for the window (it is 60/minute per IP by default, so
+     fan-out would otherwise 429 and read as latency);
+   - llama.cpp `b11026`, worker flags verbatim, opencode version, config SHAs;
+   - **thinking state for every alias.** Workers are non-thinking only. The coordinator's thinking
+     state is fixed and identical in both arms.
+6. **Stop the perturbing timers for the window, and restore them in 5.8:**
+   - `llamacpp-chat-restart.timer` (04:00/16:00);
+   - `redteam-mode-watch`, `redteam-mode-idle.timer` and `redteam-mode-precreate`;
+   - the worker VMs' apt timers, with needrestart set to list-only.
 
-### 1b. Adopt flash attention (decision pending)
+   Schedule all runs outside the 03:15 rag-refresh window. **Embed/rerank state must be the same
+   in both arms**, since arm A's mechanism stops them (5.4). Record `/healthz` before and after
+   each run.
+7. **Commit the gate config** — the frozen task sets, the thresholds in 5.7 and the environment
+   record — **before** the first timed run. Its commit SHA is quoted with the results. Changing
+   anything afterwards voids the gate.
 
-V2 is better on every axis except parity. Two ways to take it:
+### 5.1 Variance check first (it sizes the experiment)
 
-- **Re-embed** (recommended): flip `--flash-attn on` in the unit **and in `51-lxc-amd.sh`**, then
-  re-embed every AnythingLLM workspace so stored and query vectors share one space (~21k chunks
-  at ~7.9 chunks/s ≈ 45 min of embedder time; the re-ingest procedure through AnythingLLM still
-  needs to be written and timed).
-- **Accept drift:** flip the flag only. Same-text vectors move by cos ~0.0005; retrieval impact
-  is unmeasured and would need a top-k overlap test on real queries before trusting it.
+Run the quality set against arm A's coordinator alias **5× back-to-back**. Compute:
+- pass@2 mean and SD;
+- wall-clock mean and CV.
 
-The reranker (`--flash-attn off`, 0.59 s per 20-doc rerank) likely has the same floor; test it
-the same way (scores and ranking order before and after) before changing it.
+If pass@2 SD > ~1 task, or wall-clock CV > 15%, the budget is too small. Then:
+- raise runs to ≥5 per arm, and/or
+- use the full Polyglot set,
 
-### 1c. Chat slots as a profile setting
+until the 95% CI half-width on each decision metric is smaller than the threshold it is tested
+against. Record the resulting N and runs in the gate commit (a pre-registration amendment, made
+*before* any cross-arm data exists).
 
-- Add `LLAMA_PARALLEL` / `LLAMA_CTX` to each chat profile in `swap-chat-model.sh`. The default
-  stays 1 × 256K; a `-3slot` variant provides 3 × 128K if the freed ~7 GB plus existing headroom
-  fits it — measure VRAM at 3 slots before shipping.
-- Router `CHAT_CONCURRENCY` follows the active profile's slot count.
+### 5.2 opencode concurrency probe (stop condition)
 
-## 5. Phase 2 — CPU worker aliases
+Three `task` subagents run three timed sleep-and-write tasks; compare wall-clock against the sum of
+the durations.
 
-### 2a. Router: named backends
+**If they serialise**, there is no other fan-out mechanism today. The delegate has one worker thread
+and its overlay is hard-coded to the GPU model (§7). In that case **Phase 1 halts**, and that is
+recorded as the gate outcome: close Phase 2, adopt the 5.9 GPU mode if it is useful, and keep the
+workers off.
 
-Replace the single `V620_URL` with a backend table loaded from env/YAML (`yaml.safe_load` only):
+### 5.3 Idle baseline
 
-```yaml
-backends:
-  v620:         {url: "http://192.168.6.151:8080", concurrency_from_profile: true}
-  cpu-1:        {url: "http://172.16.10.205:8090", concurrency: 1, fallback: v620}
-  cpu-2:        {url: "http://172.16.10.206:8090", concurrency: 1, fallback: v620}
-  cpu-3:        {url: "http://172.16.10.207:8090", concurrency: 1, fallback: v620}
-aliases:
-  qwen3.6-cpu-1: cpu-1
-  qwen3.6-cpu-2: cpu-2
-  qwen3.6-cpu-3: cpu-3
-default_backend: v620
-```
+With nothing else running, measure the coordinator's p50 turn latency on a fixed probe prompt,
+**separately in each arm's layout** (1 slot; 3 slots). This baseline is what "+50%" in 5.7 refers
+to.
 
-- **Resolution:** the request's `model` maps through `aliases` to a backend. An unknown model goes
-  to `default_backend`, exactly as today. Existing profile aliases (qwen3.8, coder, ...) keep
-  their swap-webhook behaviour on `v620`.
-- **Admission:** one `asyncio.Semaphore` per backend, replacing the global `chat_sem` for
-  non-default backends, so a worker never queues behind the GPU chat or vice versa.
-- **Health:** a background task probes each backend's `/health` every 15 s. Two consecutive
-  failures mark it down; one success marks it up.
-- **Fallback:** a request for a down backend with `fallback` set is served by the fallback
-  backend under the fallback's alias, and the response carries `x-router-fallback: <backend>`.
-  Without `fallback` it returns 503 `{"error": "backend cpu-2 unavailable"}`. Fallback is not
-  retried mid-stream: a worker that dies mid-response fails that request, and the next request
-  falls back.
-- **Auth:** the router sends a per-worker API key read from its existing secrets env file. Keys
-  never appear in argv or logs.
+### 5.4 Arm A — 3-slot GPU
 
-### 2b. Worker VMs
+1. Enter the 3 × 128K mode with `redteam-mode-enter.sh`.
+2. **Stop `redteam-mode-idle.timer` and `redteam-mode-watch`.** A thinking-alias benchmark produces
+   none of their keep-warm signals, so the mode would revert to 1 slot after 15 minutes.
+3. **Stop `llamacpp-fast`** (Qwen3-4B), which the enter script starts.
+4. Embed/rerank are stopped by this mode. Arm B must run with them stopped too (5.0.6).
+5. Before each run, confirm `/healthz` shows `chat_admission.capacity: 3` and the right
+   `active_chat_profile`.
+6. Pin the opencode benchmark profile's context to 128K.
+7. Asymmetry to state with the results: in arm A, 3 slots serve 4 consumers (the coordinator plus 3
+   workers), and the router queues the fourth.
 
-- One per host, `llmbench01..03` re-provisioned as `llmworker01..03`.
-- 24 GB fully reserved, `sched.mem.enableTiering = FALSE`, 16 vCPU at low CPU shares.
-- HA restart priority disabled.
-- DRS VM-host should-rules pin one worker to each host (DRS stays PartiallyAutomated, the
-  user's setting).
-- Runtime: ik_llama.cpp `llama-server` as a systemd unit with `Restart=on-failure`, the §3 config
-  plus `-cram 256 -ctx-ckpt 8`, `-np 1`, bound to the VM's VLAN-10 address.
-- The API key comes from a root-only file, never argv. Unverified: whether ik takes
-  `--api-key-file` or a `LLAMA_API_KEY` env var. Check `--help` first; if neither works, put a
-  key-checking reverse proxy on the worker.
-- Apt timers disabled and needrestart set to list-only (it restarted units mid-benchmark on
-  2026-10-03).
-- Network: CRS309 accepts from the router LXC only, to the workers' `:8090` and nothing else.
-- **N-1 check before declaring done:** with workers on, simulate the loss of each host on paper
-  from measured active memory. Each survivor must stay ≤ 50% of DRAM active.
+### 5.5 Arm B — 1-slot GPU coordinator plus 3 CPU workers
 
-### 2c. Clients
+1. The lab is in Minimal mode.
+2. Start llama-server by hand on `llmbench01-03` with the frozen flags (§3), including
+   `-cram 256 -ctx-ckpt 8`.
+3. Verify each one with an **authenticated completion**.
+4. The coordinator is router `qwen3.8` at 1 slot, not redteam mode, with the restart timer stopped
+   (5.0.6).
 
-- **opencode:** the user-level config gains provider models `qwen3.6-cpu-1..3` and agents
-  `worker-1..3`, each pinned to one alias with a narrow, checkable-task prompt. Qwen3.8 (the
-  primary agent) delegates to them.
-- **Probe first:** whether opencode runs `task` subagents concurrently is undocumented. Measure
-  it with three timed sleep-and-write tasks. If they serialise, parallelism comes from separate
-  opencode sessions, and the spec records that limit.
-- **Redteam:** recon/source/fuzzer stay on the Qwen3-4B fast tier (LXC 151:8085) until a
-  comparison on a recorded engagement shows CPU Qwen3.6's quality gain is worth its per-turn
-  latency. That comparison is a follow-up, not part of this build.
+### 5.6 Measurements
 
-**Rollback:** power off the workers (aliases fall back to `v620`), then remove the backend
-entries.
+- **Quality sub-gate (aider):** run the Polyglot Python subset against (a) the coordinator alias and
+  (b) one CPU worker directly, `--threads 1`, for the number of runs 5.1 sets. Metric: pass@2 mean
+  with a 95% CI.
+- **Capacity sub-gate (opencode):** run the frozen worker-task set through the coordinator, for the
+  number of runs 5.1 sets, in each arm. Per run:
+  - wall-clock to finish all N;
+  - tasks completed per hour;
+  - coordinator p50 turn latency **during** fan-out against the 5.3 baseline;
+  - task pass/fail by `checks`;
+  - re-prefill count and `cache_n`, scraped from the **llama-server logs** per turn;
+  - worker tokens per job.
 
-## 6. Phase 3 — delegate backend pool (gated)
+### 5.7 Pre-registered decision rule
 
-Starts only if the local-delegate Phase-1 A/B returns **go**
-(`docs/superpowers/specs/2026-10-02-local-delegate-mcp-design.md` §1). CPU backends stay out of
-the delegate until then, so the A/B measures one variable.
+**Quality veto (applies first).** If the CPU worker's pass@2 CI lower bound is more than one task
+below the coordinator alias on the same ruler, with thinking state controlled, then close Phase 2.
 
-- `GpuLease` (one file lock) becomes `BackendPool`: config entries
-  `{name, alias, tier: strong|bulk}`. `acquire(tier)` leases one free backend for the job's
-  lifetime, giving stickiness.
-- `submit_task(..., tier="strong"|"bulk")`. Bulk jobs prefer CPU backends and use the GPU only if
-  allowed by a flag.
-- The ledger records the backend per job, so CPU- and GPU-delegated work can be compared.
-- On a **no-go** result, phase 3 is dropped. Phases 1-2 do not depend on it.
+**Build Phase 2 only if every one of these holds in every run:**
+1. Additive capacity: in arm B, aggregate tasks/hour exceeds arm A's, with a 95% CI that excludes
+   zero.
+2. Coordinator protection: arm B's coordinator p50 turn latency stays within **+50%** of its own
+   5.3 baseline.
+3. Task quality: arm B passes no fewer `checks` than arm A minus one task.
 
-## 7. Testing
+**Wall-clock.** A ≥30% wall-clock win for B is noted as supporting evidence. It is neither required
+nor sufficient on its own. There is no clause that builds Phase 2 on arm A's latency alone, which
+removes rev 3's loophole.
 
-- **Router:** pytest unit tests (repo convention) — alias resolution incl. unknown → default,
-  per-backend semaphore isolation, health state transitions (2-fail down, 1-success up), fallback
-  header and 503 path, and that the existing profile/swap behaviour is unchanged. Fakes assert on
-  recorded calls, not elapsed time.
-- **Deployment scripts:** `bash -n` plus shellcheck.
-- **Live checks per step:** curl through the router to each alias. Kill one worker and confirm
-  the fallback header. Run `embed-dump.py` parity after any embed-unit change (1b). Confirm the RAG answer with a
-  citation in AnythingLLM.
+**Otherwise:**
+- close Phase 2;
+- power the workers off, so Minimal means hosts only (D9);
+- if arm A's numbers justify it, adopt 5.9.
 
-## 8. Rollout order
+### 5.8 Teardown
+
+1. Restore every timer stopped in 5.0.6 and 5.4.
+2. Exit redteam mode with `redteam-mode-exit.sh`.
+3. Restore `RATE_LIMIT_CHAT`.
+4. Stop llama-server and remove the throwaway keys on the workers.
+5. Commit the raw per-run results, the environment record and the decision with its CIs, all
+   referencing the gate-config SHA.
+
+### 5.9 If arm A wins: a selectable 3-slot chat mode
+
+- Profiles are identified by `repo:quant`, so a "-3slot profile" cannot coexist with them. Model it
+  as a **mode**, like redteam mode.
+- The router capacity already follows `total_slots`.
+- While the mode is on, opencode's context pin must be 128K. It is enforced by a separate opencode
+  profile, not by convention.
+- RAG must be available in the mode. Measure VRAM for 3 × 128K with embed/rerank loaded; if they
+  do not fit, the mode is RAG-off and documented as such.
+- Redteam mode takes precedence. Entering redteam mode from the 3-slot mode, and exiting it again,
+  is defined explicitly, and the exit restores the previous mode.
+
+## 6. Phase 2 — CPU workers (only if the gate passes): requirements
+
+These are requirements, not a design. The design is written after the gate, reviewed, then planned.
+
+### 6.1 Placement and lab safety
+- Workers run only in Minimal mode, and Full refuses while they run. Both are shipped (§4).
+- **vCenter-independent guard.** It runs as a **systemd timer on the Proxmox host** and talks to
+  each ESXi host directly (`govc` with `GOVC_PERSIST_SESSION=false`, or pyVmomi). It is not the
+  scratch PowerShell watchdog. It powers all workers off within one poll when:
+  - a host disconnects, or an HA failover occurs;
+  - any tier device is not healthy;
+  - a host's **free** DRAM falls below the margin.
+
+  It is tested by injecting a fake host-down signal before Phase 2 ships.
+- **Per-host gate before power-on:** consumed + 24 GB + overhead ≤ 75 GB, read live.
+- **Tier writes:** `BlocksWritten`/day is recorded for 48 h before and after. A rise is a rollback
+  trigger.
+
+### 6.2 Network and security
+- **Dedicated worker VLAN**, not VLAN 10. Its port group must be **ephemeral-binding** (or a
+  standard vSwitch), because Minimal starts workers host-direct with vCenter off. Static binding
+  breaks that. Verify the host-direct attach on the new port group.
+- **Firewall:** router → workers `:8090` only. Worker → LAN **denied**, verified with curl.
+- **Encrypted, authenticated channel** (WireGuard, or TLS with the router pinning each worker's
+  certificate).
+- **Health:** a worker counts as up only after an **authenticated identity check**. llama-server's
+  `/health` is public, so it is not enough.
+- **Shutdown order:** a worker is removed from the router **before** it is powered off.
+- **Worker processes:**
+  - llama-server runs non-root under systemd hardening;
+  - keys are distributed as files, and rotation is documented;
+  - whether ik supports `--api-key-file` is verified by running it;
+  - no prompt retention.
+- **Agent permissions:** opencode `worker-N` agents are deny-by-default, verified by execution.
+
+### 6.3 Router
+- **Backend objects** own url, key and admission gate. The V620 key can never be sent to a worker.
+- **Config** is JSON or env, validated **fail-closed** at startup: alias collisions, unknown keys
+  and missing keys refuse to start. It is not YAML, because PyYAML is absent from the router venv.
+- **Worker aliases live outside `ALIAS_MAP`**, the profile guard, the swap webhook **and the
+  redteam watcher's alias match**.
+- **Fallback:**
+  - the target is an explicit ALIAS_MAP alias;
+  - it applies **only if the active profile already serves it**, and never triggers a swap;
+  - the alias's sampling defaults replace the client's;
+  - the guard is not re-run;
+  - **the number of fallbacks in flight is capped**, so a lab outage cannot storm the GPU;
+  - otherwise 503, in the existing error envelope.
+- **Failure handling:**
+  - No health-gating of `v620`.
+  - Worker connect timeout ~5 s, with immediate fallback on connect failure.
+  - A probe that returns **5xx, or times out**, counts as a failure.
+  - **Streams in flight to a backend marked down are aborted** (probe-driven), and TCP keepalive
+    is on.
+  - Recovery needs ≥3 consecutive good probes (hysteresis).
+- **Limits:**
+  - responses from workers are size-capped;
+  - `tool_execution=server` is refused on worker aliases;
+  - each client token has its own allowed aliases.
+- **Telemetry:** worker traffic does not feed `_last_chat_ts`, which drives the fan feed-forward
+  and the idle-restart gate.
+- **Testability:** logic lives in importable modules with pytest, following the
+  `stream_admission.py` pattern.
+
+### 6.4 Clients
+- Worker entries set explicit sampling and `limit.context` ≤ 65536 − output.
+- Each worker alias has exactly one consumer at a time.
+- Redteam stays on the Qwen3-4B fast tier until a recorded-engagement comparison.
+
+## 7. Phase 3 — delegate pool (deferred)
+
+Gated on all of the following:
+1. The local-delegate A/B returns **go**.
+2. JobStore gains real concurrency. Today it has one worker thread.
+3. The overlay is generated per job, with the leased alias and context limit. Today it is
+   hard-coded to `qwen3.8-think` at 200K.
+4. Delegate stage-2 sandboxing is in place.
+5. Pool entries are **router aliases only**.
+6. A **repo allowlist and a secret scan** run before any job content leaves the workstation.
+7. **No fallback for leased jobs**, so a job that fails on a worker fails visibly.
+
+## 8. Testing
+
+- **Python:** pytest via importable modules. The repo suite stays green.
+- **Router end-to-end:** in-process, via ASGITransport, against a fake upstream, in the router venv.
+- **PowerShell:** the vcf-lab stub harness stays green, and new guards are mutation-tested.
+- **Shell:** `bash -n` and shellcheck.
+- **Gate:** the harness, the frozen task sets, the raw results and the environment record are all
+  committed, referencing the gate-config SHA.
+
+## 9. Rollout order
 
 | Step | Change | Rollback |
 |---|---|---|
-| 1a | ✅ Embed unit reconciled to repo (2 slots / 32768) — done 2026-10-05 | restore unit backup |
-| 1b | Embed `--flash-attn on` + corpus re-embed (pending decision); rerank FA test | flip flag back (+ re-embed again if 1b re-embedded) |
-| 1c | Chat slot count as a profile setting | profile default unchanged |
-| 2a | Router backend table (no workers yet → behaviour unchanged) | revert router deploy |
-| 2b | Worker VMs + firewall + keys + N-1 check | power off workers |
-| 2c | opencode worker agents + concurrency probe | remove agent entries |
-| 3 | Delegate `BackendPool` (only after A/B go) | config lists GPU only |
-
-## 9. Out of scope / later
-
-- **3060 per node (spike):** check whether the BD795i SE BIOS offers x8/x4/x4 bifurcation, on
-  one host in maintenance mode. That would free the x4 idle under the vSAN drive for an OCuLink
-  3060 (DirectPath; all devices report `passthruCapable=True`). If it exists, the worker becomes
-  a hybrid (experts on CPU, attention on GPU) behind the same alias.
-- Splitting one model across nodes over 10G (llama.cpp RPC): rejected — the network is far
-  below what tensor/pipeline parallel needs.
-- Moving the redteam fast tier (see 2c).
+| 0 | ✅ Phase 0 (§4). **Push `main` plus branches; host `git pull --ff-only`** | revert the merge commits |
+| 0r | Re-embed rollback copies deleted after **2026-10-12** | (until then) directory swap + FA revert |
+| 1 | §5 gate: commit the gate config → variance check → concurrency probe → baselines → arms A and B → decision | none (manual mode, servers started by hand); 5.8 teardown |
+| 2 | *If the gate passes:* the §6 design → review → plan | — |
+| 2' | *If arm A justifies it:* the 5.9 mode | mode off |
+| 3 | Delegate pool (§7 gates) | — |
 
 ## 10. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Worker memory bandwidth slows the VCF management plane (CPU shares do not govern bandwidth) | Watch vSAN latency during 2b; low shares; workers are expendable |
-| Lab outage mid-job | Fallback on next request; jobs are retryable by design |
-| Flash attention adopted without re-embedding mixes two vector spaces (cos ~0.9995 apart) | 1b's default is re-embed; "accept drift" requires a top-k overlap test first |
-| Live units drift from the repo again (the 4-slot embed drift went unnoticed) | Deploy unit changes from `51-lxc-amd.sh`, then diff live vs repo after each phase |
-| Alias table drift between repo and live router | Aliases edited in repo, deployed by script (lesson from the nothink alias loss) |
-| Quality claim rests on one 15-task suite | Workers get narrow, checkable tasks; the coordinator verifies |
+| The host checkout reverts the fixes on the next deploy | Push, then `git pull --ff-only` (verified fast-forwardable) |
+| The 1-slot coordinator is killed mid-run by the restart timer | 5.0.6 stops it for the window |
+| Arm A silently reverts to 1 slot | 5.4 stops the idle timer and watcher; `/healthz` is checked before each run |
+| Rate-limit 429s read as latency | `RATE_LIMIT_CHAT` raised for the window and recorded |
+| Underpowered comparison | The 5.1 variance check sizes N and runs before any cross-arm data |
+| Thresholds tuned after the fact | The gate config is committed first; its SHA is quoted with the results |
+| Benchmark exposes the workstation to plaintext workers | 5.0.3 minimums; teardown removes servers and keys |
+
+## 11. Disposition of critical and high findings
+
+| Finding | Disposition |
+|---|---|
+| Arch C1 — streams bypass `chat_sem` | **Fixed** (`5d942d7`): capacity follows slots |
+| Evidence C1 — Phase 2 before its justification | **Adopted:** §5 gate, now runnable (rev 3.1) |
+| Ops C1/C2 — workers beside the management stack (HA cascade, tier squeeze) | **Resolved:** Full refuses while workers run (`61d3d2c`, shipped). Phase 2 adds the §6.1 guard and gates for host failure in Minimal |
+| Sec F1 — plaintext, unauthenticated channel | §6.2 for Phase 2; §5.0.3 minimums for the benchmark |
+| Ops H1 / Ev H4 — N-1 math | Superseded: §6.1 live free-DRAM gate |
+| Ops H2/H3 / Arch H1/H2 / Sec F10 — fallback hazards | §6.3, now including the redteam-watcher exclusion and the in-flight fallback cap (re-review: these had been dropped) |
+| Ops H4 / Arch H4 — dead worker visible | §6.3: connect timeout, 5xx/timeout probe failures, probe-driven abort of in-flight streams. The §1 criterion is restated to match (re-review N6) |
+| Ops H5 / Arch M5 — flapping | §6.3 hysteresis |
+| Ops H6/H7/H8 / Ev H6/H7/H8/M3 — FA and re-embed | **Done** (§4); scripts committed |
+| Ops H9 / Arch H5 — 3-slot profile | §5.9 mode, with RAG coexistence and redteam precedence defined |
+| Ops H10 — CPU contention | Measured (16% gen / 21% prefill); removed by Minimal |
+| Arch H3 — gating `v620` | §6.3: no gating |
+| Arch H6 / Sec F6 — delegate pool | §7 gates 2-7 (all of F6's five items) |
+| Sec F2 / F3 / F4 / F5 | §6.2 / §6.3 (Phase 2); §5.0.3 (benchmark) |
+| Ev H1 / H2 / H3 / H5 | §3 corrected; quality sub-gate; re-prefill scraped from logs; §1 criteria rewritten |
+| **Rev-3 re-review N1-N16** | N1: refusal shipped. N2: §2 exception. N3: §4 corrected. N4: 5.0.6 + 5.4. N5: 5.7 rewritten. N6: §1 + §6.3. N7: §6.2. N8: 5.0.3. N9: 5.9. N10: §5 harness split. N11: §3. N12: 5.0.7. N13: §1. N14: §6.1. N15: §4 + `scripts/tools/allm-reembed/`. N16: §12 |
+| **Gate re-review C1-C3, H1-H6** | C1: frozen task set, no delegations. C2: two harnesses. C3: 5.4. H1: 5.0.2. H2: 5.2 stop condition. H3: 5.0.5. H4: thinking pinned. H5: 5.1. H6: 5.7 leads with additive capacity |
+
+## 12. Checklist — medium and low findings (carried into the Phase 2 design review)
+
+- **Ops:**
+  - M1: router pre-checks couple worker requests to the V620;
+  - M2: static pinning gives no exclusivity;
+  - M3: `/healthz` changes vs the fan feed-forward and idle gate;
+  - M4: "no client-visible change" overstated;
+  - M5: rollback order vs the delegate A/B;
+  - M6: maintenance mode and the tier-failure runbook;
+  - M7: coded free-DRAM power-on gate;
+  - L1-L4: path verification, patching plan, fallback visibility, argv keys.
+- **Arch:**
+  - M1: seven code paths still pinned to `V620_URL`;
+  - M2: GPU-global token budget and tokenizer;
+  - M3: worker traffic as GPU activity;
+  - M4: fallback vs redteam and the A/B;
+  - M6: ik `/health` under load;
+  - M7: affinity with shared aliases;
+  - M8: opencode entries need context and sampling;
+  - M9: router tests not writable by import;
+  - M10: PyYAML absent;
+  - L1: 503 envelope; L2: alias typos go to the GPU; L3: workers invisible in `/v1/models`;
+  - L4: per-IP rate limit; L5: argv keys; L6: parallel > 1 costs; note: single uvicorn worker.
+- **Security:**
+  - F7: worker key handling;
+  - F8: unbounded responses;
+  - F9: `tool_execution=server` exfiltration;
+  - F11: per-client alias ACL;
+  - F12: config validation and alias collisions;
+  - F13: patching and provenance;
+  - F14: prompt and secret retention;
+  - F15: hygiene.
+- **Evidence:**
+  - M1: thinking claim;
+  - M2: embed benchmark traps;
+  - M4: 50× is ~1% of end-to-end;
+  - M5: "nothing beyond speed";
+  - M6: probe order;
+  - L1-L6: reporting and reproducibility.
+- **Re-review lows:** N12-N16 (handled above). Re-check each item against the Phase 2 design.
