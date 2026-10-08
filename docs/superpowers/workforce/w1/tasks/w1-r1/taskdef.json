@@ -1,0 +1,15 @@
+{
+ "id": "w1-r1",
+ "commit": "3d75bd4dd085c6a22dc3bc079f4bb3198e1d55b1",
+ "files": [
+  "scripts/files/cluster_monitor.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_cluster_monitor.py"
+ ],
+ "hidden": {
+  "test_w1_r1_hidden.py": "scripts/files/tests/test_w1_r1_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}
