@@ -6,7 +6,13 @@ in `build` mode would survive the switch to `locked` (security review HIGH). `75
 VM to be stopped and flushes the sandbox's conntrack entries; this check proves the table afterwards:
 every tracked flow from the sandbox must be TCP/UDP to an allowed "ip:port" (original direction).
 Exit 0 = clean, 1 = a disallowed flow (printed), 2 = an entry this script cannot parse.
+
+One exemption: an UNANSWERED entry to a multicast address. The kernel confirms bridged multicast in
+conntrack before the per-port filter drops the copies, so a freshly booted guest's IGMP report and
+LLMNR query show up here although nothing passed the PVE filter (2026-10-08: tcpdump saw 3 packets on
+tap176i0 and 0 on fwln176i0, fwpr176p0 and vmbrwf). An answered multicast entry still fails.
 """
+import ipaddress
 import re
 import sys
 
@@ -26,6 +32,13 @@ def original(line):
     return fields[0], first["dst"], first.get("dport")
 
 
+def _is_multicast(addr):
+    try:
+        return ipaddress.ip_address(addr).is_multicast
+    except ValueError:
+        return False
+
+
 def main(argv):
     allowed = set(argv[1:])
     bad = []
@@ -38,6 +51,8 @@ def main(argv):
         if entry is None:
             continue
         proto, dst, dport = entry
+        if "[UNREPLIED]" in line and _is_multicast(dst):
+            continue
         target = f"{dst}:{dport}" if dport else dst
         if proto not in ("tcp", "udp") or target not in allowed:
             bad.append(f"{proto} {target}")
