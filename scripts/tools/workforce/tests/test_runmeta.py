@@ -101,7 +101,7 @@ def test_run_meta_writes_meta_json_and_flags_missing_probe(tmp_path):
     assert json.loads((d / "meta.json").read_text()) == m
     probe.write_text("")
     m = runmeta.run_meta(str(d), str(stamps), "r1", str(probe), str(journal), fail_s=120.0)
-    assert not m["valid"] and "no user-lane probe samples" in " ".join(m["reasons"])
+    assert m["valid"] and m["probe_p50"] is None          # final review I4: a note, not an invalidity
 
 
 def test_run_meta_refuses_a_label_without_both_stamps(tmp_path):
@@ -139,3 +139,44 @@ def test_w3_schedule_refuses_a_run_without_meta(tmp_path):
     with pytest.raises(SystemExit, match="meta.json"):
         cli.main(["w3-schedule", "--baseline-probe", str(base), "--out", str(tmp_path / "s.json"),
                   "--run", f"G={d}"])
+
+
+def test_probe_p50_is_time_weighted_so_a_starved_lane_is_not_under_sampled():
+    # Final review I1: a timed-out probe takes ~180 s per cycle, a healthy one ~61 s. Equal counts of
+    # each mean the lane was starved ~75% of the time: the p50 must be the failure value.
+    t0 = epoch(BEFORE["ts"])
+    recs, t = [], t0
+    for i in range(10):
+        ok = i % 2 == 0
+        recs.append({"ts": t, "ok": ok, "latency_s": 1.0 if ok else 120.0})
+        t += 61.0 if ok else 180.0
+    assert runmeta.probe_p50(recs, t0, t, fail_s=120.0) == 120.0
+
+
+def test_a_dead_probe_does_not_invalidate_the_run(tmp_path):
+    # Final review I4: spec §9's invalidity list is closed; a missing probe fails clause 3 instead.
+    d = write_run(tmp_path, "r1")
+    stamps = tmp_path / "stamps.jsonl"
+    stamps.write_text(json.dumps(BEFORE) + "\n" + json.dumps(AFTER) + "\n")
+    probe = tmp_path / "probe.jsonl"
+    probe.write_text("")
+    journal = tmp_path / "chat.log"
+    journal.write_text(JOURNAL)
+    m = runmeta.run_meta(str(d), str(stamps), "r1", str(probe), str(journal), fail_s=120.0)
+    assert m["valid"] and m["probe_p50"] is None and "no user-lane probe samples" in " ".join(m["notes"])
+
+
+def test_w3_schedule_pairs_each_run_with_its_own_window_baseline(tmp_path):
+    runs = []
+    for name in ("g1", "t1"):
+        d = write_run(tmp_path, name)
+        (d / "meta.json").write_text(json.dumps({"valid": True, "probe_p50": 2.0, "reasons": []}))
+        runs.append(d)
+    b1, b2 = tmp_path / "base1.jsonl", tmp_path / "base2.jsonl"
+    b1.write_text("".join(json.dumps(r) + "\n" for r in probes({"latency_s": 1.0})))
+    b2.write_text("".join(json.dumps(r) + "\n" for r in probes({"latency_s": 3.0})))
+    out = tmp_path / "s.json"
+    assert cli.main(["w3-schedule", "--baseline-probe", str(b1), "--out", str(out),
+                     "--run", f"G={runs[0]}", "--run", f"T={runs[1]}@{b2}"]) == 0
+    sched = json.loads(out.read_text())
+    assert [s["baseline_p50"] for s in sched] == [1.0, 3.0]

@@ -19,12 +19,15 @@ STATE_DIR="${WF_WIN_STATE_DIR:-/root/wf/window}"
 STATE="$STATE_DIR/window.env"
 SBIN="${WF_WIN_SBIN:-/usr/local/sbin}"
 RT_STATE="${WF_WIN_RT_STATE:-/run/redteam-mode.state}"
+RT_LAST="${WF_WIN_RT_LAST:-/run/redteam-mode.last}"
 BOOT_ID="${WF_WIN_BOOT_ID:-/proc/sys/kernel/random/boot_id}"
 WAIT_S="${WF_WIN_WAIT_S:-600}"
 HOST_UNITS=(redteam-mode-watch.service redteam-mode-idle.timer redteam-mode-precreate.service
             rag-refresh.timer swap-webhook.service)
 AMD_UNITS=(llamacpp-chat-restart.timer llamacpp-fast.service)
 RAG_UNITS=(llamacpp-embed.service llamacpp-rerank.service)
+# Jobs their timers start: stopping a timer does not stop a run already loading the GPUs.
+BUSY_UNITS=(rag-refresh.service redteam-mode-idle.service)
 
 die() { echo "[wf-window] FATAL: $*" >&2; exit 1; }
 log() { echo "[wf-window] $*"; }
@@ -54,10 +57,21 @@ stop_perturbers() {
   pct exec "$AMD" -- systemctl stop "${AMD_UNITS[@]}" 2>/dev/null || true
 }
 
+active_perturbers() {  # every perturber still active, space-separated
+  local u
+  for u in "${HOST_UNITS[@]}" "${BUSY_UNITS[@]}"; do [ "$(host_active "$u")" = active ] && echo "$u"; done
+  for u in "${AMD_UNITS[@]}"; do [ "$(amd_active "$u")" = active ] && echo "$u"; done
+  return 0
+}
+
 cmd_open() {
   [ -f "$STATE" ] && die "window already open ($STATE) -- run close first"
   redteam_active && die "redteam mode is active -- refusing to open a window over an engagement"
   [ "$(capacity)" = 1 ] || die "chat is not in the normal 1-slot layout; refusing to start from an unknown state"
+  local busy
+  for busy in "${BUSY_UNITS[@]}"; do
+    [ "$(host_active "$busy")" = active ] && die "$busy is running -- wait for it to finish before opening a window"
+  done
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
   local u tmp
@@ -68,8 +82,12 @@ cmd_open() {
   } > "$tmp"
   mv "$tmp" "$STATE"
   log "saved the prior state to $STATE (close restores it, even after a failed open)"
+  date +%s > "$RT_LAST"            # as 77 and the router-keys runbook: the idle check must not revert us
   "$SBIN/redteam-mode-enter.sh"
   stop_perturbers                  # enter starts the watcher, idle revert and fast server
+  local left
+  left="$(active_perturbers | tr '\n' ' ')"
+  [ -z "${left// }" ] || die "perturbers still active after stop: $left"
   pct exec "$AMD" -- systemctl start "${RAG_UNITS[@]}"
   wait_layout 3 yes
   log "open: 3 x 128K chat, embed + rerank loaded, perturbers stopped"
@@ -110,8 +128,10 @@ cmd_stamp() {
   chat="$(pct exec "$AMD" -- systemctl show -p InvocationID --value llamacpp-chat 2>/dev/null || true)"
   cap="$(capacity)"
   [ -f "$STATE" ] && open=true
-  printf '{"ts":"%s","label":"%s","boot_id":"%s","router_invocation":"%s","chat_invocation":"%s","capacity":%s,"window_open":%s}\n' \
-    "$(date -u +%FT%TZ)" "$label" "$boot" "$router" "$chat" "${cap:-null}" "$open" >> "$out"
+  local pert u
+  pert="$(for u in $(active_perturbers); do printf '"%s",' "$u"; done)"
+  printf '{"ts":"%s","label":"%s","boot_id":"%s","router_invocation":"%s","chat_invocation":"%s","capacity":%s,"window_open":%s,"perturbers_active":[%s]}\n' \
+    "$(date -u +%FT%TZ)" "$label" "$boot" "$router" "$chat" "${cap:-null}" "$open" "${pert%,}" >> "$out"
   log "stamped $label"
 }
 

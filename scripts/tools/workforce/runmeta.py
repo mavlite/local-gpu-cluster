@@ -53,8 +53,23 @@ def _in_window(records, since, until):
 
 
 def probe_p50(records, since, until, fail_s):
-    lat = [r["latency_s"] if r.get("ok") else fail_s for r in _in_window(records, since, until)]
-    return statistics.median(lat) if lat else None
+    """Time-weighted median latency. The probe sleeps a fixed interval AFTER each request, so a
+    timed-out probe's cycle lasts ~3x a healthy one: weighting each sample by the time until the next
+    keeps a starved lane from being under-sampled (final review I1)."""
+    recs = sorted(_in_window(records, since, until), key=lambda r: r["ts"])
+    if not recs:
+        return None
+    vals = [r["latency_s"] if r.get("ok") else fail_s for r in recs]
+    gaps = [b["ts"] - a["ts"] for a, b in zip(recs, recs[1:])]
+    weights = gaps + [statistics.median(gaps) if gaps else 1.0]       # the last sample: a typical cycle
+    if len(set(weights)) <= 1:
+        return statistics.median(vals)
+    half, cum = sum(weights) / 2, 0.0
+    for v, w in sorted(zip(vals, weights)):
+        cum += w
+        if cum >= half:
+            return v
+    return vals[-1]
 
 
 def gpu_ms(journal_text, probe_records):
@@ -77,15 +92,16 @@ def run_meta(run_dir, stamps_file, label, probe_file, journal_file, fail_s):
     before, after = _stamp(stamps, f"before-{label}"), _stamp(stamps, f"after-{label}")
     since, until = iso_epoch(before["ts"]), iso_epoch(after["ts"])
     probes = load_jsonl(probe_file)
-    reasons = validity(before, after)
+    reasons, notes = validity(before, after), []
     p50 = probe_p50(probes, since, until, fail_s)
     if p50 is None:
-        reasons.append("no user-lane probe samples during the run (the probe died)")
+        # Not an invalidity cause (spec §9's list is closed): a T run without samples fails clause 3.
+        notes.append("no user-lane probe samples during the run (the probe died)")
     with open(journal_file, encoding="utf-8", errors="replace") as f:
         ms = gpu_ms(f.read(), _in_window(probes, since, until))
     with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
         accepted = json.load(f)["accepted"]
-    meta = {"label": label, "valid": not reasons, "reasons": reasons, "since": before["ts"],
+    meta = {"label": label, "valid": not reasons, "reasons": reasons, "notes": notes, "since": before["ts"],
             "until": after["ts"], "probe_p50": p50, "gpu_ms": ms,
             "gpu_ms_per_accepted": ms / accepted if accepted else None}
     with open(os.path.join(run_dir, "meta.json"), "w", encoding="utf-8") as f:
@@ -93,14 +109,20 @@ def run_meta(run_dir, stamps_file, label, probe_file, journal_file, fail_s):
     return meta
 
 
+def _baseline(path, fail_s):
+    b = probe_p50(load_jsonl(path), float("-inf"), float("inf"), fail_s)
+    if b is None:
+        raise SystemExit(f"{path}: no idle-baseline probe samples")
+    return b
+
+
 def w3_schedule(baseline_probe_file, runs, fail_s):
-    """runs: [(arm, run_dir)] in schedule order -> the schedule `cli.py w3` reads."""
-    base = load_jsonl(baseline_probe_file)
-    baseline = probe_p50(base, float("-inf"), float("inf"), fail_s)
-    if baseline is None:
-        raise SystemExit(f"{baseline_probe_file}: no idle-baseline probe samples")
+    """runs: [(arm, run_dir, own_baseline_file_or_None)] in schedule order -> the schedule `cli.py w3`
+    reads. A run measured in a later window is compared with THAT window's idle baseline."""
+    default = _baseline(baseline_probe_file, fail_s)
     out = []
-    for arm, d in runs:
+    for arm, d, own in runs:
+        baseline = _baseline(own, fail_s) if own else default
         path = os.path.join(d, "meta.json")
         if not os.path.isfile(path):
             raise SystemExit(f"{d}: no meta.json -- run `cli.py run-meta` for it first")

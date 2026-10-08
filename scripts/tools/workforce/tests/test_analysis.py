@@ -93,3 +93,15 @@ def test_w3_ignores_invalid_runs_and_needs_two_valid_per_arm():
 def test_w3_bootstrap_is_reproducible():
     runs = schedule(ALL, set(TASKS[:15]), [10, 11, 10, 11], [15, 16, 15, 16])
     assert analysis.w3_decide(runs, TASKS) == analysis.w3_decide(runs, TASKS)
+
+
+def test_a_t_run_without_probe_samples_fails_the_user_clause():
+    # Final review I4: a dead probe cannot prove the user lane was protected, so the clause fails.
+    import analysis
+    runs = []
+    for i, arm in enumerate("GTTGGTTG"):
+        runs.append({"arm": arm, "valid": True, "accepted": {"a": True, "b": True},
+                     "accepted_per_hour": 2.0 + (arm == "T") + 0.01 * i,
+                     "probe_p50": None if (arm == "T" and i == 1) else 1.0, "baseline_p50": 1.0})
+    out = analysis.w3_decide(runs, ["a", "b"])
+    assert not out["clauses"]["user"]["ok"] and "user" in out["failed"]

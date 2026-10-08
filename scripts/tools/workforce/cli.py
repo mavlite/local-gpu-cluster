@@ -235,7 +235,8 @@ def main(argv=None, env=None):
     p.add_argument("--fail-s", type=float, default=120.0, help="latency a failed probe counts as")
     p = sub.add_parser("w3-schedule", help="assemble the schedule `w3` reads, in run order")
     p.add_argument("--baseline-probe", required=True, help="probe output from the idle baseline")
-    p.add_argument("--run", action="append", required=True, help="ARM=run_dir, in schedule order")
+    p.add_argument("--run", action="append", required=True,
+                   help="ARM=run_dir[@baseline_probe_file], in schedule order (@: that run's own window baseline)")
     p.add_argument("--out", required=True)
     p.add_argument("--fail-s", type=float, default=120.0)
     a = ap.parse_args(argv)
@@ -279,10 +280,11 @@ def main(argv=None, env=None):
     elif a.cmd == "w3-schedule":
         runs = []
         for spec in a.run:
-            arm, d = spec.split("=", 1)
+            arm, rest = spec.split("=", 1)
             if arm not in ("G", "T"):
                 raise SystemExit(f"--run {spec!r}: arm must be G or T")
-            runs.append((arm, d))
+            d, _, own = rest.partition("@")
+            runs.append((arm, d, own or None))
         out = runmeta.w3_schedule(a.baseline_probe, runs, a.fail_s)
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=1)

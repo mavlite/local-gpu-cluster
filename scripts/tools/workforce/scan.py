@@ -75,7 +75,11 @@ def _calls(path):
 
 def _written(tool, inp):
     if tool in WRITE_TOOLS:
-        return "\n".join(str(inp.get(k, "")) for k in ("content", "newString", "patch", "edits"))
+        parts = [inp[k] for k in ("content", "newString", "patch", "patchText") if isinstance(inp.get(k), str)]
+        for e in inp.get("edits") or []:                 # multiedit: [{"oldString", "newString"}, ...]
+            if isinstance(e, dict) and isinstance(e.get("newString"), str):
+                parts.append(e["newString"])
+        return "\n".join(parts)
     if tool == "bash":
         return str(inp.get("command", ""))
     return ""
@@ -89,15 +93,16 @@ def scan_task(task_dir, bundle_dir, ref_patch):
     written, tainted, suspect = set(), [], []
     for name in transcript_order(os.listdir(task_dir)):
         for tool, inp, out in _calls(os.path.join(task_dir, name)):
-            for s in lines - written:
-                if s in out:
-                    tainted.append(f"{name}: {tool} output held answer line {s[:60]!r} before any agent wrote it")
+            # A call's own input counts as written before its output is shown (`cat > f <<EOF ...; cat f`).
             text = _written(tool, inp)
             if text:
                 written.update(s for s in lines if s in text)
                 m = FORGERY.search(text)
                 if m:
                     suspect.append(f"{name}: {tool} wrote {m.group(0)!r}")
+            for s in lines - written:
+                if s in out:
+                    tainted.append(f"{name}: {tool} output held answer line {s[:60]!r} before any agent wrote it")
     return tainted, suspect
 
 

@@ -152,7 +152,7 @@ cmd_start() {
 cmd_stop() {
   sudo systemctl stop "$UNIT" 2>/dev/null || true
   sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
-  sudo rm -f "$PIDFILE"
+  sudo rm -f "$PIDFILE" "$CONFIG_FILE"     # status must never report a config that is not running
   log "stopped"
 }
 

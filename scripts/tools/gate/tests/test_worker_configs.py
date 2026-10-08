@@ -70,3 +70,12 @@ def test_an_unknown_config_starts_nothing(tmp_path):
     r, calls = _run_worker(tmp_path, "start", "C9")
     assert r.returncode != 0 and "unknown config" in r.stderr
     assert "systemd-run" not in calls
+
+
+def test_stop_forgets_the_config_so_status_never_shows_a_stale_one(tmp_path):
+    # Final review (Review Focus 5): a failed later start must not leave the previous label in place.
+    cfg = tmp_path / "config"
+    cfg.write_text("C0 /opt/bench/src/ik/build/bin/llama-server ...\n")
+    r, _ = _run_worker(tmp_path, "stop")
+    assert r.returncode == 0, r.stderr
+    assert not cfg.exists()

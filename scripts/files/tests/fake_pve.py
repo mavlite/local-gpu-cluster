@@ -43,6 +43,8 @@ def systemctl(w, place, args):
                 print(f"Job for {u} failed", file=sys.stderr)
                 return 1
             was = units.get(u)
+            if verb == "stop" and w.get("fail_stop") == u:
+                continue                                 # a unit that refuses to stop
             units[u] = "inactive" if verb == "stop" else "active"
             if verb == "restart" or (verb == "start" and was != "active"):
                 ids[u] = uuid.uuid4().hex

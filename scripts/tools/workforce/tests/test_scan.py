@@ -175,3 +175,22 @@ def test_cli_w3_passes_void_through(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["clauses"]["quality"]["threshold"] == -1.0          # one task left: -1/1
     assert out["voided"] == ["b"]
+
+
+def test_one_call_that_writes_then_shows_the_answer_is_clean(setup):
+    # Final review I2: a heredoc write followed by `cat` in the same bash call is the agent's own work.
+    tmp, run = setup
+    cmd = f"cat > calc.py <<'EOF'\n{ANSWER}\nEOF\ncat calc.py"
+    transcript(run, "t1", "impl-r1.jsonl", tool("bash", {"command": cmd}, ANSWER))
+    assert result(tmp, run)["tainted"] == {}
+
+
+@pytest.mark.parametrize("call", [
+    tool("patch", {"patchText": f"*** Update File: calc.py\n-    return 0\n+{ANSWER}\n"}),
+    tool("multiedit", {"filePath": "calc.py", "edits": [{"oldString": "    return 0", "newString": ANSWER}]}),
+])
+def test_writes_through_patch_and_multiedit_count_as_written(setup, call):
+    # Final review: opencode's patch tool sends patchText; multiedit sends a list of edits.
+    tmp, run = setup
+    transcript(run, "t1", "impl-r1.jsonl", call, tool("read", {"filePath": "calc.py"}, ANSWER))
+    assert result(tmp, run)["tainted"] == {}

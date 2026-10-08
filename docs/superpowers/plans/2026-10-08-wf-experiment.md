@@ -162,7 +162,8 @@ VLAN 10 has no internet: the source goes in and builds natively.
   Use the same tag LXC 151 runs (`llamacpp_b11026_upgrade`).
 - [ ] **Step 2:** Build it on each worker:
   1. `gate_guest.ps1 -Put llama.cpp-b11026.tgz -Remote /tmp/llama.cpp.tgz`.
-  2. `-Exec 'sudo mkdir -p /opt/bench/src && sudo tar -xzf /tmp/llama.cpp.tgz -C /opt/bench/src && cd /opt/bench/src/llama.cpp && cmake -B build -DGGML_NATIVE=ON -DLLAMA_CURL=OFF && cmake --build build -j 16 --target llama-server' -TimeoutSec 3600`.
+  2. `-Exec 'sudo mkdir -p /opt/bench/src && sudo tar --no-same-owner -xzf /tmp/llama.cpp.tgz -C /opt/bench/src && sudo chown -R bench:bench /opt/bench/src/llama.cpp && cd /opt/bench/src/llama.cpp && cmake -B build -DGGML_NATIVE=ON -DLLAMA_CURL=OFF && cmake --build build -j 16 --target llama-server' -TimeoutSec 3600`.
+     `gate_guest.ps1` runs as `bench`, so the tree must belong to `bench` before `cmake` writes into it.
 
   Expected: `/opt/bench/src/llama.cpp/build/bin/llama-server` exists.
 - [ ] **Step 3:** Check the C1 flags against the binary.
@@ -210,19 +211,28 @@ user's go-ahead: chat restarts twice.**
   3. `install -d -m 0700 /root/wf/keys && pct pull 153 /root/wf-pilot.key /root/wf/keys/router.key && chmod 600 /root/wf/keys/router.key && pct exec 153 -- shred -u /root/wf-pilot.key`.
 - [ ] **Step 3:** Start the probe in LXC 153:
   1. `pct push 153 scripts/files/wf-user-probe.py /root/wf-user-probe.py --perms 0700`
-  2. `pct exec 153 -- systemd-run --unit=wf-probe --collect /usr/bin/python3 /root/wf-user-probe.py run --out /root/wf-probe-pilot.jsonl --interval 60 --until $(( $(date +%s) + 3*3600 ))`
+  2. `pct exec 153 -- systemd-run --unit=wf-probe --collect /usr/bin/python3 /root/wf-user-probe.py run --out /root/wf-probe-pilot.jsonl --interval 60`
+
+  It runs until Step 7 stops it. Never give it `--until`: a probe that ends before the window does
+  leaves later runs without samples, and a T run without samples fails clause 3.
 - [ ] **Step 4:** Run the arm-G pilot:
   1. Copy the bundles to the host, then `bash scripts/76-vm-wf-sandbox.sh push-bundles /tmp/wf-pilot/bundles`.
-  2. `bash scripts/files/wf-window.sh stamp /root/wf/stamps.jsonl before-pilot-g`.
+  2. Check the probe is alive (`pct exec 153 -- systemctl is-active wf-probe` → `active`), then
+     `bash scripts/files/wf-window.sh stamp /root/wf/stamps.jsonl before-pilot-g`.
   3. `bash scripts/76-vm-wf-sandbox.sh start-run pilot-g G`.
   4. Poll `run-status pilot-g` every 5 minutes until `unit: inactive`.
   5. `stamp ... after-pilot-g`.
   6. `bash scripts/76-vm-wf-sandbox.sh harvest pilot-g /root/wf/runs`.
-  7. `pct exec 151 -- journalctl -u llamacpp-chat --since <before ts> --until <after ts> -o cat > /root/wf/runs/pilot-g.journal`.
+  7. `pct exec 151 -- journalctl -u llamacpp-chat --since "<before ts>" --until "<after ts>" -o cat > /root/wf/runs/pilot-g.journal`.
+     Write each time in the form `2026-10-10 10:00:00 UTC`, converted from the stamp's
+     `2026-10-10T10:00:00Z`: journalctl's ISO parsing varies by systemd version.
 
   Expected: `harvested pilot-g …` and `/root/wf/runs/pilot-g/run.json` with `"valid": true`.
-- [ ] **Step 5:** Compute the run metadata and run the scan on the workstation, after copying
-  `/root/wf/runs`, the stamps and the probe output:
+- [ ] **Step 5:** Pull the probe file out of LXC 153
+  (`pct pull 153 /root/wf-probe-pilot.jsonl /root/wf/wf-probe-pilot.jsonl`). Then check that the
+  harvest holds no key: `grep -rlF -f /root/wf/keys/router.key /root/wf/runs` must print nothing. If it
+  prints a file, stop: that is a key leak. Then compute the run metadata and run the scan on the
+  workstation, after copying `/root/wf/runs`, the stamps and the probe output:
   - `python3 scripts/tools/workforce/cli.py run-meta --run-dir <runs>/pilot-g --stamps stamps.jsonl --label pilot-g --probe probe.jsonl --journal <runs>/pilot-g.journal`;
   - `python3 scripts/tools/workforce/cli.py scan --run <runs>/pilot-g --bundles /tmp/wf-pilot/bundles --refs /tmp/wf-pilot/refs`.
 
@@ -323,7 +333,8 @@ commit's changed non-test files, from `git show --numstat --format= <commit>`.
   1. Start the workers with this configuration: on every worker, `gate-worker stop`, then
      `gate-worker start <cfg>` (for C1, prefix `GATE_C1_MTP=<decision>`).
   2. Record every worker's `gate-worker status` into `/root/wf/w1-workers.txt`. **Refuse to continue
-     if any `config:` line differs from the pre-registration** (Review Focus 5).
+     if any `config:` line differs from the pre-registration, or any `health:` line is not ok**
+     (Review Focus 5). `stop` clears the label, so a failed start shows `config: none`.
   3. Run 5 times, for n = 1..5:
      1. `bash scripts/76-vm-wf-sandbox.sh start-run w1-<cfg>-<n> T --w1`;
      2. poll `run-status` every 5 minutes until the unit is inactive;
@@ -425,10 +436,10 @@ Record every replacement and its reason in `docs/superpowers/workforce/w2/select
    "arms": {"G": "lead + 1 GPU implementer (qwen3.8-nothink)", "T": "lead + 3 CPU workers"},
    "schedule": ["G", "T", "T", "G", "G", "T", "T", "G"], "runs_per_arm": 4,
    "no_added_runs": true, "no_sequential_stopping": true,
-   "validity": "runmeta.validity + harness run.json valid; nothing else invalidates a run",
+   "validity": "runmeta.validity + harness run.json valid; nothing else invalidates a run. A T run with no probe samples is valid but fails clause 3",
    "rule": {"quality": "paired task bootstrap, n_boot 10000, seed 20261007, lower95(T-G) >= -1/n",
             "win": "Welch 95% CI of T-G accepted/hour excludes 0 (lo > 0)",
-            "user": "every valid T run's probe p50 <= 1.5 x idle baseline p50; failed probes count as 120 s",
+            "user": "every valid T run's time-weighted probe p50 <= 1.5 x its window's idle baseline p50; failed probes count as 120 s",
             "clause2_confirmed_by_user": "<date and answer>"},
    "void": "tasks the transcript scan finds tainted, applied to every run of both arms",
    "harness_commit": "<git rev-parse HEAD>", "budget_h": 16, "stop_at_h": 24}
@@ -442,24 +453,30 @@ Record every replacement and its reason in `docs/superpowers/workforce/w2/select
 on the reserved lane.
 
 - [ ] **Step 1:** Open the window exactly as Task 6 Step 1, with the router key named `wf-w3`. Then:
-  1. Push the frozen bundles from `/root/wf/w2-frozen.tgz` (check the sha256 first).
+  1. Check the sha256 of `/root/wf/w2-frozen.tgz` against the pre-registration. Unpack it with
+     `rm -rf /root/wf/w2 && mkdir -p /root/wf/w2 && tar -xzf /root/wf/w2-frozen.tgz -C /root/wf/w2`,
+     then `bash scripts/76-vm-wf-sandbox.sh push-bundles /root/wf/w2/bundles`.
   2. Run the full proof with the workers included.
   3. Start the workers with the chosen configuration and record their status (Review Focus 5).
 - [ ] **Step 2:** Measure the idle baseline: 30 minutes of probes with the window open and no run.
 
   ```bash
-  pct exec 153 -- python3 /root/wf-user-probe.py run --out /root/wf-baseline.jsonl --interval 60 --count 30
+  pct exec 153 -- python3 /root/wf-user-probe.py run --out /root/wf-baseline-<window>.jsonl --interval 60 --count 30
   ```
 
-  Then start the run-long probe:
+  `<window>` is `w1` for the first window, `w2` for a second, and so on. Each window gets its own
+  baseline file, and each run is compared with its own window's baseline.
+
+  Then start the run-long probe. Use no `--until`; Step 4 stops it:
 
   ```bash
-  pct exec 153 -- systemd-run --unit=wf-probe --collect /usr/bin/python3 /root/wf-user-probe.py run --out /root/wf-probe-w3.jsonl --interval 60 --until <window end>
+  pct exec 153 -- systemd-run --unit=wf-probe --collect /usr/bin/python3 /root/wf-user-probe.py run --out /root/wf-probe-w3.jsonl --interval 60
   ```
 
 - [ ] **Step 3:** Run the eight runs in the pre-registered order, `G T T G G T T G`, named
   `w3-1-G … w3-8-G`. For each run:
-  1. `wf-window.sh stamp /root/wf/stamps.jsonl before-<run>`;
+  1. check `pct exec 153 -- systemctl is-active wf-probe` → `active` (restart it with the same command
+     if not), then `wf-window.sh stamp /root/wf/stamps.jsonl before-<run>`;
   2. `76 start-run <run> <arm>`;
   3. poll every 5 minutes until the unit is inactive;
   4. `stamp after-<run>`;
@@ -472,12 +489,17 @@ on the reserved lane.
   2. reopen it later with fresh stamps and a fresh baseline;
   3. continue with the next run number. The order never changes.
 - [ ] **Step 4:** Close the window as in Task 6 Step 4, adding `systemctl stop wf-probe` in LXC 153.
-  Copy `/root/wf` (runs, stamps, probe files) to the workstation.
+  Pull the probe and baseline files out of LXC 153 (`pct pull 153 /root/wf-probe-w3.jsonl …` and each
+  `/root/wf-baseline-<window>.jsonl`) into `/root/wf`. Check that no key reached a harvest:
+  `grep -rlF -f /root/wf/keys/router.key /root/wf/runs` and the same for `worker.key` print nothing.
+  Then copy `/root/wf` (runs, stamps, probe files) to the workstation.
 - [ ] **Step 5:** Analyse:
   1. For each run: `cli.py run-meta --run-dir <runs>/<run> --stamps stamps.jsonl --label <run> --probe wf-probe-w3.jsonl --journal <runs>/<run>.journal`.
   2. For each run: `cli.py scan --run <runs>/<run> --bundles /tmp/wf-w2/bundles --refs /tmp/wf-w2/refs`.
      Gather every tainted task ID.
-  3. `cli.py w3-schedule --baseline-probe wf-baseline.jsonl --run G=<runs>/w3-1-G --run T=<runs>/w3-2-T … --out schedule.json`.
+  3. `cli.py w3-schedule --baseline-probe wf-baseline-w1.jsonl --run G=<runs>/w3-1-G --run T=<runs>/w3-2-T … --out schedule.json`.
+     A run measured in a later window names its window's baseline:
+     `--run T=<runs>/w3-6-T@wf-baseline-w2.jsonl`.
   4. `cli.py w3 --schedule schedule.json --tasks /tmp/wf-w2/bundles [--void <id> …]`.
 
   Expected: one JSON decision, with `build`, `failed` clauses and `voided`.
@@ -498,7 +520,10 @@ on the reserved lane.
   - rework rounds, loops, cap hits;
   - voided tasks;
   - suspect transcripts;
-  - every limit the spec names: snapshot tasks are easier than live work; one repository; the 64K bias.
+  - every limit the spec names: snapshot tasks are easier than live work; one repository; the 64K bias;
+  - the GPU-time limit: `gpu_ms` is all chat-server time in the run minus the probe's, so it includes
+    arm G's implementer and any chat of the user's own. Lead and implementer share an alias, so
+    spec §9's per-alias attribution was not possible. It is reported, not decisive.
 
   Commit both files by path.
 - [ ] **Step 2:** Teardown (spec §11):

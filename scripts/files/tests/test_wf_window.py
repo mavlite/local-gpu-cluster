@@ -48,7 +48,8 @@ def world(tmp_path):
     path.write_text(json.dumps(w))
     env = dict(os.environ, FAKE_WORLD=path.as_posix(), FAKEBIN=bindir.as_posix(),
                WF_WIN_SBIN=sbin.as_posix(), WF_WIN_STATE_DIR=(tmp_path / "state").as_posix(),
-               WF_WIN_RT_STATE=w["rt_state"], WF_WIN_BOOT_ID=boot.as_posix(), WF_WIN_WAIT_S="2")
+               WF_WIN_RT_STATE=w["rt_state"], WF_WIN_BOOT_ID=boot.as_posix(), WF_WIN_WAIT_S="2",
+               WF_WIN_RT_LAST=(tmp_path / "rt.last").as_posix())
 
     def run(*args, **extra):
         prog = ('fb="$FAKEBIN"; command -v cygpath >/dev/null && fb="$(cygpath -u "$FAKEBIN")"; '
@@ -140,3 +141,42 @@ def test_close_without_open_is_an_error(world):
     run, _, _, _ = world
     r = run("close")
     assert r.returncode != 0 and "not open" in r.stderr
+
+
+@pytest.mark.parametrize("unit", ["rag-refresh.service", "redteam-mode-idle.service"])
+def test_open_refuses_while_a_timer_started_job_is_running(world, unit):
+    # Final review I3: stopping the timer does not stop a refresh already loading the GPUs.
+    run, state, patch, _ = world
+    w = state()
+    w["units"]["host"][unit] = "active"
+    patch(units=w["units"])
+    r = run("open")
+    assert r.returncode != 0 and unit in r.stderr
+    assert state()["capacity"] == 1
+
+
+def test_open_fails_if_a_perturber_survives_the_stop(world):
+    run, state, patch, _ = world
+    patch(fail_stop="rag-refresh.timer")
+    r = run("open")
+    assert r.returncode != 0 and "still active" in r.stderr
+
+
+def test_open_refreshes_the_redteam_idle_stamp_before_entering(world):
+    run, _, _, tmp = world
+    last = tmp / "rt.last"
+    r = run("open", WF_WIN_RT_LAST=last.as_posix())
+    assert r.returncode == 0, r.stderr
+    assert last.read_text().strip().isdigit()
+
+
+def test_stamp_records_any_active_perturber(world):
+    run, state, patch, tmp = world
+    out = tmp / "stamps.jsonl"
+    assert run("open").returncode == 0
+    w = state()
+    w["units"]["host"]["rag-refresh.timer"] = "active"
+    patch(units=w["units"])
+    assert run("stamp", out.as_posix(), "x").returncode == 0
+    rec = json.loads(out.read_text().splitlines()[-1])
+    assert rec["perturbers_active"] == ["rag-refresh.timer"]
