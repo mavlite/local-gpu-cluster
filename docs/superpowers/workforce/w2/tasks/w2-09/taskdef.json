@@ -1,0 +1,16 @@
+{
+ "id": "w2-09",
+ "commit": "f0eb0ac3c4a8db4d356eaaa6097062eda170a73e",
+ "files": [
+  "scripts/rag/handlers/sphinx_sitemap.py",
+  "scripts/rag/sources.yaml"
+ ],
+ "tests": [
+  "scripts/rag/tests/test_searchindex.py"
+ ],
+ "hidden": {
+  "test_w2_09_hidden.py": "scripts/rag/tests/test_w2_09_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

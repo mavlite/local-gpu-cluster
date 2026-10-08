@@ -1,0 +1,15 @@
+{
+ "id": "w2-15",
+ "commit": "f5ae5b612d543b288515d9349694fcd84489a142",
+ "files": [
+  "scripts/files/cluster_monitor.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_cluster_monitor.py"
+ ],
+ "hidden": {
+  "test_w2_15_hidden.py": "scripts/files/tests/test_w2_15_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

@@ -1,0 +1,15 @@
+{
+ "id": "w2-02",
+ "commit": "817a624543be69646dc33f4a483ade7ba8f5146d",
+ "files": [
+  "scripts/tools/gate/sh/gate_env.sh"
+ ],
+ "tests": [
+  "scripts/tools/gate/tests/test_gate_env.py"
+ ],
+ "hidden": {
+  "test_w2_02_hidden.py": "scripts/tools/gate/tests/test_w2_02_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

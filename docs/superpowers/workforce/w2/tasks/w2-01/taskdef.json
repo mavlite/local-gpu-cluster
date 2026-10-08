@@ -1,0 +1,15 @@
+{
+ "id": "w2-01",
+ "commit": "79a2f69a0b72ec97102483c8a02869a0ae2d33fd",
+ "files": [
+  "scripts/40-host-config.sh"
+ ],
+ "tests": [
+  "scripts/files/tests/test_host_config_zfs.py"
+ ],
+ "hidden": {
+  "test_w2_01_hidden.py": "scripts/files/tests/test_w2_01_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

@@ -1,0 +1,15 @@
+{
+ "id": "w2-03",
+ "commit": "00851468eef5742e88c566e1d8dcbd83b92678eb",
+ "files": [
+  "scripts/56-fan-control.sh"
+ ],
+ "tests": [
+  "scripts/files/tests/test_v620_fan.py"
+ ],
+ "hidden": {
+  "test_w2_03_hidden.py": "scripts/files/tests/test_w2_03_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

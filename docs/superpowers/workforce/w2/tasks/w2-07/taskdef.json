@@ -1,0 +1,17 @@
+{
+ "id": "w2-07",
+ "commit": "d547fbc344e9a3ede5e3d1b59a8f1a316a08871a",
+ "files": [
+  "scripts/53-lxc-router.sh",
+  "scripts/files/router-app.py",
+  "scripts/files/tavily_cache.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_tavily_cache.py"
+ ],
+ "hidden": {
+  "test_w2_07_hidden.py": "scripts/files/tests/test_w2_07_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}
