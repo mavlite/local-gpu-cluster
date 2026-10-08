@@ -230,6 +230,12 @@ phase_4_8_zfs() {
   done
 
   zfs set recordsize=1M tank/models
+
+  # Import 'tank' at boot by its own unit, not via /etc/zfs/zpool.cache alone: a hard crash can leave the
+  # cache empty (it did, 2026-10-05), and then nothing imports 'tank' before pve-guests -- LXCs that
+  # bind-mount /tank/* (151's /tank/models) fail to autostart until Proxmox imports the pool ~40 s later.
+  systemctl enable zfs-import@tank.service
+  ok "zfs-import@tank.service enabled (boot import independent of zpool.cache)"
 }
 
 # ----------------------------------------------------------------------------
