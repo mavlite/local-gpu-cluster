@@ -160,3 +160,15 @@ def test_closed_mode_denies_everything_both_ways():
     assert r.returncode == 0, r.stderr
     assert options(r.stdout) == {"enable": "1", "policy_in": "DROP", "policy_out": "DROP"}
     assert rules(r.stdout) == []
+
+
+def test_76_never_puts_a_key_on_a_qm_command_line():
+    """Plan D start-run: keys reach the guest on stdin (printf builtins piped to vm_run_stdin)."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for line in lines:
+        if "qm guest exec" in line or "vm_run" in line:
+            assert "key" not in line.replace("clear-keys", ""), line
+    start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
+    block = "\n".join(lines[start:start + 20])
+    assert "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start" in block
