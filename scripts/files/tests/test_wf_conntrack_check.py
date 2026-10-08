@@ -43,3 +43,28 @@ def test_an_empty_table_passes_and_garbage_is_an_error():
     assert check("").returncode == 0
     assert check("conntrack v1.4.8 (conntrack-tools): 0 flow entries have been shown.\n").returncode == 0
     assert check("tcp 6 1 ESTABLISHED weird\n").returncode == 2
+
+
+# Verbatim from the host on 2026-10-08, VM 176 booted under `locked`. The guest's IGMP report and
+# LLMNR query never got past the PVE filter (tcpdump: 3 on tap176i0, 0 on fwln176i0/fwpr176p0/vmbrwf);
+# the kernel confirms bridged multicast before the per-port filter drops the copies.
+IGMP_UNREPLIED = ("unknown  2 569 src=10.79.0.10 dst=224.0.0.22 [UNREPLIED] src=224.0.0.22 dst=10.79.0.10 "
+                  "mark=176 zone=1 use=1")
+LLMNR_UNREPLIED = ("udp      17 0 src=10.79.0.10 dst=224.0.0.252 sport=5355 dport=5355 [UNREPLIED] "
+                   "src=224.0.0.252 dst=10.79.0.10 sport=5355 dport=5355 mark=176 zone=1 use=1")
+
+
+def test_unanswered_multicast_is_not_a_flow():
+    r = check("\n".join([TCP_OK, IGMP_UNREPLIED, LLMNR_UNREPLIED]) + "\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_answered_multicast_flow_still_fails():
+    answered = LLMNR_UNREPLIED.replace("[UNREPLIED] ", "")
+    r = check(answered + "\n")
+    assert r.returncode == 1 and "224.0.0.252:5355" in r.stdout
+
+
+def test_an_unanswered_unicast_flow_still_fails():
+    r = check(UDP_C2.replace("dport=443 ", "dport=443 [UNREPLIED] ") + "\n")
+    assert r.returncode == 1 and "203.0.113.9:443" in r.stdout
