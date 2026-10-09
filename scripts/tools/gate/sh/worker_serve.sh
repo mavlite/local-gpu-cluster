@@ -79,9 +79,13 @@ cmd_quiet() {
 cmd_install_key() {
   local src="${1:?install-key <uploaded file>}"
   [ -s "$src" ] || die "$src is empty or missing"
-  sudo mkdir -p "$ETC"
-  sudo install -o root -g bench -m 0640 "$src" "$KEY"
-  shred -u "$src" 2>/dev/null || rm -f "$src"
+  sudo mkdir -p "$(dirname "$KEY")"
+  # A key file written on Windows ends in CRLF; llama-server would keep the CR as part of the key.
+  local clean
+  clean="$(mktemp)"
+  tr -d '\r' < "$src" > "$clean"
+  sudo install -o root -g bench -m 0640 "$clean" "$KEY"
+  shred -u "$clean" "$src" 2>/dev/null || rm -f "$clean" "$src"
   log "key installed at $KEY (root:bench 0640)"
 }
 
@@ -115,7 +119,10 @@ cmd_lock() {
   done
   local set
   set="$(IFS=,; echo "$*")"
-  nft_table "tcp dport $PORT ip saddr { $set } accept" "tcp dport $PORT counter drop"
+  # Loopback first: `start` checks its own /health on 127.0.0.1 (Plan D Task 3b: without this the
+  # lock dropped it and every start after a lock hung for 600 s).
+  nft_table "iifname \"lo\" tcp dport $PORT accept" "tcp dport $PORT ip saddr { $set } accept" \
+            "tcp dport $PORT counter drop"
   log ":$PORT accepted only from: $*"
 }
 

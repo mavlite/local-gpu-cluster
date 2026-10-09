@@ -103,9 +103,10 @@ def test_learn_ruleset_is_the_form_nft_accepted(tmp_path):
 
 @pytest.mark.skipif(BASH is None, reason="bash not available")
 def test_lock_ruleset_is_the_form_nft_accepted(tmp_path):
+    # The loopback accept (Plan D Task 3b) passed `nft -c -f` on the Proxmox host on 2026-10-09.
     assert _render_nft(tmp_path, "lock", "10.0.0.1", "10.0.0.2") == [
         "table inet gate", "delete table inet gate", "table inet gate {", " chain input {",
-        "  type filter hook input priority 0; policy accept;",
+        "  type filter hook input priority 0; policy accept;", '  iifname "lo" tcp dport 8090 accept',
         "  tcp dport 8090 ip saddr { 10.0.0.1,10.0.0.2 } accept", "  tcp dport 8090 counter drop",
         " }", "}"]
 
