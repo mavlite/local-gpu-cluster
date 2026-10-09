@@ -1,0 +1,66 @@
+{
+ "phase": "W3",
+ "date": "2026-10-09",
+ "spec": "docs/superpowers/specs/2026-10-07-distributed-workforce-design.md#9",
+ "plan": "docs/superpowers/plans/2026-10-08-wf-experiment.md (Tasks 8-9)",
+ "tasks": {
+  "manifest": "54c494ae38dcfd2adb7781257a65969c84a7986de5db988f17a770c2df7bb146",
+  "archive": "/root/wf/w2-frozen.tgz",
+  "archive_sha256": "dcf1813f68d1eed17b65960c18905d7563e99ac0ea40e8444fc515e8cef4695a",
+  "n": 16,
+  "selection": "docs/superpowers/workforce/w2/selection.md"
+ },
+ "worker_config": {
+  "id": "C2",
+  "line": "C2 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 {\"enable_thinking\":false}",
+  "w1_result": "docs/superpowers/workforce/results-w1.json"
+ },
+ "arms": {
+  "G": "lead + 1 GPU implementer (both qwen3.8-nothink via the router, scoped key)",
+  "T": "lead (qwen3.8-nothink) + 3 CPU workers (llmbench01-03, C2)"
+ },
+ "schedule": [
+  "G",
+  "T",
+  "T",
+  "G",
+  "G",
+  "T",
+  "T",
+  "G"
+ ],
+ "run_ids": [
+  "w3-1-g",
+  "w3-2-t",
+  "w3-3-t",
+  "w3-4-g",
+  "w3-5-g",
+  "w3-6-t",
+  "w3-7-t",
+  "w3-8-g"
+ ],
+ "runs_per_arm": 4,
+ "no_added_runs": true,
+ "no_sequential_stopping": true,
+ "layout": "3 x 128K chat with embed + rerank loaded (wf-window.sh open); restart timer, redteam watcher/idle, fast server, rag-refresh, swap webhook stopped",
+ "validity": "runmeta.validity (same boot, router and chat invocations; 3-slot window open at both stamps) + harness run.json valid; nothing else invalidates a run. A T run with no probe samples is valid but fails clause 3",
+ "rule": {
+  "quality": "paired task bootstrap over 16 tasks x 4 runs, n_boot 10000, seed 20261007: lower95(T-G per-task acceptance) >= -1/16",
+  "win": "Welch 95% CI of T-G accepted tasks/hour (worker-accepted for T, implementer-accepted for G) excludes 0 (lo > 0)",
+  "user": "every valid T run's time-weighted user-lane probe p50 <= 1.5 x its window's idle baseline p50; failed probes count as 120 s",
+  "gpu_time": "chat-server ms per accepted task, per arm: REPORTED, not decisive",
+  "clause2_confirmed_by_user": "2026-10-09: asked 'throughput decides (as drafted) or throughput-or-GPU-time?'; user answered 'go ahead and proceed with the testing' -> drafted rule (throughput decides)"
+ },
+ "void": "tasks the transcript scan finds tainted, applied to every run of both arms (cli.py w3 --void)",
+ "probe": "wf-user-probe.py in LXC 153, owner key, 60 s interval, no --until; 30-sample idle baseline per window",
+ "harness": {
+  "repo_head": "6892255",
+  "vm_run_path": "byte-identical to repo (see preregistration-w1.json harness.vm_run_path_sha256)"
+ },
+ "budget_h": 16,
+ "stop_at_h": 24,
+ "prior_observations_disclosed": [
+  "W1: C2 0/30 loops, 87% pass, 98 s/attempt (CPU workers, no review)",
+  "arm-G pilot on gate T1/T2/T4: 3/3 accepted, GPU implementer looped 2/3 (repeat episodes until the 60-step cap)"
+ ]
+}
