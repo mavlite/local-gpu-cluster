@@ -1,0 +1,58 @@
+{
+ "phase": "W1",
+ "date": "2026-10-09",
+ "spec": "docs/superpowers/specs/2026-10-07-distributed-workforce-design.md#7",
+ "plan": "docs/superpowers/plans/2026-10-08-wf-experiment.md (Task 5/6)",
+ "tasks": {
+  "ids": [
+   "w1-r1",
+   "w1-r2",
+   "w1-r3",
+   "w1-t1",
+   "w1-t2",
+   "w1-t4"
+  ],
+  "manifest": "519de201c43c6dc4147c1271444e2bc4f74728101395138e1e9dd1236f18a9f6",
+  "parity": "identical manifest, problems [] locally and in docker:wf-grader:1"
+ },
+ "configs": {
+  "C0": "C0 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 {\"enable_thinking\":false}",
+  "C1": "C1 /opt/bench/src/llama.cpp/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -cram 256 --ctx-checkpoints 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 --spec-type draft-mtp --spec-draft-n-max 3 {\"enable_thinking\":false}",
+  "C2": "C2 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 {\"enable_thinking\":false}",
+  "C3": "C3 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --spec-type mtp:n_max=3,p_min=0.5 -mtprot iq4_xs --temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 0 {\"enable_thinking\":true,\"preserve_thinking\":true}"
+ },
+ "c1_mtp": "ON (GATE_C1_MTP=1): mainline b11026 loads the in-GGUF MTP heads; 88/92 drafts accepted on a test completion",
+ "config_order": [
+  "C0",
+  "C2",
+  "C3",
+  "C1"
+ ],
+ "runs_per_config": 5,
+ "attempts_per_config": 30,
+ "workers": "llmbench01-03 (32 GB, Minimal mode), gate-worker started once per configuration, locked to 192.168.6.79",
+ "metric": "scripts/tools/workforce/loops.py on harness-captured events: repeat = 3+ identical consecutive tool calls; cycle = a sequence of up to 4 calls repeated 3+ times; a test re-run counts only if no file changed between",
+ "rule": "analysis.w1_choose: lowest loop rate with one-sided 95% Clopper-Pearson upper bound <= 0.10; ties by pass rate then speed; none qualifies -> stop, report, no W3",
+ "validity": "harness run.json valid only (worker unreachable >= 5 min, harness exception, infrastructure error); loops, caps and failed tasks are outcomes",
+ "window": "none needed: run --w1 never calls the router (implement + grade only); chat is untouched",
+ "harness": {
+  "repo_head": "10a283915d57ffb462b47a708dc664f8e321ede8",
+  "vm_run_path_sha256": {
+   "grade.py": "b8e5759676cfdbf34f55205762b4a57ed1262c719a08db607f7111a78c20333d",
+   "loops.py": "d7659729204561af4ce7bb42086a7501919aa45b65cc833958fed381a4cf28c9",
+   "oc.py": "e3d92dcd4686a4450a7d20097b5e959c1ec4ba8762103378ef7e076ecb352a66",
+   "paths.py": "706fe1f0c22ce876673a273a9b334aac78d5213e136dfddfb8580c104328cf83",
+   "pipeline.py": "0747fdbd0dc1845bb5275df9a477be939a3cd6add0e1cebe68993a99c780e479",
+   "profiles.py": "c0fed6170e24dfb3d780f3a7943030427652d9ce94caf7e0e9738cbaafed7673",
+   "review.py": "d96433d9022db2a94a92fa079bdd5a4a858e7405fb78bd0bf6e6a473e3a92f22",
+   "workspace.py": "e16b2a6678500b7ae351962debb46f11241eac1a47e5d12f30ac93a1a122dfc2"
+  },
+  "note": "the VM's run-path modules are byte-identical to repo HEAD; analysis/cli/bundle differ only in workstation-side code the VM does not run"
+ },
+ "budget_h": 10,
+ "stop_at_h": 15,
+ "prior_observations_disclosed": [
+  "arm-G pilot (gate T1/T2/T4, GPU implementer): looped 2/3",
+  "loop check (gate T3/T5/T6, C0): 0/9 looped, 9/9 accepted"
+ ]
+}
