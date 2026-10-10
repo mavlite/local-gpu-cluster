@@ -1,0 +1,76 @@
+{
+ "phase": "W3 (amended: option 1, one team run vs run 1's GPU-only baseline)",
+ "date": "2026-10-10",
+ "amendment": "docs/superpowers/workforce/amendment-w3-option1.md (5252550, thresholds fixed before team data)",
+ "baseline_G": {
+  "run": "w3-1-g (invalid: power outage, partial)",
+  "finished": 11,
+  "accepted": 10,
+  "elapsed_s": 8528,
+  "accepted_per_hour": 4.22,
+  "user_lane_p50_s_during": 0.65,
+  "idle_baseline_p50_s": 0.32
+ },
+ "team_T": {
+  "run": "w3-2-t",
+  "valid": true,
+  "wall_s": 7958,
+  "tasks": 16,
+  "accepted": 14,
+  "worker_accepted": 13,
+  "lead_fixed_accepted": 1,
+  "not_accepted": [
+   "w2-05",
+   "w2-10"
+  ],
+  "accepted_per_hour_worker": 5.88,
+  "rework_rounds": 11,
+  "loops": 0,
+  "time_cap_hits": 1,
+  "matched_11_accepted": 10,
+  "user_lane_p50_s": 0.56,
+  "idle_baseline_p50_s": 0.322,
+  "gpu_ms_per_accepted": 257203
+ },
+ "verdict": {
+  "throughput": {
+   "ratio": 1.39,
+   "threshold_clear": 2.0,
+   "result": "MARGINAL (4.22-8.44 band: the user decides)"
+  },
+  "quality": {
+   "matched_11": "T 10 vs G 10",
+   "threshold": ">= 9",
+   "result": "PASS"
+  },
+  "user_lane": {
+   "ratio": 1.74,
+   "threshold": 1.5,
+   "result": "FAIL"
+  },
+  "build_signal": "NO - user lane fails and throughput is not 2x"
+ },
+ "scan": {
+  "tainted": [],
+  "suspect": [
+   "w2-01",
+   "w2-06"
+  ],
+  "suspect_review": "both are the reviewer READING conftest.py (cat conftest.py) - benign; scan's forgery regex flags reads in bash commands (minor refinement)"
+ },
+ "checks": {
+  "proof_with_workers": "rc=0 before the run",
+  "key_grep": "0 / 0",
+  "window": "closed, layout restored"
+ },
+ "archive": {
+  "host": "/root/wf/w3b-runs.tgz",
+  "sha256": "5bbe71b1a33dbc7d18ef96514c795512b5d9b67b5a91e39b0a36600a62c72014"
+ },
+ "limits": [
+  "one run per arm, no confidence interval",
+  "G baseline covers only 11 tasks finished before the outage",
+  "runs at different times of day",
+  "w2-05 failed in both arms (likely a hard task, not an arm effect)"
+ ]
+}
