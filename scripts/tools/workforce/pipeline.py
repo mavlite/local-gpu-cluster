@@ -42,7 +42,7 @@ import review
 import workspace
 
 UNREACHABLE_LIMIT_S = 300            # spec §9: worker unreachable for 5 minutes -> run invalid
-_NOISE = ("__pycache__/", ".pytest_cache/")
+_NOISE = ("__pycache__/", ".pytest_cache/", ".workforce_review/")
 LEAD = "lead"
 
 
@@ -284,19 +284,31 @@ class Pipeline:
         sites = context.call_sites(context.changed_names(diff), snapshot, patched)
         tests = context.touching_tests(list(patched), snapshot)
         summary = t.rounds[-1].get("summary", "") if t.rounds else ""
-        text, truncated, _ = review.packet(t.task, t.request, diff, test_out, history=history, dropped=dropped,
-                                           call_sites=sites, tests=tests, summary=summary, header=header)
-        return text, truncated, diff
+        plain = self._filtered_patch(t)[0].decode("utf-8", "replace")
+        text, truncated, _, full = review.packet(t.task, t.request, diff, test_out, history=history, dropped=dropped,
+                                                 call_sites=sites, tests=tests, summary=summary, header=header,
+                                                 plain_diff=plain)
+        return text, truncated, full
+
+    @staticmethod
+    def _write_full_packet(root, text):
+        """FULL_PACKET under `root`, never through an agent-planted symlink (the copy keeps links)."""
+        d = os.path.join(root, os.path.dirname(review.FULL_PACKET))
+        p = os.path.join(root, review.FULL_PACKET)
+        for path in (p, d):
+            if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+                os.remove(path)
+        os.makedirs(d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
 
     def _review(self, t):
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
         test_out, header = self._visible_tests(t, f"review-r{n}-check")
-        text, truncated, diff = self._packet_for(t, test_out, header)
+        text, truncated, full = self._packet_for(t, test_out, header)
         if truncated:
-            os.makedirs(os.path.join(tree, os.path.dirname(review.FULL_PACKET)), exist_ok=True)
-            with open(os.path.join(tree, review.FULL_PACKET), "w", encoding="utf-8") as f:
-                f.write("\n".join(["# Request", t.request, "# Test output", test_out, "# Diff", diff]))
+            self._write_full_packet(tree, full)                # framed like the packet (review I3)
         pkt = os.path.join(t.adir, f"review-r{n}.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -341,7 +353,9 @@ class Pipeline:
 
     def _lead_fix(self, t):
         test_out, header = self._visible_tests(t, "fix-check")
-        text, _, _ = self._packet_for(t, test_out, header, history=t.history)
+        text, truncated, full = self._packet_for(t, test_out, header, history=t.history)
+        if truncated:                                          # the fixer works in its own workspace
+            self._write_full_packet(t.ws.root, full)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)

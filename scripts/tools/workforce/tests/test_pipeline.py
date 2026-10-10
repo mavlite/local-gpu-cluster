@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import grade  # noqa: E402
 import pipeline  # noqa: E402
 import profiles  # noqa: E402
+import review  # noqa: E402
 from wf_fixtures import FakeOpencode, make_bundle, solution_src  # noqa: E402
 
 SOL = solution_src()
@@ -204,6 +205,19 @@ def test_a_diff_too_big_for_the_packet_leaves_the_full_packet_in_the_reviewers_c
     assert script["z"]["full_packet_seen"] == [True]
     rev = [c for c in fake.calls if c["role"] == "review"][0]
     assert ".workforce_review/packet.md" in open(rev["attach"]).read().splitlines()[-2]   # then the closing delimiter
+    full = script["z"]["full_packet_text"][0]                 # review I3: the full packet is framed too
+    assert profiles.REVIEWER_PROMPT and review.UNTRUSTED_NOTE in full and "UNTRUSTED-" in full and "# filler line 2999" in full
+
+
+def test_the_fixer_gets_a_framed_full_packet_in_its_workspace_and_it_is_not_a_dropped_path(tmp_path):
+    big = WRONG + "".join(f"# filler line {i}\n" for i in range(3000))
+    script = {"z": {"impl": [{"pkg/z.py": big}] * 3, "review": ["REVISE: a", "REVISE: b", "REVISE: c"],
+                    "fix": {"pkg/z.py": SOL}}}
+    _, fake = run_pipeline(tmp_path, "G", script)
+    fix = [c for c in fake.calls if c["role"] == "fix"][0]
+    assert fix["full_packet_present"] and review.UNTRUSTED_NOTE in fix["full_packet_text"]
+    r = record(tmp_path, "z")
+    assert r["outcome"] == "lead-fixed" and not any(".workforce_review" in p for p in r["dropped"])
 
 
 def test_agent_area_and_harness_private_area_are_separate_and_handed_over(tmp_path):

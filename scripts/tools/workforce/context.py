@@ -4,17 +4,28 @@ steps re-reading files and grepping for tests and callers; this hands it those u
 import re
 import tarfile
 
-_DEF = re.compile(r"^\+(?:def|class)\s+([A-Za-z_]\w*)", re.M)
+_DEF = re.compile(r"^([ +-])(?:async\s+def|def|class)\s+([A-Za-z_]\w*)")   # top level: no indent
 _HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$")
 MAX_SITES = 40
 
 
 def changed_names(diff_text):
-    """Top-level def/class names on added lines, in order of first appearance."""
-    out = []
-    for m in _DEF.finditer(diff_text):
-        if m.group(1) not in out:
-            out.append(m.group(1))
+    """Top-level def/class names a hunk adds or changes, in order of first appearance: every added
+    def/class line, plus the def/class a hunk opens on (with -W context, the function whose body
+    changed). Nested defs are indented and never match."""
+    out, first_in_hunk = [], True
+    for line in diff_text.split("\n"):
+        if line.startswith("@@"):
+            first_in_hunk = True
+            continue
+        if line.startswith("diff --git"):
+            first_in_hunk = False
+            continue
+        m = _DEF.match(line)
+        if m and (m.group(1) == "+" or first_in_hunk) and m.group(2) not in out:
+            out.append(m.group(2))
+        if m:
+            first_in_hunk = False
     return out
 
 
@@ -70,7 +81,10 @@ def touching_tests(changed_paths, snapshot_tar):
 def shrink_blocks(diff_text, max_lines=60):
     """Trim each hunk's context to ±max_lines around its first/last changed line; unchanged hunks
     pass through byte for byte. A trimmed hunk ends with `[context trimmed: file:start-end]`."""
-    lines = diff_text.splitlines()
+    lines = diff_text.split("\n")                      # never splitlines(): \x0c etc. are not line ends
+    trailing = bool(lines) and lines[-1] == ""
+    if trailing:
+        lines.pop()
     out, file, i = [], None, 0
     while i < len(lines):
         line = lines[i]
@@ -85,7 +99,7 @@ def shrink_blocks(diff_text, max_lines=60):
         while j < len(lines) and not (lines[j].startswith("@@") or lines[j].startswith("diff --git")):
             j += 1
         body = lines[i + 1:j]
-        changed = [k for k, l in enumerate(body) if l[:1] in "+-"]
+        changed = [k for k, l in enumerate(body) if l[:1] in ("+", "-")]
         if not changed or (changed[0] <= max_lines and len(body) - 1 - changed[-1] <= max_lines):
             out.append(line)
             out.extend(body)
@@ -96,4 +110,4 @@ def shrink_blocks(diff_text, max_lines=60):
             out.extend(body[lo:hi])
             out.append(f"[context trimmed: {file}:{start}-{start + len(body)}]")
         i = j
-    return "\n".join(out) + ("\n" if diff_text.endswith("\n") else "")
+    return "\n".join(out) + ("\n" if trailing else "")

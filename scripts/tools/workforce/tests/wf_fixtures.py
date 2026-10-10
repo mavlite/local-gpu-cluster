@@ -109,11 +109,16 @@ class FakeOpencode:
                 return oc.RunResult(0, entry.get("timed_out", False), sid, entry["text"], 0.01)
             text = entry
             if s.get("expect_full_packet"):
-                s.setdefault("full_packet_seen", []).append(
-                    os.path.isfile(os.path.join(workdir, ".workforce_review", "packet.md")))
+                fp = os.path.join(workdir, ".workforce_review", "packet.md")
+                s.setdefault("full_packet_seen", []).append(os.path.isfile(fp))
+                s.setdefault("full_packet_text", []).append(open(fp, encoding="utf-8").read() if os.path.isfile(fp) else None)
             with open(os.path.join(workdir, "reviewer_scribble.txt"), "w") as f:
                 f.write("reviewers can run bash; this must not reach the workspace\n")
             return oc.RunResult(0, False, sid, text, 0.01)
+        if role == "fix":
+            fp = os.path.join(workdir, ".workforce_review", "packet.md")
+            self.calls[-1]["full_packet_present"] = os.path.isfile(fp)
+            self.calls[-1]["full_packet_text"] = open(fp, encoding="utf-8").read() if os.path.isfile(fp) else ""
         files = s["fix"] if role == "fix" else s["impl"][n]
         for path, raw in (s.get("binary", {}) if role == "impl" else {}).items():
             with open(os.path.join(workdir, path), "wb") as f:

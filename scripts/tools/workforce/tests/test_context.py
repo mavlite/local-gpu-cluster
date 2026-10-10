@@ -70,3 +70,27 @@ def test_shrink_blocks_trims_oversized_context_and_says_so():
 def test_shrink_blocks_leaves_a_small_hunk_alone():
     diff = "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n"
     assert context.shrink_blocks(diff) == diff
+
+
+def test_changed_names_include_the_enclosing_def_of_a_body_only_change():
+    # Review I6: the commonest edit changes a body, not a def line; with -W the hunk opens on the def.
+    diff = ("diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ -1,5 +1,5 @@\n def handle(x):\n     if x:\n"
+            "-        return 1\n+        return 2\n     return 0\n@@ -20,3 +20,4 @@\n async def go():\n     pass\n"
+            "+    await x\n+async def later():\n+    pass\n")
+    assert context.changed_names(diff) == ["handle", "go", "later"]
+
+
+def test_changed_names_ignore_nested_defs_in_context():
+    diff = ("diff --git a/m.py b/m.py\n@@ -1,4 +1,4 @@\n def outer():\n     def inner():\n-        return 1\n"
+            "+        return 2\n")
+    assert context.changed_names(diff) == ["outer"]
+
+
+def test_shrink_blocks_splits_on_newlines_only_and_ignores_empty_lines():
+    # Review M3: splitlines() also breaks on \x0c and friends, which could fake hunk headers.
+    diff = "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -1,3 +1,3 @@\n a\x0cb\n-b\n+c\n\n d\n"
+    assert context.shrink_blocks(diff) == diff
+    body = "\n".join(f" line{i}" for i in range(200))
+    diff = f"diff --git a/big.py b/big.py\n@@ -1,200 +1,201 @@\n{body}\n\n+new\n"
+    out = context.shrink_blocks(diff, max_lines=60)
+    assert "+new" in out and out.count("\n line") <= 61
