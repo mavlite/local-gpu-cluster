@@ -1,7 +1,7 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
 Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan
-Sandbox VM:   run
+Sandbox VM:   run, replay-reviews
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
 """
@@ -21,6 +21,7 @@ import oc
 import paths
 import pipeline
 import profiles
+import replay
 import runmeta
 import scan
 
@@ -211,6 +212,14 @@ def main(argv=None, env=None):
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
     p.add_argument("--agent-user-prefix",
                    help="run each role as OS user <prefix>-<role> in systemd scopes (the VM; harness as root)")
+    p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
+    p.add_argument("--run", required=True, help="harvested run directory (tasks/<id>/record.json, patches/)")
+    p.add_argument("--bundles", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--router", required=True)
+    p.add_argument("--grader", default="local", help="'local' or 'docker:<image>' (runs the visible tests)")
+    p.add_argument("--agent-user-prefix", help="run the reviewer as <prefix>-lead (needs the docker grader)")
+    p.add_argument("--journal", help="llama-server journal captured over the replay: prompt-token totals")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -271,6 +280,26 @@ def main(argv=None, env=None):
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1,
                                 monitor=monitor, own=own).run()
+    elif a.cmd == "replay-reviews":
+        if not env.get("WF_ROUTER_KEY"):
+            raise SystemExit("WF_ROUTER_KEY must be set")
+        if a.agent_user_prefix and not a.grader.startswith("docker:"):
+            raise SystemExit("--agent-user-prefix needs --grader docker:<image>: the local grader would run "
+                             "agent code as the harness user (root on the VM)")
+        oc_bin = resolve_opencode(env)
+        if not oc_bin:
+            raise SystemExit("opencode not found; set WF_OPENCODE")
+        launcher = own = None
+        if a.agent_user_prefix:
+            assert_private(a.bundles)
+            launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
+        opencode = build_opencode("G", a.out + ".opencode", a.router, [], [oc_bin], env, launcher=launcher)
+        journal = None
+        if a.journal:
+            with open(a.journal, encoding="utf-8", errors="replace") as f:
+                journal = f.read()
+        out = replay.replay(a.run, a.bundles, opencode, a.out, make_grader(a.grader), journal_text=journal,
+                            own=own)
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "scan":

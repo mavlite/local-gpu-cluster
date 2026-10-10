@@ -151,3 +151,33 @@ def test_bundle_validate_can_use_the_docker_grader(tmp_path, repo, monkeypatch, 
               "--work", str(tmp_path / "w"), "--grader", "docker:wf-grader:1"])
     assert isinstance(seen[0], cli.grade.DockerRunner) and seen[0].image == "wf-grader:1"
     assert json.loads(capsys.readouterr().out)["grader"] == "docker:wf-grader:1"
+
+
+def test_replay_reviews_runs_only_the_reviewer_with_the_lead_config(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None):
+        seen["build"] = (arm, router, workers, launcher)
+        return "OC"
+
+    def fake_replay(run, bundles, opencode, out, grader, limits=None, journal_text=None, own=None):
+        seen.update(run=run, bundles=bundles, opencode=opencode, out=out, grader=type(grader).__name__,
+                    journal=journal_text, own=own)
+        return {"totals": {"old_none": 0}}
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", fake_replay)
+    (tmp_path / "j.log").write_text("journal line\n")
+    assert cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+                     "--router", "http://x/v1", "--grader", "local", "--journal", str(tmp_path / "j.log")],
+                    env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["build"] == ("G", "http://x/v1", [], None) and seen["opencode"] == "OC"
+    assert seen["run"] == "R" and seen["grader"] == "LocalRunner" and seen["journal"] == "journal line\n"
+    assert seen["own"] is None and json.loads(capsys.readouterr().out)["totals"]["old_none"] == 0
+
+
+def test_replay_reviews_needs_the_router_key(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+                  "--router", "http://x/v1"], env={"WF_OPENCODE": "opencode"})
+    assert "WF_ROUTER_KEY" in str(e.value)

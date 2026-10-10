@@ -423,3 +423,13 @@ def test_review_packet_carries_call_sites_touching_tests_and_the_summary(tmp_pat
     assert "# Tests that touch the changed files" in text and "pkg/tests/test_a.py" in text
     assert "# Implementer summary" in text and "SUMMARY: done" in text
     assert re.search(r"UNTRUSTED-\w{16}-BEGIN", text)
+
+
+def test_each_implementer_round_stores_the_patch_the_reviewer_saw(tmp_path):
+    # Round 2 §5.1: replay needs the reviewed state per round, not only the final patch.
+    script = {"b": {"impl": [{"pkg/b.py": "def f(x):\n    return x\n"}, {"pkg/b.py": SOL}],
+                    "review": ["REVISE: f must double", "ACCEPT"]}}
+    run_pipeline(tmp_path, "T", script)
+    d = tmp_path / "run" / "tasks" / "b"
+    assert "return x" in (d / "impl-r0.patch").read_text() and "x * 2" in (d / "impl-r1.patch").read_text()
+    assert "x * 2" not in (d / "impl-r0.patch").read_text()

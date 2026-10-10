@@ -263,6 +263,8 @@ class Pipeline:
         t.session = t.session or r.session_id
         t.rounds.append({"round": n, "agent": agent, "session": r.session_id, "rc": r.rc,
                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time(), "summary": r.text[-500:]})
+        with open(os.path.join(t.dir, f"impl-r{n}.patch"), "wb") as f:   # the state this review sees (replay)
+            f.write(self._filtered_patch(t)[0])
         if not self.review:
             self._finalize(t, "implemented")
             return
