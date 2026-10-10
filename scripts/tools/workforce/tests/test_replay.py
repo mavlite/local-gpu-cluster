@@ -130,3 +130,16 @@ def test_recover_patches_cli(tmp_path, capsys):
     run, _ = harvested_run(tmp_path)
     assert cli.main(["recover-patches", "--run", str(run)]) == 0
     assert json.loads(capsys.readouterr().out)["recovered"] == []
+
+
+def test_an_empty_stored_patch_replays_the_pristine_tree(tmp_path):
+    # W3 w2-10: the implementer changed nothing in scope, so the reviewer saw an empty diff; git apply
+    # rejects an empty patch, but the round must still replay exactly as it happened.
+    run, bundles = harvested_run(tmp_path)
+    (run / "tasks" / "a" / "impl-r0.patch").write_bytes(b"\n")
+    fake = FakeOpencode({"a": {"review": ["REVISE: nothing changed"]}, "b": {"review": ["ACCEPT"]}})
+    out = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner())
+    a = [r for r in out["rounds"] if r["task"] == "a"][0]
+    assert a["new_verdict"] == "REVISE"
+    pkt = open([c for c in fake.calls if c["task"] == "a"][0]["attach"]).read()
+    assert "# Diff" in pkt and "+    return" not in pkt and "visible tests: 0 of 1 expected passed" in pkt

@@ -147,7 +147,8 @@ def _round_task(p, rec, k, bundle, patch, out_dir):
     os.makedirs(t.adir)
     t.ws = workspace.Workspace.materialize(os.path.join(bundle, "snapshot.tar"), os.path.join(t.adir, "ws"),
                                            os.path.join(t.dir, "git"))
-    workspace.apply_patch(t.ws.root, patch)
+    if patch.strip():                               # an empty diff is a round where nothing was changed
+        workspace.apply_patch(t.ws.root, patch)
     p.own(t.ws.root, None)
     t.homes = {pipeline.LEAD: os.path.join(t.adir, f"home-{pipeline.LEAD}")}
     os.makedirs(t.homes[pipeline.LEAD])
