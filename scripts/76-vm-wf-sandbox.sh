@@ -15,6 +15,8 @@
 #   push-harness           replace /opt/workforce/workforce with scripts/tools/workforce (no provision,
 #              any policy): the same sorted sha256 manifest must match on both sides afterwards
 #   push-bundles B         replace /srv/wf/bundles with bundle dir B (0700) -- the frozen task set
+#   push-run DIR ID        ship a harvested run's replay inputs (run.json, patches/, each task's
+#              record.json and impl-r*.patch) to /srv/wf/replay/ID (0700), byte-compared (round 2 §5.1)
 #   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
 #              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
 #              the guest on stdin only -- never argv
@@ -169,6 +171,22 @@ case "$CMD" in
     vm_run 120 sh -c "rm -rf /srv/wf/bundles/* && tar -x -C /srv/wf/bundles --no-same-owner -f $PUSH/bundles.tar && chmod 0700 /srv/wf/bundles && rm -f $PUSH/bundles.tar" >/dev/null
     ok "bundles pushed: $(vm_run 30 sh -c 'ls /srv/wf/bundles | wc -l') task(s)"
     ;;
+  push-run)
+    src="${2:-}"; id="${3:-}"
+    [[ -d "$src" && -f "$src/run.json" ]] || die "usage: 76-vm-wf-sandbox.sh push-run <harvested-run-dir> <id>"
+    [[ "$id" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]] || die "run id must match [a-z0-9][a-z0-9._-]{0,40}"
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    (cd "$src" && find tasks -maxdepth 2 \( -name record.json -o -name 'impl-r*.patch' \) -print0 | sort -z) > "$tmp/list"
+    tar -C "$src" --null -T "$tmp/list" -cf "$tmp/run.tar" run.json patches
+    mkdir "$tmp/check" && tar -x -C "$tmp/check" -f "$tmp/run.tar"
+    local_sum="$(cd "$tmp/check" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    vm_run 30 install -d -m 0700 "$PUSH" /srv/wf/replay >/dev/null
+    vm_push "$tmp/run.tar" "$PUSH/run.tar"
+    vm_run 300 sh -c "rm -rf /srv/wf/replay/$id && install -d -m 0700 /srv/wf/replay/$id && tar -x -C /srv/wf/replay/$id --no-same-owner -f $PUSH/run.tar && chmod -R go-rwx /srv/wf/replay/$id && rm -f $PUSH/run.tar" >/dev/null
+    guest_sum="$(vm_run 300 sh -c "cd /srv/wf/replay/$id && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1")"
+    [[ "$local_sum" == "$guest_sum" ]] || die "replay inputs differ after push (local $local_sum, guest $guest_sum)"
+    ok "run $id pushed to /srv/wf/replay/$id ($(tr -cd '\0' < "$tmp/list" | wc -c) task files, manifest sha256 $local_sum)"
+    ;;
   start-run)
     id="${2:-}"; arm="${3:-}"
     [[ -n "$id" && -n "$arm" ]] || die "usage: 76-vm-wf-sandbox.sh start-run <run-id> <T|G> [--w1]"
@@ -199,5 +217,5 @@ case "$CMD" in
   clear-keys)
     vm_run 30 /usr/local/sbin/wf-run-control clear-keys
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|start-run|run-status|harvest|clear-keys" ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|run-status|harvest|clear-keys" ;;
 esac
