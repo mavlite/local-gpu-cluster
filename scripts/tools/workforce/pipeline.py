@@ -270,7 +270,7 @@ class Pipeline:
             self.lead_q.append(t)
             self.cond.notify_all()
 
-    def _packet_for(self, t, test_out, history=()):
+    def _packet_for(self, t, test_out, header="", history=()):
         """(text, truncated, diff): the review/fix packet with everything the reviewer used to spend
         steps re-reading (round 2 §3.2) -- function context, call sites of changed names, the tests
         that touch the changed files, the implementer's own summary. Context comes from git blobs and
@@ -283,14 +283,14 @@ class Pipeline:
         tests = context.touching_tests(list(patched), snapshot)
         summary = t.rounds[-1].get("summary", "") if t.rounds else ""
         text, truncated, _ = review.packet(t.task, t.request, diff, test_out, history=history, dropped=dropped,
-                                           call_sites=sites, tests=tests, summary=summary)
+                                           call_sites=sites, tests=tests, summary=summary, header=header)
         return text, truncated, diff
 
     def _review(self, t):
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
-        test_out = self._visible_tests(t, f"review-r{n}-check")
-        text, truncated, diff = self._packet_for(t, test_out)
+        test_out, header = self._visible_tests(t, f"review-r{n}-check")
+        text, truncated, diff = self._packet_for(t, test_out, header)
         if truncated:
             os.makedirs(os.path.join(tree, os.path.dirname(review.FULL_PACKET)), exist_ok=True)
             with open(os.path.join(tree, review.FULL_PACKET), "w", encoding="utf-8") as f:
@@ -338,8 +338,8 @@ class Pipeline:
         self._lead_fix(t)
 
     def _lead_fix(self, t):
-        test_out = self._visible_tests(t, "fix-check")
-        text, _, _ = self._packet_for(t, test_out, history=t.history)
+        test_out, header = self._visible_tests(t, "fix-check")
+        text, _, _ = self._packet_for(t, test_out, header, history=t.history)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
