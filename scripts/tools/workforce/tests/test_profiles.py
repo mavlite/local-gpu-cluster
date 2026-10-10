@@ -83,3 +83,21 @@ def test_only_the_keys_an_arm_needs_reach_the_agents(tmp_path):
     env = profiles.opencode_env(base, str(tmp_path), "/cfg", keys=profiles.keys_for("G"))
     assert env["WF_ROUTER_KEY"] == "r" and "WF_WORKER_KEY" not in env
     assert profiles.keys_for("T") == ("WF_ROUTER_KEY", "WF_WORKER_KEY")
+
+
+def test_prompts_carry_the_round_2_sentences():
+    flat = " ".join(profiles.REVIEWER_PROMPT.split())          # the prompt is wrapped at 100 columns
+    assert "If you are told your steps are exhausted" in flat
+    assert "do not re-run it" in flat
+    assert "Issue independent reads and greps in the same step" in flat
+    assert "Your SUMMARY must list each one" in " ".join(profiles.IMPLEMENTER_PROMPT.split())
+
+
+@pytest.mark.parametrize("arm", ["T", "G"])
+def test_reviewer_verdict_agent_has_no_tools_and_few_steps(arm):
+    cfg = profiles.build_config(arm, ROUTER, WORKERS if arm == "T" else [])
+    a = cfg["agent"]["reviewer-verdict"]
+    assert a["model"] == f"router/{profiles.LEAD_ALIAS}" and a["steps"] == profiles.VERDICT_STEPS == 3
+    for tool in ("edit", "bash", "read", "grep", "glob", "list", "webfetch", "task"):
+        v = a["permission"][tool]
+        assert v == "deny" or v == {"*": "deny"}, tool
