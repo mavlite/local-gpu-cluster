@@ -20,6 +20,8 @@
 #   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
 #              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
 #              the guest on stdin only -- never argv
+#   start-replay ID SRC    start the offline reviewer replay of /srv/wf/replay/SRC as run ID (any
+#              policy; router key only, on stdin)
 #   run-status ID          the run's unit state, record presence and log tail
 #   harvest ID DEST        pack the finished run in the VM, pull it out in chunks, verify its sha256,
 #              unpack into DEST/ID
@@ -200,6 +202,14 @@ case "$CMD" in
       if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
     } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start "$id" "$arm" "${@:4}"
     ;;
+  start-replay)
+    id="${2:-}"; src="${3:-}"
+    [[ -n "$id" && -n "$src" ]] || die "usage: 76-vm-wf-sandbox.sh start-replay <run-id> <src-run-id>"
+    keys="${WF_KEY_DIR:-/root/wf/keys}"
+    [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
+    printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")" \
+      | vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay "$id" "$src"
+    ;;
   run-status)
     vm_run 30 /usr/local/sbin/wf-run-control status "${2:?usage: run-status <run-id>}"
     ;;
@@ -217,5 +227,5 @@ case "$CMD" in
   clear-keys)
     vm_run 30 /usr/local/sbin/wf-run-control clear-keys
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|run-status|harvest|clear-keys" ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|start-replay|run-status|harvest|clear-keys" ;;
 esac

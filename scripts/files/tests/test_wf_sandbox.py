@@ -206,3 +206,17 @@ def test_76_push_run_ships_only_what_the_replay_reads_and_byte_compares_it():
     assert 'check_id "$id"' in block or '[[ "$id" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]]' in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
     assert "push-run" in usage and "push-run" in "\n".join(lines[:30])
+
+
+def test_76_start_replay_pipes_the_router_key_only_and_needs_no_policy():
+    """Round 2 §5.1: the replay runs under any policy (it only talks to the router) and takes the
+    router key on stdin exactly like start-run; the worker key is never read."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "start-replay)")
+    block = "\n".join(lines[start:start + 8])
+    assert block.rstrip().endswith(";;")
+    assert '[[ -s "$keys/router.key" ]] || die' in block and "worker.key" not in block and "policy_mode" not in block
+    assert "printf 'WF_ROUTER_KEY=%s" in block and "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay" in block
+    usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
+    assert "start-replay" in usage and "start-replay" in "\n".join(lines[:34])
