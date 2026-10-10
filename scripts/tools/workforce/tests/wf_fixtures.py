@@ -29,11 +29,13 @@ def hidden_src(tid):
             f"from {tid} import f\n\ndef test_f_hidden():\n    assert f(-3) == -6\n")
 
 
-def make_bundle(root, tid):
-    """A bundle whose task is: make pkg/<tid>.py's f() double its argument."""
+def make_bundle(root, tid, extra=None):
+    """A bundle whose task is: make pkg/<tid>.py's f() double its argument. `extra`: more snapshot
+    files, {path: text}."""
     d = os.path.join(root, tid)
     os.makedirs(os.path.join(d, "hidden"))
-    files = {f"pkg/{tid}.py": stub_src(), f"pkg/tests/test_{tid}.py": test_src(tid), "README.md": "repo\n"}
+    files = {f"pkg/{tid}.py": stub_src(), f"pkg/tests/test_{tid}.py": test_src(tid), "README.md": "repo\n",
+             **(extra or {})}
     with tarfile.open(os.path.join(d, "snapshot.tar"), "w") as t:
         for name, data in sorted(files.items()):
             raw = data.encode()

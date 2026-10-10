@@ -1,6 +1,7 @@
 """Harness pipeline: dispatch, review rounds, rework affinity, lead fix, export, grade (spec §6)."""
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -202,7 +203,7 @@ def test_a_diff_too_big_for_the_packet_leaves_the_full_packet_in_the_reviewers_c
     _, fake = run_pipeline(tmp_path, "G", script)
     assert script["z"]["full_packet_seen"] == [True]
     rev = [c for c in fake.calls if c["role"] == "review"][0]
-    assert ".workforce_review/packet.md" in open(rev["attach"]).read().splitlines()[-1]
+    assert ".workforce_review/packet.md" in open(rev["attach"]).read().splitlines()[-2]   # then the closing delimiter
 
 
 def test_agent_area_and_harness_private_area_are_separate_and_handed_over(tmp_path):
@@ -408,3 +409,17 @@ def test_reader_diff_covers_allowed_paths_only_and_names_the_dropped(tmp_path):
     text = open(pkt, encoding="utf-8").read()
     assert "x" * 1000 not in text
     assert "dropped: junk.txt" in text
+
+
+def test_review_packet_carries_call_sites_touching_tests_and_the_summary(tmp_path):
+    # Round 2 §3.2: what the reviewer used to spend its steps on is handed over in the packet.
+    caller = "from a import f\n\n\ndef twice(x):\n    return f(x) + f(x)\n"
+    bundles = [make_bundle(str(tmp_path / "bundles"), "a", extra={"pkg/use.py": caller})]
+    fake = FakeOpencode({"a": {"impl": [{"pkg/a.py": SOL}], "review": ["ACCEPT"]}})
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner()).run()
+    pkt = [c["attach"] for c in fake.calls if c["agent"] == "reviewer"][0]
+    text = open(pkt, encoding="utf-8").read()
+    assert "# Call sites" in text and "pkg/use.py:5: return f(x) + f(x)" in text
+    assert "# Tests that touch the changed files" in text and "pkg/tests/test_a.py" in text
+    assert "# Implementer summary" in text and "SUMMARY: done" in text
+    assert re.search(r"UNTRUSTED-\w{16}-BEGIN", text)

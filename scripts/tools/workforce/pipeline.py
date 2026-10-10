@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+import context
 import grade
 import loops
 import paths
@@ -269,12 +270,27 @@ class Pipeline:
             self.lead_q.append(t)
             self.cond.notify_all()
 
+    def _packet_for(self, t, test_out, history=()):
+        """(text, truncated, diff): the review/fix packet with everything the reviewer used to spend
+        steps re-reading (round 2 §3.2) -- function context, call sites of changed names, the tests
+        that touch the changed files, the implementer's own summary. Context comes from git blobs and
+        the pristine snapshot only."""
+        diff, dropped = self._diff_for_reader(t)
+        allowed, _ = paths.classify(t.ws.changes(), t.task["files"])
+        snapshot = os.path.join(t.bundle, "snapshot.tar")
+        patched = {p: t.ws.read(p) for p in allowed}
+        sites = context.call_sites(context.changed_names(diff), snapshot, patched)
+        tests = context.touching_tests(list(patched), snapshot)
+        summary = t.rounds[-1].get("summary", "") if t.rounds else ""
+        text, truncated, _ = review.packet(t.task, t.request, diff, test_out, history=history, dropped=dropped,
+                                           call_sites=sites, tests=tests, summary=summary)
+        return text, truncated, diff
+
     def _review(self, t):
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
         test_out = self._visible_tests(t, f"review-r{n}-check")
-        diff, dropped = self._diff_for_reader(t)
-        text, truncated = review.packet(t.task, t.request, diff, test_out, dropped=dropped)
+        text, truncated, diff = self._packet_for(t, test_out)
         if truncated:
             os.makedirs(os.path.join(tree, os.path.dirname(review.FULL_PACKET)), exist_ok=True)
             with open(os.path.join(tree, review.FULL_PACKET), "w", encoding="utf-8") as f:
@@ -323,8 +339,7 @@ class Pipeline:
 
     def _lead_fix(self, t):
         test_out = self._visible_tests(t, "fix-check")
-        diff, dropped = self._diff_for_reader(t)
-        text, _ = review.packet(t.task, t.request, diff, test_out, history=t.history, dropped=dropped)
+        text, _, _ = self._packet_for(t, test_out, history=t.history)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
