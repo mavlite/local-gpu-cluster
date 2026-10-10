@@ -27,6 +27,40 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import llama_log  # noqa: E402
 
 MIN_PROMPT_N = 64                # below this a journal request is the user probe, not the reviewer
+_OLD_DIFF_HEAD = "\n# Diff\n"      # the round-1 packet's last section
+_OLD_TRUNCATED = "[packet truncated at "
+
+
+def recover_patches(run_dir):
+    """Round-1 runs stored no per-round patch, but the lead's packet for each review survives in
+    agent/<id>/review-r{k}.packet.md with the exact diff it reviewed as its last section. Write that
+    diff to tasks/<id>/impl-r{k}.patch (never over an existing one) so every round replays; a cut
+    packet (its diff ends in the pointer line) is skipped. {"recovered", "kept", "skipped"}."""
+    out = {"recovered": [], "kept": [], "skipped": []}
+    for tid, rec in _records(run_dir).items():
+        for k in range(len(rec.get("reviews", []))):
+            dest = os.path.join(run_dir, "tasks", tid, f"impl-r{k}.patch")
+            if os.path.isfile(dest):
+                out["kept"].append({"task": tid, "round": k})
+                continue
+            src = os.path.join(run_dir, "agent", tid, f"review-r{k}.packet.md")
+            if not os.path.isfile(src):
+                out["skipped"].append({"task": tid, "round": k, "why": "no packet"})
+                continue
+            with open(src, encoding="utf-8", errors="replace", newline="") as f:
+                text = f.read()
+            i = text.find(_OLD_DIFF_HEAD)
+            if i < 0:
+                out["skipped"].append({"task": tid, "round": k, "why": "no diff section"})
+                continue
+            diff = text[i + len(_OLD_DIFF_HEAD):].rstrip("\n")
+            if diff.rsplit("\n", 1)[-1].startswith(_OLD_TRUNCATED):
+                out["skipped"].append({"task": tid, "round": k, "why": "packet truncated"})
+                continue
+            with open(dest, "wb") as f:
+                f.write((diff + "\n").encode("utf-8"))
+            out["recovered"].append({"task": tid, "round": k})
+    return out
 
 
 class _ReplayPipeline(pipeline.Pipeline):

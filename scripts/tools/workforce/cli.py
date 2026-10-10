@@ -1,6 +1,7 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
-Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan
+Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan,
+              recover-patches
 Sandbox VM:   run, replay-reviews
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
@@ -243,6 +244,8 @@ def main(argv=None, env=None):
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
     p.add_argument("--agent-user-prefix",
                    help="run each role as OS user <prefix>-<role> in systemd scopes (the VM; harness as root)")
+    p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
+    p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
     p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
     p.add_argument("--run", required=True, help="harvested run directory (tasks/<id>/record.json, patches/)")
     p.add_argument("--bundles", required=True)
@@ -312,6 +315,8 @@ def main(argv=None, env=None):
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
                                 monitor=monitor, own=own).run()
+    elif a.cmd == "recover-patches":
+        out = replay.recover_patches(a.run)
     elif a.cmd == "replay-reviews":
         if not env.get("WF_ROUTER_KEY"):
             raise SystemExit("WF_ROUTER_KEY must be set")

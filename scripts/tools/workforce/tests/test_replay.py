@@ -90,3 +90,43 @@ def test_journal_gives_prompt_token_totals_not_per_round_attribution(tmp_path):
     t = out["totals"]
     assert t["median_prompt_tokens"] == 6000 and t["prompt_tokens_total"] == 12004 and t["requests"] == 2
     assert all(r["prompt_tokens"] is None for r in out["rounds"])
+
+
+def _old_packet(diff, truncated=False):
+    # The round-1 packet layout: "# Diff" is the last section; a cut packet ends with the pointer line.
+    text = "# Request\nreq\n\n" + "The sections below come from the implementer\n\n# Test output\n1 passed\n\n# Diff\n" + diff.rstrip()
+    if truncated:
+        text += "\n[packet truncated at 1900 of 2500 lines; the full packet is at .workforce_review/packet.md]"
+    return text + "\n"
+
+
+def test_recover_patches_takes_each_rounds_diff_from_the_old_review_packet(tmp_path):
+    run, bundles = harvested_run(tmp_path)
+    diff_a = _patch(tmp_path, os.path.join(bundles, "a"), "a", "def f(x):\n    return x\n").decode()
+    diff_c = _patch(tmp_path, os.path.join(bundles, "c"), "c", solution_src()).decode()
+    pk = run / "agent"
+    (pk / "a").mkdir(parents=True)
+    (pk / "c").mkdir()
+    (pk / "a" / "review-r0.packet.md").write_bytes(_old_packet("diff --git a/pkg/a.py b/pkg/a.py\n+never used\n").encode())  # a already has impl-r0.patch
+    (pk / "c" / "review-r0.packet.md").write_bytes(_old_packet(diff_c).encode())
+    (run / "tasks" / "c" / "record.json").write_text(json.dumps(
+        {"id": "c", "outcome": "lead-fixed", "rounds": [{"round": 0, "summary": ""}, {"round": 1, "summary": ""}],
+         "reviews": [{"round": 0, "verdict": "NONE"}, {"round": 1, "verdict": "REVISE"}]}))
+    (pk / "c" / "review-r1.packet.md").write_bytes(_old_packet(diff_a, truncated=True).encode())
+    out = replay.recover_patches(str(run))
+    assert out["recovered"] == [{"task": "c", "round": 0}] and out["kept"] == [{"task": "a", "round": 0}]
+    assert out["skipped"] == [{"task": "b", "round": 0, "why": "no packet"}, {"task": "c", "round": 1, "why": "packet truncated"}]
+    assert (run / "tasks" / "c" / "impl-r0.patch").read_bytes() == diff_c.rstrip().encode() + b"\n"   # the old packet rstripped it
+    assert "never used" not in (run / "tasks" / "a" / "impl-r0.patch").read_text()
+    # the recovered round is now replayable, exactly as the reviewer saw it
+    fake = FakeOpencode({"a": {"review": ["ACCEPT"]}, "b": {"review": ["ACCEPT"]}, "c": {"review": ["ACCEPT"]}})
+    res = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner())
+    assert {(r["task"], r["round"]) for r in res["rounds"]} == {("a", 0), ("b", 0), ("c", 0)}
+    assert res["totals"]["old_none"] == 2 and res["skipped"] == [{"task": "c", "round": 1}]
+
+
+def test_recover_patches_cli(tmp_path, capsys):
+    import cli
+    run, _ = harvested_run(tmp_path)
+    assert cli.main(["recover-patches", "--run", str(run)]) == 0
+    assert json.loads(capsys.readouterr().out)["recovered"] == []
