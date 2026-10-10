@@ -209,8 +209,11 @@ class Pipeline:
         return t.ws.patch(allowed), dropped
 
     def _diff_for_reader(self, t):
-        changed = [c[2] for c in t.ws.changes() if not any(x in c[2] for x in _NOISE)]
-        return t.ws.patch(changed).decode("utf-8", errors="replace")
+        """(diff with whole-function context over ALLOWED paths only, dropped paths by name). Junk
+        outside the scope never reaches the packet as text (round 2 §3.2)."""
+        allowed, dropped = paths.classify(t.ws.changes(), t.task["files"])
+        dropped = {p: why for p, why in dropped.items() if not any(x in p for x in _NOISE)}
+        return t.ws.reader_diff(allowed), dropped
 
     def _visible_tests(self, t, name):
         """The visible tests on pristine snapshot + filtered patch, run by the grader (never as the
@@ -270,8 +273,8 @@ class Pipeline:
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
         test_out = self._visible_tests(t, f"review-r{n}-check")
-        diff = self._diff_for_reader(t)
-        text, truncated = review.packet(t.task, t.request, diff, test_out)
+        diff, dropped = self._diff_for_reader(t)
+        text, truncated = review.packet(t.task, t.request, diff, test_out, dropped=dropped)
         if truncated:
             os.makedirs(os.path.join(tree, os.path.dirname(review.FULL_PACKET)), exist_ok=True)
             with open(os.path.join(tree, review.FULL_PACKET), "w", encoding="utf-8") as f:
@@ -320,7 +323,8 @@ class Pipeline:
 
     def _lead_fix(self, t):
         test_out = self._visible_tests(t, "fix-check")
-        text, _ = review.packet(t.task, t.request, self._diff_for_reader(t), test_out, history=t.history)
+        diff, dropped = self._diff_for_reader(t)
+        text, _ = review.packet(t.task, t.request, diff, test_out, history=t.history, dropped=dropped)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)

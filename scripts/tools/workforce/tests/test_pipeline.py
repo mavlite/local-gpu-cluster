@@ -399,3 +399,12 @@ def test_the_review_copy_survives_until_the_verdict_turn_is_done(tmp_path):
     first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
     assert turn["workdir"] == first["workdir"] and turn["owner"] is None or True
     assert not os.path.exists(turn["workdir"])            # removed after the verdict, not before
+
+
+def test_reader_diff_covers_allowed_paths_only_and_names_the_dropped(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL, "junk.txt": "x" * 200000}],
+                                                  "review": ["ACCEPT"]}})
+    pkt = [c["attach"] for c in fake.calls if c["agent"] == "reviewer"][0]
+    text = open(pkt, encoding="utf-8").read()
+    assert "x" * 1000 not in text
+    assert "dropped: junk.txt" in text

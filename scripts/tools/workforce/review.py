@@ -32,13 +32,18 @@ def implement_message(task, request_text):
             f"Acceptance tests: {test_command(task)}\n")
 
 
-def packet(task, request_text, diff, test_output, history=()):
+def packet(task, request_text, diff, test_output, history=(), dropped=None):
     """(text, truncated). Kept under MAX_ATTACH_LINES; when cut, the last line points the reader at
-    the full packet, which the caller writes to FULL_PACKET in the reviewer's directory."""
+    the full packet, which the caller writes to FULL_PACKET in the reviewer's directory. `dropped`:
+    {path: reason} of changes outside the scope, shown by name only (never as diff text)."""
     parts = ["# Request", request_text.strip(), "",
              f"Files in scope: {', '.join(task['files'])}", f"Acceptance tests: {test_command(task)}", ""]
     if history:
         parts += ["# Review feedback so far", *history, ""]
+    for p, why in sorted((dropped or {}).items()):
+        parts.append(f"dropped: {p} ({why})")
+    if dropped:
+        parts.append("")
     parts += [UNTRUSTED_NOTE, "", "# Test output", test_output.strip(), "", "# Diff", diff.rstrip()]
     lines = "\n".join(parts).splitlines()
     if len(lines) <= MAX_ATTACH_LINES:
