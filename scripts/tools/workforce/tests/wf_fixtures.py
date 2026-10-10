@@ -61,7 +61,8 @@ def _task_of(workdir):
 class FakeOpencode:
     """Scripted agents. script[task_id] = {
          "impl": [ {path: content, ...} per implementer turn ],
-         "review": ["ACCEPT" | "REVISE: ..." | other text, ... per review],
+         "review": ["ACCEPT" | "REVISE: ..." | other text | {"text", "steps", "timed_out"}, ... per review],
+         "verdict": [text, ... per verdict turn]   (the resumed reviewer-verdict agent),
          "fix": {path: content},
          "raise_on": "impl"|"review" (optional), "tool_calls": [(tool, input), ...] (export)}"""
 
@@ -74,7 +75,7 @@ class FakeOpencode:
             user=None):
         tid = _task_of(workdir)
         s = self.script[tid]
-        role = "review" if agent == "reviewer" else "fix" if agent == "fixer" else "impl"
+        role = {"reviewer": "review", "reviewer-verdict": "verdict", "fixer": "fix"}.get(agent, "impl")
         with self.lock:
             n = self.turns.get((tid, role), 0)
             self.turns[(tid, role)] = n + 1
@@ -94,8 +95,16 @@ class FakeOpencode:
                         "type": "tool", "tool": tool, "state": {"status": "completed", "input": inp}}}) + "\n")
         if role == "impl" and n < s.get("fail_impl_turns", 0):
             return oc.RunResult(1, False, None, "", 0.01)          # opencode died: no session, rc 1
+        if role == "verdict":
+            return oc.RunResult(0, False, sid, s["verdict"][n], 0.01)
         if role == "review":
-            text = s["review"][n]
+            entry = s["review"][n]
+            if isinstance(entry, dict):                      # a scripted step count / timeout
+                with open(events_path, "w") as f:
+                    for _ in range(entry.get("steps", 1)):
+                        f.write(json.dumps({"type": "step_start", "sessionID": sid}) + "\n")
+                return oc.RunResult(0, entry.get("timed_out", False), sid, entry["text"], 0.01)
+            text = entry
             if s.get("expect_full_packet"):
                 s.setdefault("full_packet_seen", []).append(
                     os.path.isfile(os.path.join(workdir, ".workforce_review", "packet.md")))

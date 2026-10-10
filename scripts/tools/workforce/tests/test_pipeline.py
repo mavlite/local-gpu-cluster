@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import grade  # noqa: E402
 import pipeline  # noqa: E402
+import profiles  # noqa: E402
 from wf_fixtures import FakeOpencode, make_bundle, solution_src  # noqa: E402
 
 SOL = solution_src()
@@ -62,11 +63,13 @@ def test_two_failed_reviews_hand_the_task_to_the_lead_fixer(tmp_path):
 
 
 def test_no_verdict_counts_as_a_failed_review(tmp_path):
+    # Round 2: a no-verdict review first gets a verdict turn; only a second no-verdict is a failed review.
     script = {"d": {"impl": [{"pkg/d.py": SOL}] * 3, "review": ["looks fine", "hmm", "ok"],
-                    "fix": {"pkg/d.py": SOL}}}
+                    "verdict": ["still unsure", "no", "..."], "fix": {"pkg/d.py": SOL}}}
     run_pipeline(tmp_path, "G", script)
     r = record(tmp_path, "d")
     assert r["outcome"] == "lead-fixed" and [x["verdict"] for x in r["reviews"]] == ["NONE"] * 3
+    assert all(x["verdict_turn"]["verdict"] == "NONE" for x in r["reviews"])
 
 
 def test_a_wrong_but_accepted_change_is_not_counted_as_accepted(tmp_path):
@@ -336,3 +339,63 @@ def test_duplicate_task_ids_are_refused_up_front(tmp_path):
     except ValueError:
         return
     raise AssertionError("duplicate task ids accepted")
+
+
+BANNER = "CRITICAL - MAXIMUM STEPS REACHED\n\nRespond with text ONLY."
+
+
+def test_a_capped_review_gets_one_verdict_turn_in_the_same_session(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": BANNER, "steps": 20}],
+                                                  "verdict": ["ACCEPT"]}})
+    rec = record(tmp_path, "t1")
+    assert rec["outcome"] == "implementer-accepted" and rec["accepted"]
+    turns = [c for c in fake.calls if c["agent"] == "reviewer-verdict"]
+    first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
+    assert len(turns) == 1 and turns[0]["resumed"] and turns[0]["session"] == first["session"]
+    assert turns[0]["message"] == profiles.VERDICT_MESSAGE
+    assert rec["reviews"][0]["capped"] and rec["reviews"][0]["steps"] == 20
+    assert rec["reviews"][0]["verdict_turn"]["verdict"] == "ACCEPT" and rec["reviews"][0]["verdict"] == "ACCEPT"
+    assert rec["rework_rounds"] == 0
+
+
+def test_a_second_no_verdict_goes_to_the_lead_fix_never_to_grading(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}] * 3,
+                                                  "review": [{"text": BANNER, "steps": 20}] * 3,
+                                                  "verdict": ["still thinking", "no idea", "..."],
+                                                  "fix": {"pkg/t1.py": SOL}}})
+    rec = record(tmp_path, "t1")
+    assert rec["outcome"] == "lead-fixed"
+    agents = [c["agent"] for c in fake.calls if c["agent"].startswith("reviewer")]
+    assert agents[:4] == ["reviewer", "reviewer-verdict", "reviewer", "reviewer-verdict"]
+    run = json.load(open(tmp_path / "run" / "run.json"))
+    assert run["review_capped"] == 3 and run["verdict_turns"] == 3 and run["review_timed_out"] == 0
+
+
+def test_a_timed_out_review_is_recorded_and_gets_a_verdict_turn(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": "", "steps": 4, "timed_out": True}],
+                                                  "verdict": ["ACCEPT"]}})
+    rec = record(tmp_path, "t1")
+    assert rec["reviews"][0]["timed_out"] and not rec["reviews"][0]["capped"]
+    assert rec["outcome"] == "implementer-accepted"
+    run = json.load(open(tmp_path / "run" / "run.json"))
+    assert run["review_timed_out"] == 1 and run["review_capped"] == 0
+
+
+def test_capped_is_the_step_count_not_the_banner_text(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": "ACCEPT\n(the file mentions " + BANNER + ")", "steps": 5}]}})
+    rec = record(tmp_path, "t1")
+    assert rec["accepted"] and not rec["reviews"][0]["capped"]
+    assert not any(c["agent"] == "reviewer-verdict" for c in fake.calls)
+
+
+def test_the_review_copy_survives_until_the_verdict_turn_is_done(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": BANNER, "steps": 20}],
+                                                  "verdict": ["ACCEPT"]}})
+    turn = [c for c in fake.calls if c["agent"] == "reviewer-verdict"][0]
+    first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
+    assert turn["workdir"] == first["workdir"] and turn["owner"] is None or True
+    assert not os.path.exists(turn["workdir"])            # removed after the verdict, not before

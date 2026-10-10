@@ -49,6 +49,7 @@ LEAD = "lead"
 class Limits:
     impl_s: int = 1800
     review_s: int = 900
+    verdict_s: int = 300             # the resumed tools-off verdict turn (round 2 §3.1)
     fix_s: int = 1800
     tests_s: int = 600
     max_rounds: int = 2
@@ -283,10 +284,27 @@ class Pipeline:
         r = self._run_as(LEAD, tree, lambda: self.oc.run(
             "reviewer", tree, "REVIEW the change described in the attached packet.", self.limits.review_s,
             os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt, home=t.homes[LEAD], user=LEAD))
-        shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
+        with open(os.path.join(t.dir, f"review-r{n}.jsonl"), encoding="utf-8", errors="replace") as f:
+            steps = loops.steps_from_events(f.read())
         verdict, feedback = review.parse_verdict(r.text)
-        t.reviews.append({"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
-                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time()})
+        entry = {"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
+                 "timed_out": r.timed_out, "steps": steps, "capped": steps >= profiles.REVIEW_STEPS,
+                 "t_start": t0, "t_end": time.time(), "verdict_turn": None}
+        if verdict == "NONE" and r.session_id:
+            # Round 2 §3.1: opencode's last-step banner tells the model to summarize instead of decide.
+            # Resume the SAME session for one tools-off turn that may only answer; a second no-verdict
+            # falls through to rework / the lead fix exactly as before. Never graded unreviewed.
+            t1 = time.time()
+            v = self._run_as(LEAD, tree, lambda: self.oc.run(
+                "reviewer-verdict", tree, profiles.VERDICT_MESSAGE, self.limits.verdict_s,
+                os.path.join(t.dir, f"review-r{n}-verdict.jsonl"), session=r.session_id,
+                home=t.homes[LEAD], user=LEAD))
+            verdict, feedback = review.parse_verdict(v.text)
+            entry["verdict_turn"] = {"verdict": verdict, "rc": v.rc, "timed_out": v.timed_out,
+                                     "t_start": t1, "t_end": time.time()}
+            entry["verdict"], entry["feedback"] = verdict, feedback[:2000]
+        shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
+        t.reviews.append(entry)
         if verdict == "ACCEPT":
             self._finalize(t, "implementer-accepted")
             return
@@ -405,6 +423,9 @@ class Pipeline:
                    "rework_rounds": sum(r["rework_rounds"] for r in recs),
                    "looped": sum(1 for r in recs if (r["loops"] or {}).get("looped")),
                    "time_cap_hits": sum(r["time_cap_hits"] for r in recs),
+                   "review_capped": sum(1 for r in recs for rv in r["reviews"] if rv.get("capped")),
+                   "review_timed_out": sum(1 for r in recs for rv in r["reviews"] if rv.get("timed_out")),
+                   "verdict_turns": sum(1 for r in recs for rv in r["reviews"] if rv.get("verdict_turn")),
                    "health": health, "valid": not invalid, "invalid_reasons": invalid}
         with open(os.path.join(self.run_dir, "run.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=1)
