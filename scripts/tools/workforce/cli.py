@@ -150,6 +150,36 @@ def w1_stats(run_dirs):
     return out
 
 
+def _task_seconds(run_dir, task_ids):
+    """{task: wall seconds} from the per-task records that have both timestamps."""
+    out = {}
+    for tid in task_ids:
+        path = os.path.join(run_dir, "tasks", tid, "record.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                rec = json.load(f)
+            if rec.get("t_start") is not None and rec.get("t_end") is not None:
+                out[tid] = rec["t_end"] - rec["t_start"]
+    return out
+
+
+def round2_runs(schedule, tasks=None, void=()):
+    """w3_runs plus the round-2 fields (spec §5.3): wall_s and review_capped from run.json, gpu_ms
+    (and worker_s when a window recorded it) from meta.json, per-task wall seconds from the records."""
+    runs = w3_runs(schedule, tasks, void=void)
+    for item, r in zip(schedule, runs):
+        s = _records(item["run_dir"])
+        meta = {}
+        path = os.path.join(item["run_dir"], "meta.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+        r.update({"wall_s": s["wall_s"], "review_capped": s.get("review_capped", 0),
+                  "gpu_ms": meta.get("gpu_ms"), "worker_s": meta.get("worker_s"),
+                  "task_s": _task_seconds(item["run_dir"], r["accepted"])})
+    return runs
+
+
 def _implementer_accepted(run_dir, task_ids):
     n = 0
     for tid in task_ids:
@@ -203,7 +233,8 @@ def main(argv=None, env=None):
     p = sub.add_parser("manifest")
     p.add_argument("--bundles", required=True)
     p = sub.add_parser("run")
-    p.add_argument("--arm", choices=("T", "G"), required=True)
+    p.add_argument("--arm", choices=("T", "G", "S"), required=True,
+                   help="T: lead + 3 CPU workers; G: lead + GPU implementer; S: GPU implementer alone, no review")
     p.add_argument("--bundles", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--router", required=True)
@@ -231,6 +262,7 @@ def main(argv=None, env=None):
     p.add_argument("--schedule", required=True)
     p.add_argument("--tasks", required=True, help="bundle root (defines the task list)")
     p.add_argument("--void", action="append", default=[], help="task the scan found tainted (repeatable)")
+    p.add_argument("--round2", action="store_true", help="round-2 three-band decision over arms S, G and T")
     p = sub.add_parser("scan", help="transcript scan of a harvested run: tainted (leak) and suspect tasks")
     p.add_argument("--run", required=True)
     p.add_argument("--bundles", required=True)
@@ -278,7 +310,7 @@ def main(argv=None, env=None):
                                   launcher=launcher)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
-        out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1,
+        out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
                                 monitor=monitor, own=own).run()
     elif a.cmd == "replay-reviews":
         if not env.get("WF_ROUTER_KEY"):
@@ -310,8 +342,8 @@ def main(argv=None, env=None):
         runs = []
         for spec in a.run:
             arm, rest = spec.split("=", 1)
-            if arm not in ("G", "T"):
-                raise SystemExit(f"--run {spec!r}: arm must be G or T")
+            if arm not in ("G", "T", "S"):
+                raise SystemExit(f"--run {spec!r}: arm must be G, T or S")
             d, _, own = rest.partition("@")
             runs.append((arm, d, own or None))
         out = runmeta.w3_schedule(a.baseline_probe, runs, a.fail_s)
@@ -327,8 +359,11 @@ def main(argv=None, env=None):
         with open(a.schedule, encoding="utf-8") as f:
             schedule = json.load(f)
         tasks = sorted(os.listdir(a.tasks))
-        runs = w3_runs(schedule, tasks, void=a.void)
-        out = analysis.w3_decide(runs, [t for t in tasks if t not in set(a.void)])
+        kept = [t for t in tasks if t not in set(a.void)]
+        if a.round2:
+            out = analysis.round2_decide(round2_runs(schedule, tasks, void=a.void), kept)
+        else:
+            out = analysis.w3_decide(w3_runs(schedule, tasks, void=a.void), kept)
         out["voided"] = sorted(set(a.void))
     print(json.dumps(out, indent=1, default=str))
     return 0

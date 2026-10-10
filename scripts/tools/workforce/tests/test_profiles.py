@@ -101,3 +101,12 @@ def test_reviewer_verdict_agent_has_no_tools_and_few_steps(arm):
     for tool in ("edit", "bash", "read", "grep", "glob", "list", "webfetch", "task"):
         v = a["permission"][tool]
         assert v == "deny" or v == {"*": "deny"}, tool
+
+
+def test_arm_s_is_the_gpu_implementer_alone_on_the_router():
+    # Round 2 §5.2: arm S implements with the lead model and never reviews; same config shape as G.
+    cfg = profiles.build_config("S", ROUTER, [])
+    assert set(cfg["provider"]) == {"router"}
+    assert cfg["agent"]["impl-1"]["model"] == "router/qwen3.8-nothink"
+    assert {"reviewer", "reviewer-verdict", "fixer"} <= set(cfg["agent"])
+    assert profiles.implementers("S") == ["impl-1"] and profiles.keys_for("S") == ("WF_ROUTER_KEY",)

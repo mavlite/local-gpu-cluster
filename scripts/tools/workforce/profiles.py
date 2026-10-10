@@ -84,8 +84,8 @@ def implementers(arm):
 
 
 def build_config(arm, router_url, worker_urls):
-    if arm not in ("T", "G"):
-        raise ValueError("arm must be T or G")
+    if arm not in ("T", "G", "S"):                   # S: the GPU implementer alone (round 2 §5.2)
+        raise ValueError("arm must be T, G or S")
     lead = f"router/{LEAD_ALIAS}"
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
     agents = {"general": {"disable": True}, "explore": {"disable": True},

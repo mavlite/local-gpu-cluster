@@ -105,3 +105,60 @@ def test_a_t_run_without_probe_samples_fails_the_user_clause():
                      "probe_p50": None if (arm == "T" and i == 1) else 1.0, "baseline_p50": 1.0})
     out = analysis.w3_decide(runs, ["a", "b"])
     assert not out["clauses"]["user"]["ok"] and "user" in out["failed"]
+
+
+def r2(arm, wall_s, acc_ids=None, capped=0, gpu_ms=None, task_s=None, valid=True):
+    acc_ids = ALL if acc_ids is None else acc_ids
+    acc = {t: t in acc_ids for t in TASKS}
+    return {"arm": arm, "valid": valid, "accepted": acc, "accepted_per_hour": len(acc_ids) / (wall_s / 3600),
+            "wall_s": wall_s, "gpu_ms": gpu_ms if gpu_ms is not None else wall_s * 1000,
+            "worker_s": 3 * wall_s if arm == "T" else None, "review_capped": capped,
+            "task_s": task_s or {t: wall_s / 16 for t in TASKS}}
+
+
+def r2_runs(s_wall, g_wall, t_wall, **over):
+    runs = [r2("S", s_wall), r2("G", g_wall), r2("T", t_wall), r2("T", t_wall), r2("G", g_wall), r2("S", s_wall)]
+    for i, patch in over.items():
+        runs[int(i)].update(patch)
+    return runs
+
+
+def test_round2_builds_at_1_5x_with_the_shortest_makespan_and_equal_acceptance():
+    # 16 tasks: S 5/h (3.2 h), G 4/h (4 h), T 9/h (1.78 h)
+    r = analysis.round2_decide(r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600), TASKS)
+    assert r["band"] == "build" and r["ratio"] == pytest.approx(1.8)
+    assert r["arms"]["T"]["accepted_per_hour"] == pytest.approx(9) and r["arms"]["S"]["accepted_per_hour"] == pytest.approx(5)
+    assert r["arms"]["T"]["makespan_s"] == pytest.approx(16 / 9 * 3600) and r["arms"]["T"]["n_runs"] == 2
+    assert r["arms"]["G"]["gpu_hours_per_accepted"] == pytest.approx(4 / 16)
+    assert r["arms"]["T"]["worker_hours_per_accepted"] == pytest.approx(3 * (16 / 9) / 16)
+    assert r["acceptance"]["t0"] == {"S": 1.0, "G": 1.0, "T": 1.0}
+    assert r["bottleneck_ci"]["n_tasks"] == 16 and r["bottleneck_ci"]["hi"] < 0     # T is faster per task
+
+
+def test_round2_is_marginal_between_1_2x_and_1_5x():
+    r = analysis.round2_decide(r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 6.5 * 3600), TASKS)
+    assert r["band"] == "marginal" and 1.2 <= r["ratio"] < 1.5
+
+
+def test_round2_says_no_when_s_alone_has_the_shortest_makespan_at_equal_acceptance():
+    r = analysis.round2_decide(r2_runs(16 / 9 * 3600, 16 / 4 * 3600, 16 / 8 * 3600), TASKS)
+    assert r["band"] == "no" and r["ratio"] < 1 and "GPU implementer alone" in r["reason"]
+
+
+def test_round2_build_needs_acceptance_within_one_task_of_the_best_arm():
+    runs = r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600)
+    for i in (2, 3):
+        runs[i] = r2("T", 16 / 9 * 3600, acc_ids=set(TASKS[:13]))
+    r = analysis.round2_decide(runs, TASKS)
+    assert r["band"] != "build" and r["arms"]["T"]["accepted_per_run"] == 13
+
+
+def test_round2_is_inconclusive_when_any_arm_has_more_than_two_capped_reviews():
+    r = analysis.round2_decide(r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600, **{"1": {"review_capped": 3}}), TASKS)
+    assert r["band"] == "inconclusive" and r["arms"]["G"]["review_capped"] == 3
+
+
+def test_round2_skips_invalid_runs_and_needs_one_valid_run_per_arm():
+    runs = r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600, **{"2": {"valid": False}, "3": {"valid": False}})
+    r = analysis.round2_decide(runs, TASKS)
+    assert r["band"] == "invalid" and r["arms"]["T"]["n_runs"] == 0

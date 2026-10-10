@@ -181,3 +181,64 @@ def test_replay_reviews_needs_the_router_key(tmp_path):
         cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
                   "--router", "http://x/v1"], env={"WF_OPENCODE": "opencode"})
     assert "WF_ROUTER_KEY" in str(e.value)
+
+
+def test_run_arm_s_needs_the_router_key_and_never_reviews(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "S", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1"], env={"WF_OPENCODE": "opencode"})
+    assert "WF_ROUTER_KEY" in str(e.value)
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(arm=arm, review=review, monitor=monitor)
+
+        def run(self):
+            return {"arm": seen["arm"]}
+
+    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None: "OC")
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    assert cli.main(["run", "--arm", "S", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                     "--router", "http://x/v1"], env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
+    assert seen == {"arm": "S", "review": False, "monitor": None}
+
+
+def _round2_run(tmp_path, name, arm, wall_s, capped, task_s, gpu_ms=3.6e6, accepted=None):
+    accepted = accepted if accepted is not None else {t: True for t in task_s}
+    d = write_run(str(tmp_path / name), arm=arm, wall_s=wall_s, accepted=sum(accepted.values()),
+                  accepted_by_task=accepted, accepted_per_hour=sum(accepted.values()) / (wall_s / 3600),
+                  review_capped=capped)
+    for t, s in task_s.items():
+        os.makedirs(os.path.join(d, "tasks", t))
+        with open(os.path.join(d, "tasks", t, "record.json"), "w") as f:
+            json.dump({"id": t, "accepted": accepted[t], "outcome": "implementer-accepted",
+                       "t_start": 100.0, "t_end": 100.0 + s}, f)
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        json.dump({"valid": True, "probe_p50": 1.0, "gpu_ms": gpu_ms}, f)
+    return d
+
+
+def test_w3_round2_reads_the_round_2_fields_from_the_runs(tmp_path, capsys):
+    tasks = {"t1": 60.0, "t2": 120.0}
+    (tmp_path / "bundles" / "t1").mkdir(parents=True)
+    (tmp_path / "bundles" / "t2").mkdir()
+    sched = [{"arm": a, "run_dir": _round2_run(tmp_path, f"{a}{i}", a, w, 0, tasks), "valid": True,
+              "probe_p50": 1.0, "baseline_p50": 1.0}
+             for i, (a, w) in enumerate([("S", 1200), ("G", 1200), ("T", 600), ("T", 600), ("G", 1200), ("S", 1200)])]
+    runs = cli.round2_runs(sched, ["t1", "t2"])
+    assert [r["arm"] for r in runs] == ["S", "G", "T", "T", "G", "S"]
+    assert runs[2]["wall_s"] == 600 and runs[2]["gpu_ms"] == 3.6e6 and runs[2]["review_capped"] == 0
+    assert runs[2]["task_s"] == tasks and runs[2]["worker_s"] is None and runs[2]["accepted_per_hour"] == 12.0
+    (tmp_path / "sched.json").write_text(json.dumps(sched))
+    assert cli.main(["w3", "--round2", "--schedule", str(tmp_path / "sched.json"), "--tasks", str(tmp_path / "bundles")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["band"] == "build" and out["ratio"] == 2.0
+
+
+def test_w3_schedule_accepts_arm_s(tmp_path, capsys):
+    d = _round2_run(tmp_path, "s1", "S", 1200, 0, {"t1": 60.0})
+    (tmp_path / "base.jsonl").write_text(json.dumps({"ts": 1.0, "ok": True, "latency_s": 1.0}) + "\n")
+    assert cli.main(["w3-schedule", "--baseline-probe", str(tmp_path / "base.jsonl"), "--run", f"S={d}",
+                     "--out", str(tmp_path / "sched.json")]) == 0
+    assert json.loads((tmp_path / "sched.json").read_text())[0]["arm"] == "S"
