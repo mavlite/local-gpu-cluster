@@ -65,6 +65,11 @@ class Workspace:
         ws._git("add", "-A", "-f")
         ws._git("commit", "-q", "--allow-empty", "--no-verify", "-m", "baseline")
         ws.baseline = ws._git("rev-parse", "HEAD").decode().strip()
+        # Whole-function hunk context for the reviewer's diff (`-W`): git's python xfuncname.
+        info = os.path.join(git_dir, "info")
+        os.makedirs(info, exist_ok=True)
+        with open(os.path.join(info, "attributes"), "w", encoding="utf-8") as f:
+            f.write("*.py diff=python\n")
         return ws
 
     def changes(self):
@@ -86,6 +91,23 @@ class Workspace:
             return b""
         self._git("add", "-A", "-f")
         return self._git("diff", "--cached", "--binary", "--no-renames", self.baseline, "--", *paths)
+
+    def reader_diff(self, paths):
+        """The diff a reviewer reads: whole-function context (`-W`, diff=python for .py) from git blobs
+        of `paths` only. A symlink diffs as its target PATH, never its content (round 2 §3.2)."""
+        if not paths:
+            return ""
+        self._git("add", "-A", "-f")
+        return self._git("diff", "--cached", "-W", "--no-renames", self.baseline, "--", *paths).decode(
+            "utf-8", errors="replace")
+
+    def read(self, path):
+        """Bytes of `path` as staged (a git blob), or b"" if it is not a regular file there."""
+        self._git("add", "-A", "-f")
+        try:
+            return self._git("show", f":{path}")
+        except subprocess.CalledProcessError:
+            return b""
 
     def copy_to(self, dest):
         """Copy the workspace, skipping FIFOs, sockets and device files (copying them would block or fail)."""

@@ -1,0 +1,17 @@
+{
+ "id": "w2-06",
+ "commit": "abfa787aaf7adb0bb831b4c09822bfc8ed9accb3",
+ "files": [
+  "scripts/53-lxc-router.sh",
+  "scripts/files/router-app.py",
+  "scripts/files/web_fetch_guard.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_web_fetch_guard.py"
+ ],
+ "hidden": {
+  "test_w2_06_hidden.py": "scripts/files/tests/test_w2_06_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

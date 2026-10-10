@@ -33,11 +33,11 @@ def guest(tmp_path):
         'open(os.environ[\'FAKE_DUMP\'], \'w\'))" "$@"\n', newline="\n")
     for f in fb.iterdir():
         f.chmod(0o755)
-    d = {k: tmp_path / k for k in ("runs", "keys", "out")}
+    d = {k: tmp_path / k for k in ("runs", "keys", "out", "replay")}
     for p in d.values():
         p.mkdir()
     env = dict(os.environ, FAKEBIN=fb.as_posix(), WF_RC_RUNS=d["runs"].as_posix(), WF_RC_KEYS=d["keys"].as_posix(),
-               WF_RC_OUT=d["out"].as_posix(), WF_RC_BIN=(fb / "wf-run").as_posix(),
+               WF_RC_OUT=d["out"].as_posix(), WF_RC_BIN=(fb / "wf-run").as_posix(), WF_RC_REPLAY=d["replay"].as_posix(),
                FAKE_DUMP=(tmp_path / "dump.json").as_posix(), FAKE_ACTIVE=(tmp_path / "active").as_posix())
 
     def run(args, stdin=""):
@@ -144,3 +144,44 @@ def test_status_reports_the_unit_and_the_record(guest):
     (d["runs"] / "run-1").mkdir()
     r = run("status run-1")
     assert r.returncode == 0 and "unit: inactive" in r.stdout and "record: absent" in r.stdout
+
+
+def test_start_replay_takes_the_router_key_only_and_starts_the_replay_unit(guest):
+    # Round 2 §5.1: the offline replay needs no worker key; the unit is named like a run so status/pack work.
+    run, log, d, _ = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    r = run("start-replay rp-1 w3-2-t", "WF_ROUTER_KEY=router-secret-1\n")
+    assert r.returncode == 0, r.stderr
+    assert (d["keys"] / "rp-1.env").read_text() == "WF_ROUTER_KEY=router-secret-1\n"
+    starts = [c for c in log().splitlines() if c.startswith("systemd-run ")]
+    assert len(starts) == 1 and "--unit=wf-run-rp-1" in starts[0] and starts[0].endswith("_exec_replay rp-1 w3-2-t")
+    assert "secret" not in log() + r.stdout + r.stderr
+
+
+def test_exec_replay_runs_replay_reviews_on_the_pushed_run_with_the_key_in_its_env(guest):
+    run, _, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-1 w3-2-t", "WF_ROUTER_KEY=r\n").returncode == 0
+    r = run("_exec_replay rp-1 w3-2-t")
+    assert r.returncode == 0, r.stderr
+    dump = json.loads((tmp / "dump.json").read_text())
+    argv = dump["argv"]
+    assert argv[0] == "replay-reviews" and argv[argv.index("--run") + 1] == d["replay"].as_posix() + "/w3-2-t"
+    assert argv[argv.index("--out") + 1] == d["runs"].as_posix() + "/rp-1"
+    assert "--worker" not in argv and "--agent-user-prefix" in argv and "docker:wf-grader:1" in argv
+    assert dump["router"] == "r" and dump["worker"] is None
+    assert not (d["keys"] / "rp-1.env").exists()
+
+
+@pytest.mark.parametrize("args,stdin,msg", [
+    ("start-replay rp-1 w3-2-t", KEYS_T, "unexpected"),                 # a worker key has no business here
+    ("start-replay rp-1 ../w3", "WF_ROUTER_KEY=r\n", "run id"),
+    ("start-replay rp-1 missing", "WF_ROUTER_KEY=r\n", "no such replay source"),
+    ("start-replay rp-1 w3-2-t", "", "WF_ROUTER_KEY"),
+])
+def test_start_replay_refuses_bad_input_before_starting_anything(guest, args, stdin, msg):
+    run, log, d, _ = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    r = run(args, stdin)
+    assert r.returncode != 0 and msg in r.stderr, r.stderr
+    assert "systemd-run" not in log() and not list(d["keys"].iterdir())

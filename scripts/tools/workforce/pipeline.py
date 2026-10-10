@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+import context
 import grade
 import loops
 import paths
@@ -41,7 +42,7 @@ import review
 import workspace
 
 UNREACHABLE_LIMIT_S = 300            # spec §9: worker unreachable for 5 minutes -> run invalid
-_NOISE = ("__pycache__/", ".pytest_cache/")
+_NOISE = ("__pycache__/", ".pytest_cache/", ".workforce_review/")
 LEAD = "lead"
 
 
@@ -49,6 +50,7 @@ LEAD = "lead"
 class Limits:
     impl_s: int = 1800
     review_s: int = 900
+    verdict_s: int = 300             # the resumed tools-off verdict turn (round 2 §3.1)
     fix_s: int = 1800
     tests_s: int = 600
     max_rounds: int = 2
@@ -208,8 +210,11 @@ class Pipeline:
         return t.ws.patch(allowed), dropped
 
     def _diff_for_reader(self, t):
-        changed = [c[2] for c in t.ws.changes() if not any(x in c[2] for x in _NOISE)]
-        return t.ws.patch(changed).decode("utf-8", errors="replace")
+        """(diff with whole-function context over ALLOWED paths only, dropped paths by name). Junk
+        outside the scope never reaches the packet as text (round 2 §3.2)."""
+        allowed, dropped = paths.classify(t.ws.changes(), t.task["files"])
+        dropped = {p: why for p, why in dropped.items() if not any(x in p for x in _NOISE)}
+        return t.ws.reader_diff(allowed), dropped
 
     def _visible_tests(self, t, name):
         """The visible tests on pristine snapshot + filtered patch, run by the grader (never as the
@@ -258,6 +263,8 @@ class Pipeline:
         t.session = t.session or r.session_id
         t.rounds.append({"round": n, "agent": agent, "session": r.session_id, "rc": r.rc,
                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time(), "summary": r.text[-500:]})
+        with open(os.path.join(t.dir, f"impl-r{n}.patch"), "wb") as f:   # the state this review sees (replay)
+            f.write(self._filtered_patch(t)[0])
         if not self.review:
             self._finalize(t, "implemented")
             return
@@ -265,16 +272,43 @@ class Pipeline:
             self.lead_q.append(t)
             self.cond.notify_all()
 
+    def _packet_for(self, t, test_out, header="", history=()):
+        """(text, truncated, diff): the review/fix packet with everything the reviewer used to spend
+        steps re-reading (round 2 §3.2) -- function context, call sites of changed names, the tests
+        that touch the changed files, the implementer's own summary. Context comes from git blobs and
+        the pristine snapshot only."""
+        diff, dropped = self._diff_for_reader(t)
+        allowed, _ = paths.classify(t.ws.changes(), t.task["files"])
+        snapshot = os.path.join(t.bundle, "snapshot.tar")
+        patched = {p: t.ws.read(p) for p in allowed}
+        sites = context.call_sites(context.changed_names(diff), snapshot, patched)
+        tests = context.touching_tests(list(patched), snapshot)
+        summary = t.rounds[-1].get("summary", "") if t.rounds else ""
+        plain = self._filtered_patch(t)[0].decode("utf-8", "replace")
+        text, truncated, _, full = review.packet(t.task, t.request, diff, test_out, history=history, dropped=dropped,
+                                                 call_sites=sites, tests=tests, summary=summary, header=header,
+                                                 plain_diff=plain)
+        return text, truncated, full
+
+    @staticmethod
+    def _write_full_packet(root, text):
+        """FULL_PACKET under `root`, never through an agent-planted symlink (the copy keeps links)."""
+        d = os.path.join(root, os.path.dirname(review.FULL_PACKET))
+        p = os.path.join(root, review.FULL_PACKET)
+        for path in (p, d):
+            if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+                os.remove(path)
+        os.makedirs(d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+
     def _review(self, t):
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
-        test_out = self._visible_tests(t, f"review-r{n}-check")
-        diff = self._diff_for_reader(t)
-        text, truncated = review.packet(t.task, t.request, diff, test_out)
+        test_out, header = self._visible_tests(t, f"review-r{n}-check")
+        text, truncated, full = self._packet_for(t, test_out, header)
         if truncated:
-            os.makedirs(os.path.join(tree, os.path.dirname(review.FULL_PACKET)), exist_ok=True)
-            with open(os.path.join(tree, review.FULL_PACKET), "w", encoding="utf-8") as f:
-                f.write("\n".join(["# Request", t.request, "# Test output", test_out, "# Diff", diff]))
+            self._write_full_packet(tree, full)                # framed like the packet (review I3)
         pkt = os.path.join(t.adir, f"review-r{n}.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -283,10 +317,27 @@ class Pipeline:
         r = self._run_as(LEAD, tree, lambda: self.oc.run(
             "reviewer", tree, "REVIEW the change described in the attached packet.", self.limits.review_s,
             os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt, home=t.homes[LEAD], user=LEAD))
-        shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
+        with open(os.path.join(t.dir, f"review-r{n}.jsonl"), encoding="utf-8", errors="replace") as f:
+            steps = loops.steps_from_events(f.read())
         verdict, feedback = review.parse_verdict(r.text)
-        t.reviews.append({"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
-                          "timed_out": r.timed_out, "t_start": t0, "t_end": time.time()})
+        entry = {"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
+                 "timed_out": r.timed_out, "steps": steps, "capped": steps >= profiles.REVIEW_STEPS,
+                 "t_start": t0, "t_end": time.time(), "verdict_turn": None}
+        if verdict == "NONE" and r.session_id:
+            # Round 2 §3.1: opencode's last-step banner tells the model to summarize instead of decide.
+            # Resume the SAME session for one tools-off turn that may only answer; a second no-verdict
+            # falls through to rework / the lead fix exactly as before. Never graded unreviewed.
+            t1 = time.time()
+            v = self._run_as(LEAD, tree, lambda: self.oc.run(
+                "reviewer-verdict", tree, profiles.VERDICT_MESSAGE, self.limits.verdict_s,
+                os.path.join(t.dir, f"review-r{n}-verdict.jsonl"), session=r.session_id,
+                home=t.homes[LEAD], user=LEAD))
+            verdict, feedback = review.parse_verdict(v.text)
+            entry["verdict_turn"] = {"verdict": verdict, "rc": v.rc, "timed_out": v.timed_out,
+                                     "t_start": t1, "t_end": time.time()}
+            entry["verdict"], entry["feedback"] = verdict, feedback[:2000]
+        shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
+        t.reviews.append(entry)
         if verdict == "ACCEPT":
             self._finalize(t, "implementer-accepted")
             return
@@ -301,8 +352,10 @@ class Pipeline:
         self._lead_fix(t)
 
     def _lead_fix(self, t):
-        test_out = self._visible_tests(t, "fix-check")
-        text, _ = review.packet(t.task, t.request, self._diff_for_reader(t), test_out, history=t.history)
+        test_out, header = self._visible_tests(t, "fix-check")
+        text, truncated, full = self._packet_for(t, test_out, header, history=t.history)
+        if truncated:                                          # the fixer works in its own workspace
+            self._write_full_packet(t.ws.root, full)
         pkt = os.path.join(t.adir, "fix.packet.md")
         with open(pkt, "w", encoding="utf-8") as f:
             f.write(text)
@@ -405,6 +458,11 @@ class Pipeline:
                    "rework_rounds": sum(r["rework_rounds"] for r in recs),
                    "looped": sum(1 for r in recs if (r["loops"] or {}).get("looped")),
                    "time_cap_hits": sum(r["time_cap_hits"] for r in recs),
+                   "review_capped": sum(1 for r in recs for rv in r["reviews"] if rv.get("capped")),
+                   "review_timed_out": sum(1 for r in recs for rv in r["reviews"] if rv.get("timed_out")),
+                   "verdict_turns": sum(1 for r in recs for rv in r["reviews"] if rv.get("verdict_turn")),
+                   "review_none_after_turn": sum(1 for r in recs for rv in r["reviews"]
+                                                 if rv.get("verdict_turn") and rv.get("verdict") == "NONE"),
                    "health": health, "valid": not invalid, "invalid_reasons": invalid}
         with open(os.path.join(self.run_dir, "run.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=1)

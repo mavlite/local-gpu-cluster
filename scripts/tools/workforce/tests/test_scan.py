@@ -194,3 +194,16 @@ def test_writes_through_patch_and_multiedit_count_as_written(setup, call):
     tmp, run = setup
     transcript(run, "t1", "impl-r1.jsonl", call, tool("read", {"filePath": "calc.py"}, ANSWER))
     assert result(tmp, run)["tainted"] == {}
+
+
+def test_order_includes_the_verdict_turn_after_its_review():
+    names = ["impl-r0.jsonl", "review-r0-verdict.jsonl", "review-r0.jsonl", "impl-r1.jsonl"]
+    assert scan.transcript_order(names) == ["impl-r0.jsonl", "review-r0.jsonl", "review-r0-verdict.jsonl",
+                                            "impl-r1.jsonl"]
+
+
+def test_a_leak_in_the_verdict_turn_taints(setup):
+    tmp, run = setup
+    transcript(run, "t1", "review-r0.jsonl", tool("read", {"filePath": "x"}, "nothing"))
+    transcript(run, "t1", "review-r0-verdict.jsonl", tool("read", {"filePath": "x"}, ANSWER))
+    assert list(result(tmp, run)["tainted"]) == ["t1"]

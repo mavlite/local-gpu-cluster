@@ -79,3 +79,27 @@ def test_stop_forgets_the_config_so_status_never_shows_a_stale_one(tmp_path):
     r, _ = _run_worker(tmp_path, "stop")
     assert r.returncode == 0, r.stderr
     assert not cfg.exists()
+
+
+def test_lock_keeps_loopback_so_start_can_check_its_own_health(tmp_path):
+    # Plan D Task 3b: `lock 192.168.6.79` dropped 127.0.0.1 too, so `start`'s /health loop never
+    # succeeded and the start hung for its full 600 s.
+    from test_scripts_static import _render_nft
+    lines = _render_nft(tmp_path, "lock", "192.168.6.79")
+    accept_lo = lines.index('  iifname "lo" tcp dport 8090 accept')
+    drop = lines.index("  tcp dport 8090 counter drop")
+    assert accept_lo < drop
+
+
+def test_install_key_strips_carriage_returns(tmp_path):
+    # A key written on Windows ended in CRLF; llama-server kept the \r as part of the key.
+    fb = tmp_path / "fbin"
+    fb.mkdir()
+    (fb / "install").write_text('#!/usr/bin/env bash\nfor last; do :; done\ncp "${@: -2:1}" "$last"\n',
+                                newline="\n")
+    (fb / "install").chmod(0o755)
+    src = tmp_path / "upload.key"
+    src.write_bytes(b"wfw_abc\r\n")
+    r, _ = _run_worker(tmp_path, "install-key", src.as_posix())
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "worker.key").read_bytes() == b"wfw_abc\n"

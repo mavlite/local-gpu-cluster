@@ -1,0 +1,18 @@
+{
+ "id": "w2-10",
+ "commit": "19da0b2dd39fe1351a504cd132018a144c28f7b6",
+ "files": [
+  "scripts/files/cluster_monitor.py",
+  "scripts/rag/handlers/sphinx_sitemap.py",
+  "scripts/tools/download-coder.sh",
+  "scripts/tools/download-devstral-large.sh"
+ ],
+ "tests": [
+  "scripts/rag/tests/test_source_interleave.py"
+ ],
+ "hidden": {
+  "test_w2_10_hidden.py": "scripts/rag/tests/test_w2_10_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

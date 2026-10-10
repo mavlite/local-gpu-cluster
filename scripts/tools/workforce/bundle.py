@@ -32,7 +32,7 @@ class LeakError(RuntimeError):
 
 def _git(repo, *args, text=True):
     env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-    r = subprocess.run(["git", "-c", "core.autocrlf=false", *args], cwd=repo, capture_output=True,
+    r = subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "core.eol=lf", *args], cwd=repo, capture_output=True,
                        check=True, env=env)
     return r.stdout.decode().strip() if text else r.stdout
 

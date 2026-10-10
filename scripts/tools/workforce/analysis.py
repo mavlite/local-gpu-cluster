@@ -97,3 +97,88 @@ def w3_decide(runs, tasks, latency_factor=W3_LATENCY_FACTOR, n_boot=10000, seed=
 
     failed = [c for c in ("quality", "win", "user") if not clauses[c]["ok"]]
     return {"build": not failed, "failed": failed, "valid": valid, "clauses": clauses}
+
+
+R2_BAR, R2_MARGINAL = 1.5, 1.2            # round 2 §5.3: the chosen bars on the pooled T / max(S, G) ratio
+R2_NONE_LIMIT = 2                          # more reviews still without a verdict after the turn: inconclusive
+
+
+def _pool(runs):
+    """One arm's pooled figures: accepted per hour over the summed clock, makespan as the mean run."""
+    hours = sum(r["wall_s"] for r in runs) / 3600
+    acc = sum(r["accepted_per_hour"] * r["wall_s"] / 3600 for r in runs)   # the count each run's rate counted
+    gpu_h = sum(r.get("gpu_ms") or 0 for r in runs) / 3.6e6
+    worker = [r["worker_s"] for r in runs if r.get("worker_s") is not None]
+    return {"n_runs": len(runs),
+            "accepted_per_hour": acc / hours if hours else None,
+            "makespan_s": statistics.mean(r["wall_s"] for r in runs) if runs else None,
+            "accepted_per_run": statistics.mean(sum(1 for v in r["accepted"].values() if v) for r in runs)
+            if runs else None,
+            "gpu_hours_per_accepted": gpu_h / acc if acc and gpu_h else None,
+            "worker_hours_per_accepted": sum(worker) / 3600 / acc if worker and acc else None,
+            "review_capped": sum(r.get("review_capped") or 0 for r in runs),
+            "review_timed_out": sum(r.get("review_timed_out") or 0 for r in runs),
+            "review_none_after_turn": sum(r.get("review_none_after_turn") or 0 for r in runs)}
+
+
+def _bottleneck_ci(by, other, tasks, n_boot, seed):
+    """Paired bootstrap over tasks of T's bottleneck seconds minus `other`'s: worker seconds / 3 for T,
+    the task's own (GPU) seconds for S and G, each the mean over the arm's runs; only tasks accepted in
+    every run of both arms are paired."""
+    def secs(arm, t):
+        vals = [r["task_s"][t] for r in by[arm] if t in r.get("task_s", {})]
+        return statistics.mean(vals) / (3 if arm == "T" else 1) if vals else None
+
+    diffs = []
+    for t in tasks:
+        if all(r["accepted"].get(t) for r in by["T"] + by[other]):
+            a, b = secs("T", t), secs(other, t)
+            if a is not None and b is not None:
+                diffs.append(a - b)
+    if not diffs:
+        return {"vs": other, "n_tasks": 0, "mean_diff": None, "lo": None, "hi": None}
+    rng = random.Random(seed)
+    boots = sorted(statistics.mean(rng.choice(diffs) for _ in diffs) for _ in range(n_boot))
+    return {"vs": other, "n_tasks": len(diffs), "mean_diff": statistics.mean(diffs),
+            "lo": boots[int(0.025 * n_boot)], "hi": boots[int(0.975 * n_boot) - 1]}
+
+
+def round2_decide(runs, tasks, bar=R2_BAR, marginal=R2_MARGINAL, n_boot=10000, seed=20261010):
+    """Round 2 §5.3. runs: [{"arm": "S"|"G"|"T", "valid", "accepted": {task: bool}, "accepted_per_hour",
+    "wall_s", "gpu_ms", "worker_s" (T, may be None), "review_capped", "task_s": {task: seconds}}].
+    Bands: build | marginal | no | inconclusive (reviewer health) | invalid (an arm without a valid run)."""
+    by = {a: [r for r in runs if r["arm"] == a and r["valid"]] for a in ("S", "G", "T")}
+    arms = {a: _pool(v) for a, v in by.items()}
+    acceptance = {t: {a: (statistics.mean(1.0 if r["accepted"].get(t) else 0.0 for r in by[a]) if by[a] else None)
+                      for a in by} for t in tasks}
+    out = {"band": None, "ratio": None, "reason": "", "arms": arms, "acceptance": acceptance,
+           "bottleneck_ci": None, "bar": bar, "marginal": marginal}
+    missing = [a for a, v in by.items() if not v]
+    if missing:
+        out.update(band="invalid", reason=f"no valid run for arm(s) {', '.join(missing)}")
+        return out
+    other = max(("S", "G"), key=lambda a: arms[a]["accepted_per_hour"])
+    best_other = arms[other]["accepted_per_hour"]
+    ratio = arms["T"]["accepted_per_hour"] / best_other if best_other else None
+    out["ratio"] = ratio
+    out["bottleneck_ci"] = _bottleneck_ci(by, other, tasks, n_boot, seed)
+    makespan = {a: arms[a]["makespan_s"] for a in arms}
+    shortest = min(makespan, key=makespan.get)
+    best_acc = max(arms[a]["accepted_per_run"] for a in arms)
+    unresolved = {a: arms[a]["review_none_after_turn"] for a in ("G", "T")}
+    if any(v > R2_NONE_LIMIT for v in unresolved.values()):
+        out.update(band="inconclusive", reason=f"reviews still without a verdict after the verdict turn, per arm "
+                                               f"{unresolved}: fix the reviewer and rerun all arms")
+    elif ratio is not None and ratio >= bar and shortest == "T" and arms["T"]["accepted_per_run"] >= best_acc - 1:
+        out.update(band="build", reason=f"T is {ratio:.2f}x {other} with the shortest makespan and acceptance "
+                                        f"within one task of the best arm")
+    elif shortest == "S" and arms["S"]["accepted_per_run"] >= arms["T"]["accepted_per_run"]:
+        out.update(band="no", reason="run the GPU implementer alone: S has the shortest makespan at equal "
+                                     "acceptance; keep the review loop only as an optional quality gate")
+    elif ratio is not None and (marginal <= ratio < bar or makespan["T"] <= 1.1 * makespan[shortest]):
+        out.update(band="marginal", reason=f"T is {ratio:.2f}x {other} (makespan {makespan['T']:.0f} s vs "
+                                           f"{makespan[shortest]:.0f} s for {shortest}): the user decides, "
+                                           f"GPU-hours per accepted in front of them")
+    else:
+        out.update(band="no", reason=f"T is {ratio:.2f}x {other}" if ratio is not None else "no accepted tasks")
+    return out

@@ -1,0 +1,16 @@
+{
+ "id": "w2-08",
+ "commit": "3259c5a6c3d8fc0a5df89c11f34fe8b2fe692fa1",
+ "files": [
+  "scripts/rag/handlers/sphinx_sitemap.py",
+  "scripts/rag/refresh.py"
+ ],
+ "tests": [
+  "scripts/rag/tests/test_source_interleave.py"
+ ],
+ "hidden": {
+  "test_w2_08_hidden.py": "scripts/rag/tests/test_w2_08_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

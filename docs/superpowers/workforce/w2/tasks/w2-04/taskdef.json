@@ -1,0 +1,17 @@
+{
+ "id": "w2-04",
+ "commit": "c4d840351354ae352e99e4005894daf8b7e5f28e",
+ "files": [
+  "scripts/53-lxc-router.sh",
+  "scripts/files/alias_defaults.py",
+  "scripts/files/router-app.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_alias_defaults.py"
+ ],
+ "hidden": {
+  "test_w2_04_hidden.py": "scripts/files/tests/test_w2_04_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

@@ -92,3 +92,45 @@ def test_unsafe_tar_members_are_refused(tmp_path):
 
 def test_git_commands_trust_a_workspace_owned_by_another_user():
     assert "safe.directory=*" in workspace._ID
+
+
+def _ws_with(tmp_path, files):
+    tar = tmp_path / "snap.tar"
+    make_tar(tar, files)
+    return workspace.Workspace.materialize(str(tar), str(tmp_path / "ws2"), str(tmp_path / "git2"))
+
+
+def _can_symlink(tmp_path):
+    try:
+        os.symlink(str(tmp_path), str(tmp_path / "probe-link"))
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_reader_diff_shows_the_whole_enclosing_python_function(tmp_path):
+    src = "def a():\n    x = 1\n    y = 2\n    z = 3\n    w = 4\n    v = 5\n    u = 6\n    return x\n\n\ndef b():\n    return 2\n"
+    ws = _ws_with(tmp_path, {"m.py": src})
+    with open(os.path.join(ws.root, "m.py"), "w") as f:
+        f.write(src.replace("    return x\n", "    return x + 1\n"))
+    d = ws.reader_diff(["m.py"])
+    assert "def a():" in d and "    x = 1" in d          # the whole function, not 3 lines of context
+    assert "+    return x + 1" in d
+
+
+def test_reader_diff_is_text_even_for_undecodable_bytes(tmp_path):
+    ws = _ws_with(tmp_path, {"m.py": "def a():\n    return 1\n"})
+    with open(os.path.join(ws.root, "m.py"), "ab") as f:
+        f.write(b"\n# \xff\xfe\n")
+    assert isinstance(ws.reader_diff(["m.py"]), str)
+
+
+def test_context_never_follows_a_symlink_in_the_tree(tmp_path):
+    if not _can_symlink(tmp_path):
+        pytest.skip("symlinks need privileges here")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("HIDDEN TEST BODY\n")
+    ws = _ws_with(tmp_path, {"m.py": "def a():\n    return 1\n"})
+    os.remove(os.path.join(ws.root, "m.py"))
+    os.symlink(str(secret), os.path.join(ws.root, "m.py"))
+    assert "HIDDEN TEST BODY" not in ws.reader_diff(["m.py"])

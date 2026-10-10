@@ -1,12 +1,15 @@
 """Harness pipeline: dispatch, review rounds, rework affinity, lead fix, export, grade (spec §6)."""
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import grade  # noqa: E402
 import pipeline  # noqa: E402
+import profiles  # noqa: E402
+import review  # noqa: E402
 from wf_fixtures import FakeOpencode, make_bundle, solution_src  # noqa: E402
 
 SOL = solution_src()
@@ -62,11 +65,13 @@ def test_two_failed_reviews_hand_the_task_to_the_lead_fixer(tmp_path):
 
 
 def test_no_verdict_counts_as_a_failed_review(tmp_path):
+    # Round 2: a no-verdict review first gets a verdict turn; only a second no-verdict is a failed review.
     script = {"d": {"impl": [{"pkg/d.py": SOL}] * 3, "review": ["looks fine", "hmm", "ok"],
-                    "fix": {"pkg/d.py": SOL}}}
+                    "verdict": ["still unsure", "no", "..."], "fix": {"pkg/d.py": SOL}}}
     run_pipeline(tmp_path, "G", script)
     r = record(tmp_path, "d")
     assert r["outcome"] == "lead-fixed" and [x["verdict"] for x in r["reviews"]] == ["NONE"] * 3
+    assert all(x["verdict_turn"]["verdict"] == "NONE" for x in r["reviews"])
 
 
 def test_a_wrong_but_accepted_change_is_not_counted_as_accepted(tmp_path):
@@ -199,7 +204,20 @@ def test_a_diff_too_big_for_the_packet_leaves_the_full_packet_in_the_reviewers_c
     _, fake = run_pipeline(tmp_path, "G", script)
     assert script["z"]["full_packet_seen"] == [True]
     rev = [c for c in fake.calls if c["role"] == "review"][0]
-    assert ".workforce_review/packet.md" in open(rev["attach"]).read().splitlines()[-1]
+    assert ".workforce_review/packet.md" in open(rev["attach"]).read().splitlines()[-2]   # then the closing delimiter
+    full = script["z"]["full_packet_text"][0]                 # review I3: the full packet is framed too
+    assert profiles.REVIEWER_PROMPT and review.UNTRUSTED_NOTE in full and "UNTRUSTED-" in full and "# filler line 2999" in full
+
+
+def test_the_fixer_gets_a_framed_full_packet_in_its_workspace_and_it_is_not_a_dropped_path(tmp_path):
+    big = WRONG + "".join(f"# filler line {i}\n" for i in range(3000))
+    script = {"z": {"impl": [{"pkg/z.py": big}] * 3, "review": ["REVISE: a", "REVISE: b", "REVISE: c"],
+                    "fix": {"pkg/z.py": SOL}}}
+    _, fake = run_pipeline(tmp_path, "G", script)
+    fix = [c for c in fake.calls if c["role"] == "fix"][0]
+    assert fix["full_packet_present"] and review.UNTRUSTED_NOTE in fix["full_packet_text"]
+    r = record(tmp_path, "z")
+    assert r["outcome"] == "lead-fixed" and not any(".workforce_review" in p for p in r["dropped"])
 
 
 def test_agent_area_and_harness_private_area_are_separate_and_handed_over(tmp_path):
@@ -336,3 +354,98 @@ def test_duplicate_task_ids_are_refused_up_front(tmp_path):
     except ValueError:
         return
     raise AssertionError("duplicate task ids accepted")
+
+
+BANNER = "CRITICAL - MAXIMUM STEPS REACHED\n\nRespond with text ONLY."
+
+
+def test_a_capped_review_gets_one_verdict_turn_in_the_same_session(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": BANNER, "steps": 20}],
+                                                  "verdict": ["ACCEPT"]}})
+    rec = record(tmp_path, "t1")
+    assert rec["outcome"] == "implementer-accepted" and rec["accepted"]
+    turns = [c for c in fake.calls if c["agent"] == "reviewer-verdict"]
+    first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
+    assert len(turns) == 1 and turns[0]["resumed"] and turns[0]["session"] == first["session"]
+    assert turns[0]["message"] == profiles.VERDICT_MESSAGE
+    assert rec["reviews"][0]["capped"] and rec["reviews"][0]["steps"] == 20
+    assert rec["reviews"][0]["verdict_turn"]["verdict"] == "ACCEPT" and rec["reviews"][0]["verdict"] == "ACCEPT"
+    assert rec["rework_rounds"] == 0
+    assert json.load(open(tmp_path / "run" / "run.json"))["review_none_after_turn"] == 0
+
+
+def test_a_second_no_verdict_goes_to_the_lead_fix_never_to_grading(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}] * 3,
+                                                  "review": [{"text": BANNER, "steps": 20}] * 3,
+                                                  "verdict": ["still thinking", "no idea", "..."],
+                                                  "fix": {"pkg/t1.py": SOL}}})
+    rec = record(tmp_path, "t1")
+    assert rec["outcome"] == "lead-fixed"
+    agents = [c["agent"] for c in fake.calls if c["agent"].startswith("reviewer")]
+    assert agents[:4] == ["reviewer", "reviewer-verdict", "reviewer", "reviewer-verdict"]
+    run = json.load(open(tmp_path / "run" / "run.json"))
+    assert run["review_capped"] == 3 and run["verdict_turns"] == 3 and run["review_timed_out"] == 0
+    assert run["review_none_after_turn"] == 3                     # review I7: the health figure §5.3 gates on
+
+
+def test_a_timed_out_review_is_recorded_and_gets_a_verdict_turn(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": "", "steps": 4, "timed_out": True}],
+                                                  "verdict": ["ACCEPT"]}})
+    rec = record(tmp_path, "t1")
+    assert rec["reviews"][0]["timed_out"] and not rec["reviews"][0]["capped"]
+    assert rec["outcome"] == "implementer-accepted"
+    run = json.load(open(tmp_path / "run" / "run.json"))
+    assert run["review_timed_out"] == 1 and run["review_capped"] == 0
+
+
+def test_capped_is_the_step_count_not_the_banner_text(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": "ACCEPT\n(the file mentions " + BANNER + ")", "steps": 5}]}})
+    rec = record(tmp_path, "t1")
+    assert rec["accepted"] and not rec["reviews"][0]["capped"]
+    assert not any(c["agent"] == "reviewer-verdict" for c in fake.calls)
+
+
+def test_the_review_copy_survives_until_the_verdict_turn_is_done(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL}],
+                                                  "review": [{"text": BANNER, "steps": 20}],
+                                                  "verdict": ["ACCEPT"]}})
+    turn = [c for c in fake.calls if c["agent"] == "reviewer-verdict"][0]
+    first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
+    assert turn["workdir"] == first["workdir"] and turn["workdir_existed"]   # review M1: seen by the fake itself
+    assert not os.path.exists(turn["workdir"])            # removed after the verdict, not before
+
+
+def test_reader_diff_covers_allowed_paths_only_and_names_the_dropped(tmp_path):
+    _, fake = run_pipeline(tmp_path, "G", {"t1": {"impl": [{"pkg/t1.py": SOL, "junk.txt": "x" * 200000}],
+                                                  "review": ["ACCEPT"]}})
+    pkt = [c["attach"] for c in fake.calls if c["agent"] == "reviewer"][0]
+    text = open(pkt, encoding="utf-8").read()
+    assert "x" * 1000 not in text
+    assert "dropped: junk.txt" in text
+
+
+def test_review_packet_carries_call_sites_touching_tests_and_the_summary(tmp_path):
+    # Round 2 §3.2: what the reviewer used to spend its steps on is handed over in the packet.
+    caller = "from a import f\n\n\ndef twice(x):\n    return f(x) + f(x)\n"
+    bundles = [make_bundle(str(tmp_path / "bundles"), "a", extra={"pkg/use.py": caller})]
+    fake = FakeOpencode({"a": {"impl": [{"pkg/a.py": SOL}], "review": ["ACCEPT"]}})
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner()).run()
+    pkt = [c["attach"] for c in fake.calls if c["agent"] == "reviewer"][0]
+    text = open(pkt, encoding="utf-8").read()
+    assert "# Call sites" in text and "pkg/use.py:5: return f(x) + f(x)" in text
+    assert "# Tests that touch the changed files" in text and "pkg/tests/test_a.py" in text
+    assert "# Implementer summary" in text and "SUMMARY: done" in text
+    assert re.search(r"UNTRUSTED-\w{16}-BEGIN", text)
+
+
+def test_each_implementer_round_stores_the_patch_the_reviewer_saw(tmp_path):
+    # Round 2 §5.1: replay needs the reviewed state per round, not only the final patch.
+    script = {"b": {"impl": [{"pkg/b.py": "def f(x):\n    return x\n"}, {"pkg/b.py": SOL}],
+                    "review": ["REVISE: f must double", "ACCEPT"]}}
+    run_pipeline(tmp_path, "T", script)
+    d = tmp_path / "run" / "tasks" / "b"
+    assert "return x" in (d / "impl-r0.patch").read_text() and "x * 2" in (d / "impl-r1.patch").read_text()
+    assert "x * 2" not in (d / "impl-r0.patch").read_text()

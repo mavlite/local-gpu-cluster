@@ -80,10 +80,11 @@ def _targets(task):
     return list(task.get("pytest_args") or task["tests"]) + sorted(task["hidden"].values())
 
 
-def expected_ids(task, tree):
-    """{(module_dotted, "Class::name" | "name")} every test the grade must see pass."""
+def expected_ids(task, tree, targets=None):
+    """{(module_dotted, "Class::name" | "name")} every test the grade must see pass. `targets`
+    narrows it (the visible check counts only the visible tests)."""
     out = set()
-    for target in _targets(task):
+    for target in (_targets(task) if targets is None else targets):
         path, _, node = target.partition("::")
         module = path[:-3].replace("/", ".")
         if node:
@@ -193,8 +194,11 @@ def _tail(text):
 
 
 def check_visible(bundle_dir, patch, workdir, runner, timeout):
-    """Output of the task's VISIBLE tests on pristine snapshot + patch, run by `runner` exactly like a
-    grade (harness ini, --noconftest unless needed). Shown to the lead; never the hidden tests."""
+    """(output, header) of the task's VISIBLE tests on pristine snapshot + patch, run by `runner`
+    exactly like a grade (harness ini, --noconftest unless needed). The output is shown to the lead
+    as untrusted data; the header ("visible tests: X of Y expected passed, rc N") is the harness's
+    own count from the JUnit report, so a forged "N passed" line in stdout never passes as the result
+    (round 2 §3.2). Never the hidden tests."""
     task = load_task(bundle_dir)
     tree = os.path.join(workdir, "tree")
     if os.path.exists(tree):
@@ -203,16 +207,27 @@ def check_visible(bundle_dir, patch, workdir, runner, timeout):
     try:
         workspace.apply_patch(tree, patch)
     except workspace.PatchError as e:
-        return f"(the change does not apply to the task's snapshot: {str(e)[-300:]})"
+        return (f"(the change does not apply to the task's snapshot: {str(e)[-300:]})",
+                "visible tests: not run (the change does not apply)")
     restore_visible_tests(bundle_dir, task, tree)
     with open(os.path.join(tree, INI), "w", encoding="utf-8") as f:
         f.write("[pytest]\n")
-    args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q"]
+    args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q", f"--junitxml={JUNIT}"]
     args += [] if task["needs_conftest"] else ["--noconftest"]
-    _rc, out, timed_out = runner.run(tree, args + list(task.get("pytest_args") or task["tests"]), timeout)
+    expected = expected_ids(task, tree, list(task.get("pytest_args") or task["tests"]))   # before any agent code runs
+    rc, out, timed_out = runner.run(tree, args + list(task.get("pytest_args") or task["tests"]), timeout)
     if timed_out:
-        return f"(tests did not finish within {timeout} s)"
-    return "\n".join(out.strip().splitlines()[-200:])
+        return f"(tests did not finish within {timeout} s)", "visible tests: not run (timeout)"
+    junit = os.path.join(tree, JUNIT)
+    passed = 0
+    if os.path.lexists(junit) and not os.path.islink(junit):
+        try:
+            results = junit_results(junit)
+            passed = sum(1 for k in expected if results.get(k))
+        except ET.ParseError:
+            passed = 0
+    header = f"visible tests: {passed} of {len(expected)} expected passed, rc {rc}"
+    return "\n".join(out.strip().splitlines()[-200:]), header
 
 
 def grade(bundle_dir, patch_text, workdir, runner):

@@ -1,0 +1,15 @@
+{
+ "id": "w2-05",
+ "commit": "bc8543488777646b7a875af59a631b7a48bfc4de",
+ "files": [
+  "scripts/files/workforce_lane.py"
+ ],
+ "tests": [
+  "scripts/files/tests/test_workforce_lane.py"
+ ],
+ "hidden": {
+  "test_w2_05_hidden.py": "scripts/files/tests/test_w2_05_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

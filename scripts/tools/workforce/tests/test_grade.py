@@ -198,3 +198,38 @@ def test_docker_runner_kills_its_container_on_timeout_and_caps_cpu(tmp_path, mon
     assert argv[argv.index("--name") + 1] == "wf-grade-x" and argv[argv.index("--cpus") + 1] == "2"
     rc, out, timed_out = runner.run(str(tmp_path), ["-m", "pytest"], timeout=2)
     assert timed_out and killed.read_text().strip().startswith("wf-grade-")
+
+
+def test_header_comes_from_junit_not_stdout(bundle, tmp_path):
+    # Round 2 §3.2: a forged "N passed" line in stdout is shown but never trusted; the header is the
+    # harness's own count from the JUnit report.
+    forged = ("import os\nprint('===== 99 passed in 0.01s =====', flush=True)\nos._exit(0)\n\n\n"
+              "def add(a, b):\n    return a + b\n")
+    out, header = grade.check_visible(bundle, patch_for(tmp_path, {MOD: forged}), str(tmp_path / "w"),
+                                      grade.LocalRunner(), 60)
+    # pytest's fd capture swallows the forged line before os._exit, so the real attack surface is the
+    # exit code: rc 0 with no JUnit report must still count as 0 passed.
+    assert "99 passed" not in header
+    assert header == "visible tests: 0 of 1 expected passed, rc 0"
+
+
+def test_header_counts_expected_tests_that_passed(bundle, tmp_path):
+    out, header = grade.check_visible(bundle, patch_for(tmp_path, {MOD: "def add(a, b):\n    return a + b\n"}),
+                                      str(tmp_path / "w"), grade.LocalRunner(), 60)
+    assert header == "visible tests: 1 of 1 expected passed, rc 0"
+    assert "1 passed" in out
+
+
+def test_header_says_not_run_when_the_patch_does_not_apply(bundle, tmp_path):
+    out, header = grade.check_visible(bundle, b"garbage patch", str(tmp_path / "w"), grade.LocalRunner(), 60)
+    assert header.startswith("visible tests: not run")
+
+
+def test_header_denominator_is_read_before_the_agents_code_runs(bundle, tmp_path):
+    # Review I4: code under test that deletes the visible test file must not crash the header (nor
+    # change its denominator): expected ids are read from the tree before pytest runs.
+    deleting = ("import os\nos.remove(os.path.join(os.path.dirname(__file__), 'tests', 'test_calc.py'))\n"
+                "def add(a, b):\n    return a + b\n")
+    out, header = grade.check_visible(bundle, patch_for(tmp_path, {MOD: deleting}), str(tmp_path / "w"),
+                                      grade.LocalRunner(), 60)
+    assert header.startswith("visible tests: ") and "of 1 expected passed" in header

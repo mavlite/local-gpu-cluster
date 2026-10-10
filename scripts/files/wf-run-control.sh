@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# wf-run-control.sh start <run-id> <T|G> [--w1] | status <run-id> | pack <run-id> | clear-keys
+# wf-run-control.sh start <run-id> <T|G> [--w1] | start-replay <run-id> <src-run-id> | status <run-id> |
+#                   pack <run-id> | clear-keys
 #
 # Runs INSIDE the workforce sandbox VM as root (installed as /usr/local/sbin/wf-run-control by
 # 76-vm-wf-sandbox.sh); the host drives it through the guest agent. Plan D.
@@ -9,6 +10,10 @@
 #           transient unit wf-run-<id>. A W3 run lasts hours: longer than any guest-exec timeout.
 #   _exec   (the unit's process) load the keys into the environment, DELETE the file, then exec the
 #           harness: from here on the keys live only in the harness's process environment.
+#   start-replay  like start, for the offline reviewer replay (round 2 §5.1): WF_ROUTER_KEY= only on
+#           stdin (a worker key line is refused), source /srv/wf/replay/<src-run-id> (pushed by the
+#           host's 76 push-run), output /srv/wf/runs/<run-id> under the same unit name, so status
+#           and pack work unchanged.
 #   status  the unit state, whether run.json exists, and the log's tail.
 #   pack    once the run has finished, /srv/wf/runs/<id> + its log into /root/wf-out/<id>.tgz;
 #           prints the size and sha256 so the host can verify its copy.
@@ -21,6 +26,7 @@ KEYS="${WF_RC_KEYS:-/run/wf}"
 OUT="${WF_RC_OUT:-/root/wf-out}"
 WF_RUN="${WF_RC_BIN:-/usr/local/sbin/wf-run}"
 BUNDLES="${WF_RC_BUNDLES:-/srv/wf/bundles}"
+REPLAY="${WF_RC_REPLAY:-/srv/wf/replay}"
 ROUTER_URL="${WF_RC_ROUTER:-http://192.168.6.153:8000/v1}"
 WORKERS="${WF_RC_WORKERS:-172.16.10.205 172.16.10.206 172.16.10.207}"
 WORKER_PORT=8090
@@ -39,6 +45,45 @@ check_opts() {
 }
 safe_key() { [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
 
+# Read the keys from stdin into KEY_ROUTER / KEY_WORKER, refusing any other line; `no-worker` refuses
+# a worker key too. Nothing is written before every line has been checked.
+read_keys() {
+  local mode="${1:-}" line
+  KEY_ROUTER="" KEY_WORKER=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    case "$line" in
+      WF_ROUTER_KEY=?*) KEY_ROUTER="${line#WF_ROUTER_KEY=}" ;;
+      WF_WORKER_KEY=?*)
+        if [ "$mode" = no-worker ]; then die "unexpected stdin line (only WF_ROUTER_KEY= is accepted here)"; fi
+        KEY_WORKER="${line#WF_WORKER_KEY=}" ;;
+      *) die "unexpected stdin line (only WF_ROUTER_KEY= and WF_WORKER_KEY= are accepted)" ;;
+    esac
+  done
+  [ -n "$KEY_ROUTER" ] || die "WF_ROUTER_KEY missing on stdin"
+  safe_key "$KEY_ROUTER" || die "WF_ROUTER_KEY has unexpected characters"
+  [ -z "$KEY_WORKER" ] || safe_key "$KEY_WORKER" || die "WF_WORKER_KEY has unexpected characters"
+}
+
+write_keys() {
+  local id="$1"
+  mkdir -p "$KEYS" "$RUNS"
+  chmod 0700 "$KEYS"
+  (
+    umask 077
+    echo "WF_ROUTER_KEY=$KEY_ROUTER" > "$KEYS/$id.env"
+    if [ -n "$KEY_WORKER" ]; then echo "WF_WORKER_KEY=$KEY_WORKER" >> "$KEYS/$id.env"; fi
+  )
+}
+
+start_unit() {
+  local id="$1"
+  shift
+  systemd-run --unit="wf-run-$id" --collect \
+    -p StandardOutput="append:$RUNS/$id.log" -p StandardError="append:$RUNS/$id.log" \
+    /bin/bash "$SELF" "$@"
+}
+
 cmd_start() {
   local id="${1:-}" arm="${2:-}"
   shift 2 || true
@@ -46,30 +91,38 @@ cmd_start() {
   check_arm "$arm"
   check_opts "$@"
   [ -e "$RUNS/$id" ] && die "run $id exists -- run ids are single-use"
-  local line router="" worker=""
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -z "$line" ] && continue
-    case "$line" in
-      WF_ROUTER_KEY=?*) router="${line#WF_ROUTER_KEY=}" ;;
-      WF_WORKER_KEY=?*) worker="${line#WF_WORKER_KEY=}" ;;
-      *) die "unexpected stdin line (only WF_ROUTER_KEY= and WF_WORKER_KEY= are accepted)" ;;
-    esac
-  done
-  [ -n "$router" ] || die "WF_ROUTER_KEY missing on stdin"
-  [ "$arm" = G ] || [ -n "$worker" ] || die "arm T needs WF_WORKER_KEY on stdin"
-  safe_key "$router" || die "WF_ROUTER_KEY has unexpected characters"
-  [ -z "$worker" ] || safe_key "$worker" || die "WF_WORKER_KEY has unexpected characters"
-  mkdir -p "$KEYS" "$RUNS"
-  chmod 0700 "$KEYS"
-  (
-    umask 077
-    echo "WF_ROUTER_KEY=$router" > "$KEYS/$id.env"
-    if [ -n "$worker" ]; then echo "WF_WORKER_KEY=$worker" >> "$KEYS/$id.env"; fi
-  )
-  systemd-run --unit="wf-run-$id" --collect \
-    -p StandardOutput="append:$RUNS/$id.log" -p StandardError="append:$RUNS/$id.log" \
-    /bin/bash "$SELF" _exec "$id" "$arm" "$@"
+  read_keys
+  [ "$arm" = G ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
+  write_keys "$id"
+  start_unit "$id" _exec "$id" "$arm" "$@"
   log "started wf-run-$id (arm $arm${*:+ $*}); log $RUNS/$id.log"
+}
+
+cmd_start_replay() {
+  local id="${1:-}" src="${2:-}"
+  check_id "$id"
+  check_id "$src"
+  [ -d "$REPLAY/$src" ] || die "no such replay source $REPLAY/$src (76 push-run first)"
+  [ -e "$RUNS/$id" ] && die "run $id exists -- run ids are single-use"
+  read_keys no-worker
+  write_keys "$id"
+  start_unit "$id" _exec_replay "$id" "$src"
+  log "started wf-run-$id (replay of $src); log $RUNS/$id.log"
+}
+
+cmd_exec_replay() {
+  local id="${1:-}" src="${2:-}"
+  check_id "$id"
+  check_id "$src"
+  local f="$KEYS/$id.env"
+  [ -r "$f" ] || die "no keys for $id"
+  set -a
+  # shellcheck disable=SC1090
+  . "$f"
+  set +a
+  rm -f "$f"
+  exec "$WF_RUN" replay-reviews --run "$REPLAY/$src" --bundles "$BUNDLES" --out "$RUNS/$id" \
+    --router "$ROUTER_URL" --grader "$GRADER" --agent-user-prefix "$PREFIX"
 }
 
 cmd_exec() {
@@ -115,9 +168,11 @@ cmd_pack() {
 
 case "${1:-}" in
   start) shift; cmd_start "$@" ;;
+  start-replay) shift; cmd_start_replay "$@" ;;
   _exec) shift; cmd_exec "$@" ;;
+  _exec_replay) shift; cmd_exec_replay "$@" ;;
   status) shift; cmd_status "$@" ;;
   pack) shift; cmd_pack "$@" ;;
   clear-keys) rm -f "$KEYS"/*.env; log "key files removed" ;;
-  *) echo "usage: $0 start <run-id> <T|G> [--w1] | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
+  *) echo "usage: $0 start <run-id> <T|G> [--w1] | start-replay <run-id> <src-run-id> | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
 esac

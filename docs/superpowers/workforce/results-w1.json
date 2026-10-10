@@ -1,0 +1,67 @@
+{
+ "phase": "W1",
+ "date": "2026-10-09",
+ "preregistration": "docs/superpowers/workforce/preregistration-w1.json (568ea2f, pushed before any W1 data)",
+ "window": {
+  "start_utc": "2026-10-09T02:08:15Z",
+  "end_utc": "2026-10-09T07:04:22Z",
+  "hours": 4.94,
+  "budget_h": 10
+ },
+ "decision": {
+  "chosen": "C2",
+  "table": {
+   "C0": {
+    "loop_rate": 0.03333333333333333,
+    "loop_upper": 0.1485960686591131,
+    "pass_rate": 0.8333333333333334,
+    "s_per_attempt": 101.97764578660329
+   },
+   "C1": {
+    "loop_rate": 0.0,
+    "loop_upper": 0.09503385285530415,
+    "pass_rate": 0.7666666666666667,
+    "s_per_attempt": 191.27944210370381
+   },
+   "C2": {
+    "loop_rate": 0.0,
+    "loop_upper": 0.09503385285530415,
+    "pass_rate": 0.8666666666666667,
+    "s_per_attempt": 97.97652801672618
+   },
+   "C3": {
+    "loop_rate": 0.03333333333333333,
+    "loop_upper": 0.1485960686591131,
+    "pass_rate": 0.7333333333333333,
+    "s_per_attempt": 133.052263156573
+   }
+  },
+  "reason": "lowest loop rate under the limit"
+ },
+ "chosen_config_line": "C2 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 {\"enable_thinking\":false}",
+ "runs": {
+  "total": 20,
+  "valid": 20,
+  "attempts": 120,
+  "loops": [
+   {
+    "run": "w1-c0-5",
+    "n": 1
+   },
+   {
+    "run": "w1-c3-5",
+    "n": 1
+   }
+  ]
+ },
+ "checks": {
+  "boundary_proof_with_workers": "rc=0 before the first run",
+  "worker_config_lines": "matched the pre-registration at every switch",
+  "key_grep_over_harvests": "0 hits for both keys"
+ },
+ "archive": {
+  "host": "/root/wf/w1-runs.tgz",
+  "sha256": "c43d87e25816857854bb89a2139432f1c17aa695ba0d35af667b0eebc26c6ae1"
+ },
+ "teardown": "workers torn down (key shredded), VM keys + bundles cleared, wf-w1 revoked, host key copies shredded"
+}

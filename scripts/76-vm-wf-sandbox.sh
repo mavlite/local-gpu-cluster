@@ -12,10 +12,16 @@
 #              reproduce local grading (Plan C Review Focus 3)
 #   status     /etc/wf-sandbox.json and the active policy mode
 #   push-control           install files/wf-run-control.sh as /usr/local/sbin/wf-run-control (Plan D)
+#   push-harness           replace /opt/workforce/workforce with scripts/tools/workforce (no provision,
+#              any policy): the same sorted sha256 manifest must match on both sides afterwards
 #   push-bundles B         replace /srv/wf/bundles with bundle dir B (0700) -- the frozen task set
+#   push-run DIR ID        ship a harvested run's replay inputs (run.json, patches/, each task's
+#              record.json and impl-r*.patch) to /srv/wf/replay/ID (0700), byte-compared (round 2 §5.1)
 #   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
 #              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
 #              the guest on stdin only -- never argv
+#   start-replay ID SRC    start the offline reviewer replay of /srv/wf/replay/SRC as run ID (any
+#              policy; router key only, on stdin)
 #   run-status ID          the run's unit state, record presence and log tail
 #   harvest ID DEST        pack the finished run in the VM, pull it out in chunks, verify its sha256,
 #              unpack into DEST/ID
@@ -145,6 +151,18 @@ case "$CMD" in
     vm_run 30 chmod 0700 /usr/local/sbin/wf-run-control >/dev/null
     ok "wf-run-control installed"
     ;;
+  push-harness)
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    tar -C "$LGC_DIR/tools" --exclude=__pycache__ -cf "$tmp/workforce.tar" workforce
+    vm_run 30 install -d -m 0700 "$PUSH" >/dev/null
+    vm_push "$tmp/workforce.tar" "$PUSH/workforce.tar"
+    vm_run 120 sh -c "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner -f $PUSH/workforce.tar && chmod -R go-rwx /opt/workforce && rm -f $PUSH/workforce.tar" >/dev/null
+    manifest="find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
+    local_sum="$(cd "$LGC_DIR/tools" && find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    guest_sum="$(vm_run 120 sh -c "cd /opt/workforce && $manifest")"
+    [[ "$local_sum" == "$guest_sum" ]] || die "harness differs after push (local $local_sum, guest $guest_sum)"
+    ok "harness pushed to /opt/workforce/workforce (manifest sha256 $local_sum)"
+    ;;
   push-bundles)
     bundles="${2:-}"
     [[ -d "$bundles" ]] || die "usage: 76-vm-wf-sandbox.sh push-bundles <bundles-dir>"
@@ -154,6 +172,22 @@ case "$CMD" in
     vm_push "$tmp/bundles.tar" "$PUSH/bundles.tar"
     vm_run 120 sh -c "rm -rf /srv/wf/bundles/* && tar -x -C /srv/wf/bundles --no-same-owner -f $PUSH/bundles.tar && chmod 0700 /srv/wf/bundles && rm -f $PUSH/bundles.tar" >/dev/null
     ok "bundles pushed: $(vm_run 30 sh -c 'ls /srv/wf/bundles | wc -l') task(s)"
+    ;;
+  push-run)
+    src="${2:-}"; id="${3:-}"
+    [[ -d "$src" && -f "$src/run.json" ]] || die "usage: 76-vm-wf-sandbox.sh push-run <harvested-run-dir> <id>"
+    [[ "$id" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]] || die "run id must match [a-z0-9][a-z0-9._-]{0,40}"
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    (cd "$src" && find tasks -maxdepth 2 \( -name record.json -o -name 'impl-r*.patch' \) -print0 | sort -z) > "$tmp/list"
+    tar -C "$src" --null -T "$tmp/list" -cf "$tmp/run.tar" run.json patches
+    mkdir "$tmp/check" && tar -x -C "$tmp/check" -f "$tmp/run.tar"
+    local_sum="$(cd "$tmp/check" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    vm_run 30 install -d -m 0700 "$PUSH" /srv/wf/replay >/dev/null
+    vm_push "$tmp/run.tar" "$PUSH/run.tar"
+    vm_run 300 sh -c "rm -rf /srv/wf/replay/$id && install -d -m 0700 /srv/wf/replay/$id && tar -x -C /srv/wf/replay/$id --no-same-owner -f $PUSH/run.tar && chmod -R go-rwx /srv/wf/replay/$id && rm -f $PUSH/run.tar" >/dev/null
+    guest_sum="$(vm_run 300 sh -c "cd /srv/wf/replay/$id && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1")"
+    [[ "$local_sum" == "$guest_sum" ]] || die "replay inputs differ after push (local $local_sum, guest $guest_sum)"
+    ok "run $id pushed to /srv/wf/replay/$id ($(tr -cd '\0' < "$tmp/list" | wc -c) task files, manifest sha256 $local_sum)"
     ;;
   start-run)
     id="${2:-}"; arm="${3:-}"
@@ -167,6 +201,14 @@ case "$CMD" in
       printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
       if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
     } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start "$id" "$arm" "${@:4}"
+    ;;
+  start-replay)
+    id="${2:-}"; src="${3:-}"
+    [[ -n "$id" && -n "$src" ]] || die "usage: 76-vm-wf-sandbox.sh start-replay <run-id> <src-run-id>"
+    keys="${WF_KEY_DIR:-/root/wf/keys}"
+    [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
+    printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")" \
+      | vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay "$id" "$src"
     ;;
   run-status)
     vm_run 30 /usr/local/sbin/wf-run-control status "${2:?usage: run-status <run-id>}"
@@ -185,5 +227,5 @@ case "$CMD" in
   clear-keys)
     vm_run 30 /usr/local/sbin/wf-run-control clear-keys
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-bundles|start-run|run-status|harvest|clear-keys" ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|start-replay|run-status|harvest|clear-keys" ;;
 esac

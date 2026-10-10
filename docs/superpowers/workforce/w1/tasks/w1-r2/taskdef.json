@@ -1,0 +1,15 @@
+{
+ "id": "w1-r2",
+ "commit": "9017c9998620ac0b4efc34c9c023a7eeabb0c841",
+ "files": [
+  "scripts/rag/refresh.py"
+ ],
+ "tests": [
+  "scripts/rag/tests/test_embed_batches.py"
+ ],
+ "hidden": {
+  "test_w1_r2_hidden.py": "scripts/rag/tests/test_w1_r2_hidden.py"
+ },
+ "needs_conftest": false,
+ "timeout_s": 180
+}

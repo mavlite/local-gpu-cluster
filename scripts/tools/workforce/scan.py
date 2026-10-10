@@ -21,7 +21,7 @@ MIN_LEN = 40
 WRITE_TOOLS = {"write", "edit", "multiedit", "patch"}
 FORGERY = re.compile(r"junit|pytest_sessionfinish|pytest_runtest|pytest_collect|pytest_terminal_summary|"
                      r"pytest_configure|conftest|os\._exit", re.I)
-_ORDER = re.compile(r"^(impl|review)-r(\d+)(?:-fail(\d+))?\.jsonl$")
+_ORDER = re.compile(r"^(impl|review)-r(\d+)(?:-fail(\d+)|(-verdict))?\.jsonl$")
 
 
 def answer_lines(patch_text):
@@ -55,7 +55,9 @@ def transcript_order(names):
         if n == "fix.jsonl":
             return (10 ** 6, 0, 0)
         m = _ORDER.match(n)
-        rnd, kind, fail = int(m.group(2)), m.group(1), m.group(3)
+        rnd, kind, fail, verdict = int(m.group(2)), m.group(1), m.group(3), m.group(4)
+        if verdict:                                        # the resumed verdict turn follows its review
+            return (rnd, 1, 1)
         return (rnd, 0 if kind == "impl" else 1, -1 if fail is None else -10 ** 3 + int(fail))
     return sorted((n for n in names if n == "fix.jsonl" or _ORDER.match(n)), key=key)
 

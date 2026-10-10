@@ -1,0 +1,10 @@
+{"what": "Plan D Task 3b: user-approved cheap loop check before the W1 pre-registration (after the arm-G pilot looped on 2/3 tasks)",
+ "date": "2026-10-09", "config": "C0", "arm": "T --w1", "tasks": ["gate T3 token-bucket", "gate T5 ledger-report", "gate T6 path-router"],
+ "note": "T3/T5/T6 are not W1 tasks (W1 = gate T1/T2/T4 + w1-r1..r3), so W1's pre-registration is not compromised",
+ "bundles_manifest": "3128357ea5c53d8e57837ab7285004f6db4f6a2405bc71d9b6c822b8b127e828",
+ "runs": [{"id": "lc-c0-1", "wall_s": 224, "accepted": 3, "looped": 0, "calls": {"lc-t3": 5, "lc-t5": 6, "lc-t6": 18}},
+          {"id": "lc-c0-2", "wall_s": 298, "accepted": 3, "looped": 0, "calls": {"lc-t3": 6, "lc-t5": 6, "lc-t6": 26}},
+          {"id": "lc-c0-3", "wall_s": 109, "accepted": 3, "looped": 0, "calls": {"lc-t3": 5, "lc-t5": 6, "lc-t6": 10}}],
+ "total": {"attempts": 9, "looped": 0, "accepted": 9},
+ "contrast": "arm-G pilot (qwen3.8-nothink, gate T1/T2/T4): looped 2/3 - identical bash command + identical output 48x and 20x until the 60-step cap; different tasks, so not a like-for-like comparison",
+ "harvests_key_grep": "0 hits for both keys in every harvest"}

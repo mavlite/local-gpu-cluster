@@ -1,7 +1,8 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
-Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan
-Sandbox VM:   run
+Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan,
+              recover-patches
+Sandbox VM:   run, replay-reviews
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
 """
@@ -21,6 +22,7 @@ import oc
 import paths
 import pipeline
 import profiles
+import replay
 import runmeta
 import scan
 
@@ -149,7 +151,41 @@ def w1_stats(run_dirs):
     return out
 
 
-def _implementer_accepted(run_dir, task_ids):
+def _task_seconds(run_dir, task_ids):
+    """{task: wall seconds} from the per-task records that have both timestamps."""
+    out = {}
+    for tid in task_ids:
+        path = os.path.join(run_dir, "tasks", tid, "record.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                rec = json.load(f)
+            if rec.get("t_start") is not None and rec.get("t_end") is not None:
+                out[tid] = rec["t_end"] - rec["t_start"]
+    return out
+
+
+def round2_runs(schedule, tasks=None, void=()):
+    """w3_runs plus the round-2 fields (spec §5.3): wall_s and review_capped from run.json, gpu_ms
+    (and worker_s when a window recorded it) from meta.json, per-task wall seconds from the records."""
+    runs = w3_runs(schedule, tasks, void=void)
+    for item, r in zip(schedule, runs):
+        s = _records(item["run_dir"])
+        meta = {}
+        path = os.path.join(item["run_dir"], "meta.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+        r.update({"wall_s": s["wall_s"], "review_capped": s.get("review_capped", 0),
+                  "review_timed_out": s.get("review_timed_out", 0),
+                  "review_none_after_turn": s.get("review_none_after_turn", 0),
+                  "gpu_ms": meta.get("gpu_ms"), "worker_s": meta.get("worker_s"),
+                  "task_s": _task_seconds(item["run_dir"], r["accepted"])})
+    return runs
+
+
+def _implementer_accepted(run_dir, task_ids, review=True):
+    """Accepted tasks the run's rate counts: implementer-accepted with a review, any accepted without
+    one (arm S / --w1 record outcome `implemented`)."""
     n = 0
     for tid in task_ids:
         path = os.path.join(run_dir, "tasks", tid, "record.json")
@@ -157,7 +193,7 @@ def _implementer_accepted(run_dir, task_ids):
             raise SystemExit(f"{path} missing: cannot recompute throughput without the voided task")
         with open(path, encoding="utf-8") as f:
             rec = json.load(f)
-        n += bool(rec["accepted"] and rec["outcome"] == "implementer-accepted")
+        n += bool(rec["accepted"] and (rec["outcome"] == "implementer-accepted" or not review))
     return n
 
 
@@ -178,7 +214,7 @@ def w3_runs(schedule, tasks=None, void=()):
         accepted = {t: v for t, v in s["accepted_by_task"].items() if t not in void}
         per_hour = s["accepted_per_hour"]
         if void:
-            per_hour = _implementer_accepted(item["run_dir"], accepted) / (s["wall_s"] / 3600)
+            per_hour = _implementer_accepted(item["run_dir"], accepted, s.get("review", True)) / (s["wall_s"] / 3600)
         runs.append({"arm": item["arm"], "valid": bool(item["valid"] and s["valid"]),
                      "accepted": accepted, "accepted_per_hour": per_hour,
                      "probe_p50": item["probe_p50"], "baseline_p50": item["baseline_p50"]})
@@ -202,7 +238,8 @@ def main(argv=None, env=None):
     p = sub.add_parser("manifest")
     p.add_argument("--bundles", required=True)
     p = sub.add_parser("run")
-    p.add_argument("--arm", choices=("T", "G"), required=True)
+    p.add_argument("--arm", choices=("T", "G", "S"), required=True,
+                   help="T: lead + 3 CPU workers; G: lead + GPU implementer; S: GPU implementer alone, no review")
     p.add_argument("--bundles", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--router", required=True)
@@ -211,6 +248,16 @@ def main(argv=None, env=None):
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
     p.add_argument("--agent-user-prefix",
                    help="run each role as OS user <prefix>-<role> in systemd scopes (the VM; harness as root)")
+    p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
+    p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
+    p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
+    p.add_argument("--run", required=True, help="harvested run directory (tasks/<id>/record.json, patches/)")
+    p.add_argument("--bundles", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--router", required=True)
+    p.add_argument("--grader", default="local", help="'local' or 'docker:<image>' (runs the visible tests)")
+    p.add_argument("--agent-user-prefix", help="run the reviewer as <prefix>-lead (needs the docker grader)")
+    p.add_argument("--journal", help="llama-server journal captured over the replay: prompt-token totals")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -222,6 +269,7 @@ def main(argv=None, env=None):
     p.add_argument("--schedule", required=True)
     p.add_argument("--tasks", required=True, help="bundle root (defines the task list)")
     p.add_argument("--void", action="append", default=[], help="task the scan found tainted (repeatable)")
+    p.add_argument("--round2", action="store_true", help="round-2 three-band decision over arms S, G and T")
     p = sub.add_parser("scan", help="transcript scan of a harvested run: tainted (leak) and suspect tasks")
     p.add_argument("--run", required=True)
     p.add_argument("--bundles", required=True)
@@ -269,8 +317,30 @@ def main(argv=None, env=None):
                                   launcher=launcher)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
-        out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1,
+        out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
                                 monitor=monitor, own=own).run()
+    elif a.cmd == "recover-patches":
+        out = replay.recover_patches(a.run)
+    elif a.cmd == "replay-reviews":
+        if not env.get("WF_ROUTER_KEY"):
+            raise SystemExit("WF_ROUTER_KEY must be set")
+        if a.agent_user_prefix and not a.grader.startswith("docker:"):
+            raise SystemExit("--agent-user-prefix needs --grader docker:<image>: the local grader would run "
+                             "agent code as the harness user (root on the VM)")
+        oc_bin = resolve_opencode(env)
+        if not oc_bin:
+            raise SystemExit("opencode not found; set WF_OPENCODE")
+        launcher = own = None
+        if a.agent_user_prefix:
+            assert_private(a.bundles)
+            launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
+        opencode = build_opencode("G", a.out + ".opencode", a.router, [], [oc_bin], env, launcher=launcher)
+        journal = None
+        if a.journal:
+            with open(a.journal, encoding="utf-8", errors="replace") as f:
+                journal = f.read()
+        out = replay.replay(a.run, a.bundles, opencode, a.out, make_grader(a.grader), journal_text=journal,
+                            own=own)
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "scan":
@@ -281,8 +351,8 @@ def main(argv=None, env=None):
         runs = []
         for spec in a.run:
             arm, rest = spec.split("=", 1)
-            if arm not in ("G", "T"):
-                raise SystemExit(f"--run {spec!r}: arm must be G or T")
+            if arm not in ("G", "T", "S"):
+                raise SystemExit(f"--run {spec!r}: arm must be G, T or S")
             d, _, own = rest.partition("@")
             runs.append((arm, d, own or None))
         out = runmeta.w3_schedule(a.baseline_probe, runs, a.fail_s)
@@ -298,8 +368,11 @@ def main(argv=None, env=None):
         with open(a.schedule, encoding="utf-8") as f:
             schedule = json.load(f)
         tasks = sorted(os.listdir(a.tasks))
-        runs = w3_runs(schedule, tasks, void=a.void)
-        out = analysis.w3_decide(runs, [t for t in tasks if t not in set(a.void)])
+        kept = [t for t in tasks if t not in set(a.void)]
+        if a.round2:
+            out = analysis.round2_decide(round2_runs(schedule, tasks, void=a.void), kept)
+        else:
+            out = analysis.w3_decide(w3_runs(schedule, tasks, void=a.void), kept)
         out["voided"] = sorted(set(a.void))
     print(json.dumps(out, indent=1, default=str))
     return 0

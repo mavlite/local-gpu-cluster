@@ -131,3 +131,26 @@ def test_snapshot_tar_is_deterministic(tmp_path, repo):
     b = bundle.build(repo, d, str(tmp_path / "o2"), str(tmp_path / "r2"))
     with open(os.path.join(a, "snapshot.tar"), "rb") as f1, open(os.path.join(b, "snapshot.tar"), "rb") as f2:
         assert f1.read() == f2.read()
+
+
+def test_the_snapshot_keeps_the_repository_line_endings_on_any_host(tmp_path):
+    # Plan D Task 4: commits whose .gitattributes was `* text=auto` came out of `git archive` with CRLF
+    # on Windows (core.eol=native), so the LF reference patch no longer applied to the snapshot.
+    r = str(tmp_path / "repo")
+    os.makedirs(r)
+    git(r, "init", "-q")
+    git(r, "config", "core.eol", "crlf")                 # what a Windows checkout behaves like
+    write(r, ".gitattributes", "* text=auto\n")
+    write(r, "pkg/calc.py", STUB)
+    git(r, "add", "-A")
+    git(r, "commit", "-qm", "parent")
+    write(r, "pkg/calc.py", SOLUTION)
+    write(r, "pkg/tests/test_calc.py", TEST)
+    git(r, "add", "-A")
+    git(r, "commit", "-qm", "fix add")
+    b = bundle.build(r, taskdef(tmp_path, r), str(tmp_path / "bundles"), str(tmp_path / "refs"))
+    with tarfile.open(os.path.join(b, "snapshot.tar")) as t:
+        data = t.extractfile("pkg/calc.py").read()
+    assert b"\r" not in data
+    assert bundle.validate(b, str(tmp_path / "refs" / "t1.patch"), str(tmp_path / "work"),
+                           grade.LocalRunner()) == []

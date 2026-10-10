@@ -172,3 +172,51 @@ def test_76_never_puts_a_key_on_a_qm_command_line():
     start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
     block = "\n".join(lines[start:start + 20])
     assert "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start" in block
+
+
+def test_76_push_harness_replaces_the_harness_and_byte_compares_it():
+    """Round 2 Task 9: a harness-only update (no provision, works under the locked policy): tar of
+    scripts/tools/workforce without __pycache__ -> /opt/workforce/workforce, then the same sorted
+    sha256 manifest on both sides must match."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "push-harness)")
+    block = "\n".join(lines[start:start + 14])
+    assert 'tar -C "$LGC_DIR/tools" --exclude=__pycache__ -cf' in block
+    assert "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner" in block
+    assert block.count("find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum") == 2
+    assert 'policy_mode' not in block and '[[ "$local_sum" == "$guest_sum" ]] || die' in block
+    usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
+    assert "push-harness" in usage and "push-harness" in "\n".join(lines[:30])
+
+
+def test_76_push_run_ships_only_what_the_replay_reads_and_byte_compares_it():
+    """Round 2 Task 10: a harvested run is 300+ MB of agent trees; the replay needs run.json, patches/
+    and each task's record.json + impl-r*.patch. They land in /srv/wf/replay/<id> (0700) and the
+    same sorted sha256 manifest must match on both sides."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "push-run)")
+    block = "\n".join(lines[start:start + 17])          # up to and including its ";;"
+    assert "find tasks -maxdepth 2" in block and "-name record.json -o -name 'impl-r*.patch'" in block
+    assert 'tar -C "$src" --null -T "$tmp/list" -cf "$tmp/run.tar" run.json patches' in block
+    assert 'rm -rf /srv/wf/replay/$id && install -d -m 0700 /srv/wf/replay/$id && tar -x -C /srv/wf/replay/$id --no-same-owner' in block
+    assert block.count("find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1") == 2
+    assert '[[ "$local_sum" == "$guest_sum" ]] || die' in block and "policy_mode" not in block
+    assert 'check_id "$id"' in block or '[[ "$id" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]]' in block
+    usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
+    assert "push-run" in usage and "push-run" in "\n".join(lines[:30])
+
+
+def test_76_start_replay_pipes_the_router_key_only_and_needs_no_policy():
+    """Round 2 §5.1: the replay runs under any policy (it only talks to the router) and takes the
+    router key on stdin exactly like start-run; the worker key is never read."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "start-replay)")
+    block = "\n".join(lines[start:start + 8])
+    assert block.rstrip().endswith(";;")
+    assert '[[ -s "$keys/router.key" ]] || die' in block and "worker.key" not in block and "policy_mode" not in block
+    assert "printf 'WF_ROUTER_KEY=%s" in block and "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay" in block
+    usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
+    assert "start-replay" in usage and "start-replay" in "\n".join(lines[:34])
