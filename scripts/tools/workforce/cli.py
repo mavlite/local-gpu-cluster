@@ -176,12 +176,16 @@ def round2_runs(schedule, tasks=None, void=()):
             with open(path, encoding="utf-8") as f:
                 meta = json.load(f)
         r.update({"wall_s": s["wall_s"], "review_capped": s.get("review_capped", 0),
+                  "review_timed_out": s.get("review_timed_out", 0),
+                  "review_none_after_turn": s.get("review_none_after_turn", 0),
                   "gpu_ms": meta.get("gpu_ms"), "worker_s": meta.get("worker_s"),
                   "task_s": _task_seconds(item["run_dir"], r["accepted"])})
     return runs
 
 
-def _implementer_accepted(run_dir, task_ids):
+def _implementer_accepted(run_dir, task_ids, review=True):
+    """Accepted tasks the run's rate counts: implementer-accepted with a review, any accepted without
+    one (arm S / --w1 record outcome `implemented`)."""
     n = 0
     for tid in task_ids:
         path = os.path.join(run_dir, "tasks", tid, "record.json")
@@ -189,7 +193,7 @@ def _implementer_accepted(run_dir, task_ids):
             raise SystemExit(f"{path} missing: cannot recompute throughput without the voided task")
         with open(path, encoding="utf-8") as f:
             rec = json.load(f)
-        n += bool(rec["accepted"] and rec["outcome"] == "implementer-accepted")
+        n += bool(rec["accepted"] and (rec["outcome"] == "implementer-accepted" or not review))
     return n
 
 
@@ -210,7 +214,7 @@ def w3_runs(schedule, tasks=None, void=()):
         accepted = {t: v for t, v in s["accepted_by_task"].items() if t not in void}
         per_hour = s["accepted_per_hour"]
         if void:
-            per_hour = _implementer_accepted(item["run_dir"], accepted) / (s["wall_s"] / 3600)
+            per_hour = _implementer_accepted(item["run_dir"], accepted, s.get("review", True)) / (s["wall_s"] / 3600)
         runs.append({"arm": item["arm"], "valid": bool(item["valid"] and s["valid"]),
                      "accepted": accepted, "accepted_per_hour": per_hour,
                      "probe_p50": item["probe_p50"], "baseline_p50": item["baseline_p50"]})

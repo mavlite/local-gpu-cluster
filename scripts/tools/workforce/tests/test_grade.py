@@ -223,3 +223,13 @@ def test_header_counts_expected_tests_that_passed(bundle, tmp_path):
 def test_header_says_not_run_when_the_patch_does_not_apply(bundle, tmp_path):
     out, header = grade.check_visible(bundle, b"garbage patch", str(tmp_path / "w"), grade.LocalRunner(), 60)
     assert header.startswith("visible tests: not run")
+
+
+def test_header_denominator_is_read_before_the_agents_code_runs(bundle, tmp_path):
+    # Review I4: code under test that deletes the visible test file must not crash the header (nor
+    # change its denominator): expected ids are read from the tree before pytest runs.
+    deleting = ("import os\nos.remove(os.path.join(os.path.dirname(__file__), 'tests', 'test_calc.py'))\n"
+                "def add(a, b):\n    return a + b\n")
+    out, header = grade.check_visible(bundle, patch_for(tmp_path, {MOD: deleting}), str(tmp_path / "w"),
+                                      grade.LocalRunner(), 60)
+    assert header.startswith("visible tests: ") and "of 1 expected passed" in header

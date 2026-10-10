@@ -184,7 +184,7 @@ def test_76_push_harness_replaces_the_harness_and_byte_compares_it():
     block = "\n".join(lines[start:start + 14])
     assert 'tar -C "$LGC_DIR/tools" --exclude=__pycache__ -cf' in block
     assert "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner" in block
-    assert block.count("find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum") == 2
+    assert block.count("find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum") == 2
     assert 'policy_mode' not in block and '[[ "$local_sum" == "$guest_sum" ]] || die' in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
     assert "push-harness" in usage and "push-harness" in "\n".join(lines[:30])
@@ -201,7 +201,7 @@ def test_76_push_run_ships_only_what_the_replay_reads_and_byte_compares_it():
     assert "find tasks -maxdepth 2" in block and "-name record.json -o -name 'impl-r*.patch'" in block
     assert 'tar -C "$src" --null -T "$tmp/list" -cf "$tmp/run.tar" run.json patches' in block
     assert 'rm -rf /srv/wf/replay/$id && install -d -m 0700 /srv/wf/replay/$id && tar -x -C /srv/wf/replay/$id --no-same-owner' in block
-    assert block.count("find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1") == 2
+    assert block.count("find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1") == 2
     assert '[[ "$local_sum" == "$guest_sum" ]] || die' in block and "policy_mode" not in block
     assert 'check_id "$id"' in block or '[[ "$id" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]]' in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))

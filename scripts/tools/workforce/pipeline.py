@@ -447,6 +447,8 @@ class Pipeline:
                    "review_capped": sum(1 for r in recs for rv in r["reviews"] if rv.get("capped")),
                    "review_timed_out": sum(1 for r in recs for rv in r["reviews"] if rv.get("timed_out")),
                    "verdict_turns": sum(1 for r in recs for rv in r["reviews"] if rv.get("verdict_turn")),
+                   "review_none_after_turn": sum(1 for r in recs for rv in r["reviews"]
+                                                 if rv.get("verdict_turn") and rv.get("verdict") == "NONE"),
                    "health": health, "valid": not invalid, "invalid_reasons": invalid}
         with open(os.path.join(self.run_dir, "run.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=1)

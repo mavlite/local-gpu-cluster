@@ -86,6 +86,7 @@ class FakeOpencode:
             self.calls.append({"task": tid, "agent": agent, "role": role, "session": sid,
                                "resumed": session is not None, "message": message, "attach": attach,
                                "workdir": workdir, "home": home, "user": user,
+                               "workdir_existed": os.path.isdir(workdir),
                                "owner": self.owners.get(workdir) if self.owners is not None else None})
         if s.get("raise_on") == role:
             raise RuntimeError(f"scripted failure in {role}")

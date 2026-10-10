@@ -112,7 +112,8 @@ def r2(arm, wall_s, acc_ids=None, capped=0, gpu_ms=None, task_s=None, valid=True
     acc = {t: t in acc_ids for t in TASKS}
     return {"arm": arm, "valid": valid, "accepted": acc, "accepted_per_hour": len(acc_ids) / (wall_s / 3600),
             "wall_s": wall_s, "gpu_ms": gpu_ms if gpu_ms is not None else wall_s * 1000,
-            "worker_s": 3 * wall_s if arm == "T" else None, "review_capped": capped,
+            "worker_s": 3 * wall_s if arm == "T" else None, "review_capped": capped, "review_timed_out": 0,
+            "review_none_after_turn": 0,
             "task_s": task_s or {t: wall_s / 16 for t in TASKS}}
 
 
@@ -153,9 +154,16 @@ def test_round2_build_needs_acceptance_within_one_task_of_the_best_arm():
     assert r["band"] != "build" and r["arms"]["T"]["accepted_per_run"] == 13
 
 
-def test_round2_is_inconclusive_when_any_arm_has_more_than_two_capped_reviews():
+def test_round2_is_inconclusive_only_when_reviews_stay_without_a_verdict_after_the_turn():
+    # Review I7: a capped review that the verdict turn rescued is reported, not fatal; more than two
+    # reviews still without a verdict after the turn in any arm make the window inconclusive.
     r = analysis.round2_decide(r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600, **{"1": {"review_capped": 3}}), TASKS)
-    assert r["band"] == "inconclusive" and r["arms"]["G"]["review_capped"] == 3
+    assert r["band"] == "build" and r["arms"]["G"]["review_capped"] == 3
+    r = analysis.round2_decide(r2_runs(16 / 5 * 3600, 16 / 4 * 3600, 16 / 9 * 3600,
+                                       **{"2": {"review_none_after_turn": 2, "review_timed_out": 1},
+                                          "3": {"review_none_after_turn": 1}}), TASKS)
+    assert r["band"] == "inconclusive" and r["arms"]["T"]["review_none_after_turn"] == 3
+    assert r["arms"]["T"]["review_timed_out"] == 1 and "without a verdict" in r["reason"]
 
 
 def test_round2_skips_invalid_runs_and_needs_one_valid_run_per_arm():

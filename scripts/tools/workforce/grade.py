@@ -214,10 +214,10 @@ def check_visible(bundle_dir, patch, workdir, runner, timeout):
         f.write("[pytest]\n")
     args = ["-m", "pytest", "-c", INI, "-p", "no:cacheprovider", "-q", f"--junitxml={JUNIT}"]
     args += [] if task["needs_conftest"] else ["--noconftest"]
+    expected = expected_ids(task, tree, list(task.get("pytest_args") or task["tests"]))   # before any agent code runs
     rc, out, timed_out = runner.run(tree, args + list(task.get("pytest_args") or task["tests"]), timeout)
     if timed_out:
         return f"(tests did not finish within {timeout} s)", "visible tests: not run (timeout)"
-    expected = expected_ids(task, tree, list(task.get("pytest_args") or task["tests"]))
     junit = os.path.join(tree, JUNIT)
     passed = 0
     if os.path.lexists(junit) and not os.path.islink(junit):

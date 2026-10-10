@@ -175,8 +175,14 @@ def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journa
                        "feedback": e["feedback"][:500], "prompt_tokens": None,
                        "t_start": e["t_start"], "t_end": time.time()})
     judged = [r for r in rounds if r["old_verdict"] != "NONE"]
+    old_none = [r for r in rounds if r["old_verdict"] == "NONE"]
     totals = {"n_rounds": len(rounds), "n_skipped": len(skipped),
-              "old_none": sum(1 for r in rounds if r["old_verdict"] == "NONE"),
+              "old_none": len(old_none),
+              "old_revise": sum(1 for r in rounds if r["old_verdict"] == "REVISE"),
+              "old_accept": sum(1 for r in rounds if r["old_verdict"] == "ACCEPT"),
+              # §5.1 verdict gate: of the rounds that had NO verdict before, how many still have none
+              "old_none_still_none": sum(1 for r in old_none if r["new_verdict"] == "NONE") if old_none else None,
+              "verdict_gate_evaluable": bool(old_none),
               "new_none_after_turn": sum(1 for r in rounds if r["new_verdict"] == "NONE"),
               "capped": sum(1 for r in rounds if r["capped"]),
               "verdict_turns": sum(1 for r in rounds if r["verdict_turn"]),

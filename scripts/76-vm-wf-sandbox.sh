@@ -157,8 +157,8 @@ case "$CMD" in
     vm_run 30 install -d -m 0700 "$PUSH" >/dev/null
     vm_push "$tmp/workforce.tar" "$PUSH/workforce.tar"
     vm_run 120 sh -c "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner -f $PUSH/workforce.tar && chmod -R go-rwx /opt/workforce && rm -f $PUSH/workforce.tar" >/dev/null
-    manifest="find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
-    local_sum="$(cd "$LGC_DIR/tools" && find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    manifest="find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
+    local_sum="$(cd "$LGC_DIR/tools" && find workforce -type f -not -path '*/__pycache__/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
     guest_sum="$(vm_run 120 sh -c "cd /opt/workforce && $manifest")"
     [[ "$local_sum" == "$guest_sum" ]] || die "harness differs after push (local $local_sum, guest $guest_sum)"
     ok "harness pushed to /opt/workforce/workforce (manifest sha256 $local_sum)"
@@ -181,11 +181,11 @@ case "$CMD" in
     (cd "$src" && find tasks -maxdepth 2 \( -name record.json -o -name 'impl-r*.patch' \) -print0 | sort -z) > "$tmp/list"
     tar -C "$src" --null -T "$tmp/list" -cf "$tmp/run.tar" run.json patches
     mkdir "$tmp/check" && tar -x -C "$tmp/check" -f "$tmp/run.tar"
-    local_sum="$(cd "$tmp/check" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    local_sum="$(cd "$tmp/check" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
     vm_run 30 install -d -m 0700 "$PUSH" /srv/wf/replay >/dev/null
     vm_push "$tmp/run.tar" "$PUSH/run.tar"
     vm_run 300 sh -c "rm -rf /srv/wf/replay/$id && install -d -m 0700 /srv/wf/replay/$id && tar -x -C /srv/wf/replay/$id --no-same-owner -f $PUSH/run.tar && chmod -R go-rwx /srv/wf/replay/$id && rm -f $PUSH/run.tar" >/dev/null
-    guest_sum="$(vm_run 300 sh -c "cd /srv/wf/replay/$id && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1")"
+    guest_sum="$(vm_run 300 sh -c "cd /srv/wf/replay/$id && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1")"
     [[ "$local_sum" == "$guest_sum" ]] || die "replay inputs differ after push (local $local_sum, guest $guest_sum)"
     ok "run $id pushed to /srv/wf/replay/$id ($(tr -cd '\0' < "$tmp/list" | wc -c) task files, manifest sha256 $local_sum)"
     ;;

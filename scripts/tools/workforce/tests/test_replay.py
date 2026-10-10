@@ -67,6 +67,8 @@ def test_replay_reruns_only_the_reviewer_on_each_stored_round(tmp_path):
     t = out["totals"]
     assert t["old_none"] == 1 and t["new_none_after_turn"] == 0 and t["agreement"] == 1.0
     assert t["median_steps"] == 10.0 and t["median_prompt_tokens"] is None     # 20 and 0 (a plain fake review)
+    # review C1: the §5.1 verdict gate is over the OLD-NONE rounds only, and says when it cannot be evaluated
+    assert t["old_none_still_none"] == 0 and t["old_revise"] == 0 and t["old_accept"] == 1 and t["verdict_gate_evaluable"]
     with open(tmp_path / "out" / "replay.json") as f:
         assert json.load(f)["totals"] == t
 
@@ -123,6 +125,10 @@ def test_recover_patches_takes_each_rounds_diff_from_the_old_review_packet(tmp_p
     res = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner())
     assert {(r["task"], r["round"]) for r in res["rounds"]} == {("a", 0), ("b", 0), ("c", 0)}
     assert res["totals"]["old_none"] == 2 and res["skipped"] == [{"task": "c", "round": 1}]
+    fake2 = FakeOpencode({"a": {"review": ["hmm"], "verdict": ["still no"]}, "b": {"review": ["ACCEPT"]},
+                          "c": {"review": ["ACCEPT"]}})
+    res2 = replay.replay(str(run), bundles, fake2, str(tmp_path / "out2"), grade.LocalRunner())
+    assert res2["totals"]["old_none_still_none"] == 1 and res2["totals"]["new_none_after_turn"] == 1
 
 
 def test_recover_patches_cli(tmp_path, capsys):
@@ -143,3 +149,11 @@ def test_an_empty_stored_patch_replays_the_pristine_tree(tmp_path):
     assert a["new_verdict"] == "REVISE"
     pkt = open([c for c in fake.calls if c["task"] == "a"][0]["attach"]).read()
     assert "# Diff" in pkt and "+    return" not in pkt and "visible tests: 0 of 1 expected passed" in pkt
+
+
+def test_verdict_gate_is_marked_not_evaluable_without_old_none_rounds(tmp_path):
+    run, bundles = harvested_run(tmp_path)
+    (run / "tasks" / "a" / "impl-r0.patch").unlink()            # leaves only b (old ACCEPT) replayable
+    fake = FakeOpencode({"b": {"review": ["ACCEPT"]}})
+    t = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner())["totals"]
+    assert t["old_none"] == 0 and not t["verdict_gate_evaluable"] and t["old_none_still_none"] is None

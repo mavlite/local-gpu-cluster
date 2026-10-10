@@ -358,6 +358,7 @@ def test_a_capped_review_gets_one_verdict_turn_in_the_same_session(tmp_path):
     assert rec["reviews"][0]["capped"] and rec["reviews"][0]["steps"] == 20
     assert rec["reviews"][0]["verdict_turn"]["verdict"] == "ACCEPT" and rec["reviews"][0]["verdict"] == "ACCEPT"
     assert rec["rework_rounds"] == 0
+    assert json.load(open(tmp_path / "run" / "run.json"))["review_none_after_turn"] == 0
 
 
 def test_a_second_no_verdict_goes_to_the_lead_fix_never_to_grading(tmp_path):
@@ -371,6 +372,7 @@ def test_a_second_no_verdict_goes_to_the_lead_fix_never_to_grading(tmp_path):
     assert agents[:4] == ["reviewer", "reviewer-verdict", "reviewer", "reviewer-verdict"]
     run = json.load(open(tmp_path / "run" / "run.json"))
     assert run["review_capped"] == 3 and run["verdict_turns"] == 3 and run["review_timed_out"] == 0
+    assert run["review_none_after_turn"] == 3                     # review I7: the health figure §5.3 gates on
 
 
 def test_a_timed_out_review_is_recorded_and_gets_a_verdict_turn(tmp_path):
@@ -398,7 +400,7 @@ def test_the_review_copy_survives_until_the_verdict_turn_is_done(tmp_path):
                                                   "verdict": ["ACCEPT"]}})
     turn = [c for c in fake.calls if c["agent"] == "reviewer-verdict"][0]
     first = [c for c in fake.calls if c["agent"] == "reviewer"][0]
-    assert turn["workdir"] == first["workdir"] and turn["owner"] is None or True
+    assert turn["workdir"] == first["workdir"] and turn["workdir_existed"]   # review M1: seen by the fake itself
     assert not os.path.exists(turn["workdir"])            # removed after the verdict, not before
 
 

@@ -100,7 +100,7 @@ def w3_decide(runs, tasks, latency_factor=W3_LATENCY_FACTOR, n_boot=10000, seed=
 
 
 R2_BAR, R2_MARGINAL = 1.5, 1.2            # round 2 §5.3: the chosen bars on the pooled T / max(S, G) ratio
-R2_CAPPED_LIMIT = 2                        # more capped reviews than this in any arm: inconclusive
+R2_NONE_LIMIT = 2                          # more reviews still without a verdict after the turn: inconclusive
 
 
 def _pool(runs):
@@ -116,7 +116,9 @@ def _pool(runs):
             if runs else None,
             "gpu_hours_per_accepted": gpu_h / acc if acc and gpu_h else None,
             "worker_hours_per_accepted": sum(worker) / 3600 / acc if worker and acc else None,
-            "review_capped": sum(r.get("review_capped") or 0 for r in runs)}
+            "review_capped": sum(r.get("review_capped") or 0 for r in runs),
+            "review_timed_out": sum(r.get("review_timed_out") or 0 for r in runs),
+            "review_none_after_turn": sum(r.get("review_none_after_turn") or 0 for r in runs)}
 
 
 def _bottleneck_ci(by, other, tasks, n_boot, seed):
@@ -163,9 +165,10 @@ def round2_decide(runs, tasks, bar=R2_BAR, marginal=R2_MARGINAL, n_boot=10000, s
     makespan = {a: arms[a]["makespan_s"] for a in arms}
     shortest = min(makespan, key=makespan.get)
     best_acc = max(arms[a]["accepted_per_run"] for a in arms)
-    capped = {a: arms[a]["review_capped"] for a in ("G", "T")}
-    if any(v > R2_CAPPED_LIMIT for v in capped.values()):
-        out.update(band="inconclusive", reason=f"capped reviews per arm {capped}: fix the reviewer and rerun all arms")
+    unresolved = {a: arms[a]["review_none_after_turn"] for a in ("G", "T")}
+    if any(v > R2_NONE_LIMIT for v in unresolved.values()):
+        out.update(band="inconclusive", reason=f"reviews still without a verdict after the verdict turn, per arm "
+                                               f"{unresolved}: fix the reviewer and rerun all arms")
     elif ratio is not None and ratio >= bar and shortest == "T" and arms["T"]["accepted_per_run"] >= best_acc - 1:
         out.update(band="build", reason=f"T is {ratio:.2f}x {other} with the shortest makespan and acceptance "
                                         f"within one task of the best arm")

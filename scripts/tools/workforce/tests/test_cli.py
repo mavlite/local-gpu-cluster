@@ -242,3 +242,28 @@ def test_w3_schedule_accepts_arm_s(tmp_path, capsys):
     assert cli.main(["w3-schedule", "--baseline-probe", str(tmp_path / "base.jsonl"), "--run", f"S={d}",
                      "--out", str(tmp_path / "sched.json")]) == 0
     assert json.loads((tmp_path / "sched.json").read_text())[0]["arm"] == "S"
+
+
+def test_voiding_keeps_arm_s_throughput_counting_all_accepted_tasks(tmp_path):
+    # Review I5: arm S records outcome "implemented"; recomputing after a void must not zero it.
+    d = write_run(str(tmp_path / "s"), arm="S", review=False, accepted_by_task={"t1": True, "t2": True},
+                  accepted=2, accepted_per_hour=12.0, wall_s=600.0)
+    for t in ("t1", "t2"):
+        os.makedirs(os.path.join(d, "tasks", t))
+        with open(os.path.join(d, "tasks", t, "record.json"), "w") as f:
+            json.dump({"id": t, "accepted": True, "outcome": "implemented"}, f)
+    runs = cli.w3_runs([{"arm": "S", "run_dir": d, "valid": True, "probe_p50": 1.0, "baseline_p50": 1.0}],
+                       ["t1", "t2", "t3"] if False else ["t1", "t2"], void=["t2"])
+    assert runs[0]["accepted"] == {"t1": True} and runs[0]["accepted_per_hour"] == 6.0
+
+
+def test_round2_runs_carry_the_reviewer_health_fields(tmp_path):
+    tasks = {"t1": 60.0}
+    d = _round2_run(tmp_path, "g1", "G", 1200, 2, tasks)
+    with open(os.path.join(d, "run.json")) as f:
+        s = json.load(f)
+    s.update(review_timed_out=1, review_none_after_turn=1)
+    with open(os.path.join(d, "run.json"), "w") as f:
+        json.dump(s, f)
+    r = cli.round2_runs([{"arm": "G", "run_dir": d, "valid": True, "probe_p50": 1.0, "baseline_p50": 1.0}], ["t1"])[0]
+    assert (r["review_capped"], r["review_timed_out"], r["review_none_after_turn"]) == (2, 1, 1)
