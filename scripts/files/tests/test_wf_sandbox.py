@@ -172,3 +172,19 @@ def test_76_never_puts_a_key_on_a_qm_command_line():
     start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
     block = "\n".join(lines[start:start + 20])
     assert "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start" in block
+
+
+def test_76_push_harness_replaces_the_harness_and_byte_compares_it():
+    """Round 2 Task 9: a harness-only update (no provision, works under the locked policy): tar of
+    scripts/tools/workforce without __pycache__ -> /opt/workforce/workforce, then the same sorted
+    sha256 manifest on both sides must match."""
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "push-harness)")
+    block = "\n".join(lines[start:start + 14])
+    assert 'tar -C "$LGC_DIR/tools" --exclude=__pycache__ -cf' in block
+    assert "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner" in block
+    assert block.count("find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum") == 2
+    assert 'policy_mode' not in block and '[[ "$local_sum" == "$guest_sum" ]] || die' in block
+    usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
+    assert "push-harness" in usage and "push-harness" in "\n".join(lines[:30])

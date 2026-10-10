@@ -12,6 +12,8 @@
 #              reproduce local grading (Plan C Review Focus 3)
 #   status     /etc/wf-sandbox.json and the active policy mode
 #   push-control           install files/wf-run-control.sh as /usr/local/sbin/wf-run-control (Plan D)
+#   push-harness           replace /opt/workforce/workforce with scripts/tools/workforce (no provision,
+#              any policy): the same sorted sha256 manifest must match on both sides afterwards
 #   push-bundles B         replace /srv/wf/bundles with bundle dir B (0700) -- the frozen task set
 #   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
 #              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
@@ -145,6 +147,18 @@ case "$CMD" in
     vm_run 30 chmod 0700 /usr/local/sbin/wf-run-control >/dev/null
     ok "wf-run-control installed"
     ;;
+  push-harness)
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    tar -C "$LGC_DIR/tools" --exclude=__pycache__ -cf "$tmp/workforce.tar" workforce
+    vm_run 30 install -d -m 0700 "$PUSH" >/dev/null
+    vm_push "$tmp/workforce.tar" "$PUSH/workforce.tar"
+    vm_run 120 sh -c "rm -rf /opt/workforce/workforce && tar -x -C /opt/workforce --no-same-owner -f $PUSH/workforce.tar && chmod -R go-rwx /opt/workforce && rm -f $PUSH/workforce.tar" >/dev/null
+    manifest="find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
+    local_sum="$(cd "$LGC_DIR/tools" && find workforce -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    guest_sum="$(vm_run 120 sh -c "cd /opt/workforce && $manifest")"
+    [[ "$local_sum" == "$guest_sum" ]] || die "harness differs after push (local $local_sum, guest $guest_sum)"
+    ok "harness pushed to /opt/workforce/workforce (manifest sha256 $local_sum)"
+    ;;
   push-bundles)
     bundles="${2:-}"
     [[ -d "$bundles" ]] || die "usage: 76-vm-wf-sandbox.sh push-bundles <bundles-dir>"
@@ -185,5 +199,5 @@ case "$CMD" in
   clear-keys)
     vm_run 30 /usr/local/sbin/wf-run-control clear-keys
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-bundles|start-run|run-status|harvest|clear-keys" ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|start-run|run-status|harvest|clear-keys" ;;
 esac
