@@ -1,0 +1,67 @@
+{
+  "what": "Round 2 §5.1 offline replay: the 27 harvested W3 (w3-2-t) review rounds re-run through the round-2 reviewer only (same-session verdict turn, git diff -W packets built from blobs with call sites, touching tests, implementer SUMMARY and the JUnit header, 12K-token/1900-line caps, nonce framing). Nothing implemented, fixed or graded.",
+  "when": "2026-10-11T03:32:12Z to 2026-10-11T05:00:13Z (88 min for 27 rounds)",
+  "source": {
+    "run": "w3-2-t (Plan D W3, arm T, 16 tasks, manifest 54c494ae38dcfd2adb7781257a65969c84a7986de5db988f17a770c2df7bb146)",
+    "per_round_patches": "recovered from agent/<id>/review-r{k}.packet.md with `cli.py recover-patches`: 27/27 rounds, all apply to their snapshot (w2-10's three rounds are empty diffs); nothing skipped",
+    "old_verdicts": {"ACCEPT": 14, "REVISE": 6, "NONE": 7},
+    "old_capped_reviews": 7,
+    "old_median_steps": 14,
+    "old_journal": {"prompt_tokens_total": 784955, "requests": 372, "median_new_prompt_tokens_per_request": 876.0}
+  },
+  "environment": {
+    "harness": "main 2cc6075 (PR #16 + #17); VM manifest sha256 35542b4726b912b6ce084780fec842fcc41aeb127d54ea451460bd3f36603409",
+    "review_steps": 20, "verdict_steps": 3, "impl_steps": 60, "fix_steps": 60,
+    "opencode_config_sha256": "ab3f2abdf05ece6e44ec25e27307ba826f9bc376e17d9fde395303835f97eb18",
+    "opencode": "1.18.34",
+    "reviewer_alias": "qwen3.8-nothink -> backend qwen3.8, enable_thinking false, strip_thinking true, QWEN38_NOTHINK_SAMPLING (router app.py)",
+    "chat_server": "llama.cpp build 11026 (b49650adb), Qwen3.8-27B UD-Q6_K_XL, window layout 3 slots x 128K (ctx 393216 / parallel 3), q8_0 KV, tensor split 1,1, draft-mtp n-max 3, cache-ram 16384",
+    "router_key": "wf-replay, aliases qwen3.8-nothink, TTL 12 h, revoked after the replay",
+    "layout_note": "scoped keys get no chat slot in the 1-slot layout (503 workforce_lane_closed): the replay needs `wf-window.sh open` like a measured run; spec §5.1 corrected"
+  },
+  "result": {
+    "rounds": 27, "skipped": 0,
+    "new_verdicts": {"ACCEPT": 21, "REVISE": 6, "NONE": 0},
+    "by_old_verdict": {
+      "NONE":   {"n": 7,  "new": {"ACCEPT": 5,  "REVISE": 2, "NONE": 0}},
+      "REVISE": {"n": 6,  "new": {"ACCEPT": 3,  "REVISE": 3, "NONE": 0}},
+      "ACCEPT": {"n": 14, "new": {"ACCEPT": 13, "REVISE": 1, "NONE": 0}}
+    },
+    "capped": 1, "verdict_turns": 1, "still_none_after_turn": 0, "timed_out": 0,
+    "steps": [3, 5, 5, 5, 6, 6, 6, 7, 7, 8, 9, 9, 10, 10, 12, 12, 13, 13, 13, 13, 14, 15, 15, 15, 15, 18, 20],
+    "median_steps": 10,
+    "journal": {"prompt_tokens_total": 733454, "requests": 255, "median_new_prompt_tokens_per_request": 1180,
+                "prompt_tokens_per_review": 27165, "w3_prompt_tokens_per_review": 29072}
+  },
+  "gates": {
+    "verdicts": {"rule": "at most 1 of the 7 previously capped rounds still without a verdict after the verdict turn", "value": 0, "ok": true,
+                 "note": "6 of the 7 reached a verdict without capping (steps 5-15); 1 round capped at 20 and the verdict turn gave its verdict"},
+    "agreement": {"rule": ">= 16 of the 20 rounds that had a verdict agree", "value": "16/20 = 0.80", "ok": true,
+                  "disagreements_read_by_hand": [
+                    {"round": "w2-06 r0", "old": "ACCEPT", "new": "REVISE", "hidden_tests_at_this_state": "16/16 pass",
+                     "read": "GAIN: the new reviewer found a real latent bug the tests do not cover - `current_url = urljoin(url, location)` resolves a relative Location after a cross-host redirect against the first request's base (patch line 319). Correct REVISE, one rework round of cost."},
+                    {"round": "w2-07 r1", "old": "REVISE", "new": "ACCEPT", "hidden_tests_at_this_state": "18/18 pass",
+                     "read": "MISS: W3's REVISE was right - the r1 state calls `should_cache(r.status_code, result)` while `def should_cache(status_code)` takes one argument (patch lines 54/123): a TypeError on every HTTP-200 search path the tests do not exercise. The new reviewer accepted in 3 steps. The hidden tests would still have passed, so the measurement is unaffected, but it is a real quality miss to watch: the packet showed both lines."},
+                    {"round": "w2-07 r2", "old": "REVISE", "new": "ACCEPT", "hidden_tests_at_this_state": "18/18 pass",
+                     "read": "NEUTRAL: the r2 state fixed the call; W3's second REVISE asked for more than the request (it was then lead-fixed). The new ACCEPT matches the hidden tests."},
+                    {"round": "w2-08 r1", "old": "REVISE", "new": "ACCEPT", "hidden_tests_at_this_state": "11/11 pass",
+                     "read": "NEUTRAL: W3's REVISE was stricter than the tests (defect-1 handling); W3 accepted the next round. The new ACCEPT matches the hidden tests."}
+                  ]},
+    "cost": {"rule": "median steps and prompt tokens per review reported against W3; both should fall",
+             "median_steps": "10 vs 14", "capped": "1 vs 7", "prompt_tokens_per_review": "27.2K vs 29.1K", "requests": "255 vs 372",
+             "note": "fewer, denser requests: median new-prompt tokens per request rose 876 -> 1180 (bigger packets, less re-reading); per review and in total the tokens fell. Replay journal is reviewer-only; W3's included probe traffic.",
+             "ok": true},
+    "step_counter_on_resume": "settled: the resumed reviewer-verdict session had steps available (the one capped round's verdict turn produced ACCEPT/REVISE at the first step); opencode does not carry the exhausted counter into the resumed tools-off agent"
+  },
+  "decision": {
+    "review_steps": 20,
+    "proceed_to_window": true,
+    "watch_items": ["a 3-step ACCEPT that missed an arity bug the packet showed (w2-07 r1): report per-arm step distributions in the window and read any ACCEPT under 5 steps by hand",
+                    "agreement sits exactly at the 0.8 bar; 2 of the 4 disagreements are the old reviewer being stricter than the tests"]
+  },
+  "incidents": [
+    "first start failed on `ModuleNotFoundError: llama_log` (cli imported replay/runmeta which imported scripts/tools/gate at load; the VM ships workforce/ alone) - fixed in PR #17",
+    "second start burned 4 rounds on 503 workforce_lane_closed before the window was opened - spec/plan corrected",
+    "orchestrator died at the harvest: wf-run-control pack demanded run.json (a replay writes replay.json) - fixed (77cc3b9); harvested by hand, journal captured for 03:32:12-05:00:13 UTC"
+  ]
+}
