@@ -172,7 +172,8 @@ def test_g4_config_serves_gemma_under_its_own_alias_with_its_sampling_and_mtp_dr
     assert re.search(r'^GEMMA="--temp 1\.0 --top-p 0\.95 --top-k 64 --presence-penalty 0"$', s, re.M)
     g4 = re.search(r'^    G4\)\s+(.*)$', s, re.M).group(1)
     assert 'SRV_MODEL="$G4_MODEL"' in g4 and 'SRV_ALIAS=gemma4' in g4 and "SRV_KWARGS='{}'" in g4
-    assert 'SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $IK_MEM $G4_MTP $GEMMA}"' in g4
+    assert 'SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $G4_MEM $G4_MTP $GEMMA}"' in g4
+    assert re.search(r'^G4_MEM="-rtr -cram 0 -ctx-ckpt 8"$', s, re.M)     # no prompt-cache RAM: Gemma's KV is big
     assert '-md $G4_DRAFT --spec-type mtp:' in s
     assert re.search(r'^G4_BASE=".* -fa on -ctk q8_0 -ctv q8_0 .*-rea off"$', s, re.M)   # the sweep's winner, thinking off
     assert '"$SRV_BIN" -m "$SRV_MODEL" $SRV_FLAGS' in s and '--alias "$SRV_ALIAS"' in s

@@ -58,6 +58,9 @@ G4_DRAFT="${GATE_G4_DRAFT:-/models/mtp-gemma-4-26B-A4B-it.gguf}"
 G4_BASE="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rea off"
 G4_MTP="-md $G4_DRAFT --spec-type mtp:n_max=3,p_min=0.5"
 GEMMA="--temp 1.0 --top-p 0.95 --top-k 64 --presence-penalty 0"
+# Gemma has full-attention KV (~7 GB at 61K q8_0), unlike Qwen3.6: saving the prompt state to RAM on top of
+# the weights blew the 30 GB cap (OOM 2026-10-11 22:1xZ, replay-4) -- no prompt-cache RAM for G4.
+G4_MEM="-rtr -cram 0 -ctx-ckpt 8"
 
 select_config() {      # select_config <gate|C0|C1|C2|C3|G4>: sets SRV_BIN, SRV_MODEL, SRV_ALIAS, SRV_FLAGS, SRV_KWARGS
   SRV_BIN="$BIN"; SRV_KWARGS="$KW_NOTHINK"; SRV_MODEL="$MODEL"; SRV_ALIAS=qwen3.6
@@ -68,7 +71,7 @@ select_config() {      # select_config <gate|C0|C1|C2|C3|G4>: sets SRV_BIN, SRV_
           if [ "${GATE_C1_MTP:-0}" = 1 ]; then SRV_FLAGS="$SRV_FLAGS $ML_MTP"; fi ;;
     C2)   SRV_FLAGS="$WF_BASE $IK_MEM $NOTHINK" ;;
     C3)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $THINK"; SRV_KWARGS="$KW_THINK" ;;
-    G4)   SRV_MODEL="$G4_MODEL"; SRV_ALIAS=gemma4; SRV_KWARGS='{}'; SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $IK_MEM $G4_MTP $GEMMA}" ;;
+    G4)   SRV_MODEL="$G4_MODEL"; SRV_ALIAS=gemma4; SRV_KWARGS='{}'; SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $G4_MEM $G4_MTP $GEMMA}" ;;
     *)    die "unknown config '$1' (gate|C0|C1|C2|C3|G4)" ;;
   esac
 }
