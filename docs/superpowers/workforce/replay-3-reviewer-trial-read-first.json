@@ -1,0 +1,34 @@
+{
+  "what": "Reviewer-model trial 2: trial 1's setup (Qwen3.6-35B-A3B nothink on worker llmbench01, C2, same 27 W3 rounds, same packets) plus the `--read-first` reviewer rule: 'Before you decide, read at least one changed function from the tree with the read tool (a file named in the diff) and base the verdict on what you read, never on the packet alone.' Question: do the one-step hallucinated REVISEs of trial 1 go away, and at what cost?",
+  "when": "2026-10-11T17:30Z to 2026-10-11T19:48Z (138 min for 27 rounds)",
+  "harness": "feat/wf-experiment 6d2ace5 (main 4f186e3 + --read-first); VM manifest 1fbbc6dd07414f72ac87daf93c8d6c111e3a125c7c01beee79c2c7ce7d47eda3",
+  "result": {
+    "verdicts": {"ACCEPT": 20, "REVISE": 7, "NONE": 0},
+    "still_none_of_old_none": "0 of 7",
+    "one_step_verdicts": "1 of 27 (trial 1: 12 of 27)",
+    "agreement_with_w3": "17/20 (trial 1: 14/20; qwen3.8: 16/20)",
+    "agreement_with_qwen3.8": "24/27 (trial 1: 21/27)",
+    "agreement_with_trial_1": "20/27",
+    "median_steps": {"trial 2": 11, "trial 1": 3, "qwen3.8": 10},
+    "capped": {"trial 2": 4, "trial 1": 1, "qwen3.8": 1},
+    "verdict_turns": {"trial 2": 5, "trial 1": 1, "qwen3.8": 1},
+    "median_seconds_per_review": {"trial 2 (CPU worker)": 277, "trial 1 (CPU worker)": 119, "qwen3.8 (V620 pair)": 201}
+  },
+  "rounds_that_changed_vs_trial_1": [
+    {"round": "w2-09 r0", "trial1": "REVISE (1 step, hallucinated TypeError)", "trial2": "ACCEPT (16 steps)", "read": "FIXED: the hallucination is gone; hidden tests 6/6, every other reviewer accepts."},
+    {"round": "w2-12 r0", "trial1": "REVISE (1 step, hallucinated lock bug)", "trial2": "ACCEPT (13 steps)", "read": "FIXED: the hallucination is gone; hidden tests 71/71."},
+    {"round": "w2-01 r0", "trial1": "ACCEPT", "trial2": "REVISE (1 step)", "read": "now matches W3 and qwen3.8 (DefaultDependencies=no and the unit's live-host behaviour)."},
+    {"round": "w2-01 r1", "trial1": "ACCEPT", "trial2": "REVISE (20 steps, verdict turn)", "read": "VALID CATCH nobody else made: the generated unit has `RemainAfterExit=yes` under [Unit] (patch line 23) as well as under [Service]; systemd warns and ignores it. Hidden tests 3/3 pass."},
+    {"round": "w2-06 r0", "trial1": "ACCEPT", "trial2": "REVISE (21 steps, verdict turn)", "read": "VALID CATCH: `async with httpx.AsyncClient(` was replaced by an inline `client=httpx.AsyncClient(` that is never closed (patch lines 105/141). A different real bug from the urljoin one qwen3.8 found; hidden tests 16/16."},
+    {"round": "w2-05 r1", "trial1": "REVISE (1 step)", "trial2": "ACCEPT (9 steps)", "read": "LOST: the state fails the hidden tests (1 failed, 12 passed); trial 1 was the only reviewer to refuse it, trial 2 accepts it like W3 and qwen3.8."},
+    {"round": "w2-07 r0", "trial1": "REVISE", "trial2": "ACCEPT (15 steps)", "read": "LENIENT: qwen3.8's REVISE named request parts that are missing (force re-fetch, wiring into router-app); hidden tests 18/18 pass, W3 was capped (NONE)."}
+  ],
+  "tally_vs_qwen3.8": {"gains": 2, "misses": 1, "spurious_revises": 0, "agree": 24, "both_wrong": "w2-05 r1 (hidden-test-failing state accepted by both)"},
+  "assessment": {
+    "quality": "with the rule the candidate is at least qwen3.8's equal on these rounds: 17/20 W3 agreement (qwen3.8 16/20), two valid catches qwen3.8 did not make, zero hallucinated findings, one lenient ACCEPT; it also lost trial 1's lucky catch of the hidden-test-failing state.",
+    "cost": "the rule triples its steps (median 3 -> 11, now at qwen3.8's level) and more than doubles wall time per review on the CPU worker (119 -> 277 s). The per-step cheapness of a 3B-active model remains, so on the V620s it would still be faster than the 27B dense reviewer per review, but the 3x fewer-steps advantage is gone.",
+    "reviewer_health": "4 capped reviews and 5 verdict turns in 27 rounds: with the rule this model needs REVIEW_STEPS > 20 or a softer rule, otherwise it would trip the window's >2-unresolved health check much more easily than qwen3.8 (1 in 27). All 5 verdict turns did produce a verdict.",
+    "recommendation": "the read-first rule works as a hallucination guard and should be kept for any small reviewer. For the throughput case the better variant to test next is the rule plus REVIEW_STEPS 30 on the GPU, measured as an extra T arm in a later window. qwen3.8 stays the pre-registered round-2 reviewer."
+  },
+  "teardown": "worker torn down (key shredded, lock removed), wf-replay3 router key revoked, host keys shredded, VM key files 0, no key in the harvest; harvest at /root/wf/runs/replay-3 on the host"
+}

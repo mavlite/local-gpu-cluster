@@ -72,3 +72,27 @@ round each). A credible throughput reviewer, not a quality upgrade. Next if the 
 after the round-2 window: measure it on the GPU as an extra arm in a later window, after trying a
 "read the changed function before you decide" rule to cut the one-step verdicts. Gemma 4 26B-A4B remains
 the next candidate to replay.
+
+## Trial 2 result — same model + the read-first rule (2026-10-11)
+
+`replay-3`: trial 1's setup plus `--read-first` ("read at least one changed function with the read tool
+before you decide; never from the packet alone"). Full record: `replay-3-reviewer-trial-read-first.json`.
+
+| | qwen3.8 (V620) | Qwen3.6 trial 1 | Qwen3.6 + read-first (trial 2) |
+|---|---|---|---|
+| Agreement with W3 (20 judged) | 16/20 | 14/20 | **17/20** |
+| Agreement with qwen3.8 | — | 21/27 | 24/27 |
+| One-step verdicts | 0 | 12 | 1 |
+| Hallucinated REVISEs | 0 | 2 | **0** |
+| Valid catches qwen3.8 missed | — | 2 | 2 (different ones) |
+| Median steps | 10 | 3 | 11 |
+| Capped / verdict turns | 1 / 1 | 1 / 1 | 4 / 5 |
+| Median seconds per review | 201 (GPU) | 119 (CPU) | 277 (CPU) |
+
+**Verdict:** the rule does what it was for — the two hallucinated findings are gone and the model now reads
+before it judges, finding two real defects nobody else did (`RemainAfterExit` under `[Unit]`; an unclosed
+`httpx.AsyncClient`). The price is qwen3.8-level step counts and a high cap rate (4 of 27, all rescued by the
+verdict turn), so the "3× cheaper" result of trial 1 does not survive the rule; what survives is the per-step
+cheapness of a 3B-active model, i.e. still a likely 2× on the GPU. Keep the rule for any small reviewer.
+Next variant worth a GPU measurement: rule + `REVIEW_STEPS 30`, as an extra T arm in a later window. qwen3.8
+remains the pre-registered round-2 reviewer.
