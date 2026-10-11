@@ -226,3 +226,15 @@ def test_warm_refuses_arm_t_without_a_worker_key(guest):
     run, log, _, _ = guest
     r = run("warm T", "WF_ROUTER_KEY=r\n")
     assert r.returncode != 0 and "WF_WORKER_KEY" in r.stderr and "curl" not in log()
+
+
+def test_pack_accepts_a_replay_record_in_place_of_run_json(guest):
+    # Round 2 §5.1: replay-reviews writes replay.json, not run.json; pack and status must take either.
+    run, _, d, _ = guest
+    (d["runs"] / "rp-1").mkdir()
+    (d["runs"] / "rp-1" / "replay.json").write_text('{"totals": {}}')
+    r = run("pack rp-1")
+    assert r.returncode == 0, r.stderr
+    with tarfile.open(d["out"] / "rp-1.tgz") as t:
+        assert "rp-1/replay.json" in t.getnames()
+    assert "record: present" in run("status rp-1").stdout

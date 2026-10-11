@@ -19,7 +19,8 @@
 #           `warm <endpoint> <http code> <seconds>` per endpoint; exit 1 if any is not 200. The keys
 #           reach curl through a -K config on stdin, never argv.
 #   status  the unit state, whether run.json exists, and the log's tail.
-#   pack    once the run has finished, /srv/wf/runs/<id> + its log into /root/wf-out/<id>.tgz;
+#   pack    once the run has finished (run.json, or replay.json for a replay), /srv/wf/runs/<id> + its log
+#           into /root/wf-out/<id>.tgz;
 #           prints the size and sha256 so the host can verify its copy.
 #   clear-keys  remove every leftover key file (window teardown).
 # Run ids are single-use. Keys are never on a command line and never printed.
@@ -179,7 +180,7 @@ cmd_status() {
   local id="${1:-}"
   check_id "$id"
   echo "unit: $(systemctl is-active "wf-run-$id" 2>/dev/null || true)"
-  if [ -f "$RUNS/$id/run.json" ]; then echo "record: present"; else echo "record: absent"; fi
+  if [ -f "$RUNS/$id/run.json" ] || [ -f "$RUNS/$id/replay.json" ]; then echo "record: present"; else echo "record: absent"; fi
   if [ -f "$RUNS/$id.log" ]; then tail -n 3 "$RUNS/$id.log"; fi
 }
 
@@ -187,7 +188,7 @@ cmd_pack() {
   local id="${1:-}"
   check_id "$id"
   [ "$(systemctl is-active "wf-run-$id" 2>/dev/null || true)" = active ] && die "wf-run-$id is still running"
-  [ -f "$RUNS/$id/run.json" ] || die "no $RUNS/$id/run.json -- the run did not finish"
+  [ -f "$RUNS/$id/run.json" ] || [ -f "$RUNS/$id/replay.json" ] || die "no $RUNS/$id/run.json (or replay.json) -- the run did not finish"
   mkdir -p "$OUT"
   local items=("$id")
   [ -f "$RUNS/$id.log" ] && items+=("$id.log")
