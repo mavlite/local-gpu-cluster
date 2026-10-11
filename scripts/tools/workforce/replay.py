@@ -23,10 +23,15 @@ import grade
 import pipeline
 import workspace
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gate"))
-import llama_log  # noqa: E402
-
 MIN_PROMPT_N = 64                # below this a journal request is the user probe, not the reviewer
+
+
+def _llama_log():
+    """scripts/tools/gate is a workstation-side package: the VM ships workforce/ alone and never passes
+    a journal, so the import happens on use, not at module load (that broke `wf-run` in the VM)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gate"))
+    import llama_log
+    return llama_log
 _OLD_DIFF_HEAD = "\n# Diff\n"      # the round-1 packet's last section
 _OLD_TRUNCATED = "[packet truncated at "
 
@@ -116,7 +121,7 @@ def _stored_patch(run_dir, rec, k):
 def _journal_totals(journal_text):
     if journal_text is None:
         return {"prompt_tokens_total": None, "requests": None, "median_prompt_tokens": None}
-    recs = llama_log.parse(journal_text)
+    recs = _llama_log().parse(journal_text)
     big = [r["prompt_n"] for r in recs if r["prompt_n"] >= MIN_PROMPT_N]
     return {"prompt_tokens_total": sum(r["prompt_n"] for r in recs), "requests": len(big),
             "median_prompt_tokens": statistics.median(big) if big else None}

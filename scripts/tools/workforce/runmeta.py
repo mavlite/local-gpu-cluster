@@ -16,8 +16,14 @@ import statistics
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gate"))
-import llama_log  # noqa: E402  (scripts/tools/gate: parses mainline and ik llama-server timings)
+
+
+def _llama_log():
+    """scripts/tools/gate parses mainline and ik llama-server timings. Workstation-side only: the VM
+    ships workforce/ alone, so the import happens on use, not when cli imports this module."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gate"))
+    import llama_log
+    return llama_log
 
 
 def iso_epoch(iso):
@@ -73,7 +79,7 @@ def probe_p50(records, since, until, fail_s):
 
 
 def gpu_ms(journal_text, probe_records):
-    total = sum((r.get("prompt_ms") or 0) + (r.get("gen_ms") or 0) for r in llama_log.parse(journal_text))
+    total = sum((r.get("prompt_ms") or 0) + (r.get("gen_ms") or 0) for r in _llama_log().parse(journal_text))
     probe = sum((r.get("prompt_ms") or 0) + (r.get("predicted_ms") or 0) for r in probe_records)
     return total - probe
 
