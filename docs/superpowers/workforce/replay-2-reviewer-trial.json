@@ -1,0 +1,44 @@
+{
+  "what": "Reviewer-model trial 1: the same 27 harvested W3 review rounds as replay-1, with the reviewer (and its verdict turn) on Qwen3.6-35B-A3B nothink instead of qwen3.8-nothink. Same round-2 packets, prompts, REVIEW_STEPS 20 and verdict turn. The candidate was served by worker llmbench01 (ik llama-server, config C2, locked to the sandbox) through `replay-reviews --reviewer-model w1/qwen3.6 --worker ...`: no router or chat-server change, no window, the user's chat untouched.",
+  "when": "2026-10-11T13:06:11Z to 2026-10-11T14:31:14Z (85 min for 27 rounds)",
+  "candidate": {
+    "model": "Qwen3.6-35B-A3B-MTP-UD-IQ4_XS, thinking off",
+    "served_by": "llmbench01 (172.16.10.205:8090), ik llama-server C2: -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 -rtr -cram 256 -ctx-ckpt 8, temp 0.7 top-p 0.8 top-k 20",
+    "hardware": "one Minisforum BD795i SE (CPU only); the GPU reviewer in replay-1 ran on the V620 pair",
+    "harness": "feat/wf-experiment 6d14836 (main 583f8b2 + --reviewer-model/--worker); VM manifest e694578445cc957bc9c0c3c679737f235f3caf188ea08645e89b4d8d7ebd8ecb"
+  },
+  "result": {
+    "rounds": 27, "skipped": 0,
+    "verdicts": {"ACCEPT": 19, "REVISE": 8, "NONE": 0},
+    "still_none_of_old_none": "0 of 7",
+    "capped": 1, "verdict_turns": 1,
+    "agreement_with_w3": "14/20 (qwen3.8: 16/20)",
+    "agreement_with_qwen3.8": "21/27",
+    "median_steps": {"qwen3.6": 3, "qwen3.8": 10},
+    "one_step_verdicts": "12 of 27 (decided from the packet alone, no tool call)",
+    "median_seconds_per_review": {"qwen3.6 on a CPU worker": 119, "qwen3.8 on the V620 pair": 201},
+    "tool_errors": "a few `glob` calls timed out (ripgrep over the tree); no model or API errors"
+  },
+  "disagreements_with_qwen3.8_read_by_hand": [
+    {"round": "w2-05 r1", "w3": "ACCEPT", "qwen3.8": "ACCEPT", "qwen3.6": "REVISE (1 step)", "hidden_tests_at_this_state": "1 failed, 12 passed",
+     "read": "GAIN: the only reviewer to refuse a state that fails the hidden tests (the lane re-check releases one slot, not both)."},
+    {"round": "w2-07 r1", "w3": "REVISE", "qwen3.8": "ACCEPT", "qwen3.6": "REVISE (1 step)", "hidden_tests_at_this_state": "18/18 pass",
+     "read": "GAIN: catches the should_cache arity bug (TypeError on every HTTP-200 search) that qwen3.8 accepted in 3 steps; W3 agrees."},
+    {"round": "w2-06 r0", "w3": "ACCEPT", "qwen3.8": "REVISE", "qwen3.6": "ACCEPT (2 steps)", "hidden_tests_at_this_state": "16/16 pass",
+     "read": "MISS: the redirect urljoin bug qwen3.8 found is real; qwen3.6 did not see it."},
+    {"round": "w2-01 r0", "w3": "REVISE", "qwen3.8": "REVISE", "qwen3.6": "ACCEPT (11 steps)", "hidden_tests_at_this_state": "3/3 pass",
+     "read": "MISS (soft): both other reviewers asked for real fixes to the shipped zfs-import unit (wrong comment, live-host behaviour); the tests do not cover them."},
+    {"round": "w2-09 r0", "w3": "ACCEPT", "qwen3.8": "ACCEPT", "qwen3.6": "REVISE (1 step)", "hidden_tests_at_this_state": "6/6 pass",
+     "read": "SPURIOUS: claims `except (*_REQUEST_EXCEPTIONS, RuntimeError):` raises TypeError; that is valid Python (PEP 448). A hallucinated bug, one rework round of cost."},
+    {"round": "w2-12 r0", "w3": "ACCEPT", "qwen3.8": "ACCEPT", "qwen3.6": "REVISE (1 step)", "hidden_tests_at_this_state": "71/71 pass",
+     "read": "SPURIOUS: the 'logical bug' it describes is the lock doing its job (the second caller sees the first caller's row). Hallucinated, one rework round of cost."}
+  ],
+  "tally_vs_qwen3.8": {"gains": 2, "misses": 2, "spurious_revises": 2, "agree": 21},
+  "assessment": {
+    "quality": "about the same as qwen3.8 on these 27 rounds: it caught two things qwen3.8 missed (one of them a state the hidden tests fail) and missed two things qwen3.8 caught; the new failure mode is the hallucinated bug in a 1-step verdict (2 of 27), which costs a rework round each.",
+    "cost": "3x fewer reviewer steps (median 3 vs 10) and 40% less wall time per review even on a CPU box; on the V620s a 3B-active MoE would be several times faster still than the 27B dense reviewer.",
+    "verdicts": "always a verdict; 1 capped round rescued by the verdict turn, like qwen3.8.",
+    "recommendation": "a credible reviewer for the throughput question, not a quality upgrade. If the lead stays the bottleneck after the round-2 window, measure it on the GPU as an extra arm (T with the qwen3.6 reviewer) in a later window rather than changing the pre-registered one; keep qwen3.8 as the fixer. Mitigation worth trying first: require at least one tool call (a read of the changed function) before a verdict, to cut the 1-step hallucinations."
+  },
+  "teardown": "worker torn down (key shredded, lock removed), wf-replay2 router key revoked, host keys shredded, VM key files 0, no key in the harvest; harvest at /root/wf/runs/replay-2 on the host"
+}
