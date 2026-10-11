@@ -157,3 +157,15 @@ def test_verdict_gate_is_marked_not_evaluable_without_old_none_rounds(tmp_path):
     fake = FakeOpencode({"b": {"review": ["ACCEPT"]}})
     t = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner())["totals"]
     assert t["old_none"] == 0 and not t["verdict_gate_evaluable"] and t["old_none_still_none"] is None
+
+
+def test_the_harness_imports_in_the_vm_where_the_gate_package_is_absent():
+    # The VM gets scripts/tools/workforce only; llama_log (scripts/tools/gate) must be needed solely
+    # when a journal is given, never at import time -- or `wf-run` dies before any subcommand.
+    import subprocess
+    code = ("import sys; sys.modules['llama_log'] = None; sys.path.insert(0, sys.argv[1]); "
+            "import replay, cli, runmeta; "
+            "assert replay._journal_totals(None)['requests'] is None; print('imports-ok')")
+    r = subprocess.run([sys.executable, "-c", code, os.path.join(os.path.dirname(__file__), "..")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "imports-ok" in r.stdout, r.stderr[-800:]
