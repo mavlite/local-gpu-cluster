@@ -276,3 +276,13 @@ def test_start_replay_accepts_the_read_first_option(guest):
     assert run("start-replay rp-3 w3-2-t --read-first", "WF_ROUTER_KEY=r\n").returncode == 0
     assert run("_exec_replay rp-3 w3-2-t --read-first").returncode == 0
     assert "--read-first" in json.loads((tmp / "dump.json").read_text())["argv"]
+
+
+def test_start_replay_accepts_the_worker_alias_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    opts = "--reviewer-model=w1/gemma4 --worker=http://172.16.10.205:8090/v1 --worker-alias=gemma4 --read-first"
+    assert run(f"start-replay rp-4 w3-2-t {opts}", KEYS_T).returncode == 0
+    assert run(f"_exec_replay rp-4 w3-2-t {opts}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--worker-alias") + 1] == "gemma4"

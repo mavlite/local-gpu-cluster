@@ -55,8 +55,9 @@ safe_key() { [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
 check_replay_opts() {
   local o
   for o in "$@"; do
-    [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ || "$o" == --read-first ]] \
-      || die "unknown option '$o' (only --reviewer-model=<provider/model>, --worker=<url>, --read-first)"
+    [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ \
+       || "$o" =~ ^--worker-alias=[A-Za-z0-9._-]+$ || "$o" == --read-first ]] \
+      || die "unknown option '$o' (only --reviewer-model=<provider/model>, --worker=<url>, --worker-alias=<name>, --read-first)"
   done
 }
 has_worker_opt() { [[ " $* " == *" --worker="* ]]; }
@@ -141,6 +142,7 @@ cmd_exec_replay() {
       --reviewer-model=*) extra+=(--reviewer-model "${o#--reviewer-model=}") ;;
       --worker=*) extra+=(--worker "${o#--worker=}") ;;
       --read-first) extra+=(--read-first) ;;
+      --worker-alias=*) extra+=(--worker-alias "${o#--worker-alias=}") ;;
     esac
   done
   local f="$KEYS/$id.env"

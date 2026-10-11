@@ -39,12 +39,12 @@ def resolve_opencode(env):
 
 
 def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, reviewer_model=None,
-                  keys=None, read_first=False):
+                  keys=None, read_first=False, worker_alias=None):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
     Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
     cfg = profiles.install(os.path.join(oc_dir, "cfg"),
                            profiles.build_config(arm, router_url, worker_urls, reviewer_model=reviewer_model,
-                                                 read_first=read_first))
+                                                 read_first=read_first, worker_alias=worker_alias))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
     return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=keys or profiles.keys_for(arm)),
@@ -264,6 +264,7 @@ def main(argv=None, env=None):
     p.add_argument("--reviewer-model", help="reviewer-model trial: provider/model for the reviewer, e.g. w1/qwen3.6")
     p.add_argument("--worker", action="append", default=[], help="worker URL(s) that serve the trial reviewer")
     p.add_argument("--read-first", action="store_true", help="reviewer rule: read a changed function before deciding")
+    p.add_argument("--worker-alias", help="model alias the trial worker serves (default qwen3.6)")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -344,7 +345,8 @@ def main(argv=None, env=None):
             launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
         opencode = build_opencode("G", a.out + ".opencode", a.router, a.worker, [oc_bin], env, launcher=launcher,
                                   reviewer_model=a.reviewer_model,
-                                  keys=profiles.KEY_ENV if a.worker else None, read_first=a.read_first)
+                                  keys=profiles.KEY_ENV if a.worker else None, read_first=a.read_first,
+                                  worker_alias=a.worker_alias)
         journal = None
         if a.journal:
             with open(a.journal, encoding="utf-8", errors="replace") as f:

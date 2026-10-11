@@ -291,7 +291,7 @@ def test_replay_reviews_with_a_worker_reviewer_needs_the_worker_key_and_passes_b
 def test_replay_reviews_read_first_flag_reaches_the_config_and_the_record(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, read_first=False):
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, read_first=False, **kw):
         seen["read_first"] = read_first
         return "OC"
 
@@ -301,3 +301,18 @@ def test_replay_reviews_read_first_flag_reaches_the_config_and_the_record(tmp_pa
             "--router", "http://x/v1", "--read-first"]
     assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
     assert seen["read_first"] is True and json.loads(capsys.readouterr().out)["read_first"] is True
+
+
+def test_replay_reviews_worker_alias_flag_reaches_the_config(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen.update(kw)
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: {"totals": {}})
+    args = ["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+            "--router", "http://x/v1", "--worker", "http://w/v1", "--reviewer-model", "w1/gemma4", "--worker-alias", "gemma4"]
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["worker_alias"] == "gemma4" and seen["reviewer_model"] == "w1/gemma4"

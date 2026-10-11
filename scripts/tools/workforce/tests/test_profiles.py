@@ -133,3 +133,11 @@ def test_read_first_rule_is_added_to_the_reviewer_prompt_only_when_asked():
     assert "Your reply must START" in ruled["reviewer"]["prompt"]           # the verdict format stays last-but-one
     assert ruled["reviewer-verdict"]["prompt"] == plain["reviewer-verdict"]["prompt"]   # the tools-off turn cannot read
     assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]
+
+
+def test_worker_alias_override_names_the_worker_model_and_the_trial_reviewer():
+    # Trial 3: a worker serving Gemma 4 under alias "gemma4"; the reviewer model is w1/gemma4.
+    cfg = profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/gemma4", worker_alias="gemma4")
+    assert list(cfg["provider"]["w1"]["models"]) == ["gemma4"]
+    assert cfg["agent"]["reviewer"]["model"] == "w1/gemma4"
+    assert list(profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6")["provider"]["w1"]["models"]) == ["qwen3.6"]

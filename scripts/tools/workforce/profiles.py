@@ -87,13 +87,14 @@ def implementers(arm):
     return [f"impl-{i}" for i in range(1, (N_WORKERS if arm == "T" else 1) + 1)]
 
 
-def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False):
+def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
     if arm not in ("T", "G", "S"):                   # S: the GPU implementer alone (round 2 §5.2)
         raise ValueError("arm must be T, G or S")
     lead = f"router/{LEAD_ALIAS}"
+    walias = worker_alias or WORKER_ALIAS                      # trial: a worker serving another model
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
     agents = {"general": {"disable": True}, "explore": {"disable": True},
               "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else ""),
@@ -104,12 +105,12 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
         if len(worker_urls) != N_WORKERS:
             raise ValueError(f"arm T needs {N_WORKERS} worker URLs")
         for i, url in enumerate(worker_urls, start=1):
-            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", WORKER_ALIAS, WORKER_CONTEXT)
-            agents[f"impl-{i}"] = _agent(f"w{i}/{WORKER_ALIAS}", IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
+            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
+            agents[f"impl-{i}"] = _agent(f"w{i}/{walias}", IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
     else:
         agents["impl-1"] = _agent(lead, IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
         for i, url in enumerate(worker_urls, start=1):              # trial: a worker serves the reviewer
-            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", WORKER_ALIAS, WORKER_CONTEXT)
+            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
     return {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
             "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
 
