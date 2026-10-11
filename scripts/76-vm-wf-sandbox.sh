@@ -17,11 +17,12 @@
 #   push-bundles B         replace /srv/wf/bundles with bundle dir B (0700) -- the frozen task set
 #   push-run DIR ID        ship a harvested run's replay inputs (run.json, patches/, each task's
 #              record.json and impl-r*.patch) to /srv/wf/replay/ID (0700), byte-compared (round 2 §5.1)
-#   start-run ID T|G [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
+#   start-run ID T|G|S [--w1]  start harness run ID detached in the VM (needs `locked`). Keys come from
 #              root-only files on the host ($WF_KEY_DIR/router.key, worker.key for arm T) and reach
 #              the guest on stdin only -- never argv
 #   start-replay ID SRC    start the offline reviewer replay of /srv/wf/replay/SRC as run ID (any
 #              policy; router key only, on stdin)
+#   warm T|G|S             one untimed warm-up request to the lead (and each worker for T), keys on stdin
 #   run-status ID          the run's unit state, record presence and log tail
 #   harvest ID DEST        pack the finished run in the VM, pull it out in chunks, verify its sha256,
 #              unpack into DEST/ID
@@ -191,7 +192,7 @@ case "$CMD" in
     ;;
   start-run)
     id="${2:-}"; arm="${3:-}"
-    [[ -n "$id" && -n "$arm" ]] || die "usage: 76-vm-wf-sandbox.sh start-run <run-id> <T|G> [--w1]"
+    [[ -n "$id" && -n "$arm" ]] || die "usage: 76-vm-wf-sandbox.sh start-run <run-id> <T|G|S> [--w1]"
     [[ "$(policy_mode)" == "locked" ]] || die "measured runs need the locked policy: run 75-vm-wf-sandbox-firewall.sh locked"
     keys="${WF_KEY_DIR:-/root/wf/keys}"
     [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
@@ -210,6 +211,17 @@ case "$CMD" in
     printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")" \
       | vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay "$id" "$src"
     ;;
+  warm)
+    arm="${2:-}"
+    [[ "$arm" == T || "$arm" == G || "$arm" == S ]] || die "usage: 76-vm-wf-sandbox.sh warm <T|G|S>"
+    keys="${WF_KEY_DIR:-/root/wf/keys}"
+    [[ -s "$keys/router.key" ]] || die "$keys/router.key missing"
+    [[ "$arm" != T || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
+    {
+      printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
+      if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
+    } | vm_run_stdin 900 /usr/local/sbin/wf-run-control warm "$arm"
+    ;;
   run-status)
     vm_run 30 /usr/local/sbin/wf-run-control status "${2:?usage: run-status <run-id>}"
     ;;
@@ -227,5 +239,5 @@ case "$CMD" in
   clear-keys)
     vm_run 30 /usr/local/sbin/wf-run-control clear-keys
     ;;
-  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|start-replay|run-status|harvest|clear-keys" ;;
+  *) die "usage: 76-vm-wf-sandbox.sh provision|proof|validate|status|push-control|push-harness|push-bundles|push-run|start-run|start-replay|warm|run-status|harvest|clear-keys" ;;
 esac

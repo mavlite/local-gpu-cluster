@@ -31,6 +31,8 @@ def guest(tmp_path):
         rec + '"' + sys.executable.replace(chr(92), '/') + '" -c "import json,os,sys; json.dump({\'argv\': sys.argv[1:], '
         '\'router\': os.environ.get(\'WF_ROUTER_KEY\'), \'worker\': os.environ.get(\'WF_WORKER_KEY\')}, '
         'open(os.environ[\'FAKE_DUMP\'], \'w\'))" "$@"\n', newline="\n")
+    # curl: record argv, keep the -K config read from stdin (never argv), answer like a 200 in 0.5 s
+    (fb / "curl").write_text(rec + 'cat >> "$FAKE_CURL_CFG"; printf "200 0.5"\n', newline="\n")
     for f in fb.iterdir():
         f.chmod(0o755)
     d = {k: tmp_path / k for k in ("runs", "keys", "out", "replay")}
@@ -38,7 +40,8 @@ def guest(tmp_path):
         p.mkdir()
     env = dict(os.environ, FAKEBIN=fb.as_posix(), WF_RC_RUNS=d["runs"].as_posix(), WF_RC_KEYS=d["keys"].as_posix(),
                WF_RC_OUT=d["out"].as_posix(), WF_RC_BIN=(fb / "wf-run").as_posix(), WF_RC_REPLAY=d["replay"].as_posix(),
-               FAKE_DUMP=(tmp_path / "dump.json").as_posix(), FAKE_ACTIVE=(tmp_path / "active").as_posix())
+               FAKE_DUMP=(tmp_path / "dump.json").as_posix(), FAKE_ACTIVE=(tmp_path / "active").as_posix(),
+               FAKE_CURL_CFG=(tmp_path / "curl-cfg.txt").as_posix())
 
     def run(args, stdin=""):
         prog = ('fb="$FAKEBIN"; command -v cygpath >/dev/null && fb="$(cygpath -u "$FAKEBIN")"; '
@@ -185,3 +188,41 @@ def test_start_replay_refuses_bad_input_before_starting_anything(guest, args, st
     r = run(args, stdin)
     assert r.returncode != 0 and msg in r.stderr, r.stderr
     assert "systemd-run" not in log() and not list(d["keys"].iterdir())
+
+
+def test_warm_sends_one_keyed_request_to_the_lead_and_each_worker_with_keys_off_argv(guest):
+    # Round 2 §5.2: one untimed warm-up per worker and one to the lead before each run's clock starts.
+    run, log, _, tmp = guest
+    r = run("warm T", KEYS_T)
+    assert r.returncode == 0, r.stderr
+    curls = [c for c in log().splitlines() if c.startswith("curl ")]
+    assert len(curls) == 4 and all("-K -" in c and "secret" not in c for c in curls)
+    assert "http://192.168.6.153:8000/v1/chat/completions" in curls[0]
+    assert [c.split("http://")[1].split(":")[0] for c in curls[1:]] == ["172.16.10.205", "172.16.10.206", "172.16.10.207"]
+    cfg = (tmp / "curl-cfg.txt").read_text()
+    assert cfg.count("Authorization: Bearer router-secret-1") == 1 and cfg.count("Authorization: Bearer worker-secret-2") == 3
+    assert "secret" not in r.stdout + r.stderr
+    assert [l.split()[1] for l in r.stdout.splitlines() if l.startswith("warm ")] == ["lead", "172.16.10.205", "172.16.10.206", "172.16.10.207"]
+
+
+def test_warm_for_g_and_s_touches_only_the_lead(guest):
+    run, log, _, _ = guest
+    assert run("warm G", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("warm S", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert len([c for c in log().splitlines() if c.startswith("curl ")]) == 2
+
+
+def test_start_accepts_arm_s_with_the_router_key_only(guest):
+    # Round 2 §5.2: arm S (GPU implementer alone) is a run like G from the controller's point of view.
+    run, _, _, tmp = guest
+    assert run("start s-1 S", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec s-1 S").returncode == 0
+    dump = json.loads((tmp / "dump.json").read_text())
+    assert "--arm" in dump["argv"] and dump["argv"][dump["argv"].index("--arm") + 1] == "S"
+    assert "--worker" not in dump["argv"] and dump["worker"] is None
+
+
+def test_warm_refuses_arm_t_without_a_worker_key(guest):
+    run, log, _, _ = guest
+    r = run("warm T", "WF_ROUTER_KEY=r\n")
+    assert r.returncode != 0 and "WF_WORKER_KEY" in r.stderr and "curl" not in log()

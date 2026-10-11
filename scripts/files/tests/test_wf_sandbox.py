@@ -220,3 +220,15 @@ def test_76_start_replay_pipes_the_router_key_only_and_needs_no_policy():
     assert "printf 'WF_ROUTER_KEY=%s" in block and "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay" in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
     assert "start-replay" in usage and "start-replay" in "\n".join(lines[:34])
+
+
+def test_76_warm_pipes_the_keys_like_start_run():
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "warm)")
+    block = "\n".join(lines[start:start + 11])
+    assert block.rstrip().endswith(";;") and "| vm_run_stdin 900 /usr/local/sbin/wf-run-control warm" in block
+    assert "printf 'WF_ROUTER_KEY=%s" in block and "printf 'WF_WORKER_KEY=%s" in block
+    for line in block.splitlines():
+        if "vm_run" in line:
+            assert "key" not in line.replace("worker.key", "").replace("router.key", "") or "printf" in line
