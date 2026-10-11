@@ -1,0 +1,73 @@
+{
+ "phase": "R2 (round-2 window)",
+ "date": "2026-10-11",
+ "spec": "docs/superpowers/specs/2026-10-10-workforce-review-efficiency-design.md#5",
+ "plan": "docs/superpowers/plans/2026-10-10-workforce-review-efficiency.md (Task 11)",
+ "status": "drafted after replay-1; the window itself awaits the user's go-ahead",
+ "tasks": {
+  "manifest": "54c494ae38dcfd2adb7781257a65969c84a7986de5db988f17a770c2df7bb146",
+  "archive": "/root/wf/w2-frozen.tgz",
+  "archive_sha256": "dcf1813f68d1eed17b65960c18905d7563e99ac0ea40e8444fc515e8cef4695a",
+  "n": 16,
+  "selection": "docs/superpowers/workforce/w2/selection.md",
+  "reuse": "the same frozen W2 set as W3; nothing added, nothing dropped"
+ },
+ "worker_config": {
+  "id": "C2",
+  "line": "C2 /opt/bench/src/ik/build/bin/llama-server -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rtr -cram 256 -ctx-ckpt 8 --temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0 {\"enable_thinking\":false}",
+  "unchanged_since": "W1/W3 (docs/superpowers/workforce/results-w1.json)"
+ },
+ "arms": {
+  "S": "GPU implementer alone (qwen3.8-nothink via the router, scoped key), no review; graded like --w1",
+  "G": "lead + 1 GPU implementer (both qwen3.8-nothink via the router, scoped key)",
+  "T": "lead (qwen3.8-nothink) + 3 CPU workers (llmbench01-03, C2)"
+ },
+ "schedule": ["S", "G", "T", "T", "G", "S"],
+ "run_ids": ["r2-1-s", "r2-2-g", "r2-3-t", "r2-4-t", "r2-5-g", "r2-6-s"],
+ "runs_per_arm": 2,
+ "no_added_runs": true,
+ "no_sequential_stopping": true,
+ "warm_up": "before each run's before-stamp: one untimed 16-token request to the lead through the router and, for T, one to each worker (`76 warm <arm>` -> `wf-run-control warm`), recorded in /root/wf/r2.log, outside the stamps; workers cold-start once per window and stay up",
+ "layout": "3 x 128K chat with embed + rerank loaded (wf-window.sh open); restart timer, redteam watcher/idle, fast server, rag-refresh, swap webhook stopped; no harness edit between runs",
+ "validity": "runmeta.validity (same boot, router and chat invocations; 3-slot window open at both stamps) + harness run.json valid; an invalid run stays in the schedule and is not repeated",
+ "harness": {
+  "review_steps": 20,
+  "verdict_steps": 3,
+  "impl_steps": 60,
+  "fix_steps": 60,
+  "repo_head": "feat/wf-experiment 7e67120 (main 2cc6075 + warm/arm-S/pack fixes + replay-1.json); the merge commit is recorded in results-r2.json",
+  "vm_run_path_sha256": "35542b4726b912b6ce084780fec842fcc41aeb127d54ea451460bd3f36603409 (sorted sha256 manifest of /opt/workforce/workforce, byte-compared by 76 push-harness; workforce/ unchanged since e9557da)",
+  "opencode_config_sha256": "ab3f2abdf05ece6e44ec25e27307ba826f9bc376e17d9fde395303835f97eb18 (G/replay config; the T config adds the three worker providers and is hashed into results-r2.json)",
+  "opencode": "1.18.34"
+ },
+ "models": {
+  "lead_alias": "qwen3.8-nothink: backend qwen3.8, enable_thinking false, strip_thinking true, sampling alias_defaults.QWEN38_NOTHINK_SAMPLING (router app.py line 489 at 2cc6075)",
+  "chat_server": "llama.cpp build 11026 (b49650adb); Qwen3.8-27B UD-Q6_K_XL; 3 slots x 128K (ctx 393216, parallel 3), q8_0 KV, tensor split 1,1, draft-mtp n-max 3, cache-ram 16384, flash-attn auto",
+  "workers": "Qwen3.6-35B-A3B-MTP-UD-IQ4_XS on ik llama-server, C2 line above"
+ },
+ "rule": {
+  "pooled_per_arm": "accepted tasks per hour over the summed clock (implementer-accepted for G and T, accepted for S), makespan as the mean run, GPU-hours per accepted task (chat-server ms / accepted), worker-hours per accepted task for T, per-task acceptance table",
+  "ratio": "T accepted-per-hour / max(S, G)",
+  "build": "ratio >= 1.5 AND T has the shortest makespan AND T's accepted-per-run >= best arm - 1",
+  "no_s_alone": "S has the shortest makespan at acceptance >= T's -> no: run the GPU implementer alone; the review loop stays only as an optional quality gate (checked before the marginal band)",
+  "marginal": "ratio in [1.2, 1.5) OR T's makespan within 10% of the shortest -> the user decides, with GPU-hours per accepted in front of them",
+  "no": "otherwise",
+  "reviewer_health": "per arm (G, T): reviews still without a verdict after the verdict turn > 2 -> inconclusive, fix the reviewer, rerun all arms; capped first reviews and timeouts are reported per arm, not decisive (ruling: the spec's 'capped after the verdict turn' read as 'still without a verdict'; every capped review would make the window inconclusive at W3's rate)",
+  "bootstrap": "paired per-task bootstrap CI (n_boot 10000, seed 20261010) of T's bottleneck seconds per accepted task (task wall / 3) minus the better of S/G's (task wall), over tasks accepted in every run of both arms: REPORTED, not decisive",
+  "user_lane": "probe p50 reported per run (wf-user-probe.py, 60 s); not a decision clause in round 2 (user: chat usability during runs does not matter)",
+  "code": "analysis.round2_decide via `cli.py w3 --round2`; bar 1.5, marginal 1.2, R2_NONE_LIMIT 2"
+ },
+ "void": "tasks the transcript scan finds tainted, applied to every run of all arms (cli.py w3 --round2 --void)",
+ "probe": "wf-user-probe.py in LXC 153, owner key, 60 s interval; 30-sample idle baseline per window",
+ "budget_h": 14,
+ "stop_at_h": 14,
+ "prior_observations_disclosed": [
+  "W3 (old reviewer): one T run vs a partial G baseline gave 1.39x throughput (marginal under the old 2x rule), equal quality, user lane 1.74x; 7 of 27 reviews capped with no verdict",
+  "replay-1 (new reviewer on W3's 27 rounds): 0 of 7 capped rounds still NONE, agreement 16/20, median steps 10 vs 14, capped 1 vs 7, tokens per review -7%; one 3-step ACCEPT missed an arity bug (docs/superpowers/workforce/replay-1.json)",
+  "GPU-solo baseline from the W3 archives: arm S has never been run under this harness; its first measurement is this window"
+ ],
+ "watch_items": [
+  "any ACCEPT under 5 reviewer steps is read by hand before the result is reported",
+  "per-arm reviewer step distributions and verdict-turn counts go into results-r2.json"
+ ]
+}

@@ -888,7 +888,7 @@ def test_a_leak_in_the_verdict_turn_taints(setup):
   Plan D Task 3 Step 2; push the W2 bundles (`76 push-bundles /root/wf/w2/bundles`); push the
   harvested run `/root/wf/runs/w3-2-t` into the VM at `/srv/wf/replay/w3-2-t` (new `76 push-run`
   or reuse `push-bundles`' tar path with a destination argument, test-first).
-- [ ] **Step 2:** In the VM: `wf-run replay-reviews --run /srv/wf/replay/w3-2-t --bundles /srv/wf/bundles --out /srv/wf/runs/replay-1 --router http://192.168.6.153:8000/v1 --grader docker:wf-grader:1 --agent-user-prefix wf`, started detached via `wf-run-control`-style `systemd-run` (add `start-replay` to `wf-run-control.sh` test-first, keys on stdin as `start-run`). The chat runs in its **normal 1-slot layout**: the replay is one reviewer at a time.
+- [ ] **Step 2:** In the VM: `wf-run replay-reviews --run /srv/wf/replay/w3-2-t --bundles /srv/wf/bundles --out /srv/wf/runs/replay-1 --router http://192.168.6.153:8000/v1 --grader docker:wf-grader:1 --agent-user-prefix wf`, started detached via `wf-run-control`-style `systemd-run` (add `start-replay` to `wf-run-control.sh` test-first, keys on stdin as `start-run`). The chat must be in the **window layout** (`wf-window.sh open`, 3 slots): the router's reserved user lane admits scoped keys only when more than one slot exists, so the 1-slot layout refuses every reviewer call with `503 workforce_lane_closed` (learned 2026-10-11). The replay is still one reviewer at a time.
 - [ ] **Step 3:** Harvest `replay-1`; compute the three gates: `new_none_after_turn ≤ 1` of the old
   NONE rounds replayed, `agreement ≥ 0.8` on the rounds that had a verdict, and median steps and
   prompt tokens against W3's (prompt tokens from `journalctl -u llamacpp-chat` over the replay window).

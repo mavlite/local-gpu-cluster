@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# wf-run-control.sh start <run-id> <T|G> [--w1] | start-replay <run-id> <src-run-id> | status <run-id> |
-#                   pack <run-id> | clear-keys
+# wf-run-control.sh start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> | warm <T|G|S> |
+#                   status <run-id> | pack <run-id> | clear-keys
 #
 # Runs INSIDE the workforce sandbox VM as root (installed as /usr/local/sbin/wf-run-control by
 # 76-vm-wf-sandbox.sh); the host drives it through the guest agent. Plan D.
@@ -14,8 +14,13 @@
 #           stdin (a worker key line is refused), source /srv/wf/replay/<src-run-id> (pushed by the
 #           host's 76 push-run), output /srv/wf/runs/<run-id> under the same unit name, so status
 #           and pack work unchanged.
+#   warm    one 16-token request to the lead (through the router) and, for arm T, to each worker, with
+#           the keys from stdin (round 2 §5.2: untimed warm-ups before a run's clock starts). Prints
+#           `warm <endpoint> <http code> <seconds>` per endpoint; exit 1 if any is not 200. The keys
+#           reach curl through a -K config on stdin, never argv.
 #   status  the unit state, whether run.json exists, and the log's tail.
-#   pack    once the run has finished, /srv/wf/runs/<id> + its log into /root/wf-out/<id>.tgz;
+#   pack    once the run has finished (run.json, or replay.json for a replay), /srv/wf/runs/<id> + its log
+#           into /root/wf-out/<id>.tgz;
 #           prints the size and sha256 so the host can verify its copy.
 #   clear-keys  remove every leftover key file (window teardown).
 # Run ids are single-use. Keys are never on a command line and never printed.
@@ -28,6 +33,8 @@ WF_RUN="${WF_RC_BIN:-/usr/local/sbin/wf-run}"
 BUNDLES="${WF_RC_BUNDLES:-/srv/wf/bundles}"
 REPLAY="${WF_RC_REPLAY:-/srv/wf/replay}"
 ROUTER_URL="${WF_RC_ROUTER:-http://192.168.6.153:8000/v1}"
+LEAD_ALIAS="${WF_RC_LEAD_ALIAS:-qwen3.8-nothink}"
+WORKER_ALIAS="${WF_RC_WORKER_ALIAS:-qwen3.6}"
 WORKERS="${WF_RC_WORKERS:-172.16.10.205 172.16.10.206 172.16.10.207}"
 WORKER_PORT=8090
 GRADER=docker:wf-grader:1
@@ -38,7 +45,7 @@ die() { echo "[wf-run-control] FATAL: $*" >&2; exit 1; }
 log() { echo "[wf-run-control] $*"; }
 
 check_id() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]] || die "run id must match [a-z0-9][a-z0-9._-]{0,40}"; }
-check_arm() { [[ "${1:-}" == T || "${1:-}" == G ]] || die "arm must be T or G"; }
+check_arm() { [[ "${1:-}" == T || "${1:-}" == G || "${1:-}" == S ]] || die "arm must be T, G or S"; }
 check_opts() {
   local o
   for o in "$@"; do [[ "$o" == --w1 ]] || die "unknown option '$o' (only --w1)"; done
@@ -92,7 +99,7 @@ cmd_start() {
   check_opts "$@"
   [ -e "$RUNS/$id" ] && die "run $id exists -- run ids are single-use"
   read_keys
-  [ "$arm" = G ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
+  [ "$arm" != T ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
   write_keys "$id"
   start_unit "$id" _exec "$id" "$arm" "$@"
   log "started wf-run-$id (arm $arm${*:+ $*}); log $RUNS/$id.log"
@@ -146,11 +153,34 @@ cmd_exec() {
   exec "$WF_RUN" "${args[@]}" "$@"
 }
 
+# warm_one <label> <url> <key> <model>: one short completion; prints "warm <label> <code> <seconds>".
+warm_one() {
+  local label="$1" url="$2" key="$3" model="$4" body res
+  body=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with the single word ready."}],"max_tokens":16,"temperature":0}' "$model")
+  res=$(printf 'header = "Authorization: Bearer %s"\n' "$key" \
+        | curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 900 -K - \
+            -H "Content-Type: application/json" -X POST --data "$body" "$url/chat/completions" || echo "000 0")
+  echo "warm $label $res"
+  [ "${res%% *}" = 200 ]
+}
+
+cmd_warm() {
+  local arm="${1:-}" w ok=0
+  [[ "$arm" == T || "$arm" == G || "$arm" == S ]] || die "arm must be T, G or S"
+  read_keys
+  [ "$arm" != T ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
+  warm_one lead "$ROUTER_URL" "$KEY_ROUTER" "$LEAD_ALIAS" || ok=1
+  if [ "$arm" = T ]; then
+    for w in $WORKERS; do warm_one "$w" "http://$w:$WORKER_PORT/v1" "$KEY_WORKER" "$WORKER_ALIAS" || ok=1; done
+  fi
+  return $ok
+}
+
 cmd_status() {
   local id="${1:-}"
   check_id "$id"
   echo "unit: $(systemctl is-active "wf-run-$id" 2>/dev/null || true)"
-  if [ -f "$RUNS/$id/run.json" ]; then echo "record: present"; else echo "record: absent"; fi
+  if [ -f "$RUNS/$id/run.json" ] || [ -f "$RUNS/$id/replay.json" ]; then echo "record: present"; else echo "record: absent"; fi
   if [ -f "$RUNS/$id.log" ]; then tail -n 3 "$RUNS/$id.log"; fi
 }
 
@@ -158,7 +188,7 @@ cmd_pack() {
   local id="${1:-}"
   check_id "$id"
   [ "$(systemctl is-active "wf-run-$id" 2>/dev/null || true)" = active ] && die "wf-run-$id is still running"
-  [ -f "$RUNS/$id/run.json" ] || die "no $RUNS/$id/run.json -- the run did not finish"
+  [ -f "$RUNS/$id/run.json" ] || [ -f "$RUNS/$id/replay.json" ] || die "no $RUNS/$id/run.json (or replay.json) -- the run did not finish"
   mkdir -p "$OUT"
   local items=("$id")
   [ -f "$RUNS/$id.log" ] && items+=("$id.log")
@@ -171,8 +201,9 @@ case "${1:-}" in
   start-replay) shift; cmd_start_replay "$@" ;;
   _exec) shift; cmd_exec "$@" ;;
   _exec_replay) shift; cmd_exec_replay "$@" ;;
+  warm) shift; cmd_warm "$@" ;;
   status) shift; cmd_status "$@" ;;
   pack) shift; cmd_pack "$@" ;;
   clear-keys) rm -f "$KEYS"/*.env; log "key files removed" ;;
-  *) echo "usage: $0 start <run-id> <T|G> [--w1] | start-replay <run-id> <src-run-id> | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
+  *) echo "usage: $0 start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> | warm <T|G|S> | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
 esac

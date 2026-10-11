@@ -114,9 +114,9 @@ frozen W2 tasks (manifest `54c494ae…`), worker configuration C2, the implement
 
 ## 5. Measurement (round 2)
 
-### 5.1 Offline replay first (no window, a few GPU-hours)
+### 5.1 Offline replay first (window layout, no workers; a few GPU-hours)
 
-The 27 harvested W3 review rounds are replayed through the new reviewer: same packets rebuilt from
+The 27 harvested W3 review rounds are replayed through the new reviewer (the chat in the 3-slot window layout, because scoped keys get no slot in the 1-slot layout; no workers, no probe): same packets rebuilt from
 the harvested patches with §3.2, `REVIEW_STEPS = 20`, the §3.1 prompt and verdict turn. Three
 questions, each with a gate:
 - **Verdicts:** at most **1 of the 7** previously capped rounds still ends without a verdict after

@@ -220,3 +220,29 @@ def test_76_start_replay_pipes_the_router_key_only_and_needs_no_policy():
     assert "printf 'WF_ROUTER_KEY=%s" in block and "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay" in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
     assert "start-replay" in usage and "start-replay" in "\n".join(lines[:34])
+
+
+def test_76_warm_pipes_the_keys_like_start_run():
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "warm)")
+    block = "\n".join(lines[start:start + 11])
+    assert block.rstrip().endswith(";;") and "| vm_run_stdin 900 /usr/local/sbin/wf-run-control warm" in block
+    assert "printf 'WF_ROUTER_KEY=%s" in block and "printf 'WF_WORKER_KEY=%s" in block
+    for line in block.splitlines():
+        if "vm_run" in line:
+            assert "key" not in line.replace("worker.key", "").replace("router.key", "") or "printf" in line
+
+
+def test_wf_r2_runs_the_preregistered_order_with_a_warm_up_before_each_stamp():
+    """Round 2 §5.2: order S G T T G S, one untimed warm-up (lead + workers for T) before the
+    before-stamp of every run, arm from the run-id suffix, keys never on a command line."""
+    with open(os.path.join(FILES, "wf-r2.sh"), encoding="utf-8") as f:
+        text = f.read()
+    assert "RUNS=(r2-1-s r2-2-g r2-3-t r2-4-t r2-5-g r2-6-s)" in text
+    body = text[text.index("for id in"):]
+    assert body.index("76-vm-wf-sandbox.sh warm") < body.index('stamp "$STAMPS" "before-$id"') < body.index("start-run")
+    assert 'arm=$(echo "${id##*-}" | tr a-z A-Z)' in text
+    for line in text.splitlines():
+        assert "router.key" not in line or line.strip().startswith(("[", "#"))
+
