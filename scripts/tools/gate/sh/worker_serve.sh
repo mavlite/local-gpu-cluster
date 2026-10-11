@@ -52,7 +52,10 @@ KW_THINK='{"enable_thinking":true,"preserve_thinking":true}'
 # is the sweep's winner.
 G4_MODEL="${GATE_G4_MODEL:-/models/gemma-4-26B_q4_0-it.gguf}"
 G4_DRAFT="${GATE_G4_DRAFT:-/models/mtp-gemma-4-26B-A4B-it.gguf}"
-G4_BASE="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0"
+# Sweep 2026-10-11 (llmbench01, 11.5K-token packet): FA on + q8 KV 395 t/s prefill / 18.4 t/s gen; FA off
+# halves both; f16 KV -16%; threads and -ub indifferent; MTP n_max=3 p_min=0.5 gen 31 t/s (77% accepted)
+# at -20% prefill; -rea off is required (the template thinks by default and the harness reads content).
+G4_BASE="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rea off"
 G4_MTP="-md $G4_DRAFT --spec-type mtp:n_max=3,p_min=0.5"
 GEMMA="--temp 1.0 --top-p 0.95 --top-k 64 --presence-penalty 0"
 
