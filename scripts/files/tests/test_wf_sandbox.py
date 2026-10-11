@@ -214,10 +214,12 @@ def test_76_start_replay_pipes_the_router_key_only_and_needs_no_policy():
     with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
         lines = f.read().splitlines()
     start = next(i for i, l in enumerate(lines) if l.strip() == "start-replay)")
-    block = "\n".join(lines[start:start + 8])
+    block = "\n".join(lines[start:start + 11])
     assert block.rstrip().endswith(";;")
-    assert '[[ -s "$keys/router.key" ]] || die' in block and "worker.key" not in block and "policy_mode" not in block
-    assert "printf 'WF_ROUTER_KEY=%s" in block and "| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay" in block
+    assert '[[ -s "$keys/router.key" ]] || die' in block and "policy_mode" not in block
+    assert "printf 'WF_ROUTER_KEY=%s" in block and '| vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay "$id" "$src" "${@:4}"' in block
+    # the worker key goes only when a --worker option is given (reviewer-model trial), and never on argv
+    assert 'if [[ " ${*:4} " == *" --worker="* ]]; then printf \'WF_WORKER_KEY=%s' in block
     usage = next(l for l in lines if l.startswith("  *) die \"usage:"))
     assert "start-replay" in usage and "start-replay" in "\n".join(lines[:34])
 

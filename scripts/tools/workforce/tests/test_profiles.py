@@ -110,3 +110,14 @@ def test_arm_s_is_the_gpu_implementer_alone_on_the_router():
     assert cfg["agent"]["impl-1"]["model"] == "router/qwen3.8-nothink"
     assert {"reviewer", "reviewer-verdict", "fixer"} <= set(cfg["agent"])
     assert profiles.implementers("S") == ["impl-1"] and profiles.keys_for("S") == ("WF_ROUTER_KEY",)
+
+
+def test_reviewer_model_override_puts_only_the_reviewer_on_a_worker():
+    # Reviewer-model trial: the reviewer (and its verdict turn) on a worker-served candidate model;
+    # implementer and fixer stay on the lead; the worker provider exists without implementer agents.
+    cfg = profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6")
+    assert set(cfg["provider"]) == {"router", "w1"} and "qwen3.6" in cfg["provider"]["w1"]["models"]
+    assert cfg["agent"]["reviewer"]["model"] == cfg["agent"]["reviewer-verdict"]["model"] == "w1/qwen3.6"
+    assert cfg["agent"]["fixer"]["model"] == cfg["agent"]["impl-1"]["model"] == "router/qwen3.8-nothink"
+    assert sorted(a for a in cfg["agent"] if a.startswith("impl-")) == ["impl-1"]
+    assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["model"] == "router/qwen3.8-nothink"

@@ -38,13 +38,15 @@ def resolve_opencode(env):
     return shutil.which("opencode")
 
 
-def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None):
+def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, reviewer_model=None,
+                  keys=None):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
     Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
-    cfg = profiles.install(os.path.join(oc_dir, "cfg"), profiles.build_config(arm, router_url, worker_urls))
+    cfg = profiles.install(os.path.join(oc_dir, "cfg"),
+                           profiles.build_config(arm, router_url, worker_urls, reviewer_model=reviewer_model))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
-    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=profiles.keys_for(arm)),
+    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=keys or profiles.keys_for(arm)),
                        launcher=launcher)
 
 
@@ -258,6 +260,8 @@ def main(argv=None, env=None):
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>' (runs the visible tests)")
     p.add_argument("--agent-user-prefix", help="run the reviewer as <prefix>-lead (needs the docker grader)")
     p.add_argument("--journal", help="llama-server journal captured over the replay: prompt-token totals")
+    p.add_argument("--reviewer-model", help="reviewer-model trial: provider/model for the reviewer, e.g. w1/qwen3.6")
+    p.add_argument("--worker", action="append", default=[], help="worker URL(s) that serve the trial reviewer")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -324,6 +328,8 @@ def main(argv=None, env=None):
     elif a.cmd == "replay-reviews":
         if not env.get("WF_ROUTER_KEY"):
             raise SystemExit("WF_ROUTER_KEY must be set")
+        if a.worker and not env.get("WF_WORKER_KEY"):
+            raise SystemExit("WF_WORKER_KEY must be set when --worker serves the reviewer")
         if a.agent_user_prefix and not a.grader.startswith("docker:"):
             raise SystemExit("--agent-user-prefix needs --grader docker:<image>: the local grader would run "
                              "agent code as the harness user (root on the VM)")
@@ -334,13 +340,15 @@ def main(argv=None, env=None):
         if a.agent_user_prefix:
             assert_private(a.bundles)
             launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
-        opencode = build_opencode("G", a.out + ".opencode", a.router, [], [oc_bin], env, launcher=launcher)
+        opencode = build_opencode("G", a.out + ".opencode", a.router, a.worker, [oc_bin], env, launcher=launcher,
+                                  reviewer_model=a.reviewer_model,
+                                  keys=profiles.KEY_ENV if a.worker else None)
         journal = None
         if a.journal:
             with open(a.journal, encoding="utf-8", errors="replace") as f:
                 journal = f.read()
         out = replay.replay(a.run, a.bundles, opencode, a.out, make_grader(a.grader), journal_text=journal,
-                            own=own)
+                            own=own, reviewer_model=a.reviewer_model)
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "scan":

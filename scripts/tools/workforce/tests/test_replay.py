@@ -169,3 +169,11 @@ def test_the_harness_imports_in_the_vm_where_the_gate_package_is_absent():
     r = subprocess.run([sys.executable, "-c", code, os.path.join(os.path.dirname(__file__), "..")],
                        capture_output=True, text=True)
     assert r.returncode == 0 and "imports-ok" in r.stdout, r.stderr[-800:]
+
+
+def test_replay_records_the_reviewer_model(tmp_path):
+    run, bundles = harvested_run(tmp_path)
+    fake = FakeOpencode({"a": {"review": ["ACCEPT"]}, "b": {"review": ["ACCEPT"]}})
+    out = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner(), reviewer_model="w1/qwen3.6")
+    assert out["reviewer_model"] == "w1/qwen3.6"
+    assert json.load(open(tmp_path / "out" / "replay.json"))["reviewer_model"] == "w1/qwen3.6"
