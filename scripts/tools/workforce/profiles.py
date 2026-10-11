@@ -43,6 +43,10 @@ Your reply must START with exactly one of these two forms:
 ACCEPT
 REVISE: <specific, actionable feedback for the engineer>"""
 
+READ_FIRST_RULE = ("Before you decide, read at least one changed function from the tree with the read "
+                   "tool (a file named in the diff) and base the verdict on what you read, never on the "
+                   "packet alone.")
+
 FIXER_PROMPT = """Another engineer could not satisfy a request after two rounds of review. Finish the
 work yourself in this directory. The attached packet holds the request, the current diff, the test
 output and the review feedback so far. Edit only the files the request lists as in scope, do not edit
@@ -83,7 +87,7 @@ def implementers(arm):
     return [f"impl-{i}" for i in range(1, (N_WORKERS if arm == "T" else 1) + 1)]
 
 
-def build_config(arm, router_url, worker_urls, reviewer_model=None):
+def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
@@ -92,7 +96,8 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None):
     lead = f"router/{LEAD_ALIAS}"
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
     agents = {"general": {"disable": True}, "explore": {"disable": True},
-              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT, REVIEW_PERMS, REVIEW_STEPS),
+              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else ""),
+                                 REVIEW_PERMS, REVIEW_STEPS),
               "reviewer-verdict": _agent(reviewer_model or lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
               "fixer": _agent(lead, FIXER_PROMPT, WRITE_PERMS, FIX_STEPS)}
     if arm == "T":

@@ -121,3 +121,15 @@ def test_reviewer_model_override_puts_only_the_reviewer_on_a_worker():
     assert cfg["agent"]["fixer"]["model"] == cfg["agent"]["impl-1"]["model"] == "router/qwen3.8-nothink"
     assert sorted(a for a in cfg["agent"] if a.startswith("impl-")) == ["impl-1"]
     assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["model"] == "router/qwen3.8-nothink"
+
+
+def test_read_first_rule_is_added_to_the_reviewer_prompt_only_when_asked():
+    # Trial 2: one-step verdicts hallucinated bugs; the rule forces at least one read of a changed function.
+    plain = profiles.build_config("G", ROUTER, [])["agent"]
+    ruled = profiles.build_config("G", ROUTER, [], read_first=True)["agent"]
+    assert profiles.READ_FIRST_RULE not in plain["reviewer"]["prompt"]
+    assert ruled["reviewer"]["prompt"].endswith(profiles.READ_FIRST_RULE)
+    assert ruled["reviewer"]["prompt"].startswith(profiles.REVIEWER_PROMPT.split("Your reply must START")[0][:40])
+    assert "Your reply must START" in ruled["reviewer"]["prompt"]           # the verdict format stays last-but-one
+    assert ruled["reviewer-verdict"]["prompt"] == plain["reviewer-verdict"]["prompt"]   # the tools-off turn cannot read
+    assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]

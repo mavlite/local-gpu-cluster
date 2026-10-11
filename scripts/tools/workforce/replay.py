@@ -165,7 +165,7 @@ def _round_task(p, rec, k, bundle, patch, out_dir):
 
 
 def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journal_text=None, own=None,
-           reviewer_model=None):
+           reviewer_model=None, read_first=False):
     todo, skipped, bundle_dirs = _plan(run_dir, bundles_root)
     lim = limits or pipeline.Limits()
     lim.max_rounds = 0                                 # every non-ACCEPT ends the round: no rework here
@@ -196,7 +196,8 @@ def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journa
                             if judged else None),
               "median_steps": statistics.median([r["steps"] for r in rounds]) if rounds else None,
               **_journal_totals(journal_text)}
-    out = {"run": os.path.abspath(run_dir), "reviewer_model": reviewer_model, "rounds": rounds, "skipped": skipped,
+    out = {"run": os.path.abspath(run_dir), "reviewer_model": reviewer_model, "read_first": read_first,
+           "rounds": rounds, "skipped": skipped,
            "totals": totals}
     with open(os.path.join(out_dir, "replay.json"), "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1)

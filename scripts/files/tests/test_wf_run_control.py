@@ -268,3 +268,11 @@ def test_start_replay_options_are_validated(guest, args, stdin, msg):
     r = run(args, stdin)
     assert r.returncode != 0 and msg in r.stderr, r.stderr
     assert "systemd-run" not in log() and not list(d["keys"].iterdir())
+
+
+def test_start_replay_accepts_the_read_first_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-3 w3-2-t --read-first", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-3 w3-2-t --read-first").returncode == 0
+    assert "--read-first" in json.loads((tmp / "dump.json").read_text())["argv"]

@@ -156,11 +156,11 @@ def test_bundle_validate_can_use_the_docker_grader(tmp_path, repo, monkeypatch, 
 def test_replay_reviews_runs_only_the_reviewer_with_the_lead_config(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None):
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, **kw):
         seen["build"] = (arm, router, workers, launcher)
         return "OC"
 
-    def fake_replay(run, bundles, opencode, out, grader, limits=None, journal_text=None, own=None, reviewer_model=None):
+    def fake_replay(run, bundles, opencode, out, grader, limits=None, journal_text=None, own=None, reviewer_model=None, **kw):
         seen.update(run=run, bundles=bundles, opencode=opencode, out=out, grader=type(grader).__name__,
                     journal=journal_text, own=own)
         return {"totals": {"old_none": 0}}
@@ -272,7 +272,7 @@ def test_round2_runs_carry_the_reviewer_health_fields(tmp_path):
 def test_replay_reviews_with_a_worker_reviewer_needs_the_worker_key_and_passes_both(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None):
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, **kw):
         seen.update(arm=arm, workers=workers, reviewer_model=reviewer_model, keys=keys)
         return "OC"
 
@@ -286,3 +286,18 @@ def test_replay_reviews_with_a_worker_reviewer_needs_the_worker_key_and_passes_b
     assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
     assert seen == {"arm": "G", "workers": ["http://w/v1"], "reviewer_model": "w1/qwen3.6", "keys": ("WF_ROUTER_KEY", "WF_WORKER_KEY")}
     assert json.loads(capsys.readouterr().out)["reviewer_model"] == "w1/qwen3.6"
+
+
+def test_replay_reviews_read_first_flag_reaches_the_config_and_the_record(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, read_first=False):
+        seen["read_first"] = read_first
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: {"totals": {}, "read_first": k.get("read_first")})
+    args = ["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+            "--router", "http://x/v1", "--read-first"]
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["read_first"] is True and json.loads(capsys.readouterr().out)["read_first"] is True
