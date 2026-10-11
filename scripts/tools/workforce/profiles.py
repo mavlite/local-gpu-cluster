@@ -83,14 +83,17 @@ def implementers(arm):
     return [f"impl-{i}" for i in range(1, (N_WORKERS if arm == "T" else 1) + 1)]
 
 
-def build_config(arm, router_url, worker_urls):
+def build_config(arm, router_url, worker_urls, reviewer_model=None):
+    """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
+    verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
+    workers on a non-T arm (providers only, no implementer agents)."""
     if arm not in ("T", "G", "S"):                   # S: the GPU implementer alone (round 2 §5.2)
         raise ValueError("arm must be T, G or S")
     lead = f"router/{LEAD_ALIAS}"
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
     agents = {"general": {"disable": True}, "explore": {"disable": True},
-              "reviewer": _agent(lead, REVIEWER_PROMPT, REVIEW_PERMS, REVIEW_STEPS),
-              "reviewer-verdict": _agent(lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
+              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT, REVIEW_PERMS, REVIEW_STEPS),
+              "reviewer-verdict": _agent(reviewer_model or lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
               "fixer": _agent(lead, FIXER_PROMPT, WRITE_PERMS, FIX_STEPS)}
     if arm == "T":
         if len(worker_urls) != N_WORKERS:
@@ -100,6 +103,8 @@ def build_config(arm, router_url, worker_urls):
             agents[f"impl-{i}"] = _agent(f"w{i}/{WORKER_ALIAS}", IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
     else:
         agents["impl-1"] = _agent(lead, IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
+        for i, url in enumerate(worker_urls, start=1):              # trial: a worker serves the reviewer
+            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", WORKER_ALIAS, WORKER_CONTEXT)
     return {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
             "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
 

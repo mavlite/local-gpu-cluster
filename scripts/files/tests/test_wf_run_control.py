@@ -238,3 +238,33 @@ def test_pack_accepts_a_replay_record_in_place_of_run_json(guest):
     with tarfile.open(d["out"] / "rp-1.tgz") as t:
         assert "rp-1/replay.json" in t.getnames()
     assert "record: present" in run("status rp-1").stdout
+
+
+def test_start_replay_passes_reviewer_model_and_worker_options_and_then_takes_a_worker_key(guest):
+    # Reviewer-model trial: the candidate reviewer is served by a worker, so the replay needs the worker
+    # key too; nothing else about start-replay changes.
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    opts = "--reviewer-model=w1/qwen3.6 --worker=http://172.16.10.205:8090/v1"
+    r = run(f"start-replay rp-2 w3-2-t {opts}", KEYS_T)
+    assert r.returncode == 0, r.stderr
+    assert (d["keys"] / "rp-2.env").read_text() == KEYS_T
+    starts = [c for c in log().splitlines() if c.startswith("systemd-run ")]
+    assert starts[0].endswith(f"_exec_replay rp-2 w3-2-t {opts}")
+    assert run(f"_exec_replay rp-2 w3-2-t {opts}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--reviewer-model") + 1] == "w1/qwen3.6" and argv[argv.index("--worker") + 1] == "http://172.16.10.205:8090/v1"
+    assert json.loads((tmp / "dump.json").read_text())["worker"] == "worker-secret-2"
+
+
+@pytest.mark.parametrize("args,stdin,msg", [
+    ("start-replay rp-2 w3-2-t --network=host", KEYS_T, "option"),
+    ("start-replay rp-2 w3-2-t --reviewer-model=w1/qwen3.6", KEYS_T, "unexpected"),       # no worker: no worker key
+    ("start-replay rp-2 w3-2-t --reviewer-model=w1/qwen3.6 --worker=http://w/v1", "WF_ROUTER_KEY=r\n", "WF_WORKER_KEY"),
+])
+def test_start_replay_options_are_validated(guest, args, stdin, msg):
+    run, log, d, _ = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    r = run(args, stdin)
+    assert r.returncode != 0 and msg in r.stderr, r.stderr
+    assert "systemd-run" not in log() and not list(d["keys"].iterdir())

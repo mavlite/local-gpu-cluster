@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wf-run-control.sh start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> | warm <T|G|S> |
+# wf-run-control.sh start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> [opts] | warm <T|G|S> |
 #                   status <run-id> | pack <run-id> | clear-keys
 #
 # Runs INSIDE the workforce sandbox VM as root (installed as /usr/local/sbin/wf-run-control by
@@ -51,6 +51,15 @@ check_opts() {
   for o in "$@"; do [[ "$o" == --w1 ]] || die "unknown option '$o' (only --w1)"; done
 }
 safe_key() { [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
+# start-replay options (reviewer-model trial): --reviewer-model=<provider/model> and --worker=<url>.
+check_replay_opts() {
+  local o
+  for o in "$@"; do
+    [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ ]] \
+      || die "unknown option '$o' (only --reviewer-model=<provider/model> and --worker=<url>)"
+  done
+}
+has_worker_opt() { [[ " $* " == *" --worker="* ]]; }
 
 # Read the keys from stdin into KEY_ROUTER / KEY_WORKER, refusing any other line; `no-worker` refuses
 # a worker key too. Nothing is written before every line has been checked.
@@ -107,20 +116,32 @@ cmd_start() {
 
 cmd_start_replay() {
   local id="${1:-}" src="${2:-}"
+  shift 2 || true
   check_id "$id"
   check_id "$src"
+  check_replay_opts "$@"
   [ -d "$REPLAY/$src" ] || die "no such replay source $REPLAY/$src (76 push-run first)"
   [ -e "$RUNS/$id" ] && die "run $id exists -- run ids are single-use"
-  read_keys no-worker
+  if has_worker_opt "$@"; then read_keys; else read_keys no-worker; fi
+  ! has_worker_opt "$@" || [ -n "$KEY_WORKER" ] || die "a --worker reviewer needs WF_WORKER_KEY on stdin"
   write_keys "$id"
-  start_unit "$id" _exec_replay "$id" "$src"
-  log "started wf-run-$id (replay of $src); log $RUNS/$id.log"
+  start_unit "$id" _exec_replay "$id" "$src" "$@"
+  log "started wf-run-$id (replay of $src${*:+ $*}); log $RUNS/$id.log"
 }
 
 cmd_exec_replay() {
-  local id="${1:-}" src="${2:-}"
+  local id="${1:-}" src="${2:-}" o
+  shift 2 || true
   check_id "$id"
   check_id "$src"
+  check_replay_opts "$@"
+  local extra=()
+  for o in "$@"; do
+    case "$o" in
+      --reviewer-model=*) extra+=(--reviewer-model "${o#--reviewer-model=}") ;;
+      --worker=*) extra+=(--worker "${o#--worker=}") ;;
+    esac
+  done
   local f="$KEYS/$id.env"
   [ -r "$f" ] || die "no keys for $id"
   set -a
@@ -129,7 +150,7 @@ cmd_exec_replay() {
   set +a
   rm -f "$f"
   exec "$WF_RUN" replay-reviews --run "$REPLAY/$src" --bundles "$BUNDLES" --out "$RUNS/$id" \
-    --router "$ROUTER_URL" --grader "$GRADER" --agent-user-prefix "$PREFIX"
+    --router "$ROUTER_URL" --grader "$GRADER" --agent-user-prefix "$PREFIX" "${extra[@]}"
 }
 
 cmd_exec() {

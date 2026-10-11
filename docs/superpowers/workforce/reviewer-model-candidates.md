@@ -46,3 +46,29 @@ model beat a larger one (arXiv 2606.15689) — **keep diffs small**.
 visible tests do not catch, i.e. the three real bugs the W3 reviewer found plus synthetic siblings,
 replayed through `cli.py replay-reviews` with the reviewer alias switched. Measure verdict accuracy,
 steps per review and prompt tokens per review against Qwen3.8.
+
+## Trial 1 result — Qwen3.6-35B-A3B nothink (2026-10-11)
+
+Run as `replay-2`: the 27 harvested W3 review rounds with the reviewer on Qwen3.6-35B-A3B (C2, served by
+worker llmbench01 through the sandbox's worker provider — no router or chat change). Full record:
+`replay-2-reviewer-trial.json`.
+
+| | qwen3.8-nothink (replay-1, V620 pair) | Qwen3.6-35B-A3B nothink (CPU worker) |
+|---|---|---|
+| Verdicts | 21 ACCEPT / 6 REVISE / 0 NONE | 19 ACCEPT / 8 REVISE / 0 NONE |
+| Agreement with W3 (20 judged rounds) | 16/20 | 14/20 |
+| Agreement with each other | — | 21/27 |
+| Median reviewer steps | 10 | 3 (12 of 27 verdicts after one step) |
+| Capped / verdict turns | 1 / 1 | 1 / 1 |
+| Median seconds per review | 201 | 119 |
+
+Disagreements, graded against the hidden tests: 2 gains for Qwen3.6 (a state the hidden tests fail that
+both other reviewers accepted; the `should_cache` arity bug qwen3.8 missed), 2 misses (the redirect
+`urljoin` bug; the zfs-import unit defects), 2 spurious REVISEs from hallucinated bugs in one-step verdicts.
+
+**Verdict:** quality on par with qwen3.8, 3× fewer steps, 40% faster per review even on a CPU box (it would
+be several times faster on the V620s); the new risk is the one-step hallucination (2 of 27, one rework
+round each). A credible throughput reviewer, not a quality upgrade. Next if the lead stays the bottleneck
+after the round-2 window: measure it on the GPU as an extra arm in a later window, after trying a
+"read the changed function before you decide" rule to cut the one-step verdicts. Gemma 4 26B-A4B remains
+the next candidate to replay.
