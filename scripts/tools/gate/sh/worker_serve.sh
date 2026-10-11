@@ -47,9 +47,17 @@ NOTHINK="--temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 0"
 THINK="--temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 0"
 KW_NOTHINK='{"enable_thinking":false}'
 KW_THINK='{"enable_thinking":true,"preserve_thinking":true}'
+# G4: Gemma 4 26B-A4B (reviewer-model trial 3). Google's QAT q4_0 build, the separate MTP draft head, Gemma's
+# model-card sampling, no Qwen thinking kwargs. The sweep overrides GATE_G4_FLAGS; the frozen value below
+# is the sweep's winner.
+G4_MODEL="${GATE_G4_MODEL:-/models/gemma-4-26B_q4_0-it.gguf}"
+G4_DRAFT="${GATE_G4_DRAFT:-/models/mtp-gemma-4-26B-A4B-it.gguf}"
+G4_BASE="-c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0"
+G4_MTP="-md $G4_DRAFT --spec-type mtp:n_max=3,p_min=0.5"
+GEMMA="--temp 1.0 --top-p 0.95 --top-k 64 --presence-penalty 0"
 
-select_config() {      # select_config <gate|C0|C1|C2|C3>: sets SRV_BIN, SRV_FLAGS, SRV_KWARGS
-  SRV_BIN="$BIN"; SRV_KWARGS="$KW_NOTHINK"
+select_config() {      # select_config <gate|C0|C1|C2|C3|G4>: sets SRV_BIN, SRV_MODEL, SRV_ALIAS, SRV_FLAGS, SRV_KWARGS
+  SRV_BIN="$BIN"; SRV_KWARGS="$KW_NOTHINK"; SRV_MODEL="$MODEL"; SRV_ALIAS=qwen3.6
   case "$1" in
     gate) SRV_FLAGS="$WORKER_FLAGS $WORKER_EXTRA" ;;
     C0)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $NOTHINK" ;;
@@ -57,7 +65,8 @@ select_config() {      # select_config <gate|C0|C1|C2|C3>: sets SRV_BIN, SRV_FLA
           if [ "${GATE_C1_MTP:-0}" = 1 ]; then SRV_FLAGS="$SRV_FLAGS $ML_MTP"; fi ;;
     C2)   SRV_FLAGS="$WF_BASE $IK_MEM $NOTHINK" ;;
     C3)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $THINK"; SRV_KWARGS="$KW_THINK" ;;
-    *)    die "unknown config '$1' (gate|C0|C1|C2|C3)" ;;
+    G4)   SRV_MODEL="$G4_MODEL"; SRV_ALIAS=gemma4; SRV_KWARGS='{}'; SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $IK_MEM $G4_MTP $GEMMA}" ;;
+    *)    die "unknown config '$1' (gate|C0|C1|C2|C3|G4)" ;;
   esac
 }
 
@@ -141,8 +150,8 @@ cmd_start() {
   # shellcheck disable=SC2086  # the flag strings are intentionally word-split
   sudo systemd-run --quiet --unit="$UNIT" --uid=bench --gid=bench -p MemoryMax="$MEMMAX" \
     -p StandardOutput="append:$logf" -p StandardError="append:$logf" \
-    "$SRV_BIN" -m "$MODEL" $SRV_FLAGS \
-    --jinja -np 1 --alias qwen3.6 --chat-template-kwargs "$SRV_KWARGS" \
+    "$SRV_BIN" -m "$SRV_MODEL" $SRV_FLAGS \
+    --jinja -np 1 --alias "$SRV_ALIAS" --chat-template-kwargs "$SRV_KWARGS" \
     --host 0.0.0.0 --port "$PORT" --api-key-file "$KEY" || die "systemd-run failed"
   systemctl show -p MainPID --value "$UNIT" | sudo tee "$PIDFILE" >/dev/null
   echo "$cfg $SRV_BIN $SRV_FLAGS $SRV_KWARGS" | sudo tee "$CONFIG_FILE" >/dev/null

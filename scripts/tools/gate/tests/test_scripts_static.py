@@ -161,3 +161,19 @@ def test_worker_runs_qwen_nonthinking_preset_including_presence_penalty():
     m = re.search(r'^WORKER_EXTRA="([^"]*)"$', read("sh", "worker_serve.sh"), re.M)
     assert m and "--presence-penalty 1.5" in m.group(1)
     assert "--repeat-last-n" not in m.group(1)       # default 64-token window, same as the GPU side
+
+
+def test_g4_config_serves_gemma_under_its_own_alias_with_its_sampling_and_mtp_draft():
+    # Reviewer-model trial 3: Gemma 4 26B-A4B (QAT UD-Q4_K_XL) with its MTP draft head, Gemma's sampling,
+    # no Qwen thinking kwargs, served as alias "gemma4"; model/draft/flags overridable for the sweep.
+    s = read("sh", "worker_serve.sh")
+    assert re.search(r'^G4_MODEL="\$\{GATE_G4_MODEL:-/models/gemma-4-26B_q4_0-it\.gguf\}"$', s, re.M)
+    assert re.search(r'^G4_DRAFT="\$\{GATE_G4_DRAFT:-/models/mtp-gemma-4-26B-A4B-it\.gguf\}"$', s, re.M)
+    assert re.search(r'^GEMMA="--temp 1\.0 --top-p 0\.95 --top-k 64 --presence-penalty 0"$', s, re.M)
+    g4 = re.search(r'^    G4\)\s+(.*)$', s, re.M).group(1)
+    assert 'SRV_MODEL="$G4_MODEL"' in g4 and 'SRV_ALIAS=gemma4' in g4 and "SRV_KWARGS='{}'" in g4
+    assert 'SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $IK_MEM $G4_MTP $GEMMA}"' in g4
+    assert '-md $G4_DRAFT --spec-type mtp:' in s
+    assert '"$SRV_BIN" -m "$SRV_MODEL" $SRV_FLAGS' in s and '--alias "$SRV_ALIAS"' in s
+    assert 'SRV_MODEL="$MODEL"; SRV_ALIAS=qwen3.6' in s          # every other config is unchanged
+    assert "gate|C0|C1|C2|C3|G4" in s
