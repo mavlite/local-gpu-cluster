@@ -256,3 +256,15 @@ def test_wf_r2_runs_the_preregistered_order_with_a_warm_up_before_each_stamp():
     for line in text.splitlines():
         assert "router.key" not in line or line.strip().startswith(("[", "#"))
 
+
+
+def test_provision_installs_ripgrep_for_opencode_glob_and_grep():
+    """2026-10-12: without rg on PATH opencode downloads ripgrep into each fresh per-task home; the locked VM
+    blocks that, so every glob/grep call failed after a long timeout ("ripgrep execution failed", 45 times in
+    one replay; glob+grep were most of a review's wall time)."""
+    with open(os.path.join(FILES, "wf-sandbox-provision.sh"), encoding="utf-8") as f:
+        text = f.read()
+    apt = text[text.index("apt-get install"):]
+    apt = apt[:apt.index(">/dev/null")]
+    assert " ripgrep" in apt
+    assert "command -v rg" in text

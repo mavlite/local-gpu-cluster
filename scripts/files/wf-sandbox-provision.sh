@@ -31,8 +31,11 @@ done
 
 log "packages"
 apt-get update -qq
+# ripgrep: opencode's glob/grep use rg from PATH and otherwise download it into each fresh per-task home,
+# which the locked VM blocks -- every such call then fails after a long timeout (2026-10-12).
 apt-get install -y -qq python3 python3-venv git shellcheck docker.io nodejs npm curl ca-certificates \
-  procps util-linux >/dev/null
+  procps util-linux ripgrep >/dev/null
+command -v rg >/dev/null || die "ripgrep did not install"
 
 log "IPv6 off (the firewall policy is IPv4-only)"
 printf 'net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\n' \
