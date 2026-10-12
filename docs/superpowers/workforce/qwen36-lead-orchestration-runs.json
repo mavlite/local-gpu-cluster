@@ -91,5 +91,83 @@
   "If the CPU nodes are to be used at all: as overflow for a queue that saturates the GPU, not as primary implementers."
  ],
  "reviewer_speed_fair": "replay-11 (qwen3.8 with ripgrep): 109 s per review vs Qwen3.6 tuned 44 s - 2.5x; see qwen36-gpu-lead-tuning.json",
- "restored": "2026-10-12 10:20Z: transient GPU server stopped and its files removed from LXC 151; production qwen3.8 chat back, window closed (1 slot, embed + rerank, timers restored, /healthz capacity 1); sandbox policy identical to the pre-trial backup; all trial router keys revoked, host and VM key files shredded; workers torn down (keys shredded, locks removed); ripgrep stays installed in VM 176 (a fix, now also in provisioning); harvests under /root/wf/runs on the host (replay-7..11, lt-1-t, lt-2-s, lt-3-g)"
+ "restored": "2026-10-12 10:20Z: transient GPU server stopped and its files removed from LXC 151; production qwen3.8 chat back, window closed (1 slot, embed + rerank, timers restored, /healthz capacity 1); sandbox policy identical to the pre-trial backup; all trial router keys revoked, host and VM key files shredded; workers torn down (keys shredded, locks removed); ripgrep stays installed in VM 176 (a fix, now also in provisioning); harvests under /root/wf/runs on the host (replay-7..11, lt-1-t, lt-2-s, lt-3-g)",
+ "repeats_2026_10_12": {
+  "what": "S and G repeated twice each with the lt-2-s / lt-3-g configurations unchanged (repeat-chain, alternating S G S G), 12:14-15:51Z",
+  "runs": {
+   "lt-2-s": {
+    "arm": "S",
+    "minutes": 27,
+    "accepted": 13,
+    "failed": [
+     "w2-07",
+     "w2-10",
+     "w2-16"
+    ]
+   },
+   "lt-4-s": {
+    "arm": "S",
+    "minutes": 36,
+    "accepted": 12,
+    "failed": [
+     "w2-05",
+     "w2-07",
+     "w2-10",
+     "w2-16"
+    ]
+   },
+   "lt-6-s": {
+    "arm": "S",
+    "minutes": 37,
+    "accepted": 15,
+    "failed": [
+     "w2-16"
+    ]
+   },
+   "lt-3-g": {
+    "arm": "G",
+    "minutes": 94,
+    "accepted": 14,
+    "failed": [
+     "w2-05",
+     "w2-16"
+    ]
+   },
+   "lt-5-g": {
+    "arm": "G",
+    "minutes": 63,
+    "accepted": 12,
+    "failed": [
+     "w2-02",
+     "w2-07",
+     "w2-10",
+     "w2-16"
+    ]
+   },
+   "lt-7-g": {
+    "arm": "G",
+    "minutes": 59,
+    "accepted": 12,
+    "failed": [
+     "w2-02",
+     "w2-07",
+     "w2-10",
+     "w2-16"
+    ],
+    "harness_flag": "valid=false: w2-10 'implementer runs failed 4 times (rc -15)'. Root cause is not infrastructure: the implementer's own endless loop hit the scope's 8G MemoryMax and systemd's default OOMPolicy=stop terminated the whole agent scope; each retry reused the broken workspace. Counted here as an honest w2-10 failure. Fixed in 5f09c84 (OOMPolicy=continue), not deployed for these runs."
+   }
+  },
+  "summary": {
+   "S": "accepted 13 / 12 / 15 (mean 13.3) in 27 / 36 / 37 min (mean 33)",
+   "G": "accepted 14 / 12 / 12 (mean 12.7) in 94 / 63 / 59 min (mean 72)",
+   "T": "one run: 15 in 93 min (lt-1-t)"
+  },
+  "findings": [
+   "Run-to-run noise for the same S configuration is 3 tasks (12-15): single runs cannot separate arms that differ by 1-2 tasks.",
+   "GPU review (G) does not raise acceptance over the GPU alone (S): 12.7 vs 13.3 on average, at 2.2x the wall time.",
+   "w2-16 fails in every run of every arm; w2-07 and w2-10 flip between runs in both S and G, i.e. implementer variance rather than something review catches.",
+   "In G the review sends work back often (10 rework rounds per run) without converting it into more hidden-test passes."
+  ],
+  "next": "lt-8-gc: G + --review-budget=1 (one review, one unreviewed rework, no lead fix) to price the cheapest review; then the CPU-overflow arm per cpu-overflow-proposal.md if pursued."
+ }
 }
