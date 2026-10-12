@@ -1,0 +1,90 @@
+{
+ "q01": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q06": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q10": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q15": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q19": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q23": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q03": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q07": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q11": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q16": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q20": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q24": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q04": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q08": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q12": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q17": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q21": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q05": {
+  "X": "qwen3.8-nothink",
+  "Y": "qwen3.6"
+ },
+ "q09": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q13": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q18": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ },
+ "q22": {
+  "X": "qwen3.6",
+  "Y": "qwen3.8-nothink"
+ }
+}

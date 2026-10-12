@@ -77,5 +77,51 @@
    "server": "same Q6_K_XL + MTP n3, enable_thinking true, server sampling 0.6/0.95/20 (aider overrides temperature to 0), --n-predict 32768",
    "tokens": "2.0-4.7K generated per request at 108-117 t/s"
   }
+ },
+ "rag_frozen_retrieval": {
+  "setup": "22 answerable VCF questions (rag_questions.json), vcf-reference vector-search top-6 frozen once, workspace system prompt, non-thinking, identical explicit sampling 0.7/0.8/20 presence 1.5, max_tokens 1500. Qwen3.6 = gpu-q36.sh Q6_K_XL + MTP n3 direct; qwen3.8 = router alias qwen3.8-nothink (production chat, window 3-slot layout), no other load.",
+  "grading": "blind: 4 batches, X/Y labels randomised per question (seed 20261012), key kept apart until all grades were in; 4 Opus graders judged each answer against the frozen context only (2 correct+supported, 1 partly/unsupported claim, 0 wrong or unjustified refusal).",
+  "results": {
+   "qwen3.8-nothink": {
+    "points": "39/44",
+    "fully_correct": 17,
+    "partly": 5,
+    "wrong": 0,
+    "median_s": 39.6,
+    "total_s": 822
+   },
+   "qwen3.6": {
+    "points": "32/44",
+    "fully_correct": 12,
+    "partly": 8,
+    "wrong": 2,
+    "median_s": 13.7,
+    "total_s": 282
+   }
+  },
+  "per_question": {
+   "qwen3.6_better": [
+    "q05",
+    "q06",
+    "q22"
+   ],
+   "qwen3.8_better": [
+    "q01",
+    "q07",
+    "q08",
+    "q09",
+    "q10",
+    "q12",
+    "q16",
+    "q20"
+   ],
+   "tied": 11
+  },
+  "qwen36_failure_modes": [
+   "unjustified refusal 'Not in the provided VCF documents.' when the context held the answer (q08 component table, q09 certificate replacement)",
+   "claims the context does not support or contradicts: invented menu names (q12), VCF Automation and Identity Broker called core components (q20), 'VCF Automation does not need a Supervisor' where the context requires one (q16)"
+  ],
+  "decision_clause": "FAILS: Qwen3.6 has 5 fewer fully correct answers than qwen3.8 (12 vs 17); the clause allows at most 2. Qwen3.6 answers 2.9x faster.",
+  "files": "docs/superpowers/workforce/rag-eval/results/ (answers, grades, key)"
  }
 }

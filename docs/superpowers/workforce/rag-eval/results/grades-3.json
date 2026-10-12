@@ -1,0 +1,22 @@
+{
+  "q05": {
+    "X": {"score": 1, "why": "Installer cert-import and UI configuration steps match the context, but it states flatly that the installer depot uses HTTPS on port 443 by borrowing a requirement from the VCF Operations management-component web-server page (the installer page only says 'if' the depot is HTTPS), and it misreads the login as username 'admin@localuser'."},
+    "Y": {"score": 2, "why": "Cert import, restart, Depot Settings and Binary Management > Offline Depot > Configure, URL/proxy-auth steps and the download step all match the installer page, and its hedged protocol answer (HTTPS when the web server uses HTTPS, requiring the TLS cert import) is faithful to the context."}
+  },
+  "q09": {
+    "X": {"score": 0, "why": "Refusal, although the context contains the CA-signed certificate replacement procedures for VCF components (configured-CA and external-CA CSR/import flows in VCF Operations) and the NSX certificate replacement APIs."},
+    "Y": {"score": 2, "why": "It correctly notes Microsoft is not named, then gives the VCF Operations Generate CSR / Replace With Configured CA Certificate flow for 9.0 and 9.1, the external-CA download/import route, and the NSX API steps, all supported by the context apart from a minor 'Certificates' menu inference."}
+  },
+  "q13": {
+    "X": {"score": 1, "why": "Its general rules (forward and reverse resolution, unique unassigned IPs, no .local, dual-stack, mixed case allowed since 9.1.1) are supported, but it does not list which components need FQDN records (vCenter, each ESX host, NSX nodes plus VIP, SDDC Manager, VCF Operations, etc.) even though the context tables give them, and it only points to those tables."},
+    "Y": {"score": 1, "why": "Its stated requirements are supported and it honestly notes that record types are not named, but it omits the per-component FQDN/IP list from the context tables, which is the substance of 'which DNS records are required'."}
+  },
+  "q18": {
+    "X": {"score": 2, "why": "It correctly caveats that the context has no general SDDC Manager task-status procedure, and its precheck View Status / Retry Precheck steps and VCF Operations Recent Tasks steps match the context."},
+    "Y": {"score": 2, "why": "It gives the same correct caveat and the same supported precheck and Recent Tasks procedures; the only unsupported claim is a trivial '(formerly vRealize Operations)' aside."}
+  },
+  "q22": {
+    "X": {"score": 2, "why": "Registration via VCF Operations and the Business Services console, connected/disconnected modes, the 90-day evaluation, primary-license assignment to vCenter, overrides, add-ons, HCX statuses kept separate, and the 90-day post-expiration impacts all match the context."},
+    "Y": {"score": 1, "why": "The licensing steps are mostly supported, but it wrongly applies HCX-only statuses to VCF Operations and the whole environment (it says the environment enters 'Restricted Mode' after the 90 days) and adds unsupported claims such as losing the ability to manage existing workloads and status returning to Active."}
+  }
+}
