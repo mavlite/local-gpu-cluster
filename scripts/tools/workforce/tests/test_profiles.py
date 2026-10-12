@@ -141,3 +141,10 @@ def test_worker_alias_override_names_the_worker_model_and_the_trial_reviewer():
     assert list(cfg["provider"]["w1"]["models"]) == ["gemma4"]
     assert cfg["agent"]["reviewer"]["model"] == "w1/gemma4"
     assert list(profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6")["provider"]["w1"]["models"]) == ["qwen3.6"]
+
+
+def test_review_steps_override_changes_only_the_reviewer_cap():
+    cfg = profiles.build_config("G", ROUTER, [], review_steps=30)["agent"]
+    assert cfg["reviewer"]["steps"] == 30 and cfg["reviewer-verdict"]["steps"] == profiles.VERDICT_STEPS
+    assert cfg["fixer"]["steps"] == profiles.FIX_STEPS and cfg["impl-1"]["steps"] == profiles.IMPL_STEPS
+    assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["steps"] == profiles.REVIEW_STEPS == 20

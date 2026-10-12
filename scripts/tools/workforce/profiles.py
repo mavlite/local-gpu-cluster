@@ -87,7 +87,8 @@ def implementers(arm):
     return [f"impl-{i}" for i in range(1, (N_WORKERS if arm == "T" else 1) + 1)]
 
 
-def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None):
+def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
+                 review_steps=None):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
@@ -98,7 +99,7 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
     agents = {"general": {"disable": True}, "explore": {"disable": True},
               "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else ""),
-                                 REVIEW_PERMS, REVIEW_STEPS),
+                                 REVIEW_PERMS, review_steps or REVIEW_STEPS),
               "reviewer-verdict": _agent(reviewer_model or lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
               "fixer": _agent(lead, FIXER_PROMPT, WRITE_PERMS, FIX_STEPS)}
     if arm == "T":

@@ -449,3 +449,13 @@ def test_each_implementer_round_stores_the_patch_the_reviewer_saw(tmp_path):
     d = tmp_path / "run" / "tasks" / "b"
     assert "return x" in (d / "impl-r0.patch").read_text() and "x * 2" in (d / "impl-r1.patch").read_text()
     assert "x * 2" not in (d / "impl-r0.patch").read_text()
+
+
+def test_capped_follows_the_review_step_cap_in_force(tmp_path):
+    # A replay with --review-steps 30 must not call a 20-step review capped.
+    bundles = [make_bundle(str(tmp_path / "bundles"), "t1")]
+    fake = FakeOpencode({"t1": {"impl": [{"pkg/t1.py": SOL}], "review": [{"text": "ACCEPT", "steps": 20}]}})
+    p = pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), review_steps=30)
+    p.run()
+    rec = record(tmp_path, "t1")
+    assert rec["reviews"][0]["steps"] == 20 and rec["reviews"][0]["capped"] is False

@@ -123,7 +123,7 @@ class HealthMonitor:
 
 class Pipeline:
     def __init__(self, arm, bundle_dirs, opencode, run_dir, grader, review=True, limits=None,
-                 monitor=None, own=None):
+                 monitor=None, own=None, review_steps=None):
         loaded = []
         for b in bundle_dirs:
             t = grade.load_task(b)
@@ -141,6 +141,7 @@ class Pipeline:
         self.own = own or (lambda path, role: None)
         self.arm, self.oc, self.run_dir, self.grader = arm, opencode, run_dir, grader
         self.review, self.limits, self.monitor = review, limits or Limits(), monitor
+        self.review_steps = review_steps or profiles.REVIEW_STEPS   # the cap in force (a replay may raise it)
         self.impls = profiles.implementers(arm)
         self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
                             os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
@@ -321,7 +322,7 @@ class Pipeline:
             steps = loops.steps_from_events(f.read())
         verdict, feedback = review.parse_verdict(r.text)
         entry = {"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
-                 "timed_out": r.timed_out, "steps": steps, "capped": steps >= profiles.REVIEW_STEPS,
+                 "timed_out": r.timed_out, "steps": steps, "capped": steps >= self.review_steps,
                  "t_start": t0, "t_end": time.time(), "verdict_turn": None}
         if verdict == "NONE" and r.session_id:
             # Round 2 §3.1: opencode's last-step banner tells the model to summarize instead of decide.

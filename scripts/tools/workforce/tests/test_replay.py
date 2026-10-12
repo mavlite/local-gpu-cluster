@@ -177,3 +177,11 @@ def test_replay_records_the_reviewer_model(tmp_path):
     out = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner(), reviewer_model="w1/qwen3.6")
     assert out["reviewer_model"] == "w1/qwen3.6"
     assert json.load(open(tmp_path / "out" / "replay.json"))["reviewer_model"] == "w1/qwen3.6"
+
+
+def test_replay_records_and_applies_the_review_step_cap(tmp_path):
+    run, bundles = harvested_run(tmp_path)
+    fake = FakeOpencode({"a": {"review": [{"text": "ACCEPT", "steps": 20}]}, "b": {"review": ["ACCEPT"]}})
+    out = replay.replay(str(run), bundles, fake, str(tmp_path / "out"), grade.LocalRunner(), review_steps=30)
+    a = [r for r in out["rounds"] if r["task"] == "a"][0]
+    assert out["review_steps"] == 30 and a["steps"] == 20 and a["capped"] is False

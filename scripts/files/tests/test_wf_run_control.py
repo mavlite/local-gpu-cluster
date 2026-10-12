@@ -286,3 +286,13 @@ def test_start_replay_accepts_the_worker_alias_option(guest):
     assert run(f"_exec_replay rp-4 w3-2-t {opts}").returncode == 0
     argv = json.loads((tmp / "dump.json").read_text())["argv"]
     assert argv[argv.index("--worker-alias") + 1] == "gemma4"
+
+
+def test_start_replay_accepts_the_review_steps_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-5 w3-2-t --review-steps=30", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-5 w3-2-t --review-steps=30").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--review-steps") + 1] == "30"
+    assert run("start-replay rp-6 w3-2-t --review-steps=abc", "WF_ROUTER_KEY=r\n").returncode != 0
