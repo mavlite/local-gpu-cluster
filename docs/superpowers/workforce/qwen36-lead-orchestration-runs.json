@@ -1,44 +1,95 @@
 {
-  "what": "Overnight 2026-10-12, EXPLORATORY (user-authorised; not the pre-registered round-2 window): three full pipeline runs on the 16 frozen W2 tasks with Qwen3.6-35B-A3B as the GPU lead on a transient tuned server in LXC 151, compared with W3's T run. One run per arm, so every number carries single-run variance.",
-  "common": {
-    "tasks": "the frozen W2 set, manifest 54c494ae38dcfd2adb7781257a65969c84a7986de5db988f17a770c2df7bb146, hidden-test grading in the sandbox's Docker grader",
-    "gpu_lead": "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M, llama.cpp b11026, layer split 1:1, ubatch 1024, f16 KV, ctx 131072, 1 slot, thinking off (qwen36-gpu-lead-tuning.json)",
-    "reviewer_settings": "read-first + defects-only rules, reviewer temperature 0.2, REVIEW_STEPS 30 (the best replay configuration, replay-10)",
-    "workers": "llmbench01-03, ik llama-server config C2 (Qwen3.6-35B-A3B MTP UD-IQ4_XS, no MTP), keyed and locked to the sandbox",
-    "harness": "feat/wf-experiment 59a44eb (run --lead-url ...); ripgrep installed in the VM (the W3 baseline ran without it)"
+ "what": "Overnight 2026-10-12, EXPLORATORY (user-authorised; not the pre-registered round-2 window): three full pipeline runs on the 16 frozen W2 tasks with Qwen3.6-35B-A3B as the GPU lead on a transient tuned server in LXC 151, compared with W3's T run. One run per arm, so every number carries single-run variance.",
+ "common": {
+  "tasks": "the frozen W2 set, manifest 54c494ae38dcfd2adb7781257a65969c84a7986de5db988f17a770c2df7bb146, hidden-test grading in the sandbox's Docker grader",
+  "gpu_lead": "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M, llama.cpp b11026, layer split 1:1, ubatch 1024, f16 KV, ctx 131072, 1 slot, thinking off (qwen36-gpu-lead-tuning.json)",
+  "reviewer_settings": "read-first + defects-only rules, reviewer temperature 0.2, REVIEW_STEPS 30 (the best replay configuration, replay-10)",
+  "workers": "llmbench01-03, ik llama-server config C2 (Qwen3.6-35B-A3B MTP UD-IQ4_XS, no MTP), keyed and locked to the sandbox",
+  "harness": "feat/wf-experiment 59a44eb (run --lead-url ...); ripgrep installed in the VM (the W3 baseline ran without it)"
+ },
+ "runs": [
+  {
+   "id": "w3-2-t (baseline)",
+   "arm": "T",
+   "lead": "qwen3.8-nothink via router (round-1 reviewer, ripgrep broken)",
+   "makespan_h": 2.21,
+   "accepted": "14/16",
+   "implementer_accepted": 13,
+   "lead_fixed": 1,
+   "accepted_per_h": 5.88,
+   "rework_rounds": 11,
+   "reviews": 27,
+   "capped": 7,
+   "median_task_min": 34.2
   },
-  "runs": [
-    {"id": "w3-2-t (baseline)", "arm": "T", "lead": "qwen3.8-nothink via router (round-1 reviewer, ripgrep broken)", "makespan_h": 2.21, "accepted": "14/16", "implementer_accepted": 13, "lead_fixed": 1, "accepted_per_h": 5.88, "rework_rounds": 11, "reviews": 27, "capped": 7, "median_task_min": 34.2},
-    {"id": "lt-1-t", "arm": "T", "lead": "Qwen3.6 GPU (reviewer + fixer)", "makespan_h": 1.55, "accepted": "15/16", "implementer_accepted": 14, "lead_fixed": 1, "accepted_per_h": 9.04, "rework_rounds": 7, "reviews": 23, "capped": 0, "verdict_turns": 1, "median_task_min": 7.9,
-     "note": "makespan set by one straggler: w2-10 held a worker 22-93 min (30-min first attempt, 13-min review, 24-min rework); every other task was done by minute 47"},
-    {"id": "lt-2-s", "arm": "S", "lead": "Qwen3.6 GPU implementer alone, no review", "makespan_h": 0.45, "accepted": "13/16", "accepted_per_h": 29.07, "median_task_min": 1.5,
-     "note": "w2-01 (3 reviews + lead fix in lt-1-t) implemented in 28 s and passes; failures w2-07, w2-10, w2-16"},
-    {"id": "lt-3-g", "arm": "G", "lead": "Qwen3.6 GPU implements and reviews", "makespan_h": 1.57, "accepted": "14/16", "implementer_accepted": 13, "lead_fixed": 1, "accepted_per_h": 8.30, "rework_rounds": 9, "reviews": 25, "capped": 3, "verdict_turns": 3, "median_task_min": 12.5,
-     "note": "vs S: recovered w2-07 and w2-10 (lead fix), lost w2-05 (which S got right); implementer run-to-run variance is as large as the review effect"}
-  ],
-  "per_task_hidden_tests": {
-    "w2-05": "W3 F, lt-1-t T, S T, G F (lead-fixed)",
-    "w2-07": "W3 T (lead-fixed), lt-1-t T, S F, G T",
-    "w2-10": "W3 F (lead-fixed), lt-1-t T, S F, G T (lead-fixed)",
-    "w2-16": "W3 T, lt-1-t F, S F, G F",
-    "all_others": "pass in every run"
+  {
+   "id": "lt-1-t",
+   "arm": "T",
+   "lead": "Qwen3.6 GPU (reviewer + fixer)",
+   "makespan_h": 1.55,
+   "accepted": "15/16",
+   "implementer_accepted": 14,
+   "lead_fixed": 1,
+   "accepted_per_h": 9.04,
+   "rework_rounds": 7,
+   "reviews": 23,
+   "capped": 0,
+   "verdict_turns": 1,
+   "median_task_min": 7.9,
+   "note": "makespan set by one straggler: w2-10 held a worker 22-93 min (30-min first attempt, 13-min review, 24-min rework); every other task was done by minute 47"
   },
-  "round2_rule_applied_informally": {
-    "ratio_T_over_max_S_G": 0.31,
-    "shortest_makespan": "S (0.45 h)",
-    "acceptance": "T 15, G 14, S 13 (S is 2 below the best)",
-    "band": "NO - S has the shortest makespan by 3.4x; the build band needs T's ratio >= 1.5. Strictly the 'run S alone' clause asks for equal acceptance, which S misses by two tasks in one run each.",
-    "caveat": "exploratory, one run per arm, not pre-registered; the pre-registered window remains the formal decision"
+  {
+   "id": "lt-2-s",
+   "arm": "S",
+   "lead": "Qwen3.6 GPU implementer alone, no review",
+   "makespan_h": 0.45,
+   "accepted": "13/16",
+   "accepted_per_h": 29.07,
+   "median_task_min": 1.5,
+   "note": "w2-01 (3 reviews + lead fix in lt-1-t) implemented in 28 s and passes; failures w2-07, w2-10, w2-16"
   },
-  "findings": [
-    "With Qwen3.6 on the V620s the GPU implementer is fast enough (median 1.5 min per task) that the CPU team cannot keep up: three CPU workers at ~5-30 min per attempt are slower than one GPU doing every task in turn.",
-    "Review costs 3.5x the wall time (S 0.45 h vs G 1.57 h) for one extra accepted task in this sample: most of G's time is review, rework and the lead fix, not implementation.",
-    "Against W3, the team improved by 54% throughput and one accepted task with the Qwen3.6 lead + ripgrep fix, but that improvement is dwarfed by what the same model does alone on the GPU.",
-    "Team makespan is tail-dominated: rework affinity keeps a hard task on one slow worker (w2-10: 70 min). If the team design is kept, per-task time caps with reassignment to the GPU matter more than average speed."
-  ],
-  "suggested_next": [
-    "Repeat S and G two or three times each (≈2.5 h of GPU time) to see whether S's 13/16 vs G's 14/16 is noise; the per-task flips say it may be.",
-    "Test a cheap quality gate on S: S plus one review pass without rework (flag-only) or a review only when the visible tests fail - the review's value per minute is the open question, not the team's.",
-    "If the CPU nodes are to be used at all: as overflow for a queue that saturates the GPU, not as primary implementers."
-  ]
+  {
+   "id": "lt-3-g",
+   "arm": "G",
+   "lead": "Qwen3.6 GPU implements and reviews",
+   "makespan_h": 1.57,
+   "accepted": "14/16",
+   "implementer_accepted": 13,
+   "lead_fixed": 1,
+   "accepted_per_h": 8.3,
+   "rework_rounds": 9,
+   "reviews": 25,
+   "capped": 3,
+   "verdict_turns": 3,
+   "median_task_min": 12.5,
+   "note": "vs S: recovered w2-07 and w2-10 (lead fix), lost w2-05 (which S got right); implementer run-to-run variance is as large as the review effect"
+  }
+ ],
+ "per_task_hidden_tests": {
+  "w2-05": "W3 F, lt-1-t T, S T, G F (lead-fixed)",
+  "w2-07": "W3 T (lead-fixed), lt-1-t T, S F, G T",
+  "w2-10": "W3 F (lead-fixed), lt-1-t T, S F, G T (lead-fixed)",
+  "w2-16": "W3 T, lt-1-t F, S F, G F",
+  "all_others": "pass in every run"
+ },
+ "round2_rule_applied_informally": {
+  "ratio_T_over_max_S_G": 0.31,
+  "shortest_makespan": "S (0.45 h)",
+  "acceptance": "T 15, G 14, S 13 (S is 2 below the best)",
+  "band": "NO - S has the shortest makespan by 3.4x; the build band needs T's ratio >= 1.5. Strictly the 'run S alone' clause asks for equal acceptance, which S misses by two tasks in one run each.",
+  "caveat": "exploratory, one run per arm, not pre-registered; the pre-registered window remains the formal decision"
+ },
+ "findings": [
+  "With Qwen3.6 on the V620s the GPU implementer is fast enough (median 1.5 min per task) that the CPU team cannot keep up: three CPU workers at ~5-30 min per attempt are slower than one GPU doing every task in turn.",
+  "Review costs 3.5x the wall time (S 0.45 h vs G 1.57 h) for one extra accepted task in this sample: most of G's time is review, rework and the lead fix, not implementation.",
+  "Against W3, the team improved by 54% throughput and one accepted task with the Qwen3.6 lead + ripgrep fix, but that improvement is dwarfed by what the same model does alone on the GPU.",
+  "Team makespan is tail-dominated: rework affinity keeps a hard task on one slow worker (w2-10: 70 min). If the team design is kept, per-task time caps with reassignment to the GPU matter more than average speed."
+ ],
+ "suggested_next": [
+  "Repeat S and G two or three times each (≈2.5 h of GPU time) to see whether S's 13/16 vs G's 14/16 is noise; the per-task flips say it may be.",
+  "Test a cheap quality gate on S: S plus one review pass without rework (flag-only) or a review only when the visible tests fail - the review's value per minute is the open question, not the team's.",
+  "If the CPU nodes are to be used at all: as overflow for a queue that saturates the GPU, not as primary implementers."
+ ],
+ "reviewer_speed_fair": "replay-11 (qwen3.8 with ripgrep): 109 s per review vs Qwen3.6 tuned 44 s - 2.5x; see qwen36-gpu-lead-tuning.json",
+ "restored": "2026-10-12 10:20Z: transient GPU server stopped and its files removed from LXC 151; production qwen3.8 chat back, window closed (1 slot, embed + rerank, timers restored, /healthz capacity 1); sandbox policy identical to the pre-trial backup; all trial router keys revoked, host and VM key files shredded; workers torn down (keys shredded, locks removed); ripgrep stays installed in VM 176 (a fix, now also in provisioning); harvests under /root/wf/runs on the host (replay-7..11, lt-1-t, lt-2-s, lt-3-g)"
 }
