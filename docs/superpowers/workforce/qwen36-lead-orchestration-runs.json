@@ -169,5 +169,44 @@
    "In G the review sends work back often (9, 10 and 10 rework rounds) without converting it into more hidden-test passes."
   ],
   "next": "lt-8-gc: G + --review-budget=1 (one review, one unreviewed rework, no lead fix) to price the cheapest review; then the CPU-overflow arm per cpu-overflow-proposal.md if pursued."
+ },
+ "cheap_review_lt_8_gc": {
+  "config": "lt-3/5/7-g configuration + --review-budget=1 (harness 03b1dff): one review per task, a REVISE gets one implementer rework graded unreviewed, no lead fix",
+  "result": {
+   "minutes": 41,
+   "accepted": 13,
+   "implementer_accepted": 11,
+   "reworked_accepted": 2,
+   "rework_rounds": 4,
+   "valid": true,
+   "failed": [
+    "w2-05",
+    "w2-07",
+    "w2-16"
+   ]
+  },
+  "what_the_review_did": {
+   "pre_review_hidden_test_failures": [
+    "w2-05",
+    "w2-07",
+    "w2-10",
+    "w2-16"
+   ],
+   "flagged_by_review": [
+    "w2-05",
+    "w2-10",
+    "w2-16"
+   ],
+   "missed": [
+    "w2-07"
+   ],
+   "false_alarm": "w2-01 (passed before review; the rework still passes)",
+   "rework_converted": [
+    "w2-10"
+   ],
+   "net": "+1 task (12 -> 13) for ~8 min over the S mean; the reviewer finds 3 of 4 real failures with 1 false alarm in 12 good ones, but the implementer's one rework fixes only 1 of the 3"
+  },
+  "reading": "Within the S noise band (12-15) at S-like wall time (41 vs 27-37 min); far cheaper than full G (59-94 min) for the same or better acceptance. If review is kept on the GPU-alone path, this is the shape to keep.",
+  "pre_review_grading": "impl-r0.patch of the reworked tasks graded in the VM's Docker grader (grade_rounds2.py, SRC=/srv/wf/runs/lt-8-gc)"
  }
 }

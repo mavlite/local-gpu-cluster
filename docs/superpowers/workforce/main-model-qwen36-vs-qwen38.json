@@ -1,0 +1,43 @@
+{
+ "what": "Main GPU model research 2026-10-12: optimized Qwen3.6-35B-A3B vs Qwen3.8-27B (plan docs/superpowers/plans/2026-10-12-main-model-qwen36-vs-qwen38.md)",
+ "serving_qwen36": {
+  "bench": "LXC 151, llama.cpp b11026, both V620s, layer split 1,1, ub 1024, f16 KV, FA auto, ctx 65536, thinking off, embed + rerank resident; 700-token outputs, prompts: code (temp 0 and 0.7) and a 7.7K-token RAG context, two reps each",
+  "results_gen_tps": {
+   "UD-Q4_K_M (plain repo), no MTP": {
+    "code": 72,
+    "rag": 69,
+    "prefill_7k": 2503
+   },
+   "UD-Q6_K_XL (MTP repo), MTP off": {
+    "code": 67,
+    "rag": 64,
+    "prefill_7k": 2416,
+    "vram_gb": 40.3
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 1": {
+    "code": "91-93",
+    "rag": 89,
+    "acceptance": "88-92%",
+    "prefill_7k": 1895
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 2": {
+    "code": "106-110",
+    "rag": 105,
+    "acceptance": "84-88%",
+    "prefill_7k": 1889
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 3": {
+    "code": "110-119",
+    "rag": 112,
+    "acceptance": "72-81%",
+    "prefill_7k": 1887
+   }
+  },
+  "failures": [
+   "Unsloth MTP UD-Q4_K_XL: ROCm illegal memory access on the first request, with or without MTP (4 of 4 attempts)",
+   "plain UD-Q6_K runs at layer 1:1 (57.7 t/s); its earlier crash was specific to layer 1:1.5"
+  ],
+  "chosen": "UD-Q6_K_XL + draft-mtp n-max 3: 1.6x the old Q4 generation at a higher-quality quant; costs ~25% prefill. Used for every Qwen3.6 quality run below.",
+  "vs_published": "Unsloth/community report 1.15-1.25x for MTP on this MoE on NVIDIA; measured 1.6-1.7x over MTP-off at the same quant here."
+ }
+}
