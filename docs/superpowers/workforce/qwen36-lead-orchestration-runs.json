@@ -166,7 +166,7 @@
    "Run-to-run noise for the same S configuration is 3 tasks (12-15): single runs cannot separate arms that differ by 1-2 tasks.",
    "GPU review (G) does not raise acceptance over the GPU alone (S): 12.7 vs 13.3 on average, at 2.2x the wall time.",
    "w2-16 fails in every run of every arm; w2-07 and w2-10 flip between runs in both S and G, i.e. implementer variance rather than something review catches.",
-   "In G the review sends work back often (10 rework rounds per run) without converting it into more hidden-test passes."
+   "In G the review sends work back often (9, 10 and 10 rework rounds) without converting it into more hidden-test passes."
   ],
   "next": "lt-8-gc: G + --review-budget=1 (one review, one unreviewed rework, no lead fix) to price the cheapest review; then the CPU-overflow arm per cpu-overflow-proposal.md if pursued."
  }
