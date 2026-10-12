@@ -76,6 +76,7 @@ class _Task:
     history: list = field(default_factory=list)      # feedback lines for the fixer
     fix: dict = None
     t_start: float = None
+    final: bool = False                              # the next implementer turn ships unreviewed
 
 
 class HealthMonitor:
@@ -123,7 +124,9 @@ class HealthMonitor:
 
 class Pipeline:
     def __init__(self, arm, bundle_dirs, opencode, run_dir, grader, review=True, limits=None,
-                 monitor=None, own=None, review_steps=None, enforce_read=False):
+                 monitor=None, own=None, review_steps=None, enforce_read=False, review_budget=None):
+        if review_budget is not None and review_budget < 1:
+            raise ValueError(f"review_budget must be >= 1, got {review_budget}")
         loaded = []
         for b in bundle_dirs:
             t = grade.load_task(b)
@@ -143,6 +146,9 @@ class Pipeline:
         self.review, self.limits, self.monitor = review, limits or Limits(), monitor
         self.review_steps = review_steps or profiles.REVIEW_STEPS   # the cap in force (a replay may raise it)
         self.enforce_read = enforce_read                           # a verdict that read nothing gets one re-read
+        # The cheap-review variant: at most `review_budget` reviews per task; the rework after the last one
+        # is graded unreviewed and the lead never fixes. None keeps max_rounds + the lead fix.
+        self.review_budget = review_budget
         self.impls = profiles.implementers(arm)
         self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
                             os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
@@ -270,6 +276,9 @@ class Pipeline:
         if not self.review:
             self._finalize(t, "implemented")
             return
+        if t.final:
+            self._finalize(t, "reworked-unreviewed")
+            return
         with self.cond:
             self.lead_q.append(t)
             self.cond.notify_all()
@@ -362,7 +371,9 @@ class Pipeline:
             return
         t.history.append(f"Review {n + 1}: " + (f"REVISE: {feedback}" if verdict == "REVISE"
                                                  else f"(no verdict) {feedback[:500]}"))
-        if len(t.rounds) <= self.limits.max_rounds:
+        if self.review_budget is not None and len(t.reviews) >= self.review_budget:
+            t.final = True
+        if t.final or len(t.rounds) <= self.limits.max_rounds:
             fb = feedback if verdict == "REVISE" else "The reviewer gave no clear verdict; re-check the request."
             with self.cond:
                 self.rework[t.agent].append((t, fb))
@@ -433,7 +444,8 @@ class Pipeline:
             json.dump(doc, f)
 
     def _record(self, t, outcome, g, dropped, loop):
-        accepted = bool(g and g["pass"] and outcome in ("implementer-accepted", "lead-fixed", "implemented"))
+        accepted = bool(g and g["pass"] and outcome in ("implementer-accepted", "lead-fixed", "implemented",
+                                                           "reworked-unreviewed"))
         return {"id": t.id, "arm": self.arm, "implementer": t.agent, "outcome": outcome, "accepted": accepted,
                 "grade": g, "dropped": dropped, "loops": loop, "rounds": t.rounds, "reviews": t.reviews,
                 "impl_failures": t.impl_failures, "rework_rounds": max(0, len(t.rounds) - 1), "fix": t.fix,
@@ -476,12 +488,14 @@ class Pipeline:
         invalid += [f"worker {u} unreachable for {s:.0f} s" for u, s in health["max_unreachable_s"].items()
                     if s >= UNREACHABLE_LIMIT_S]
         impl_acc = sum(1 for r in recs if r["accepted"] and r["outcome"] == "implementer-accepted")
+        rework_acc = sum(1 for r in recs if r["accepted"] and r["outcome"] == "reworked-unreviewed")
         hours = max(t1 - t0, 1e-9) / 3600
         summary = {"arm": self.arm, "review": self.review, "n_tasks": len(recs), "t_start": t0, "t_end": t1,
                    "wall_s": t1 - t0, "accepted": sum(1 for r in recs if r["accepted"]),
                    "implementer_accepted": impl_acc,
+                   "reworked_accepted": rework_acc,
                    "lead_fixed": sum(1 for r in recs if r["accepted"] and r["outcome"] == "lead-fixed"),
-                   "accepted_per_hour": (impl_acc if self.review else
+                   "accepted_per_hour": (impl_acc + rework_acc if self.review else
                                          sum(1 for r in recs if r["accepted"])) / hours,
                    "accepted_by_task": {r["id"]: r["accepted"] for r in recs},
                    "outcomes": {o: sum(1 for r in recs if r["outcome"] == o) for o in {r["outcome"] for r in recs}},

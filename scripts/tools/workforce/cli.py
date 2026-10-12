@@ -263,6 +263,8 @@ def main(argv=None, env=None):
     p.add_argument("--enforce-read", action="store_true", help="re-ask a verdict that read no code, once")
     p.add_argument("--reviewer-temperature", type=float, help="sampling temperature for the reviewer")
     p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
+    p.add_argument("--review-budget", type=int,
+                   help="at most N reviews per task; the rework after the last is graded unreviewed, no lead fix")
     p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
     p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
     p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
@@ -344,7 +346,7 @@ def main(argv=None, env=None):
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
                                 monitor=monitor, own=own, review_steps=a.review_steps,
-                                enforce_read=a.enforce_read).run()
+                                enforce_read=a.enforce_read, review_budget=a.review_budget).run()
     elif a.cmd == "recover-patches":
         out = replay.recover_patches(a.run)
     elif a.cmd == "replay-reviews":

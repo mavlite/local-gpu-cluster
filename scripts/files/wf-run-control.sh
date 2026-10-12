@@ -51,8 +51,9 @@ check_opts() {
   for o in "$@"; do
     [[ "$o" == --w1 || "$o" == --read-first || "$o" =~ ^--lead-url=https?://[A-Za-z0-9.:/_-]+$ \
        || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ \
-       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only ]] \
-      || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first)"
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only \
+       || "$o" =~ ^--review-budget=[1-9]$ ]] \
+      || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first, --review-budget=<1-9>)"
   done
 }
 has_lead_opt() { [[ " $* " == *" --lead-url="* ]]; }
@@ -192,6 +193,7 @@ cmd_exec() {
       --lead-url=*) args+=(--lead-url "${o#--lead-url=}") ;;
       --lead-alias=*) args+=(--lead-alias "${o#--lead-alias=}") ;;
       --review-steps=*) args+=(--review-steps "${o#--review-steps=}") ;;
+      --review-budget=*) args+=(--review-budget "${o#--review-budget=}") ;;
       --reviewer-temperature=*) args+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
       *) args+=("$o") ;;
     esac

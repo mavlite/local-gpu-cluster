@@ -336,3 +336,13 @@ def test_defects_only_passes_through_start_and_start_replay(guest):
     assert run("start d-1 T --defects-only", KEYS_T).returncode == 0
     assert run("_exec d-1 T --defects-only").returncode == 0
     assert "--defects-only" in json.loads((tmp / "dump.json").read_text())["argv"]
+
+
+def test_review_budget_passes_through_start_and_is_validated(guest):
+    run, log, d, tmp = guest
+    assert run("start rb-1 T --review-budget=1", KEYS_T).returncode == 0
+    assert run("_exec rb-1 T --review-budget=1").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--review-budget") + 1] == "1"
+    for bad in ("--review-budget=0", "--review-budget=abc", "--review-budget=10"):
+        assert run(f"start rb-2 T {bad}", KEYS_T).returncode != 0, bad

@@ -410,3 +410,24 @@ def test_defects_only_flag_reaches_run_and_replay_configs(tmp_path, monkeypatch)
     assert cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
                      "--router", "http://x/v1", "--defects-only"], env=env) == 0
     assert [kw["defects_only"] for kw in seen] == [True, True]
+
+
+def test_run_review_budget_reaches_the_pipeline(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(kw)
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cli, "build_opencode", lambda *a, **k: "OC")
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    env = {"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                     "--router", "http://x/v1", "--review-budget", "1"], env=env) == 0
+    assert seen["review_budget"] == 1
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r2"),
+                     "--router", "http://x/v1"], env=env) == 0
+    assert seen["review_budget"] is None

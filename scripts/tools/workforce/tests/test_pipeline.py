@@ -488,3 +488,54 @@ def test_a_reread_without_a_verdict_keeps_the_first_verdict(tmp_path):
     fake, rec = _enforced(tmp_path, [{"text": "ACCEPT", "steps": 1}, "I am still looking"])
     r0 = rec["reviews"][0]
     assert r0["verdict"] == "ACCEPT" and r0["reread"]["verdict"] == "NONE"
+
+
+# ---- review budget: one review, one unreviewed rework, no lead fix (the cheap-review variant) ----------
+
+def test_review_budget_one_ships_the_rework_unreviewed_and_never_calls_the_lead_fixer(tmp_path):
+    script = {"rb": {"impl": [{"pkg/rb.py": WRONG}, {"pkg/rb.py": SOL}], "review": ["REVISE: f must double"],
+                     "fix": {"pkg/rb.py": WRONG}}}
+    summary, fake = run_pipeline(tmp_path, "G", script, review_budget=1)
+    assert [c["role"] for c in fake.calls] == ["impl", "review", "impl"]
+    r = record(tmp_path, "rb")
+    assert r["outcome"] == "reworked-unreviewed" and r["accepted"] and r["rework_rounds"] == 1
+    assert summary["reworked_accepted"] == 1 and summary["lead_fixed"] == 0
+    assert summary["accepted"] == 1 and summary["accepted_per_hour"] > 0
+
+
+def test_review_budget_one_counts_a_wrong_rework_as_not_accepted(tmp_path):
+    script = {"rw": {"impl": [{"pkg/rw.py": WRONG}, {"pkg/rw.py": WRONG}], "review": ["REVISE: no"]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, review_budget=1)
+    assert [c["role"] for c in fake.calls] == ["impl", "review", "impl"]
+    r = record(tmp_path, "rw")
+    assert r["outcome"] == "reworked-unreviewed" and not r["accepted"]
+    assert summary["accepted"] == summary["reworked_accepted"] == 0
+
+
+def test_review_budget_one_leaves_an_accept_unchanged(tmp_path):
+    summary, fake = run_pipeline(tmp_path, "G", {"ra": {"impl": [{"pkg/ra.py": SOL}], "review": ["ACCEPT"]}},
+                                 review_budget=1)
+    assert [c["role"] for c in fake.calls] == ["impl", "review"]
+    assert record(tmp_path, "ra")["outcome"] == "implementer-accepted"
+    assert summary["implementer_accepted"] == 1 and summary["reworked_accepted"] == 0
+
+
+def test_review_budget_one_reworks_after_a_double_no_verdict_too(tmp_path):
+    script = {"rn": {"impl": [{"pkg/rn.py": SOL}, {"pkg/rn.py": SOL}], "review": ["hmm"], "verdict": ["still unsure"]}}
+    _, fake = run_pipeline(tmp_path, "G", script, review_budget=1)
+    assert [c["role"] for c in fake.calls] == ["impl", "review", "verdict", "impl"]
+    assert record(tmp_path, "rn")["outcome"] == "reworked-unreviewed"
+
+
+def test_review_budget_two_reviews_the_first_rework_and_ships_the_second(tmp_path):
+    script = {"r2": {"impl": [{"pkg/r2.py": WRONG}] * 2 + [{"pkg/r2.py": SOL}], "review": ["REVISE: a", "REVISE: b"]}}
+    _, fake = run_pipeline(tmp_path, "G", script, review_budget=2)
+    assert [c["role"] for c in fake.calls] == ["impl", "review", "impl", "review", "impl"]
+    r = record(tmp_path, "r2")
+    assert r["outcome"] == "reworked-unreviewed" and r["accepted"] and r["rework_rounds"] == 2
+
+
+def test_review_budget_rejects_values_below_one(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="review_budget"):
+        run_pipeline(tmp_path, "G", {"rz": {"impl": [{"pkg/rz.py": SOL}], "review": ["ACCEPT"]}}, review_budget=0)
