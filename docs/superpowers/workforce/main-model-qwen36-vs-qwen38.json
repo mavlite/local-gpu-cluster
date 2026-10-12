@@ -38,6 +38,6 @@
    "plain UD-Q6_K runs at layer 1:1 (57.7 t/s); its earlier crash was specific to layer 1:1.5"
   ],
   "chosen": "UD-Q6_K_XL + draft-mtp n-max 3: 1.6x the old Q4 generation at a higher-quality quant; costs ~25% prefill. Used for every Qwen3.6 quality run below.",
-  "vs_published": "Unsloth/community report 1.15-1.25x for MTP on this MoE on NVIDIA; measured 1.6-1.7x over MTP-off at the same quant here."
+  "vs_published": "Unsloth/community report 1.15-1.25x for MTP on this MoE on NVIDIA; measured 1.6-1.8x over MTP-off at the same quant here (110-119 vs 67 code, 112 vs 64 RAG)."
  }
 }
