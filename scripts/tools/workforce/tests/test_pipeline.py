@@ -459,3 +459,32 @@ def test_capped_follows_the_review_step_cap_in_force(tmp_path):
     p.run()
     rec = record(tmp_path, "t1")
     assert rec["reviews"][0]["steps"] == 20 and rec["reviews"][0]["capped"] is False
+
+
+def _enforced(tmp_path, review):
+    bundles = [make_bundle(str(tmp_path / "bundles"), "t1")]
+    fake = FakeOpencode({"t1": {"impl": [{"pkg/t1.py": SOL}] * 3, "review": review, "fix": {"pkg/t1.py": SOL}}})
+    pipeline.Pipeline("G", bundles, fake, str(tmp_path / "run"), grade.LocalRunner(), enforce_read=True).run()
+    return fake, record(tmp_path, "t1")
+
+
+def test_a_verdict_without_any_read_gets_one_reread_turn_in_the_same_session(tmp_path):
+    # The Qwen3.6 reviewer's hallucinated REVISEs came from one-step verdicts that read nothing.
+    fake, rec = _enforced(tmp_path, [{"text": "REVISE: invented bug", "steps": 1}, "ACCEPT"])
+    revs = [c for c in fake.calls if c["agent"] == "reviewer"]
+    assert len(revs) == 2 and revs[1]["resumed"] and revs[1]["session"] == revs[0]["session"]
+    assert revs[1]["message"] == profiles.READ_NOW_MESSAGE
+    r0 = rec["reviews"][0]
+    assert r0["verdict"] == "ACCEPT" and r0["reread"]["first_verdict"] == "REVISE" and r0["reread"]["verdict"] == "ACCEPT"
+    assert rec["outcome"] == "implementer-accepted" and rec["rework_rounds"] == 0
+
+
+def test_a_verdict_after_a_read_is_left_alone(tmp_path):
+    fake, rec = _enforced(tmp_path, [{"text": "ACCEPT", "steps": 3, "tools": [("read", {"filePath": "pkg/t1.py"})]}])
+    assert len([c for c in fake.calls if c["agent"] == "reviewer"]) == 1 and rec["reviews"][0]["reread"] is None
+
+
+def test_a_reread_without_a_verdict_keeps_the_first_verdict(tmp_path):
+    fake, rec = _enforced(tmp_path, [{"text": "ACCEPT", "steps": 1}, "I am still looking"])
+    r0 = rec["reviews"][0]
+    assert r0["verdict"] == "ACCEPT" and r0["reread"]["verdict"] == "NONE"

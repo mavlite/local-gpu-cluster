@@ -363,3 +363,29 @@ def test_run_lead_url_needs_the_worker_key_and_reaches_config_and_pipeline(tmp_p
     b = seen["build"]
     assert b["lead_url"] == "http://192.168.6.151:8090/v1" and b["lead_alias"] is None and b["read_first"] is True
     assert b["review_steps"] == 30 and seen["review_steps"] == 30
+
+
+def test_quality_flags_reach_config_pipeline_and_replay(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen["pipeline"] = kw
+
+        def run(self):
+            return {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen["build"] = kw
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: seen.update(replay=k) or {"totals": {}})
+    env = {"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+                     "--enforce-read", "--reviewer-temperature", "0.2"], env=env) == 0
+    assert seen["build"]["reviewer_temperature"] == 0.2 and seen["pipeline"]["enforce_read"] is True
+    assert cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+                     "--router", "http://x/v1", "--enforce-read", "--reviewer-temperature", "0.2"], env=env) == 0
+    assert seen["build"]["reviewer_temperature"] == 0.2 and seen["replay"]["enforce_read"] is True

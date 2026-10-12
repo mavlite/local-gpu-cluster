@@ -165,12 +165,12 @@ def _round_task(p, rec, k, bundle, patch, out_dir):
 
 
 def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journal_text=None, own=None,
-           reviewer_model=None, read_first=False, review_steps=None):
+           reviewer_model=None, read_first=False, review_steps=None, enforce_read=False):
     todo, skipped, bundle_dirs = _plan(run_dir, bundles_root)
     lim = limits or pipeline.Limits()
     lim.max_rounds = 0                                 # every non-ACCEPT ends the round: no rework here
     p = _ReplayPipeline("G", bundle_dirs, opencode, out_dir, grader, review=True, limits=lim, own=own,
-                        review_steps=review_steps)
+                        review_steps=review_steps, enforce_read=enforce_read)
     rounds = []
     for rec, k, bundle, patch in todo:
         t = _round_task(p, rec, k, bundle, patch, out_dir)
@@ -178,7 +178,7 @@ def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journa
         e = t.reviews[0]
         rounds.append({"task": rec["id"], "round": k, "old_verdict": rec["reviews"][k].get("verdict"),
                        "new_verdict": e["verdict"], "capped": e["capped"], "steps": e["steps"],
-                       "timed_out": e["timed_out"], "verdict_turn": e["verdict_turn"],
+                       "timed_out": e["timed_out"], "verdict_turn": e["verdict_turn"], "reread": e.get("reread"),
                        "feedback": e["feedback"][:500], "prompt_tokens": None,
                        "t_start": e["t_start"], "t_end": time.time()})
     judged = [r for r in rounds if r["old_verdict"] != "NONE"]
@@ -198,7 +198,7 @@ def replay(run_dir, bundles_root, opencode, out_dir, grader, limits=None, journa
               "median_steps": statistics.median([r["steps"] for r in rounds]) if rounds else None,
               **_journal_totals(journal_text)}
     out = {"run": os.path.abspath(run_dir), "reviewer_model": reviewer_model, "read_first": read_first,
-           "review_steps": review_steps or pipeline.profiles.REVIEW_STEPS,
+           "review_steps": review_steps or pipeline.profiles.REVIEW_STEPS, "enforce_read": enforce_read,
            "rounds": rounds, "skipped": skipped,
            "totals": totals}
     with open(os.path.join(out_dir, "replay.json"), "w", encoding="utf-8") as f:

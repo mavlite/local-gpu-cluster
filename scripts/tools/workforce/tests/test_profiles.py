@@ -165,3 +165,10 @@ def test_lead_url_moves_the_whole_lead_to_its_own_provider():
     g = profiles.build_config("S", ROUTER, [], lead_url=GPU_LEAD, lead_alias="other")["agent"]
     assert g["impl-1"]["model"] == "lead/other"
     assert profiles.keys_for("S", lead_url=GPU_LEAD) == profiles.KEY_ENV and profiles.keys_for("S") == ("WF_ROUTER_KEY",)
+
+
+def test_reviewer_temperature_sets_only_the_reviewer_agents():
+    a = profiles.build_config("G", ROUTER, [], reviewer_temperature=0.2)["agent"]
+    assert a["reviewer"]["temperature"] == a["reviewer-verdict"]["temperature"] == 0.2
+    assert "temperature" not in a["fixer"] and "temperature" not in a["impl-1"]
+    assert "temperature" not in profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]

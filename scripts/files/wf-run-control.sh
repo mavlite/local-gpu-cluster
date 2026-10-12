@@ -50,7 +50,8 @@ check_opts() {
   local o
   for o in "$@"; do
     [[ "$o" == --w1 || "$o" == --read-first || "$o" =~ ^--lead-url=https?://[A-Za-z0-9.:/_-]+$ \
-       || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ ]] \
+       || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ ]] \
       || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first)"
   done
 }
@@ -61,7 +62,8 @@ check_replay_opts() {
   local o
   for o in "$@"; do
     [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ \
-       || "$o" =~ ^--worker-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ || "$o" == --read-first ]] \
+       || "$o" =~ ^--worker-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ || "$o" == --read-first \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ ]] \
       || die "unknown option '$o' (only --reviewer-model=<provider/model>, --worker=<url>, --worker-alias=<name>, --review-steps=<n>, --read-first)"
   done
 }
@@ -150,6 +152,8 @@ cmd_exec_replay() {
       --read-first) extra+=(--read-first) ;;
       --worker-alias=*) extra+=(--worker-alias "${o#--worker-alias=}") ;;
       --review-steps=*) extra+=(--review-steps "${o#--review-steps=}") ;;
+      --enforce-read) extra+=(--enforce-read) ;;
+      --reviewer-temperature=*) extra+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
     esac
   done
   local f="$KEYS/$id.env"
@@ -187,6 +191,7 @@ cmd_exec() {
       --lead-url=*) args+=(--lead-url "${o#--lead-url=}") ;;
       --lead-alias=*) args+=(--lead-alias "${o#--lead-alias=}") ;;
       --review-steps=*) args+=(--review-steps "${o#--review-steps=}") ;;
+      --reviewer-temperature=*) args+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
       *) args+=("$o") ;;
     esac
   done

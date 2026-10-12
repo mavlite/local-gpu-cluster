@@ -15,6 +15,9 @@ WORKER_ALIAS = "qwen3.6"
 N_WORKERS = 3
 IMPL_STEPS, REVIEW_STEPS, FIX_STEPS, VERDICT_STEPS = 60, 20, 60, 3
 VERDICT_MESSAGE = "Give your verdict now. Reply starting with ACCEPT or REVISE:"
+READ_NOW_MESSAGE = ("You gave a verdict without reading any code. Read the changed function(s) from the tree "
+                    "with the read tool now, then reply starting with ACCEPT or REVISE: <feedback>, decided on "
+                    "what you read.")
 LEAD_CONTEXT, WORKER_CONTEXT, OUTPUT_TOKENS = 120000, 65536 - 8192, 8192
 
 IMPLEMENTER_PROMPT = """You are a software engineer working in a checkout of a repository.
@@ -88,7 +91,7 @@ def implementers(arm):
 
 
 def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
-                 review_steps=None, lead_url=None, lead_alias=None):
+                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
@@ -116,8 +119,16 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
         agents["impl-1"] = _agent(lead, IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
         for i, url in enumerate(worker_urls, start=1):              # trial: a worker serves the reviewer
             providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
-    return {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
-            "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
+    cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
+           "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
+    return cfg if reviewer_temperature is None else _with_temperature(cfg, reviewer_temperature)
+
+
+def _with_temperature(cfg, temperature):
+    """The reviewer and its verdict turn at a fixed sampling temperature (a judge should not be noisy)."""
+    agents = {k: (dict(v, temperature=temperature) if k in ("reviewer", "reviewer-verdict") else v)
+              for k, v in cfg["agent"].items()}
+    return dict(cfg, agent=agents)
 
 
 def install(cfg_dir, config):

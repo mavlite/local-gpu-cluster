@@ -310,3 +310,18 @@ def test_start_passes_lead_options_and_a_gpu_lead_needs_the_worker_key(guest):
     assert argv[argv.index("--lead-url") + 1] == "http://192.168.6.151:8090/v1"
     assert "--read-first" in argv and argv[argv.index("--review-steps") + 1] == "30"
     assert run("start l-3 T --lead-url=file:///etc/passwd", KEYS_T).returncode != 0
+
+
+def test_quality_options_pass_through_start_and_start_replay(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    q = "--enforce-read --reviewer-temperature=0.2"
+    assert run(f"start-replay rp-9 w3-2-t {q}", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run(f"_exec_replay rp-9 w3-2-t {q}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert "--enforce-read" in argv and argv[argv.index("--reviewer-temperature") + 1] == "0.2"
+    assert run(f"start q-1 T {q}", KEYS_T).returncode == 0
+    assert run(f"_exec q-1 T {q}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert "--enforce-read" in argv and argv[argv.index("--reviewer-temperature") + 1] == "0.2"
+    assert run("start q-2 T --reviewer-temperature=hot", KEYS_T).returncode != 0

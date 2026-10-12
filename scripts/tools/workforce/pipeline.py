@@ -123,7 +123,7 @@ class HealthMonitor:
 
 class Pipeline:
     def __init__(self, arm, bundle_dirs, opencode, run_dir, grader, review=True, limits=None,
-                 monitor=None, own=None, review_steps=None):
+                 monitor=None, own=None, review_steps=None, enforce_read=False):
         loaded = []
         for b in bundle_dirs:
             t = grade.load_task(b)
@@ -142,6 +142,7 @@ class Pipeline:
         self.arm, self.oc, self.run_dir, self.grader = arm, opencode, run_dir, grader
         self.review, self.limits, self.monitor = review, limits or Limits(), monitor
         self.review_steps = review_steps or profiles.REVIEW_STEPS   # the cap in force (a replay may raise it)
+        self.enforce_read = enforce_read                           # a verdict that read nothing gets one re-read
         self.impls = profiles.implementers(arm)
         self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
                             os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
@@ -337,6 +338,23 @@ class Pipeline:
             entry["verdict_turn"] = {"verdict": verdict, "rc": v.rc, "timed_out": v.timed_out,
                                      "t_start": t1, "t_end": time.time()}
             entry["verdict"], entry["feedback"] = verdict, feedback[:2000]
+        entry["reread"] = None
+        if self.enforce_read and verdict in ("ACCEPT", "REVISE") and r.session_id and \
+                not self._inspected(os.path.join(t.dir, f"review-r{n}.jsonl")):
+            # A one-step verdict decided from the packet alone (the Qwen3.6 reviewer's invented bugs). Resume
+            # the SAME session once with tools and ask it to read first; a reply with no verdict keeps the
+            # first one, so this never turns a verdict into a no-verdict.
+            t2 = time.time()
+            rr = self._run_as(LEAD, tree, lambda: self.oc.run(
+                "reviewer", tree, profiles.READ_NOW_MESSAGE, self.limits.review_s,
+                os.path.join(t.dir, f"review-r{n}-reread.jsonl"), session=r.session_id,
+                home=t.homes[LEAD], user=LEAD))
+            v2, fb2 = review.parse_verdict(rr.text)
+            entry["reread"] = {"first_verdict": verdict, "verdict": v2, "rc": rr.rc, "timed_out": rr.timed_out,
+                               "t_start": t2, "t_end": time.time()}
+            if v2 != "NONE":
+                verdict, feedback = v2, fb2
+                entry["verdict"], entry["feedback"] = verdict, feedback[:2000]
         shutil.rmtree(tree, ignore_errors=True)            # whatever the reviewer did there is discarded
         t.reviews.append(entry)
         if verdict == "ACCEPT":
@@ -351,6 +369,17 @@ class Pipeline:
                 self.cond.notify_all()
             return
         self._lead_fix(t)
+
+    @staticmethod
+    def _inspected(events_path):
+        """True if the review session completed any call that looks at code."""
+        try:
+            with open(events_path, encoding="utf-8", errors="replace") as f:
+                calls = loops.tool_calls_from_events(f.read())
+        except OSError:
+            return False
+        return any(c["tool"] in ("read", "grep", "glob", "list", "bash") and c["status"] == "completed"
+                   for c in calls)
 
     def _lead_fix(self, t):
         test_out, header = self._visible_tests(t, "fix-check")
@@ -462,6 +491,7 @@ class Pipeline:
                    "review_capped": sum(1 for r in recs for rv in r["reviews"] if rv.get("capped")),
                    "review_timed_out": sum(1 for r in recs for rv in r["reviews"] if rv.get("timed_out")),
                    "verdict_turns": sum(1 for r in recs for rv in r["reviews"] if rv.get("verdict_turn")),
+                   "review_rereads": sum(1 for r in recs for rv in r["reviews"] if rv.get("reread")),
                    "review_none_after_turn": sum(1 for r in recs for rv in r["reviews"]
                                                  if rv.get("verdict_turn") and rv.get("verdict") == "NONE"),
                    "health": health, "valid": not invalid, "invalid_reasons": invalid}
