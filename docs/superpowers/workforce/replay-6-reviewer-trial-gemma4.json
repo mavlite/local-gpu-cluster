@@ -1,0 +1,45 @@
+{
+  "what": "Reviewer-model trial 3: Gemma 4 26B-A4B (Google QAT q4_0 GGUF + Unsloth MTP draft head) as the reviewer on the same 27 harvested W3 rounds, same round-2 packets, REVIEW_STEPS 20, verdict turn, read-first rule. Served by worker llmbench01 (ik llama-server, frozen G4 config from the sweep in gemma4-worker-sweep.json) through `replay-reviews --reviewer-model w1/gemma4 --worker ... --worker-alias gemma4 --read-first`; no router or chat-server change, no window.",
+  "when": "2026-10-11T23:11Z to 2026-10-12T01:19Z (128 min for 27 rounds; third start)",
+  "harness": "feat/wf-experiment 60f3e14 (main 4f186e3 + --read-first, --worker-alias, G4); VM manifest b8914790cbac071db841c93ea7ab2534229e5b44e82dab087ed2661f033a05f6",
+  "serving": {
+    "engine": "ik_llama.cpp 5f89bfc, config G4: -c 65536 -t 12 -tb 16 -ub 1024 -b 2048 -fa on -ctk q8_0 -ctv q8_0 --min-p 0 -rea off -rtr -cram 0 -ctx-ckpt 8 -md mtp-gemma-4-26B-A4B-it.gguf --spec-type mtp:n_max=3,p_min=0.5 --temp 1.0 --top-p 0.95 --top-k 64, alias gemma4, 1 slot, 30 GB cap",
+    "sweep": "gemma4-worker-sweep.json: 395 t/s prefill / 18 t/s gen base, MTP 31 t/s gen; thinking must be off"
+  },
+  "result": {
+    "verdicts": {"ACCEPT": 23, "REVISE": 3, "NONE": 1},
+    "still_none_of_old_none": "0 of 7 (all reached a verdict, 6 through the verdict turn)",
+    "agreement_with_w3": "14/20 (qwen3.8 16/20; Qwen3.6 alone 14/20; Qwen3.6 + read-first 17/20)",
+    "agreement_with_qwen3.8": "22/27",
+    "median_steps": {"gemma4": 7, "qwen3.8": 10, "qwen3.6+rule": 11},
+    "capped": 1, "verdict_turns": 6, "one_step_verdicts": 1,
+    "median_seconds_per_review": {"gemma4 (CPU worker, MTP)": 239, "qwen3.6 alone (CPU)": 119, "qwen3.6 + rule (CPU)": 277, "qwen3.8 (V620 pair)": 201}
+  },
+  "disagreements_with_qwen3.8_read_by_hand": [
+    {"round": "w2-01 r2", "w3": "ACCEPT", "qwen3.8": "ACCEPT", "gemma4": "REVISE (2 steps, via verdict turn)", "hidden_tests_at_this_state": "3/3 pass",
+     "read": "VALID (minor): `RemainAfterExit=yes` appears twice in the generated unit (patch lines 23 and 27; one of them under [Unit]) - the same defect Qwen3.6+rule found at r1; W3 and qwen3.8 accepted it."},
+    {"round": "w2-01 r0", "w3": "REVISE", "qwen3.8": "REVISE", "gemma4": "ACCEPT", "hidden_tests_at_this_state": "3/3 pass",
+     "read": "MISS: both other reviewers asked for real fixes to the shipped unit; Gemma accepted."},
+    {"round": "w2-06 r0", "w3": "ACCEPT", "qwen3.8": "REVISE", "gemma4": "ACCEPT", "hidden_tests_at_this_state": "16/16 pass",
+     "read": "MISS: the real redirect urljoin bug qwen3.8 found."},
+    {"round": "w2-07 r0", "w3": "NONE", "qwen3.8": "REVISE", "gemma4": "ACCEPT", "hidden_tests_at_this_state": "18/18 pass",
+     "read": "LENIENT: qwen3.8's REVISE named missing request parts (force re-fetch, router wiring)."},
+    {"round": "w2-10 r2", "w3": "REVISE", "qwen3.8": "REVISE", "gemma4": "NONE (20 steps + verdict turn)", "hidden_tests_at_this_state": "n/a (empty diff)",
+     "read": "FAILURE: role confusion - on the empty-diff round Gemma decided it was the implementer ('I will now proceed with the implementation') and refused to give a verdict even in the verdict turn."}
+  ],
+  "shared_misses_with_qwen3.8": ["w2-05 r1 (state fails the hidden tests; accepted in 2 steps)", "w2-07 r1 (should_cache arity bug; accepted in 7 steps)"],
+  "tally_vs_qwen3.8": {"gains": 1, "misses": 3, "failures": 1, "agree": 22},
+  "integration_findings": [
+    "Gemma 4 thinks by default; the harness reads message.content, so -rea off (or --reasoning-budget 0, or kwargs enable_thinking=false) is mandatory - all three work, no speed cost",
+    "ik: on ~15% of tool-using rounds the model answered a tool result with an EMPTY message (4 output tokens), ending the session without a verdict; the verdict turn then produced prose without a leading ACCEPT/REVISE on several of them. The isolated two-turn tool probe never reproduces it.",
+    "ik: Gemma's full-attention KV (~7 GB at 61K tokens q8_0) plus the prompt-cache RAM save OOM-killed the worker at the 30 GB cap during replay-4; fixed with -cram 0 (G4_MEM)",
+    "mainline llama.cpp b11026 on the same box: Gemma prefill collapsed to 36-40 t/s (vs ~395 on ik), so long steps hit opencode's ~275 s request cancellation; mainline is not usable for Gemma on these CPUs without further tuning (replay-5 abandoned)",
+    "Gemma reads a lot: contexts of 30-61K tokens per review session versus ~10-20K for the Qwen reviewers"
+  ],
+  "assessment": {
+    "quality": "the weakest of the three reviewers tried: most lenient (23/27 ACCEPT), lowest W3 agreement, one role-confusion failure, misses both qwen3.8 catches, one minor valid catch of its own. The second-family hypothesis (different blind spots) did not pay off: it shares both of qwen3.8's misses.",
+    "cost": "7 steps median but 239 s per review on the CPU worker (slower than Qwen3.6 at 119 s), driven by much larger contexts; verdict turns 6 of 27 - it would trip the window's reviewer-health rule.",
+    "recommendation": "do not pursue Gemma 4 26B-A4B as the reviewer. Rank after three trials: qwen3.8-nothink (pre-registered) ~ Qwen3.6-35B-A3B + read-first (equal quality, cheaper per step) > Qwen3.6 alone (fast, hallucinates) > Gemma 4 26B-A4B (lenient, integration quirks). Laguna XS 2.1 remains untried (HIP risks); not worth a trial before the round-2 window."
+  },
+  "teardown": "worker torn down (key shredded, lock removed), wf-replay4 router key revoked, host keys shredded, VM key files 0, no key in the harvest; harvest at /root/wf/runs/replay-6 on the host; the Unsloth QAT UD-Q4_K_XL + MTP files remain at /tank/models/gemma4 for a possible GPU run; llmbench01 keeps gemma-4-26B_q4_0-it.gguf and the MTP head in /models"
+}
