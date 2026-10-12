@@ -17,6 +17,30 @@ original decision still hold once Qwen3.6 runs with the right settings?
 So the quality evidence for qwen3.8 is one partial run, and the speed evidence compared against a
 mis-configured Qwen3.6.
 
+## Published evidence (researched 2026-10-12)
+
+- **Qwen's Qwen3.8-27B card** compares against the *dense* Qwen3.6-27B, not the 35B-A3B, and wins
+  clearly: SWE-bench Pro 61.7 vs 53.5, Terminal-Bench 2.1 73.0 vs 63.4, LiveCodeBench v6 90.3 vs 83.9,
+  NL2Repo 42.3 vs 36.2, IFBench 79.5 vs 69.1. Source: huggingface.co/Qwen/Qwen3.8-27B.
+- **Qwen3.6-35B-A3B's own card**: SWE-bench Verified 73.4, SWE-bench Pro 49.5, Terminal-Bench 2.0 51.5,
+  LiveCodeBench v6 80.4 — below the dense 27B on every shared benchmark. Source: huggingface.co/Qwen/Qwen3.6-35B-A3B.
+- **Artificial Analysis** (artificialanalysis.ai/models/comparisons/qwen3-8-27b-vs-qwen3-6-35b-a3b):
+  Intelligence Index 34 vs 18; AutomationBench-AA 48% vs 5%; SciCode 47 vs 37; AA-LCR (long context)
+  82 vs 72; output speed 46.5 vs 129.4 tok/s. Effort-confounded: qwen3.8 ran at "Xhigh" (67K output
+  tokens/task) vs Qwen3.6 default reasoning (35K).
+- **Aggregators** (llm-stats, BenchLM): qwen3.8 wins 8/8 shared benchmarks; SWE-bench Pro 61.7 vs 49.5.
+- **Optimizations for Qwen3.6-35B-A3B in llama.cpp** (Unsloth docs, Jarvislabs, community):
+  in-GGUF MTP via the `unsloth/Qwen3.6-35B-A3B-MTP-GGUF` with `--spec-type draft-mtp --spec-draft-n-max 2`
+  — only ~1.15–1.25× on this MoE (1.17× measured on an RTX PRO 6000; 1.73× for the dense 27B), acceptance
+  falls 83% → 50% at 4 drafts, ~1 GB extra memory; community reports Q4 noticeably weaker than Q6 on
+  this MoE for tool calling and long context; bf16 KV as the fix if output degrades; `--n-cpu-moe` is
+  irrelevant here (the model fits in VRAM).
+
+**Implication.** The external gap on hard agentic coding is large (~12 points SWE-bench Pro, 48% vs 5%
+AutomationBench). Our own tasks showed near-parity — which is exactly the pattern of a saturated
+ruler (2026-09-06: "thinking is worse" looked true until Aider Polyglot showed +23.5 points). The
+decision therefore rests on the discriminating measurements below, not on the workforce replays.
+
 ## Measurements (each model at its own model-card sampling)
 
 1. **Coding quality — Aider Polyglot Python-34, full set** (LXC 158, the established discriminating
@@ -30,9 +54,11 @@ mis-configured Qwen3.6.
 3. **Speed and capacity at production shapes** — generation/prefill at 262K context; `--parallel 3`
    (Qwen3.6's hybrid attention keeps KV small, so three large slots may fit where qwen3.8 needs the
    window layout); VRAM headroom for embed + rerank alongside.
-4. **Qwen3.6 with its in-GGUF MTP head on the GPU** (`draft-mtp`). The 2026-09 spec-decode regression on
-   this MoE was a *separate draft model*; the MTP-variant GGUF (already used by the CPU workers) is
-   untested on the V620s.
+4. **Qwen3.6 serving optimizations on the V620s**: the MTP GGUF with `draft-mtp` at n-max 1/2/3 (the
+   2026-09 spec-decode regression on this MoE was a *separate draft model*); **Q6 instead of Q4** (UD-Q6_K
+   crashed with a ROCm illegal memory access under layer 1:1.5 on 2026-10-12 — retry at layer 1:1 and
+   with UD-Q6_K_XL); bf16 KV. The Polyglot and S runs use whichever quant wins, so Qwen3.6 is not judged
+   at a handicapped quant.
 5. **Not covered yet — RAG answer quality.** There is no discriminating RAG eval; the vcf-lookup path
    needs a small known-answer set before it can be compared. Flagged, not run.
 
