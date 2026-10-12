@@ -59,13 +59,20 @@ decision therefore rests on the discriminating measurements below, not on the wo
    crashed with a ROCm illegal memory access under layer 1:1.5 on 2026-10-12 — retry at layer 1:1 and
    with UD-Q6_K_XL); bf16 KV. The Polyglot and S runs use whichever quant wins, so Qwen3.6 is not judged
    at a handicapped quant.
-5. **Not covered yet — RAG answer quality.** There is no discriminating RAG eval; the vcf-lookup path
-   needs a small known-answer set before it can be compared. Flagged, not run.
+5. **RAG answer quality, frozen retrieval.** 24 VCF questions with known answers (from facts the lab
+   verified by running, e.g. three-host vSAN, .local scope, memory tiering needing maintenance mode);
+   AnythingLLM `vcf-reference` vector-search top-6 frozen once, so both models answer from identical
+   context with the workspace's own system prompt, non-thinking (the RAG path's mode). 22 of 24 questions
+   have their key facts in the retrieved context and are used. Graded blind (model labels hidden) against
+   the frozen context: correct and supported / partly / wrong or unsupported, plus latency.
+   Scripts and questions: `docs/superpowers/workforce/rag-eval/` (`rag_eval.py` retrieve / answer / grade).
 
 ## Decision rule (fixed before the runs)
 
 - Qwen3.6 replaces qwen3.8 as the main model if its Polyglot pass@2 (best mode) is within 5 points of
-  qwen3.8-think **and** its S-arm acceptance is within one task of qwen3.8's, at ≥1.5× the speed.
+  qwen3.8-think **and** its S-arm acceptance is within one task of qwen3.8's, at ≥1.5× the speed,
+  **and** its blind-graded RAG correctness is no more than 2 questions (of 22) below qwen3.8's.
+  (The RAG clause was added 2026-10-12 before any RAG answers were generated.)
 - Within 5–10 points: keep qwen3.8 as the default, add Qwen3.6 as the fast profile for agents/workforce.
 - More than 10 points behind: keep qwen3.8; Qwen3.6 only as the workforce lead where speed dominates.
 
