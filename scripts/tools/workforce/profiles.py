@@ -14,6 +14,7 @@ LEAD_ALIAS = "qwen3.8-nothink"
 WORKER_ALIAS = "qwen3.6"
 N_WORKERS = 3
 IMPL_STEPS, REVIEW_STEPS, FIX_STEPS, VERDICT_STEPS = 60, 20, 60, 3
+QWEN_NOTHINK_TEMPERATURE = 0.7                 # the Qwen non-thinking card value the servers default to
 VERDICT_MESSAGE = "Give your verdict now. Reply starting with ACCEPT or REVISE:"
 READ_NOW_MESSAGE = ("You gave a verdict without reading any code. Read the changed function(s) from the tree "
                     "with the read tool now, then reply starting with ACCEPT or REVISE: <feedback>, decided on "
@@ -125,10 +126,23 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
 
 
 def _with_temperature(cfg, temperature):
-    """The reviewer and its verdict turn at a fixed sampling temperature (a judge should not be noisy)."""
-    agents = {k: (dict(v, temperature=temperature) if k in ("reviewer", "reviewer-verdict") else v)
-              for k, v in cfg["agent"].items()}
-    return dict(cfg, agent=agents)
+    """The reviewer and its verdict turn at a fixed sampling temperature (a judge should not be noisy).
+    opencode sends an agent temperature only for a model marked temperature-capable, and once marked it
+    sends its own default to every other agent on that provider -- so the reviewer's provider model is
+    marked and the other agents on it are pinned to the Qwen card value the servers default to."""
+    rprov = cfg["agent"]["reviewer"]["model"].split("/", 1)[0]
+    providers = {k: (dict(v, models={m: dict(spec, temperature=True) for m, spec in v["models"].items()})
+                     if k == rprov else v)
+                 for k, v in cfg["provider"].items()}
+    agents = {}
+    for k, v in cfg["agent"].items():
+        if k in ("reviewer", "reviewer-verdict"):
+            agents[k] = dict(v, temperature=temperature)
+        elif isinstance(v.get("model"), str) and v["model"].split("/", 1)[0] == rprov:
+            agents[k] = dict(v, temperature=QWEN_NOTHINK_TEMPERATURE)
+        else:
+            agents[k] = v
+    return dict(cfg, provider=providers, agent=agents)
 
 
 def install(cfg_dir, config):

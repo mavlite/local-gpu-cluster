@@ -170,5 +170,20 @@ def test_lead_url_moves_the_whole_lead_to_its_own_provider():
 def test_reviewer_temperature_sets_only_the_reviewer_agents():
     a = profiles.build_config("G", ROUTER, [], reviewer_temperature=0.2)["agent"]
     assert a["reviewer"]["temperature"] == a["reviewer-verdict"]["temperature"] == 0.2
-    assert "temperature" not in a["fixer"] and "temperature" not in a["impl-1"]
     assert "temperature" not in profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]
+
+
+def test_reviewer_temperature_is_actually_sent_and_leaves_other_agents_at_the_server_default():
+    # opencode sends an agent temperature only for a model marked temperature-capable (2026-10-12: replay-8
+    # ran at the server's 0.7 because it was not). Marking it makes opencode send ITS default to every other
+    # agent on that provider, so those are pinned to the Qwen card value the server uses anyway.
+    t = profiles.build_config("T", ROUTER, WORKERS, lead_url="http://192.168.6.151:8090/v1", reviewer_temperature=0.2)
+    assert t["provider"]["lead"]["models"]["qwen3.6"]["temperature"] is True
+    assert t["agent"]["fixer"]["temperature"] == profiles.QWEN_NOTHINK_TEMPERATURE == 0.7
+    assert all("temperature" not in t["provider"][w]["models"]["qwen3.6"] for w in ("w1", "w2", "w3"))
+    assert all("temperature" not in t["agent"][f"impl-{i}"] for i in (1, 2, 3))
+    assert "temperature" not in t["provider"]["router"]["models"][profiles.LEAD_ALIAS]
+    g = profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6", reviewer_temperature=0.2)
+    assert g["provider"]["w1"]["models"]["qwen3.6"]["temperature"] is True
+    assert "temperature" not in g["provider"]["router"]["models"][profiles.LEAD_ALIAS]
+    assert "temperature" not in g["agent"]["fixer"] and "temperature" not in g["agent"]["impl-1"]
