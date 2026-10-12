@@ -53,9 +53,29 @@
    "incident": "case 31 (forth) fell into a temperature-0 repetition loop: 52K+ tokens on one request with no client max_tokens; aider timed out and retried behind it. The server was restarted at 19:03Z with --n-predict 32768 so a loop fails fast; no real answer comes near that cap, so the score is unaffected (a loop never passes). All later runs use the cap."
   },
   "qwen38_reference_2026_09": {
-   "think_pass_rate_2": 73.5,
-   "nothink_pass_rate_2": 50.0
+   "think": {
+    "run": "2026-09-06-02-05-32--py34-q38think",
+    "model": "openai/qwen3.8-think",
+    "pass_rate_1": 26.5,
+    "pass_rate_2": 73.5,
+    "seconds_per_case": 111.8
+   },
+   "nothink": {
+    "run": "2026-09-06-01-14-02--py34-q38nothink",
+    "pass_rate_2": 50.0
+   }
   },
-  "reading_so_far": "Non-thinking: Qwen3.6 5.9 points above qwen3.8. The decision rule compares best modes (qwen3.8 think 73.5)."
+  "reading_so_far": "Qwen3.6 think 76.5 vs qwen3.8 think 73.5 (Sept): +3 points = one case, inside noise. Qwen3.6 is NOT faster here: 124.5 vs 111.8 s/case -- it generates ~1.6x faster per token but reasons longer. Per the plan (within 10 points) qwen3.8-think is re-run the same day: queued after lt-9-s38 (run py34-q38think-rerun).",
+  "qwen36_think": {
+   "run": "2026-10-12-19-15-21--q36-q6mtp3-think",
+   "pass_rate_1": 38.2,
+   "pass_rate_2": 76.5,
+   "passed_2": "26/34",
+   "error_outputs": 0,
+   "exhausted_context_windows": 0,
+   "seconds_per_case": 124.5,
+   "server": "same Q6_K_XL + MTP n3, enable_thinking true, server sampling 0.6/0.95/20 (aider overrides temperature to 0), --n-predict 32768",
+   "tokens": "2.0-4.7K generated per request at 108-117 t/s"
+  }
  }
 }
