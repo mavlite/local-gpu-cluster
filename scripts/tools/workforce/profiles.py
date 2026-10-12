@@ -47,6 +47,9 @@ Your reply must START with exactly one of these two forms:
 ACCEPT
 REVISE: <specific, actionable feedback for the engineer>"""
 
+DEFECTS_ONLY_RULE = ("REVISE only for a defect: the change does not do what the request asks, breaks existing "
+                     "behaviour, or will fail at runtime. Style, naming, comments, redundancy and improvements "
+                     "beyond the request are not reasons to REVISE; if you mention them, do it after ACCEPT.")
 READ_FIRST_RULE = ("Before you decide, read at least one changed function from the tree with the read "
                    "tool (a file named in the diff) and base the verdict on what you read, never on the "
                    "packet alone.")
@@ -92,7 +95,7 @@ def implementers(arm):
 
 
 def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
-                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None):
+                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None, defects_only=False):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
@@ -106,9 +109,12 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
         providers["lead"] = _provider("lead", lead_url, "WF_WORKER_KEY", lalias, LEAD_CONTEXT)
         lead = f"lead/{lalias}"
     agents = {"general": {"disable": True}, "explore": {"disable": True},
-              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else ""),
+              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else "")
+                                 + ("\n" + DEFECTS_ONLY_RULE if defects_only else ""),
                                  REVIEW_PERMS, review_steps or REVIEW_STEPS),
-              "reviewer-verdict": _agent(reviewer_model or lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
+              "reviewer-verdict": _agent(reviewer_model or lead,
+                                         REVIEWER_PROMPT + ("\n" + DEFECTS_ONLY_RULE if defects_only else ""),
+                                         VERDICT_PERMS, VERDICT_STEPS),
               "fixer": _agent(lead, FIXER_PROMPT, WRITE_PERMS, FIX_STEPS)}
     if arm == "T":
         if len(worker_urls) != N_WORKERS:

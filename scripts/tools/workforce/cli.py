@@ -40,14 +40,15 @@ def resolve_opencode(env):
 
 def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, reviewer_model=None,
                   keys=None, read_first=False, worker_alias=None, review_steps=None, lead_url=None,
-                  lead_alias=None, reviewer_temperature=None):
+                  lead_alias=None, reviewer_temperature=None, defects_only=False):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
     Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
     cfg = profiles.install(os.path.join(oc_dir, "cfg"),
                            profiles.build_config(arm, router_url, worker_urls, reviewer_model=reviewer_model,
                                                  read_first=read_first, worker_alias=worker_alias,
                                                  review_steps=review_steps, lead_url=lead_url,
-                                                 lead_alias=lead_alias, reviewer_temperature=reviewer_temperature))
+                                                 lead_alias=lead_alias, reviewer_temperature=reviewer_temperature,
+                                                 defects_only=defects_only))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
     return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg,
@@ -261,6 +262,7 @@ def main(argv=None, env=None):
     p.add_argument("--review-steps", type=int, help="reviewer step cap (default REVIEW_STEPS)")
     p.add_argument("--enforce-read", action="store_true", help="re-ask a verdict that read no code, once")
     p.add_argument("--reviewer-temperature", type=float, help="sampling temperature for the reviewer")
+    p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
     p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
     p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
     p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
@@ -278,6 +280,7 @@ def main(argv=None, env=None):
     p.add_argument("--review-steps", type=int, help="reviewer step cap for this replay (default REVIEW_STEPS)")
     p.add_argument("--enforce-read", action="store_true", help="re-ask a verdict that read no code, once")
     p.add_argument("--reviewer-temperature", type=float, help="sampling temperature for the reviewer")
+    p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -336,7 +339,7 @@ def main(argv=None, env=None):
         opencode = build_opencode(a.arm, a.out + ".opencode", a.router, a.worker, [oc_bin], env,
                                   launcher=launcher, lead_url=a.lead_url, lead_alias=a.lead_alias,
                                   read_first=a.read_first, review_steps=a.review_steps,
-                                  reviewer_temperature=a.reviewer_temperature)
+                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
@@ -363,7 +366,7 @@ def main(argv=None, env=None):
                                   reviewer_model=a.reviewer_model,
                                   keys=profiles.KEY_ENV if a.worker else None, read_first=a.read_first,
                                   worker_alias=a.worker_alias, review_steps=a.review_steps,
-                                  reviewer_temperature=a.reviewer_temperature)
+                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only)
         journal = None
         if a.journal:
             with open(a.journal, encoding="utf-8", errors="replace") as f:

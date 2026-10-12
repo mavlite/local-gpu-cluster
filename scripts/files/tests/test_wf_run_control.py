@@ -325,3 +325,14 @@ def test_quality_options_pass_through_start_and_start_replay(guest):
     argv = json.loads((tmp / "dump.json").read_text())["argv"]
     assert "--enforce-read" in argv and argv[argv.index("--reviewer-temperature") + 1] == "0.2"
     assert run("start q-2 T --reviewer-temperature=hot", KEYS_T).returncode != 0
+
+
+def test_defects_only_passes_through_start_and_start_replay(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-10 w3-2-t --defects-only", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-10 w3-2-t --defects-only").returncode == 0
+    assert "--defects-only" in json.loads((tmp / "dump.json").read_text())["argv"]
+    assert run("start d-1 T --defects-only", KEYS_T).returncode == 0
+    assert run("_exec d-1 T --defects-only").returncode == 0
+    assert "--defects-only" in json.loads((tmp / "dump.json").read_text())["argv"]

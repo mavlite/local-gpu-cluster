@@ -51,7 +51,7 @@ check_opts() {
   for o in "$@"; do
     [[ "$o" == --w1 || "$o" == --read-first || "$o" =~ ^--lead-url=https?://[A-Za-z0-9.:/_-]+$ \
        || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ \
-       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ ]] \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only ]] \
       || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first)"
   done
 }
@@ -63,7 +63,7 @@ check_replay_opts() {
   for o in "$@"; do
     [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ \
        || "$o" =~ ^--worker-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ || "$o" == --read-first \
-       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ ]] \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only ]] \
       || die "unknown option '$o' (only --reviewer-model=<provider/model>, --worker=<url>, --worker-alias=<name>, --review-steps=<n>, --read-first)"
   done
 }
@@ -153,6 +153,7 @@ cmd_exec_replay() {
       --worker-alias=*) extra+=(--worker-alias "${o#--worker-alias=}") ;;
       --review-steps=*) extra+=(--review-steps "${o#--review-steps=}") ;;
       --enforce-read) extra+=(--enforce-read) ;;
+      --defects-only) extra+=(--defects-only) ;;
       --reviewer-temperature=*) extra+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
     esac
   done

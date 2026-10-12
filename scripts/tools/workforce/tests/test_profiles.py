@@ -187,3 +187,12 @@ def test_reviewer_temperature_is_actually_sent_and_leaves_other_agents_at_the_se
     assert g["provider"]["w1"]["models"]["qwen3.6"]["temperature"] is True
     assert "temperature" not in g["provider"]["router"]["models"][profiles.LEAD_ALIAS]
     assert "temperature" not in g["agent"]["fixer"] and "temperature" not in g["agent"]["impl-1"]
+
+
+def test_defects_only_rule_is_added_to_the_reviewer_and_its_verdict_turn():
+    plain = profiles.build_config("G", ROUTER, [])["agent"]
+    ruled = profiles.build_config("G", ROUTER, [], defects_only=True, read_first=True)["agent"]
+    assert profiles.DEFECTS_ONLY_RULE not in plain["reviewer"]["prompt"]
+    assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer"]["prompt"] and profiles.READ_FIRST_RULE in ruled["reviewer"]["prompt"]
+    assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer-verdict"]["prompt"]       # the tools-off turn decides too
+    assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]
