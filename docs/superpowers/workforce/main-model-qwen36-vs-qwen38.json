@@ -39,5 +39,23 @@
   ],
   "chosen": "UD-Q6_K_XL + draft-mtp n-max 3: 1.6x the old Q4 generation at a higher-quality quant; costs ~25% prefill. Used for every Qwen3.6 quality run below.",
   "vs_published": "Unsloth/community report 1.15-1.25x for MTP on this MoE on NVIDIA; measured 1.6-1.8x over MTP-off at the same quant here (110-119 vs 67 code, 112 vs 64 RAG)."
+ },
+ "polyglot_python34": {
+  "setup": "Aider Polyglot Python-34, whole edit format, --threads 1, aider sends temperature 0 (as in every earlier run); LXC 158 -> direct llama-server in 151 (gpu-q36.sh: Q6_K_XL + MTP n3, 1 x 128K)",
+  "qwen36_nothink": {
+   "run": "2026-10-12-17-00-37--q36-q6mtp3-nothink",
+   "pass_rate_1": 32.4,
+   "pass_rate_2": 55.9,
+   "passed_2": "19/34",
+   "exhausted_context_windows": 2,
+   "error_outputs": 7,
+   "seconds_per_case": 235.4,
+   "incident": "case 31 (forth) fell into a temperature-0 repetition loop: 52K+ tokens on one request with no client max_tokens; aider timed out and retried behind it. The server was restarted at 19:03Z with --n-predict 32768 so a loop fails fast; no real answer comes near that cap, so the score is unaffected (a loop never passes). All later runs use the cap."
+  },
+  "qwen38_reference_2026_09": {
+   "think_pass_rate_2": 73.5,
+   "nothink_pass_rate_2": 50.0
+  },
+  "reading_so_far": "Non-thinking: Qwen3.6 5.9 points above qwen3.8. The decision rule compares best modes (qwen3.8 think 73.5)."
  }
 }
