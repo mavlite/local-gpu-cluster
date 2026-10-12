@@ -162,6 +162,14 @@ def test_closed_mode_denies_everything_both_ways():
     assert rules(r.stdout) == []
 
 
+def test_76_start_run_sends_the_worker_key_for_a_gpu_lead():
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
+    block = "\n".join(lines[start:start + 14])
+    assert 'if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]]; then printf \'WF_WORKER_KEY=%s' in block
+
+
 def test_76_never_puts_a_key_on_a_qm_command_line():
     """Plan D start-run: keys reach the guest on stdin (printf builtins piped to vm_run_stdin)."""
     with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:

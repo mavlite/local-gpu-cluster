@@ -88,7 +88,7 @@ def implementers(arm):
 
 
 def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
-                 review_steps=None):
+                 review_steps=None, lead_url=None, lead_alias=None):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
@@ -97,6 +97,10 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
     lead = f"router/{LEAD_ALIAS}"
     walias = worker_alias or WORKER_ALIAS                      # trial: a worker serving another model
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
+    if lead_url:                                               # orchestration trial: the lead on its own server
+        lalias = lead_alias or WORKER_ALIAS
+        providers["lead"] = _provider("lead", lead_url, "WF_WORKER_KEY", lalias, LEAD_CONTEXT)
+        lead = f"lead/{lalias}"
     agents = {"general": {"disable": True}, "explore": {"disable": True},
               "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else ""),
                                  REVIEW_PERMS, review_steps or REVIEW_STEPS),
@@ -137,9 +141,10 @@ def with_home(env, home):
     return out
 
 
-def keys_for(arm):
-    """The keys an arm's agents need: arm G has no CPU workers, so no worker key."""
-    return KEY_ENV if arm == "T" else ("WF_ROUTER_KEY",)
+def keys_for(arm, lead_url=None):
+    """The keys an arm's agents need: arm G has no CPU workers, so no worker key -- unless the lead runs on
+    a keyed server of its own (the orchestration trial), which takes the worker key."""
+    return KEY_ENV if arm == "T" or lead_url else ("WF_ROUTER_KEY",)
 
 
 def opencode_env(base_env, home, config_path, keys=KEY_ENV):

@@ -197,7 +197,7 @@ def test_run_arm_s_needs_the_router_key_and_never_reviews(tmp_path, monkeypatch)
         def run(self):
             return {"arm": seen["arm"]}
 
-    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None: "OC")
+    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None, **kw: "OC")
     monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
     assert cli.main(["run", "--arm", "S", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
                      "--router", "http://x/v1"], env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
@@ -336,3 +336,30 @@ def test_replay_reviews_review_steps_flag_reaches_config_and_pipeline(tmp_path, 
     assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
     assert seen["build"]["review_steps"] == 30 and seen["replay"]["review_steps"] == 30
     assert json.loads(capsys.readouterr().out)["review_steps"] == 30
+
+
+def test_run_lead_url_needs_the_worker_key_and_reaches_config_and_pipeline(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(arm=arm, review=review, **kw)
+
+        def run(self):
+            return {"arm": seen["arm"]}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen["build"] = kw
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    args = ["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+            "--lead-url", "http://192.168.6.151:8090/v1", "--read-first", "--review-steps", "30"]
+    with pytest.raises(SystemExit) as e:
+        cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"})
+    assert "WF_WORKER_KEY" in str(e.value)
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
+    b = seen["build"]
+    assert b["lead_url"] == "http://192.168.6.151:8090/v1" and b["lead_alias"] is None and b["read_first"] is True
+    assert b["review_steps"] == 30 and seen["review_steps"] == 30

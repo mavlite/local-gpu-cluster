@@ -148,3 +148,20 @@ def test_review_steps_override_changes_only_the_reviewer_cap():
     assert cfg["reviewer"]["steps"] == 30 and cfg["reviewer-verdict"]["steps"] == profiles.VERDICT_STEPS
     assert cfg["fixer"]["steps"] == profiles.FIX_STEPS and cfg["impl-1"]["steps"] == profiles.IMPL_STEPS
     assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["steps"] == profiles.REVIEW_STEPS == 20
+
+
+GPU_LEAD = "http://192.168.6.151:8090/v1"
+
+
+def test_lead_url_moves_the_whole_lead_to_its_own_provider():
+    # Orchestration trial: reviewer, verdict turn and fixer on the GPU lead server; the workers unchanged.
+    cfg = profiles.build_config("T", ROUTER, WORKERS, lead_url=GPU_LEAD)
+    assert cfg["provider"]["lead"]["options"]["baseURL"] == GPU_LEAD
+    assert cfg["provider"]["lead"]["options"]["apiKey"] == "{env:WF_WORKER_KEY}"
+    a = cfg["agent"]
+    assert a["reviewer"]["model"] == a["reviewer-verdict"]["model"] == a["fixer"]["model"] == "lead/qwen3.6"
+    assert [a[f"impl-{i}"]["model"] for i in (1, 2, 3)] == ["w1/qwen3.6", "w2/qwen3.6", "w3/qwen3.6"]
+    assert cfg["model"] == "lead/qwen3.6"
+    g = profiles.build_config("S", ROUTER, [], lead_url=GPU_LEAD, lead_alias="other")["agent"]
+    assert g["impl-1"]["model"] == "lead/other"
+    assert profiles.keys_for("S", lead_url=GPU_LEAD) == profiles.KEY_ENV and profiles.keys_for("S") == ("WF_ROUTER_KEY",)

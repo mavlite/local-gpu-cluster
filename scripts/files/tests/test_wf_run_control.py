@@ -296,3 +296,17 @@ def test_start_replay_accepts_the_review_steps_option(guest):
     argv = json.loads((tmp / "dump.json").read_text())["argv"]
     assert argv[argv.index("--review-steps") + 1] == "30"
     assert run("start-replay rp-6 w3-2-t --review-steps=abc", "WF_ROUTER_KEY=r\n").returncode != 0
+
+
+def test_start_passes_lead_options_and_a_gpu_lead_needs_the_worker_key(guest):
+    # Orchestration trial: the lead on a keyed GPU server takes the worker key, also on arms G/S.
+    run, log, d, tmp = guest
+    opts = "--lead-url=http://192.168.6.151:8090/v1 --read-first --review-steps=30"
+    r = run(f"start l-1 G {opts}", "WF_ROUTER_KEY=r\n")
+    assert r.returncode != 0 and "WF_WORKER_KEY" in r.stderr
+    assert run(f"start l-2 T {opts}", KEYS_T).returncode == 0
+    assert run(f"_exec l-2 T {opts}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--lead-url") + 1] == "http://192.168.6.151:8090/v1"
+    assert "--read-first" in argv and argv[argv.index("--review-steps") + 1] == "30"
+    assert run("start l-3 T --lead-url=file:///etc/passwd", KEYS_T).returncode != 0
