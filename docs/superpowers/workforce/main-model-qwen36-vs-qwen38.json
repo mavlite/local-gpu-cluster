@@ -65,7 +65,7 @@
     "pass_rate_2": 50.0
    }
   },
-  "reading_so_far": "Qwen3.6 think 76.5 vs qwen3.8 think 73.5 (Sept): +3 points = one case, inside noise. Qwen3.6 is NOT faster here: 124.5 vs 111.8 s/case -- it generates ~1.6x faster per token but reasons longer. Per the plan (within 10 points) qwen3.8-think is re-run the same day: queued after lt-9-s38 (run py34-q38think-rerun).",
+  "reading_so_far": "Thinking (best mode for both): Qwen3.6 76.5 vs qwen3.8 70.6 same day (73.5 in Sept) -- +2 cases, within run-to-run noise but not behind. Qwen3.6 is slower per case in thinking mode (124.5 vs 102.4 s) because it reasons longer. Non-thinking: Qwen3.6 55.9 vs qwen3.8 50.0 (Sept).",
   "qwen36_think": {
    "run": "2026-10-12-19-15-21--q36-q6mtp3-think",
    "pass_rate_1": 38.2,
@@ -76,6 +76,17 @@
    "seconds_per_case": 124.5,
    "server": "same Q6_K_XL + MTP n3, enable_thinking true, server sampling 0.6/0.95/20 (aider overrides temperature to 0), --n-predict 32768",
    "tokens": "2.0-4.7K generated per request at 108-117 t/s"
+  },
+  "qwen38_think_same_day": {
+   "run": "2026-10-12-21-35-51--py34-q38think-rerun",
+   "model": "openai/qwen3.8-think via the router (production chat, window 3-slot layout)",
+   "pass_rate_1": 32.4,
+   "pass_rate_2": 70.6,
+   "passed_2": "24/34",
+   "error_outputs": 0,
+   "exhausted_context_windows": 0,
+   "seconds_per_case": 102.4,
+   "note": "paused by the user at 30/34 (22:2xZ) and resumed in place with aider --cont; only cases without results re-ran"
   }
  },
  "rag_frozen_retrieval": {
@@ -159,5 +170,21 @@
    "valid": true
   },
   "reading": "Equal acceptance (13 vs 12-15). Qwen3.6 is 1.5x faster (33 vs 49 min) even WITHOUT MTP; with Q6+MTP its generation is ~1.6x faster again, so the real gap is likely larger (not measured). Run format: [accepted of 16, minutes]."
+ },
+ "decision": {
+  "rule_applied": {
+   "polyglot_within_5_points_of_qwen38_think": "PASS (76.5 vs 70.6 same day; ahead)",
+   "s_arm_acceptance_within_one_task": "PASS (13.3 mean vs 13)",
+   "speed_at_least_1_5x": "MIXED: S arm 1.48x (33 vs 49 min, Qwen3.6 without MTP); RAG 2.9x (14 vs 40 s); Polyglot think 0.82x (124.5 vs 102.4 s/case)",
+   "rag_no_more_than_2_below": "FAIL (12 vs 17 fully correct; 32 vs 39 points; two unjustified refusals)"
+  },
+  "outcome": "Qwen3.6 does NOT replace qwen3.8 as the main model: it fails the pre-registered RAG clause, and the speed clause is not met across the board.",
+  "beyond_the_rule": "The rule's middle band (keep qwen3.8 default, add Qwen3.6 as a fast profile) was written for a Polyglot gap of 5-10 points; the observed pattern is different (equal or better coding, worse RAG grounding, faster except on long reasoning). Recommendation, not a rule outcome: keep qwen3.8 for chat and RAG (vcf-lookup, AnythingLLM); offer Qwen3.6 Q6_K_XL + MTP n3 as a fast coding/agent profile (workforce lead, OpenCode subagents) where it matched qwen3.8's acceptance at 1.5x speed. That profile change is a separate decision for the user.",
+  "caveats": [
+   "one qwen3.8 S run vs three Qwen3.6 S runs; S noise is 3 tasks",
+   "the Qwen3.6 S runs used Q4_K_M without MTP; Q6+MTP was not re-run on S",
+   "RAG set is 22 questions graded by Opus against the frozen context, single grader per answer",
+   "Polyglot differences of 1-2 cases are within noise (qwen3.8 itself scored 73.5 then 70.6)"
+  ]
  }
 }

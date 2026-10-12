@@ -82,5 +82,8 @@ profile names.
 
 ## Status
 
-Queued behind the S/G repeat chain (2026-10-12, GPU busy until ~16:30Z). Results go to
-`docs/superpowers/workforce/main-model-qwen36-vs-qwen38.json`.
+Done 2026-10-12 (results: `docs/superpowers/workforce/main-model-qwen36-vs-qwen38.json`). Outcome under the rule:
+**qwen3.8 stays the main model.** Qwen3.6 (Q6_K_XL + in-GGUF MTP n3) matched or beat it on coding (Polyglot think
+76.5 vs 70.6 same day; S arm 13.3 vs 13 accepted at 1.5x speed) but failed the RAG clause (12 vs 17 fully correct of
+22, blind-graded) and is slower per case on long reasoning (124.5 vs 102.4 s). A Qwen3.6 fast coding/agent profile is
+a separate, open decision.
