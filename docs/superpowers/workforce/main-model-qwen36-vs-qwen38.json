@@ -123,5 +123,41 @@
   ],
   "decision_clause": "FAILS: Qwen3.6 has 5 fewer fully correct answers than qwen3.8 (12 vs 17); the clause allows at most 2. Qwen3.6 answers 2.9x faster.",
   "files": "docs/superpowers/workforce/rag-eval/results/ (answers, grades, key)"
+ },
+ "workforce_arm_s": {
+  "setup": "the 16 frozen W2 tasks, hidden-test grading, harness 03b1dff, GPU implementer alone, non-thinking. Qwen3.6 = transient Q4_K_M server (no MTP; the S runs predate the MTP bench); qwen3.8 = router qwen3.8-nothink on the production chat (3-slot window layout, MTP n3).",
+  "qwen36": {
+   "runs": {
+    "lt-2-s": [
+     13,
+     27
+    ],
+    "lt-4-s": [
+     12,
+     36
+    ],
+    "lt-6-s": [
+     15,
+     37
+    ]
+   },
+   "mean_accepted": 13.3,
+   "mean_minutes": 33
+  },
+  "qwen38": {
+   "runs": {
+    "lt-9-s38": [
+     13,
+     49
+    ]
+   },
+   "failed": [
+    "w2-06",
+    "w2-10",
+    "w2-16"
+   ],
+   "valid": true
+  },
+  "reading": "Equal acceptance (13 vs 12-15). Qwen3.6 is 1.5x faster (33 vs 49 min) even WITHOUT MTP; with Q6+MTP its generation is ~1.6x faster again, so the real gap is likely larger (not measured). Run format: [accepted of 16, minutes]."
  }
 }
