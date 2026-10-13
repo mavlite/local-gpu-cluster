@@ -39,14 +39,20 @@ def resolve_opencode(env):
 
 
 def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, reviewer_model=None,
-                  keys=None):
+                  keys=None, read_first=False, worker_alias=None, review_steps=None, lead_url=None,
+                  lead_alias=None, reviewer_temperature=None, defects_only=False):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
     Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
     cfg = profiles.install(os.path.join(oc_dir, "cfg"),
-                           profiles.build_config(arm, router_url, worker_urls, reviewer_model=reviewer_model))
+                           profiles.build_config(arm, router_url, worker_urls, reviewer_model=reviewer_model,
+                                                 read_first=read_first, worker_alias=worker_alias,
+                                                 review_steps=review_steps, lead_url=lead_url,
+                                                 lead_alias=lead_alias, reviewer_temperature=reviewer_temperature,
+                                                 defects_only=defects_only))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
-    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg, keys=keys or profiles.keys_for(arm)),
+    return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg,
+                                                     keys=keys or profiles.keys_for(arm, lead_url=lead_url)),
                        launcher=launcher)
 
 
@@ -250,6 +256,15 @@ def main(argv=None, env=None):
     p.add_argument("--grader", default="local", help="'local' or 'docker:<image>'")
     p.add_argument("--agent-user-prefix",
                    help="run each role as OS user <prefix>-<role> in systemd scopes (the VM; harness as root)")
+    p.add_argument("--lead-url", help="orchestration trial: the lead (reviewer, fixer, G/S implementer) on this server")
+    p.add_argument("--lead-alias", help="model alias the --lead-url server serves (default qwen3.6)")
+    p.add_argument("--read-first", action="store_true", help="reviewer rule: read a changed function before deciding")
+    p.add_argument("--review-steps", type=int, help="reviewer step cap (default REVIEW_STEPS)")
+    p.add_argument("--enforce-read", action="store_true", help="re-ask a verdict that read no code, once")
+    p.add_argument("--reviewer-temperature", type=float, help="sampling temperature for the reviewer")
+    p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
+    p.add_argument("--review-budget", type=int,
+                   help="at most N reviews per task; the rework after the last is graded unreviewed, no lead fix")
     p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
     p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
     p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
@@ -262,6 +277,12 @@ def main(argv=None, env=None):
     p.add_argument("--journal", help="llama-server journal captured over the replay: prompt-token totals")
     p.add_argument("--reviewer-model", help="reviewer-model trial: provider/model for the reviewer, e.g. w1/qwen3.6")
     p.add_argument("--worker", action="append", default=[], help="worker URL(s) that serve the trial reviewer")
+    p.add_argument("--read-first", action="store_true", help="reviewer rule: read a changed function before deciding")
+    p.add_argument("--worker-alias", help="model alias the trial worker serves (default qwen3.6)")
+    p.add_argument("--review-steps", type=int, help="reviewer step cap for this replay (default REVIEW_STEPS)")
+    p.add_argument("--enforce-read", action="store_true", help="re-ask a verdict that read no code, once")
+    p.add_argument("--reviewer-temperature", type=float, help="sampling temperature for the reviewer")
+    p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
     p = sub.add_parser("import")
     p.add_argument("--repo", required=True)
     p.add_argument("--patch", required=True)
@@ -304,8 +325,8 @@ def main(argv=None, env=None):
     elif a.cmd == "manifest":
         out = {"manifest": bundle.manifest(a.bundles)}
     elif a.cmd == "run":
-        if not env.get("WF_ROUTER_KEY") or (a.arm == "T" and not env.get("WF_WORKER_KEY")):
-            raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T) must be set")
+        if not env.get("WF_ROUTER_KEY") or ((a.arm == "T" or a.lead_url) and not env.get("WF_WORKER_KEY")):
+            raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T or a --lead-url lead) must be set")
         if a.agent_user_prefix and not a.grader.startswith("docker:"):
             raise SystemExit("--agent-user-prefix needs --grader docker:<image>: the local grader would run "
                              "agent code as the harness user (root on the VM)")
@@ -318,11 +339,14 @@ def main(argv=None, env=None):
             assert_private(a.bundles)
             launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
         opencode = build_opencode(a.arm, a.out + ".opencode", a.router, a.worker, [oc_bin], env,
-                                  launcher=launcher)
+                                  launcher=launcher, lead_url=a.lead_url, lead_alias=a.lead_alias,
+                                  read_first=a.read_first, review_steps=a.review_steps,
+                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
         monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
-                                monitor=monitor, own=own).run()
+                                monitor=monitor, own=own, review_steps=a.review_steps,
+                                enforce_read=a.enforce_read, review_budget=a.review_budget).run()
     elif a.cmd == "recover-patches":
         out = replay.recover_patches(a.run)
     elif a.cmd == "replay-reviews":
@@ -342,13 +366,16 @@ def main(argv=None, env=None):
             launcher, own = oc.SystemdScopeLauncher(a.agent_user_prefix), chown_tree(a.agent_user_prefix)
         opencode = build_opencode("G", a.out + ".opencode", a.router, a.worker, [oc_bin], env, launcher=launcher,
                                   reviewer_model=a.reviewer_model,
-                                  keys=profiles.KEY_ENV if a.worker else None)
+                                  keys=profiles.KEY_ENV if a.worker else None, read_first=a.read_first,
+                                  worker_alias=a.worker_alias, review_steps=a.review_steps,
+                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only)
         journal = None
         if a.journal:
             with open(a.journal, encoding="utf-8", errors="replace") as f:
                 journal = f.read()
         out = replay.replay(a.run, a.bundles, opencode, a.out, make_grader(a.grader), journal_text=journal,
-                            own=own, reviewer_model=a.reviewer_model)
+                            own=own, reviewer_model=a.reviewer_model, read_first=a.read_first,
+                            review_steps=a.review_steps, enforce_read=a.enforce_read)
     elif a.cmd == "import":
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "scan":

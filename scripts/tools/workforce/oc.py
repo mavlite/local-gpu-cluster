@@ -110,6 +110,7 @@ class SystemdScopeLauncher:
         user = self.user(role)
         return ["systemd-run", "--scope", "--quiet", f"--unit={name}", f"--uid={user}",
                 f"--gid={user}", "-p", f"MemoryMax={self.memory_max}", "-p", f"TasksMax={self.tasks_max}",
+                "-p", "OOMPolicy=continue",
                 "--", *argv]
 
     def popen_kwargs(self):

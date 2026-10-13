@@ -197,11 +197,12 @@ case "$CMD" in
     [[ "$(policy_mode)" == "locked" ]] || die "measured runs need the locked policy: run 75-vm-wf-sandbox-firewall.sh locked"
     keys="${WF_KEY_DIR:-/root/wf/keys}"
     [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
-    [[ "$arm" == G || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
-    # The keys go to the guest on stdin, built by shell builtins: never on any command line.
+    [[ "$arm" == G || "$arm" == S || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
+    # The keys go to the guest on stdin, built by shell builtins: never on any command line. A lead on its
+    # own GPU server (--lead-url=, the orchestration trial) takes the worker key too.
     {
       printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
-      if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
+      if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
     } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start "$id" "$arm" "${@:4}"
     ;;
   start-replay)

@@ -14,7 +14,11 @@ LEAD_ALIAS = "qwen3.8-nothink"
 WORKER_ALIAS = "qwen3.6"
 N_WORKERS = 3
 IMPL_STEPS, REVIEW_STEPS, FIX_STEPS, VERDICT_STEPS = 60, 20, 60, 3
+QWEN_NOTHINK_TEMPERATURE = 0.7                 # the Qwen non-thinking card value the servers default to
 VERDICT_MESSAGE = "Give your verdict now. Reply starting with ACCEPT or REVISE:"
+READ_NOW_MESSAGE = ("You gave a verdict without reading any code. Read the changed function(s) from the tree "
+                    "with the read tool now, then reply starting with ACCEPT or REVISE: <feedback>, decided on "
+                    "what you read.")
 LEAD_CONTEXT, WORKER_CONTEXT, OUTPUT_TOKENS = 120000, 65536 - 8192, 8192
 
 IMPLEMENTER_PROMPT = """You are a software engineer working in a checkout of a repository.
@@ -42,6 +46,13 @@ decided on what you have seen.
 Your reply must START with exactly one of these two forms:
 ACCEPT
 REVISE: <specific, actionable feedback for the engineer>"""
+
+DEFECTS_ONLY_RULE = ("REVISE only for a defect: the change does not do what the request asks, breaks existing "
+                     "behaviour, or will fail at runtime. Style, naming, comments, redundancy and improvements "
+                     "beyond the request are not reasons to REVISE; if you mention them, do it after ACCEPT.")
+READ_FIRST_RULE = ("Before you decide, read at least one changed function from the tree with the read "
+                   "tool (a file named in the diff) and base the verdict on what you read, never on the "
+                   "packet alone.")
 
 FIXER_PROMPT = """Another engineer could not satisfy a request after two rounds of review. Finish the
 work yourself in this directory. The attached packet holds the request, the current diff, the test
@@ -83,30 +94,61 @@ def implementers(arm):
     return [f"impl-{i}" for i in range(1, (N_WORKERS if arm == "T" else 1) + 1)]
 
 
-def build_config(arm, router_url, worker_urls, reviewer_model=None):
+def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
+                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None, defects_only=False):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
     workers on a non-T arm (providers only, no implementer agents)."""
     if arm not in ("T", "G", "S"):                   # S: the GPU implementer alone (round 2 §5.2)
         raise ValueError("arm must be T, G or S")
     lead = f"router/{LEAD_ALIAS}"
+    walias = worker_alias or WORKER_ALIAS                      # trial: a worker serving another model
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
+    if lead_url:                                               # orchestration trial: the lead on its own server
+        lalias = lead_alias or WORKER_ALIAS
+        providers["lead"] = _provider("lead", lead_url, "WF_WORKER_KEY", lalias, LEAD_CONTEXT)
+        lead = f"lead/{lalias}"
     agents = {"general": {"disable": True}, "explore": {"disable": True},
-              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT, REVIEW_PERMS, REVIEW_STEPS),
-              "reviewer-verdict": _agent(reviewer_model or lead, REVIEWER_PROMPT, VERDICT_PERMS, VERDICT_STEPS),
+              "reviewer": _agent(reviewer_model or lead, REVIEWER_PROMPT + ("\n" + READ_FIRST_RULE if read_first else "")
+                                 + ("\n" + DEFECTS_ONLY_RULE if defects_only else ""),
+                                 REVIEW_PERMS, review_steps or REVIEW_STEPS),
+              "reviewer-verdict": _agent(reviewer_model or lead,
+                                         REVIEWER_PROMPT + ("\n" + DEFECTS_ONLY_RULE if defects_only else ""),
+                                         VERDICT_PERMS, VERDICT_STEPS),
               "fixer": _agent(lead, FIXER_PROMPT, WRITE_PERMS, FIX_STEPS)}
     if arm == "T":
         if len(worker_urls) != N_WORKERS:
             raise ValueError(f"arm T needs {N_WORKERS} worker URLs")
         for i, url in enumerate(worker_urls, start=1):
-            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", WORKER_ALIAS, WORKER_CONTEXT)
-            agents[f"impl-{i}"] = _agent(f"w{i}/{WORKER_ALIAS}", IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
+            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
+            agents[f"impl-{i}"] = _agent(f"w{i}/{walias}", IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
     else:
         agents["impl-1"] = _agent(lead, IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
         for i, url in enumerate(worker_urls, start=1):              # trial: a worker serves the reviewer
-            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", WORKER_ALIAS, WORKER_CONTEXT)
-    return {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
-            "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
+            providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
+    cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
+           "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
+    return cfg if reviewer_temperature is None else _with_temperature(cfg, reviewer_temperature)
+
+
+def _with_temperature(cfg, temperature):
+    """The reviewer and its verdict turn at a fixed sampling temperature (a judge should not be noisy).
+    opencode sends an agent temperature only for a model marked temperature-capable, and once marked it
+    sends its own default to every other agent on that provider -- so the reviewer's provider model is
+    marked and the other agents on it are pinned to the Qwen card value the servers default to."""
+    rprov = cfg["agent"]["reviewer"]["model"].split("/", 1)[0]
+    providers = {k: (dict(v, models={m: dict(spec, temperature=True) for m, spec in v["models"].items()})
+                     if k == rprov else v)
+                 for k, v in cfg["provider"].items()}
+    agents = {}
+    for k, v in cfg["agent"].items():
+        if k in ("reviewer", "reviewer-verdict"):
+            agents[k] = dict(v, temperature=temperature)
+        elif isinstance(v.get("model"), str) and v["model"].split("/", 1)[0] == rprov:
+            agents[k] = dict(v, temperature=QWEN_NOTHINK_TEMPERATURE)
+        else:
+            agents[k] = v
+    return dict(cfg, provider=providers, agent=agents)
 
 
 def install(cfg_dir, config):
@@ -130,9 +172,10 @@ def with_home(env, home):
     return out
 
 
-def keys_for(arm):
-    """The keys an arm's agents need: arm G has no CPU workers, so no worker key."""
-    return KEY_ENV if arm == "T" else ("WF_ROUTER_KEY",)
+def keys_for(arm, lead_url=None):
+    """The keys an arm's agents need: arm G has no CPU workers, so no worker key -- unless the lead runs on
+    a keyed server of its own (the orchestration trial), which takes the worker key."""
+    return KEY_ENV if arm == "T" or lead_url else ("WF_ROUTER_KEY",)
 
 
 def opencode_env(base_env, home, config_path, keys=KEY_ENV):

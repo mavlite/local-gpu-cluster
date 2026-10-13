@@ -1,0 +1,22 @@
+{
+  "q04": {
+    "X": {"score": 2, "why": "The context gives no NVMe endurance rating or device capacity-ratio requirement (the one-to-one DRAM:NVMe mapping is only a savings-calculation assumption), so the refusal is correct."},
+    "Y": {"score": 2, "why": "Correct refusal; the added summary ($10/GB DRAM vs about $1/GB NVMe, inactive pages moved to NVMe, device selection in the vSphere Client) is supported by the context."}
+  },
+  "q08": {
+    "X": {"score": 0, "why": "Refuses although the component table explicitly marks SDDC Manager, NSX Edge, Virtual Network Appliance, HCX and others as VCF-only and lists which components also apply to vSphere Foundation."},
+    "Y": {"score": 2, "why": "Correctly reads the platform-type table (SDDC Manager, NSX Edge, VNA, Operations for networks, HCX and Salt are VCF-only; fleet/SDDC lifecycle, depot, telemetry, log management and services runtime are shared); the only flaw is a minor Day-N label on Identity Broker."}
+  },
+  "q12": {
+    "X": {"score": 1, "why": "The depot connection, Download Now/Schedule Download, two-stage availability and offline/no-depot paths are supported, but it invents navigation menu names ('Configure', 'Lifecycle') that the context leaves blank and slightly misstates the 5.2.x-to-9.1 path."},
+    "Y": {"score": 2, "why": "Depot prerequisites, the one-depot-type limit, the two-stage download, the Download Now/Schedule Download triggers, checksum verification, View Details and Download History all match the context; it only loosely conflates the Bundles tab with the Bundle/Binary Management rename."}
+  },
+  "q17": {
+    "X": {"score": 2, "why": "Baselines unsupported in VCF 9, the mandatory transition before ESX 9 upgrade, the methods, the prerequisites table, topology minimums, the 25-concurrency limits, image seeding, uniqueness rules and compliance-check nuances are all supported."},
+    "Y": {"score": 2, "why": "Accurately covers unsupported baselines, transition timing (including the vCenter-before-ESX exception), methods, the prerequisites table, constraints, concurrency limits, topologies, image seeding and compliance false positives; it only mislabels '8.0.3 and earlier' as a VCF version."}
+  },
+  "q21": {
+    "X": {"score": 1, "why": "When the witness is required (HCI/storage stretched yes, compute stretched no; separate witness zone, same ESX version, RTT, ESA/OSA appliance matching) is correct, but the 'tie-breaker to maintain quorum' purpose is not stated in the context."},
+    "Y": {"score": 1, "why": "Requirement table, third-site/no-shared-resources rule, cross-hosting limits, 64 two-node clusters and appliance matching are supported, but its headline purpose ('provide quorum... ensure consensus') is not in the context."}
+  }
+}

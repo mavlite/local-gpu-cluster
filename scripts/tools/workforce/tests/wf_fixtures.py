@@ -102,10 +102,13 @@ class FakeOpencode:
             return oc.RunResult(0, False, sid, s["verdict"][n], 0.01)
         if role == "review":
             entry = s["review"][n]
-            if isinstance(entry, dict):                      # a scripted step count / timeout
+            if isinstance(entry, dict):                      # a scripted step count / timeout / tool calls
                 with open(events_path, "w") as f:
                     for _ in range(entry.get("steps", 1)):
                         f.write(json.dumps({"type": "step_start", "sessionID": sid}) + "\n")
+                    for tool, inp in entry.get("tools", []):
+                        f.write(json.dumps({"type": "tool_use", "sessionID": sid, "part": {
+                            "type": "tool", "tool": tool, "state": {"status": "completed", "input": inp}}}) + "\n")
                 return oc.RunResult(0, entry.get("timed_out", False), sid, entry["text"], 0.01)
             text = entry
             if s.get("expect_full_packet"):

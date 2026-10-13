@@ -1,0 +1,178 @@
+{
+ "what": "Overnight 2026-10-12 (user-authorised, exploratory, not the pre-registered round-2 window): tune Qwen3.6-35B-A3B as the GPU reviewer/lead on the V620s and re-test it. Five replays of the same 27 harvested W3 review rounds (replay-7..10, plus replay-1 = qwen3.8 for reference), two GPU serving sweeps, and one harness bug found and fixed (ripgrep).",
+ "setup": {
+  "server": "transient llama-server inside LXC 151 (production chat stopped for the night; window open = perturbers stopped), unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M, 1 slot, thinking off via chat-template kwargs, keyed with the trial's throwaway key, reached from the sandbox through a locked policy extended with 192.168.6.151:8090",
+  "harness": "feat/wf-experiment: replay-reviews --reviewer-model w1/qwen3.6 --worker http://192.168.6.151:8090/v1 plus the per-run options below"
+ },
+ "gpu_sweeps": {
+  "workload": "the largest real review packet (11,467 tokens) cold (prefill), warm (generation), and doubled (~23K tokens) cold",
+  "round_1": [
+   {
+    "config": "layer 1:1.5, ub 512, q8 KV (replay-7's)",
+    "prefill_11k": 2153,
+    "prefill_23k": 1836,
+    "gen": 53.6
+   },
+   {
+    "config": "layer 1:1.5, ub 1024",
+    "prefill_11k": 2474,
+    "prefill_23k": 2105,
+    "gen": 53.1
+   },
+   {
+    "config": "layer 1:1.5, ub 2048",
+    "prefill_11k": 2395,
+    "prefill_23k": 2093,
+    "gen": 53.7
+   },
+   {
+    "config": "layer 1:1",
+    "prefill_11k": 2216,
+    "prefill_23k": 1900,
+    "gen": 59.2
+   },
+   {
+    "config": "tensor 1:1",
+    "prefill_11k": 1875,
+    "prefill_23k": 1691,
+    "gen": 33.4
+   },
+   {
+    "config": "one GPU",
+    "prefill_11k": 1306,
+    "prefill_23k": 1103,
+    "gen": 54.7
+   },
+   {
+    "config": "one GPU, ub 1024",
+    "prefill_11k": 1615,
+    "prefill_23k": 1354,
+    "gen": 55.3
+   },
+   {
+    "config": "f16 KV",
+    "prefill_11k": 2114,
+    "prefill_23k": 1808,
+    "gen": 60.5
+   },
+   {
+    "config": "UD-Q6_K, layer 1:1.5",
+    "error": "ROCm illegal memory access at load (not pursued)"
+   },
+   {
+    "config": "ctx 131072",
+    "prefill_11k": 2124,
+    "prefill_23k": 1811,
+    "gen": 53.4
+   }
+  ],
+  "round_2": [
+   {
+    "config": "layer 1:1, ub 1024, q8 KV",
+    "prefill_11k": 2566,
+    "prefill_23k": 2209,
+    "gen": 53.3
+   },
+   {
+    "config": "layer 1:1, ub 1024, f16 KV  <- CHOSEN",
+    "prefill_11k": 2559,
+    "prefill_23k": 2203,
+    "gen": 59.7
+   },
+   {
+    "config": "layer 1:1, ub 1024, q8 KV, ctx 131072",
+    "prefill_11k": 2547,
+    "prefill_23k": 2191,
+    "gen": 53.2
+   },
+   {
+    "config": "layer 1:1, ub 1536, b 3072",
+    "prefill_11k": 2595,
+    "prefill_23k": 2232,
+    "gen": 51.4
+   }
+  ],
+  "chosen": "layer split 1:1, ubatch 1024, batch 2048, f16 KV, flash attention, ctx 131072: +19% prefill and +11% generation over replay-7's settings; measured in a real replay: prompt 1632 -> 1883 t/s, generation 53.7 -> 65.5 t/s"
+ },
+ "ripgrep_bug": {
+  "finding": "the sandbox VM had no `rg` on PATH; opencode then tries to download ripgrep into each fresh per-task home, which the locked policy blocks, so EVERY glob and grep call by every agent (reviewers and CPU implementers) failed after a long timeout ('ripgrep execution failed').",
+  "evidence": "tool time per 27-round replay - replay-1 (qwen3.8): grep 40.5 + glob 9.0 min of a 75-min session wall; replay-7: glob 36.6 + grep 5.4 of 41; replay-8: glob 45.3 + grep 18.0 of 60. After installing ripgrep: replay-9 tool time 0.5 min of 18.6; replay-10 0.8 of 16.9.",
+  "impact": "every measured run so far (W1, W3, all replays before replay-9) paid this: reviews ran 2-4x slower than the model required, and implementers' searches failed too. The W3 throughput numbers include it.",
+  "fix": "ripgrep 14.1.1 installed in VM 176 tonight (host-downloaded trixie package, checksum-verified, through the guest agent); wf-sandbox-provision.sh now installs ripgrep and dies if rg is missing (ef6a8f0)."
+ },
+ "temperature_bug": {
+  "finding": "opencode sends an agent's temperature only for a model marked temperature-capable; our provider definitions were not, so --reviewer-temperature 0.2 had no effect (replay-8 ran at the server's 0.7). Fixed in f8a9f9d: the reviewer's provider model is marked capable and the other agents on that provider are pinned to 0.7 explicitly (marking it would otherwise make opencode send its own default to them). Verified on the server's /slots: 23 of 27 in-flight requests at 0.2; the other 4 are opencode's session-title requests at 0.5."
+ },
+ "replays": [
+  {
+   "id": "replay-1",
+   "reviewer": "qwen3.8-nothink (router, V620s)",
+   "options": "round-2 harness defaults",
+   "verdicts": "21 ACCEPT / 6 REVISE",
+   "w3_agreement": "16/20",
+   "median_s": 201,
+   "wall_min": 88,
+   "note": "reference; rg broken"
+  },
+  {
+   "id": "replay-7",
+   "reviewer": "Qwen3.6 GPU, replay-7 server settings",
+   "options": "read-first, 30 steps, temp 0.7",
+   "verdicts": "16 / 10 / 1 NONE",
+   "w3_agreement": "14/20",
+   "median_s": 83,
+   "wall_min": 47,
+   "note": "rg broken; 7 one-step verdicts; trial-1 hallucinations returned; caught both qwen3.8 misses"
+  },
+  {
+   "id": "replay-8",
+   "reviewer": "Qwen3.6 GPU, tuned server",
+   "options": "read-first, enforce-read, 30 steps, temp 0.7 (temperature not yet sent)",
+   "verdicts": "19 / 8",
+   "w3_agreement": "14/20",
+   "median_s": 170,
+   "wall_min": 77,
+   "note": "rg broken; enforce-read flipped 4 one-step REVISEs to ACCEPT - fixed one hallucination but also dropped a real catch (w2-05 r1); net zero, not kept"
+  },
+  {
+   "id": "replay-9",
+   "reviewer": "Qwen3.6 GPU, tuned server",
+   "options": "read-first, temp 0.2, 30 steps",
+   "verdicts": "13 / 14",
+   "w3_agreement": "12/20",
+   "median_s": 46,
+   "wall_min": 29,
+   "note": "rg FIXED; too strict - ~6 REVISEs were nits or self-contradicting; but 2 real catches nobody else made"
+  },
+  {
+   "id": "replay-10",
+   "reviewer": "Qwen3.6 GPU, tuned server",
+   "options": "read-first, defects-only, temp 0.2, 30 steps",
+   "verdicts": "16 / 11",
+   "w3_agreement": "15/20",
+   "median_s": 44,
+   "wall_min": 29,
+   "note": "BEST: 3 real defects qwen3.8 accepted (w2-05 r0 and r1 both FAIL the hidden tests; the should_cache TypeError), misses 1 real bug qwen3.8 caught (redirect urljoin) and 1 incomplete-request REVISE (w2-07 r0); 2-3 borderline REVISEs remain"
+  },
+  {
+   "id": "replay-11",
+   "reviewer": "qwen3.8-nothink via router (production chat, window layout)",
+   "options": "round-2 defaults (as replay-1)",
+   "verdicts": "22 ACCEPT / 5 REVISE",
+   "w3_agreement": "17/20",
+   "median_s": 109,
+   "wall_min": 57,
+   "note": "FAIR BASELINE: same as replay-1 but with ripgrep working - 201 -> 109 s per review; now catches the should_cache crash (w2-07 r1), misses the urljoin bug it caught before (w2-06 r0), still ACCEPTS both hidden-test-failing w2-05 states; agrees with replay-1 on 24/27"
+  }
+ ],
+ "hidden_test_grading": {
+  "w2-05 r0": "1 failed, 12 passed - REVISEd by Qwen3.6 in replays 9 and 10; accepted by qwen3.8 and by W3's reviewer",
+  "w2-05 r1": "1 failed, 12 passed - REVISEd by Qwen3.6 in trial 1, replay-7 and replay-10; accepted by qwen3.8 and W3",
+  "others_contested": "w2-01 r1/r2, w2-02, w2-11, w2-12, w2-13, w2-16 states all pass their hidden tests"
+ },
+ "conclusion": {
+  "reviewer": "Qwen3.6-35B-A3B on the V620s with read-first + defects-only + temperature 0.2 is qwen3.8's equal as a reviewer on these 27 rounds (15/20 vs 17/20 W3 agreement with ripgrep fixed - within run-to-run noise - and it rejects the two hidden-test-failing w2-05 states that qwen3.8 accepts in every replay) and 2.5x faster per review on the same GPUs (44 s vs 109 s, both with ripgrep working). The earlier 4.5x was inflated by the ripgrep bug.",
+  "settings": "keep: tuned server (layer 1:1, ub 1024, f16 KV), read-first, defects-only, reviewer temperature 0.2, REVIEW_STEPS 30. Drop: enforce-read (net zero).",
+  "caveat": "single replays at sampling temperature > 0 are noisy (same model and rule moved 14 -> 17 -> 14 -> 12 -> 15 agreement across runs; qwen3.8's two replays agree on 24/27); differences of 1-2 rounds are within noise."
+ }
+}

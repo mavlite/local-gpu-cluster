@@ -1,0 +1,26 @@
+{
+  "q03": {
+    "X": {"score": 2, "why": "The context covers ESX design, NSX maintenance mode and vSAN maintenance mode but says nothing about memory tiering, so the refusal is correct."},
+    "Y": {"score": 2, "why": "The context has no memory tiering content, so the refusal is correct."}
+  },
+  "q07": {
+    "X": {"score": 2, "why": "It covers the management, vMotion, vSAN/NFS and NSX overlay networks, the network-pool table, automatic IP assignment from pools, the default pool, the installer IP ranges (at least one IP per host) and the 9.1 vmk0-only manual IP, all of which the context supports."},
+    "Y": {"score": 1, "why": "The IP-pool part is correct and supported, but it says the VCF Management Network carries vCenter, NSX and SDDC Manager traffic, which the context assigns to the VM management network, and it leaves out the ESX/VM management network distinction."}
+  },
+  "q11": {
+    "X": {"score": 2, "why": "The ESA HCL criteria (NVMe TLC, 1.6 TB or more, performance class F, 1 DWPD), the caveat on non-certified devices, the vSAN managed disk claim steps, new-host claiming, unaffected manual disks and one storage pool per host are all in the context."},
+    "Y": {"score": 2, "why": "The Broadcom Compatibility Guide check, the ESA NVMe criteria, the ReadyNode or component options and the automatic-claim steps and behaviour all match the context."}
+  },
+  "q16": {
+    "X": {"score": 2, "why": "It correctly says VCF Automation relies on a Supervisor that uses NSX VPC workload networks (Easy Supervisor is not allowed) and does not need a pre-existing VKS cluster; its deployment models and identity-provider points are supported."},
+    "Y": {"score": 1, "why": "It says VCF Automation does not require a Supervisor to be enabled, which conflicts with the context: Supervisor with NSX VPC workload networks is a requirement for using VCF Automation. It also omits the VPC and Easy Supervisor constraints, though its points on VKS cluster management in 9.0.1 are supported."}
+  },
+  "q20": {
+    "X": {"score": 1, "why": "The procedures and the why are mostly accurate, but it labels VCF Automation and Identity Broker as 'VCF core components', while the context explicitly separates those management components from core components, which have their own procedure."},
+    "Y": {"score": 2, "why": "The why (same time across cluster nodes, NSX features need NTP) and the VCF Operations admin UI, fleet management, ESX Host Client and NSX procedures all match the context, including the at-least-two-servers and small-increment guidance."}
+  },
+  "q24": {
+    "X": {"score": 2, "why": "The per-component password configuration methods, the universal special characters, 9.1 central policies in VCF Operations, the SDDC Manager rotate/schedule (30/60/90 days, API custom, midnight, hourly retry)/rotate-all options and the ESX no-auto-rotate note are supported. It has a minor unstated 'renamed' inference and the answer is cut off at the end."},
+    "Y": {"score": 2, "why": "The password configuration methods per component, the special-character set, 9.1 policies in VCF Operations, the SDDC Manager rotation options, prerequisites and retry behaviour, and VCF Operations as the recommended approach are all in the context."}
+  }
+}

@@ -79,3 +79,12 @@ def test_opencode_passes_a_unique_unit_name_to_the_launcher(tmp_path):
     o.run("impl-1", str(tmp_path), "x", 30, str(tmp_path / "a.jsonl"))
     o.run("impl-1", str(tmp_path), "x", 30, str(tmp_path / "b.jsonl"))
     assert len(seen) == 2 and seen[0] != seen[1] and all(n.startswith("wf-") for n in seen)
+
+
+def test_scope_survives_an_oom_kill_of_agent_run_code():
+    # lt-7-g w2-10: an agent-written endless loop hit MemoryMax; systemd's default OOMPolicy=stop then
+    # terminated the whole scope (opencode rc -15), and every retry died the same way on the same workspace.
+    # With OOMPolicy=continue only the runaway process is killed and the agent sees it.
+    argv = oc.SystemdScopeLauncher("wf").argv(["/usr/bin/opencode", "run", "x"], "wf-1", role="impl-1")
+    assert argv[argv.index("OOMPolicy=continue") - 1] == "-p"
+    assert argv.index("OOMPolicy=continue") < argv.index("--")

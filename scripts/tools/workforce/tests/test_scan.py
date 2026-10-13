@@ -207,3 +207,9 @@ def test_a_leak_in_the_verdict_turn_taints(setup):
     transcript(run, "t1", "review-r0.jsonl", tool("read", {"filePath": "x"}, "nothing"))
     transcript(run, "t1", "review-r0-verdict.jsonl", tool("read", {"filePath": "x"}, ANSWER))
     assert list(result(tmp, run)["tainted"]) == ["t1"]
+
+
+def test_order_includes_the_reread_turn_after_its_review():
+    names = ["review-r0-reread.jsonl", "review-r0.jsonl", "review-r0-verdict.jsonl", "impl-r0.jsonl"]
+    assert scan.transcript_order(names) == ["impl-r0.jsonl", "review-r0.jsonl", "review-r0-verdict.jsonl",
+                                            "review-r0-reread.jsonl"]
