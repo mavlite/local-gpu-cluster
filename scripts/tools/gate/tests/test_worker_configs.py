@@ -35,6 +35,15 @@ def test_c2_is_c0_without_mtp(tmp_path):
     assert "--spec-type" not in run and "-mtprot" not in run
 
 
+def test_c2t10_is_c2_with_ten_generation_and_batch_threads(tmp_path):
+    # Thread sweep 2026-10-13 (llmbench02, VCF Full running): 10/10 costs +4% per cold 6K request and cuts
+    # NSX CPU ready 64% against the shipped 12/16; generation is bandwidth-bound and flat down to 6 threads.
+    run, _ = started(tmp_path, "start", "C2T10")
+    assert BASE.replace("-t 12 -tb 16", "-t 10 -tb 10") in run and NOTHINK in run
+    assert "-t 12" not in run and "-tb 16" not in run
+    assert "--spec-type" not in run and "-mtprot" not in run and "-rtr" in run
+
+
 def test_c3_thinks_and_preserves_thinking_with_thinking_sampling(tmp_path):
     run, _ = started(tmp_path, "start", "C3")
     assert IK_MTP in run and THINK in run

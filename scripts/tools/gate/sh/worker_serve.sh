@@ -33,6 +33,9 @@ APT_UNITS=(apt-daily.timer apt-daily-upgrade.timer)
 # Workforce W1 configurations (docs/superpowers/specs/2026-10-07-distributed-workforce-design.md §7).
 #   C0 ik_llama.cpp, MTP on,  non-thinking     C1 mainline b11026, MTP only if GATE_C1_MTP=1
 #   C2 ik_llama.cpp, MTP off, non-thinking     C3 ik_llama.cpp, MTP on, thinking + preserve_thinking
+# C2T10: C2 at -t 10 -tb 10, the production worker config since 2026-10-13. Thread sweep on llmbench02 with
+# the VCF Full stack running: +4% per cold 6K-token request, NSX CPU ready -64% vs 12/16; generation is
+# bandwidth-bound and flat down to 6 threads, prefill scales with cores.
 # All four run presence penalty 0 (the spec's table) with the Qwen model-card sampling for their mode
 # (scripts/files/alias_defaults.py). The mainline memory flags are checked against the built binary's
 # --help before the W1 pre-registration.
@@ -62,7 +65,7 @@ GEMMA="--temp 1.0 --top-p 0.95 --top-k 64 --presence-penalty 0"
 # the weights blew the 30 GB cap (OOM 2026-10-11 22:1xZ, replay-4) -- no prompt-cache RAM for G4.
 G4_MEM="-rtr -cram 0 -ctx-ckpt 8"
 
-select_config() {      # select_config <gate|C0|C1|C2|C3|G4>: sets SRV_BIN, SRV_MODEL, SRV_ALIAS, SRV_FLAGS, SRV_KWARGS
+select_config() {      # select_config <gate|C0|C1|C2|C2T10|C3|G4>: sets SRV_BIN, SRV_MODEL, SRV_ALIAS, SRV_FLAGS, SRV_KWARGS
   SRV_BIN="$BIN"; SRV_KWARGS="$KW_NOTHINK"; SRV_MODEL="$MODEL"; SRV_ALIAS=qwen3.6
   case "$1" in
     gate) SRV_FLAGS="$WORKER_FLAGS $WORKER_EXTRA" ;;
@@ -70,9 +73,10 @@ select_config() {      # select_config <gate|C0|C1|C2|C3|G4>: sets SRV_BIN, SRV_
     C1)   SRV_BIN="$ML_BIN"; SRV_FLAGS="$WF_BASE $ML_MEM $NOTHINK"
           if [ "${GATE_C1_MTP:-0}" = 1 ]; then SRV_FLAGS="$SRV_FLAGS $ML_MTP"; fi ;;
     C2)   SRV_FLAGS="$WF_BASE $IK_MEM $NOTHINK" ;;
+    C2T10) SRV_FLAGS="${WF_BASE/-t 12 -tb 16/-t 10 -tb 10} $IK_MEM $NOTHINK" ;;   # production: VCF coexistence
     C3)   SRV_FLAGS="$WF_BASE $IK_MEM $IK_MTP $THINK"; SRV_KWARGS="$KW_THINK" ;;
     G4)   SRV_MODEL="$G4_MODEL"; SRV_ALIAS=gemma4; SRV_KWARGS='{}'; SRV_FLAGS="${GATE_G4_FLAGS:-$G4_BASE $G4_MEM $G4_MTP $GEMMA}" ;;
-    *)    die "unknown config '$1' (gate|C0|C1|C2|C3|G4)" ;;
+    *)    die "unknown config '$1' (gate|C0|C1|C2|C2T10|C3|G4)" ;;
   esac
 }
 
