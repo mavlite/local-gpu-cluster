@@ -265,6 +265,15 @@ phase_4_10_template() {
   fi
 }
 
+phase_4_11_nic_aspm() {
+  step "4.11 — PCIe ASPM L1 off on the Intel I226 NIC (igc 'PCIe link lost', 2026-10-13)"
+  install -m 0755 "$LGC_DIR/files/i226-no-aspm.sh" /usr/local/sbin/i226-no-aspm.sh
+  install -m 0644 "$LGC_DIR/files/i226-no-aspm.service" /etc/systemd/system/i226-no-aspm.service
+  systemctl daemon-reload
+  systemctl enable --now i226-no-aspm.service
+  ok "i226-no-aspm.service enabled (journalctl -t i226-no-aspm shows what it changed)"
+}
+
 main() {
   phase_4_1_kernel_check
   phase_4_2_iommu
@@ -275,6 +284,7 @@ main() {
   phase_4_8_zfs
   phase_4_9_pvesm
   phase_4_10_template
+  phase_4_11_nic_aspm
 
   # Disable transparent hugepages (V620-only tuning — THP fragments KV allocation on large models)
   if [[ "$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null | grep -oP '\[\K[^]]+')" != "never" ]]; then

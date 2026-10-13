@@ -1,0 +1,11 @@
+[Unit]
+Description=Disable PCIe ASPM L1 on the Intel I226 NIC (igc "PCIe link lost" outage 2026-10-13)
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/i226-no-aspm.sh
+
+[Install]
+WantedBy=multi-user.target
