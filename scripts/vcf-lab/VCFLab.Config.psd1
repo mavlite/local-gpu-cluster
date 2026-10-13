@@ -80,10 +80,19 @@
     # port group (SDDC-DPortGroup-VM-Mgmt), so it needs neither vSAN nor
     # vCenter: power-on is done host-direct. Host is the Hosts[].Short name;
     # the VM cannot move, so this pairing is fixed.
+    #
+    # The wf-runner-0N VMs (coding engine phase 2: test execution and grading
+    # for the background queue, 16 GB, tiering off, full reservation) are the
+    # same tier: listed AFTER the workers so Minimal starts them last. Their
+    # first power-on and their reservation came from 79-vm-wf-runner-image.sh
+    # power-on (DRAM guard); the reservation persists in the VMX.
     LlmWorkers = @(
         @{ VmName = 'llmbench01'; Host = 'hyp02' }
         @{ VmName = 'llmbench02'; Host = 'hyp01' }
         @{ VmName = 'llmbench03'; Host = 'hyp03' }
+        @{ VmName = 'wf-runner-01'; Host = 'hyp01' }
+        @{ VmName = 'wf-runner-02'; Host = 'hyp02' }
+        @{ VmName = 'wf-runner-03'; Host = 'hyp03' }
     )
 
     # VCF 9 licensing must be refreshed at least every 180 days (in connected
