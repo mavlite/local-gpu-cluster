@@ -32,7 +32,7 @@ step() { echo "==> $*"; }
 check_name() { [[ "$1" =~ ^wf-runner-0[1-9]$ ]] || die "runner names are wf-runner-0N: $1"; }
 
 vlan10_ip() {
-  [[ "$1" =~ ^172\.16\.10\.([0-9]{1,3})$ ]] && (( BASH_REMATCH[1] >= 1 && BASH_REMATCH[1] <= 254 ))
+  [[ "$1" =~ ^172\.16\.10\.([1-9][0-9]{0,2})$ ]] && (( BASH_REMATCH[1] <= 254 ))
 }
 
 govc_env() {
@@ -105,6 +105,8 @@ cmd_power_on() {
   local mem res
   mem="$(vm_prop "$name" config.hardware.memoryMB)"
   res="$(vm_prop "$name" config.memoryAllocation.reservation)"
+  [[ "$mem" =~ ^[1-9][0-9]*$ ]] || die "cannot read $name's memory size (got '$mem')"
+  [[ "$res" =~ ^[0-9]+$ ]] || die "cannot read $name's memory reservation (got '$res')"
   if (( res < mem )); then
     govc vm.change -vm "$name" -mem.reservation "$mem" \
       || die "cannot set the ${mem} MB reservation host-direct while vCenter manages $host -- power on in Minimal mode"
@@ -112,11 +114,17 @@ cmd_power_on() {
     (( res >= mem )) || die "$name reservation reads back ${res} MB, not ${mem} MB"
   fi
 
-  local used
-  used="$(govc host.info -json | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["hostSystems"][0]["summary"]["quickStats"]["overallMemoryUsage"])')"
-  [[ "$used" =~ ^[0-9]+$ ]] || die "cannot read the memory in use on $host"
+  # "in use" is the larger of what the host has consumed and what its running VMs are sized for: a VM started
+  # moments ago (another runner, a worker) has not touched its pages yet, so overallMemoryUsage alone lags
+  local hjson vjson consumed committed used
+  hjson="$(govc host.info -json)" || die "cannot read the memory in use on $host"
+  vjson="$(govc vm.info -json '*')" || die "cannot read the running VMs' memory on $host"
+  consumed="$("$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["hostSystems"][0]["summary"]["quickStats"]["overallMemoryUsage"])' <<<"$hjson" 2>/dev/null)" || consumed=""
+  committed="$("$PYTHON" -c 'import json,sys; print(sum(v["config"]["hardware"]["memoryMB"] for v in json.load(sys.stdin)["virtualMachines"] or [] if v["runtime"]["powerState"] == "poweredOn"))' <<<"$vjson" 2>/dev/null)" || committed=""
+  [[ "$consumed" =~ ^[0-9]+$ && "$committed" =~ ^[0-9]+$ ]] || die "cannot read the memory in use on $host"
+  used=$(( consumed > committed ? consumed : committed ))
   if (( (used + mem) * 100 > HOST_DRAM_MB * HOST_MAX_PCT )); then
-    die "host $host: ${used} MB in use + ${mem} MB would pass ${HOST_MAX_PCT}% of ${HOST_DRAM_MB} MB DRAM -- refusing (crash-hardening rule 6)"
+    die "host $host: ${used} MB in use (consumed ${consumed}, running VMs ${committed}) + ${mem} MB would pass ${HOST_MAX_PCT}% of ${HOST_DRAM_MB} MB DRAM -- refusing (crash-hardening rule 6)"
   fi
   govc vm.power -on "$name" >/dev/null || die "power-on failed"
   ok "$name powered on (host at $(( (used + mem) * 100 / HOST_DRAM_MB ))% of DRAM with it)"

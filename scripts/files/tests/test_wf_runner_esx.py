@@ -37,6 +37,14 @@ case "$1" in
     [[ "$*" == *"sched.mem.enableTiering=FALSE"* ]] && echo FALSE > "$st/tiering"
     exit 0 ;;
   vm.info)
+    if [[ " $* " == *" -json "* ]]; then
+      printf '{"virtualMachines":['; sep=""
+      for m in $(get running_mb ''); do
+        printf '%s{"name":"vm%s","config":{"hardware":{"memoryMB":%s}},"runtime":{"powerState":"poweredOn"}}' "$sep" "$m" "$m"; sep=","
+      done
+      printf '%s{"name":"off","config":{"hardware":{"memoryMB":65536}},"runtime":{"powerState":"poweredOff"}}]}\n' "$sep"
+      exit 0
+    fi
     [[ "$(get exists no)" == yes ]] || { echo "govc: vm '${!#}' not found" >&2; exit 1; }
     echo "Name:           ${!#}"
     if [[ " $* " == *" -e "* ]]; then
@@ -48,12 +56,13 @@ case "$1" in
   object.collect)
     case "$*" in
       *memoryAllocation.reservation*) get reservation 0 ;;
-      *config.hardware.memoryMB*) echo 16384 ;;
+      *config.hardware.memoryMB*) get mem 16384 ;;
       *config.version*) echo vmx-22 ;;
       *runtime.powerState*) get power poweredOff ;;
     esac
     exit 0 ;;
   host.info)
+    [[ -f "$st/fail_host" ]] && { echo "govc: connection refused" >&2; exit 1; }
     printf '{"hostSystems":[{"hardware":{"memorySize":%d},"summary":{"quickStats":{"overallMemoryUsage":%d}}}]}\n' \
       $(( 191924 * 1048576 )) "$(get host_used 30000)"
     exit 0 ;;
@@ -224,9 +233,9 @@ def test_power_on_refuses_without_tiering_off(esx):
     assert not any(c.startswith("vm.power") for c in esx.calls())
 
 
-@pytest.mark.parametrize("used,starts", [(60000, True), (61000, False), (95124, False)])
+@pytest.mark.parametrize("used,starts", [(60000, True), (60620, True), (60621, False), (95124, False)])
 def test_power_on_keeps_the_host_at_or_below_80_percent_dram(esx, used, starts):
-    # 96256 MB DRAM * 80% = 77004.8 MB; the runner adds 16384 MB, so 60000 fits and 61000 does not
+    # 96256 MB DRAM * 80% = 77004.8 MB; the runner adds 16384 MB, so 60620 fits and 60621 does not
     esx.set("exists", "yes")
     esx.set("tiering", "FALSE")
     esx.set("reservation", "16384")
@@ -236,3 +245,61 @@ def test_power_on_keeps_the_host_at_or_below_80_percent_dram(esx, used, starts):
     assert any(c.startswith("vm.power") for c in esx.calls()) == starts
     if not starts:
         assert "rule 6" in r.stderr
+
+
+def ready(esx):
+    esx.set("exists", "yes")
+    esx.set("tiering", "FALSE")
+    esx.set("reservation", "16384")
+
+
+def test_power_on_counts_memory_committed_to_running_vms_not_only_consumed(esx):
+    # a VM started moments ago has its reservation but has not touched its pages yet: overallMemoryUsage lags
+    ready(esx)
+    esx.set("host_used", "20000")
+    esx.set("running_mb", "24576 24576 16384")
+    r = esx.power_on()
+    assert r.returncode != 0 and "rule 6" in r.stderr
+    assert not any(c.startswith("vm.power") for c in esx.calls())
+
+
+@pytest.mark.parametrize("mem", ["", "unset", "0"])
+def test_power_on_fails_closed_when_the_vm_memory_cannot_be_read(esx, mem):
+    ready(esx)
+    esx.set("mem", mem)
+    r = esx.power_on()
+    assert r.returncode != 0
+    assert not any(c.startswith("vm.power") for c in esx.calls())
+
+
+def test_power_on_fails_closed_when_host_memory_cannot_be_read(esx):
+    ready(esx)
+    esx.set("fail_host")
+    r = esx.power_on()
+    assert r.returncode != 0 and "memory" in r.stderr
+    assert not any(c.startswith("vm.power") for c in esx.calls())
+
+
+def test_power_on_refuses_a_running_vm(esx):
+    ready(esx)
+    esx.set("power", "poweredOn")
+    r = esx.power_on()
+    assert r.returncode != 0
+    assert not any(c.startswith(("vm.power", "vm.change")) for c in esx.calls())
+
+
+def test_the_password_never_reaches_argv_or_output(esx):
+    esx.env["GOVC_PASSWORD"] = "s3cret-Pa55"
+    esx.set("vcenter_up")
+    r1 = esx.deploy()
+    esx.state.joinpath("vcenter_up").unlink()
+    r2 = esx.power_on()
+    blob = "\n".join([r1.stdout, r1.stderr, r2.stdout, r2.stderr, *esx.calls()])
+    assert r1.returncode == 0 and r2.returncode == 0, (r1.stderr, r2.stderr)
+    assert "s3cret-Pa55" not in blob
+
+
+@pytest.mark.parametrize("ip", ["172.16.10.010", "172.16.10.0", "172.16.10.255"])
+def test_deploy_rejects_ambiguous_or_network_addresses(esx, ip):
+    r = esx.deploy(ip=ip)
+    assert r.returncode != 0 and esx.calls() == []
