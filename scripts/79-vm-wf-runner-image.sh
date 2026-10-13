@@ -13,6 +13,14 @@
 #                       task with the run's own records (graded on VM 176); exit 1 on any difference
 #   export              clear 177's instance identity (cloud-init state, machine-id), shut it down, and convert its
 #                       disk to a streamOptimized VMDK + sha256 in $RUNNER_DIR (govc import.vmdk on each host later)
+#   deploy HOST DS NAME IP   files/wf-runner-esx.sh on ESXi host HOST (host-direct, works with vCenter down): import
+#                       the VMDK into datastore DS, register NAME POWERED OFF (8 vCPU, 16 GB, pvscsi, vmxnet3 on
+#                       SDDC-DPortGroup-VM-Mgmt), static IP via cloud-init guestinfo, sched.mem.enableTiering=FALSE;
+#                       the full memory reservation only if the host accepts it (vCenter-managed hosts refuse it
+#                       host-direct while vCenter is up)
+#   power-on HOST NAME  set the reservation if missing; refuse without it, without enableTiering=FALSE, or if the
+#                       runner would take the host past 80% of DRAM (crash-hardening rule 6)
+# ESXi credentials: GOVC_USERNAME / GOVC_PASSWORD in the environment only (the caller pipes them in; never argv).
 #
 # Why generic, not genericcloud like VM 176: the image is later imported onto ESXi, and genericcloud's cloud kernel
 # drops most hardware drivers (pvscsi, vmxnet3). Why Proxmox at all: VLAN 10 has no internet.
@@ -206,6 +214,19 @@ PY
     ok "exported $out ($(du -h "$out" | cut -f1), sha256 $(cut -c1-16 "$out.sha256"))"
     ;;
 
+  deploy)
+    [[ $# -eq 5 ]] || die "usage: $0 deploy HOST DS NAME IP"
+    require_cmd govc
+    RUNNER_MEM_MB="$RUNNER_MEM_MB" RUNNER_CORES="$RUNNER_CORES" \
+      bash "$LGC_DIR/files/wf-runner-esx.sh" deploy "$2" "$3" "$4" "$5" "$RUNNER_DIR/wf-runner.vmdk"
+    ;;
+
+  power-on)
+    [[ $# -eq 3 ]] || die "usage: $0 power-on HOST NAME"
+    require_cmd govc
+    bash "$LGC_DIR/files/wf-runner-esx.sh" power-on "$2" "$3"
+    ;;
+
   *)
-    echo "usage: $0 fetch-constraints | create | provision | parity RUN_DIR BUNDLES_DIR | export" >&2; exit 2 ;;
+    echo "usage: $0 fetch-constraints | create | provision | parity RUN_DIR BUNDLES_DIR | export | deploy HOST DS NAME IP | power-on HOST NAME" >&2; exit 2 ;;
 esac
