@@ -197,12 +197,13 @@ case "$CMD" in
     [[ "$(policy_mode)" == "locked" ]] || die "measured runs need the locked policy: run 75-vm-wf-sandbox-firewall.sh locked"
     keys="${WF_KEY_DIR:-/root/wf/keys}"
     [[ -s "$keys/router.key" ]] || die "$keys/router.key missing (router-keys add --out ... ; pct pull)"
-    [[ "$arm" == G || "$arm" == S || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
+    pool=false; [[ " ${*:4} " == *" --review-pool "* ]] && pool=true
+    [[ "$arm" == G || "$arm" == S ]] && ! $pool || [[ -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T / --review-pool)"
     # The keys go to the guest on stdin, built by shell builtins: never on any command line. A lead on its
     # own GPU server (--lead-url=, the orchestration trial) takes the worker key too.
     {
       printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
-      if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
+      if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]] || $pool; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
     } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start "$id" "$arm" "${@:4}"
     ;;
   start-replay)
@@ -217,15 +218,16 @@ case "$CMD" in
     } | vm_run_stdin 60 /usr/local/sbin/wf-run-control start-replay "$id" "$src" "${@:4}"
     ;;
   warm)
-    arm="${2:-}"
-    [[ "$arm" == T || "$arm" == G || "$arm" == S ]] || die "usage: 76-vm-wf-sandbox.sh warm <T|G|S>"
+    arm="${2:-}"; pool="${3:-}"
+    [[ "$arm" == T || "$arm" == G || "$arm" == S ]] || die "usage: 76-vm-wf-sandbox.sh warm <T|G|S> [--review-pool]"
+    [[ -z "$pool" || "$pool" == --review-pool ]] || die "usage: 76-vm-wf-sandbox.sh warm <T|G|S> [--review-pool]"
     keys="${WF_KEY_DIR:-/root/wf/keys}"
     [[ -s "$keys/router.key" ]] || die "$keys/router.key missing"
-    [[ "$arm" != T || -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T)"
+    [[ "$arm" != T && -z "$pool" ]] || [[ -s "$keys/worker.key" ]] || die "$keys/worker.key missing (arm T / --review-pool)"
     {
       printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/router.key")"
-      if [[ "$arm" == T ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
-    } | vm_run_stdin 900 /usr/local/sbin/wf-run-control warm "$arm"
+      if [[ "$arm" == T || -n "$pool" ]]; then printf 'WF_WORKER_KEY=%s\n' "$(tr -d '[:space:]' < "$keys/worker.key")"; fi
+    } | vm_run_stdin 900 /usr/local/sbin/wf-run-control warm "$arm" ${pool:+"$pool"}
     ;;
   run-status)
     vm_run 30 /usr/local/sbin/wf-run-control status "${2:?usage: run-status <run-id>}"

@@ -40,7 +40,7 @@ def resolve_opencode(env):
 
 def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launcher=None, reviewer_model=None,
                   keys=None, read_first=False, worker_alias=None, review_steps=None, lead_url=None,
-                  lead_alias=None, reviewer_temperature=None, defects_only=False):
+                  lead_alias=None, reviewer_temperature=None, defects_only=False, review_pool=False):
     """Write the read-only config under oc_dir/cfg and return an Opencode bound to the locked env.
     Every run passes its own per-task, per-role home; oc_dir/home is only the fallback."""
     cfg = profiles.install(os.path.join(oc_dir, "cfg"),
@@ -48,11 +48,12 @@ def build_opencode(arm, oc_dir, router_url, worker_urls, oc_cmd, base_env, launc
                                                  read_first=read_first, worker_alias=worker_alias,
                                                  review_steps=review_steps, lead_url=lead_url,
                                                  lead_alias=lead_alias, reviewer_temperature=reviewer_temperature,
-                                                 defects_only=defects_only))
+                                                 defects_only=defects_only, review_pool=review_pool))
     home = os.path.join(oc_dir, "home")
     os.makedirs(home, exist_ok=True)
     return oc.Opencode(oc_cmd, profiles.opencode_env(base_env, home, cfg,
-                                                     keys=keys or profiles.keys_for(arm, lead_url=lead_url)),
+                                                     keys=keys or profiles.keys_for(arm, lead_url=lead_url,
+                                                                                    review_pool=review_pool)),
                        launcher=launcher)
 
 
@@ -265,6 +266,9 @@ def main(argv=None, env=None):
     p.add_argument("--defects-only", action="store_true", help="reviewer rule: REVISE only for defects")
     p.add_argument("--review-budget", type=int,
                    help="at most N reviews per task; the rework after the last is graded unreviewed, no lead fix")
+    p.add_argument("--review-pool", action="store_true",
+                   help="arm G: reviews on the --worker CPU nodes (one lane each, health-checked), the GPU lead "
+                        "as fallback (coding engine phase 3)")
     p = sub.add_parser("recover-patches", help="write tasks/<id>/impl-r{k}.patch from a round-1 run's review packets")
     p.add_argument("--run", required=True, help="harvested run directory (before 76 push-run)")
     p = sub.add_parser("replay-reviews", help="re-run only the reviewer on a harvested run (round 2 §5.1)")
@@ -325,6 +329,16 @@ def main(argv=None, env=None):
     elif a.cmd == "manifest":
         out = {"manifest": bundle.manifest(a.bundles)}
     elif a.cmd == "run":
+        if a.review_pool:
+            if a.arm != "G":
+                raise SystemExit("--review-pool is for arm G (GPU implementer, CPU reviewers)")
+            if not a.worker:
+                raise SystemExit("--review-pool needs at least one --worker URL")
+            if not env.get("WF_WORKER_KEY"):
+                raise SystemExit("WF_WORKER_KEY must be set for --review-pool")
+            if a.review_budget is None:
+                raise SystemExit("--review-pool needs --review-budget (a REVISE past the last round would "
+                                 "otherwise run the lead fix on a worker lane and take a third GPU slot)")
         if not env.get("WF_ROUTER_KEY") or ((a.arm == "T" or a.lead_url) and not env.get("WF_WORKER_KEY")):
             raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T or a --lead-url lead) must be set")
         if a.agent_user_prefix and not a.grader.startswith("docker:"):
@@ -341,12 +355,15 @@ def main(argv=None, env=None):
         opencode = build_opencode(a.arm, a.out + ".opencode", a.router, a.worker, [oc_bin], env,
                                   launcher=launcher, lead_url=a.lead_url, lead_alias=a.lead_alias,
                                   read_first=a.read_first, review_steps=a.review_steps,
-                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only)
+                                  reviewer_temperature=a.reviewer_temperature, defects_only=a.defects_only,
+                                  review_pool=a.review_pool)
         bundles = [os.path.join(a.bundles, n) for n in sorted(os.listdir(a.bundles))]
-        monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" else None
+        monitor = pipeline.HealthMonitor(a.worker) if a.arm == "T" or a.review_pool else None
+        lanes = [(f"w{i}", u) for i, u in enumerate(a.worker, start=1)] if a.review_pool else None
         out = pipeline.Pipeline(a.arm, bundles, opencode, a.out, grader, review=not a.w1 and a.arm != "S",
                                 monitor=monitor, own=own, review_steps=a.review_steps,
-                                enforce_read=a.enforce_read, review_budget=a.review_budget).run()
+                                enforce_read=a.enforce_read, review_budget=a.review_budget,
+                                review_lanes=lanes).run()
     elif a.cmd == "recover-patches":
         out = replay.recover_patches(a.run)
     elif a.cmd == "replay-reviews":

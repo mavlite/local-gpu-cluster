@@ -431,3 +431,56 @@ def test_run_review_budget_reaches_the_pipeline(tmp_path, monkeypatch):
     assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r2"),
                      "--router", "http://x/v1"], env=env) == 0
     assert seen["review_budget"] is None
+
+
+def test_run_review_pool_wires_lanes_monitor_and_both_keys(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(arm=arm, review=review, monitor=monitor, lanes=kw.get("review_lanes"),
+                        budget=kw.get("review_budget"))
+
+        def run(self):
+            return {"arm": seen["arm"]}
+
+    def fake_build(arm, d, router, workers, cmd, env, launcher=None, **kw):
+        seen.update(build_pool=kw.get("review_pool"), build_workers=list(workers))
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    w = ["http://172.16.10.205:8090/v1", "http://172.16.10.206:8090/v1"]
+    argv = ["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+            "--review-pool", "--worker", w[0], "--worker", w[1], "--review-budget", "1"]
+    assert cli.main(argv, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["build_pool"] is True and seen["build_workers"] == w
+    assert seen["lanes"] == [("w1", w[0]), ("w2", w[1])] and seen["budget"] == 1
+    assert isinstance(seen["monitor"], cli.pipeline.HealthMonitor) and seen["review"] is True
+
+
+@pytest.mark.parametrize("extra,env,msg", [
+    (["--review-pool", "--worker", "http://w/v1"], {"WF_ROUTER_KEY": "k"}, "WF_WORKER_KEY"),
+    (["--review-pool"], {"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w"}, "--worker"),
+])
+def test_run_review_pool_refuses_missing_inputs(tmp_path, extra, env, msg):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1", *extra], env=dict(env, WF_OPENCODE="opencode"))
+    assert msg in str(e.value)
+
+
+def test_run_review_pool_is_arm_g_only(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "S", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1", "--review-pool", "--worker", "http://w/v1"],
+                 env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"})
+    assert "arm G" in str(e.value)
+
+
+def test_run_review_pool_needs_a_review_budget(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1", "--review-pool", "--worker", "http://w/v1"],
+                 env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"})
+    assert "--review-budget" in str(e.value)

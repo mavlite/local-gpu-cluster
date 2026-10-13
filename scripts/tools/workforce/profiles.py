@@ -95,12 +95,24 @@ def implementers(arm):
 
 
 def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=False, worker_alias=None,
-                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None, defects_only=False):
+                 review_steps=None, lead_url=None, lead_alias=None, reviewer_temperature=None, defects_only=False,
+                 review_pool=False):
     """The opencode config for an arm. `reviewer_model` (e.g. "w1/qwen3.6") puts the reviewer and its
     verdict turn on another provider for the reviewer-model trial; with it, `worker_urls` may name
-    workers on a non-T arm (providers only, no implementer agents)."""
+    workers on a non-T arm (providers only, no implementer agents). `review_pool` (coding engine phase 3):
+    one reviewer and verdict agent per worker (`reviewer-wN`, `reviewer-verdict-wN`) for the harness's
+    review lanes; `reviewer` stays on the lead as the fallback lane."""
     if arm not in ("T", "G", "S"):                   # S: the GPU implementer alone (round 2 §5.2)
         raise ValueError("arm must be T, G or S")
+    if review_pool:
+        if arm != "G":
+            raise ValueError("review_pool is for arm G (GPU implementer, CPU reviewers)")
+        if not worker_urls:
+            raise ValueError("review_pool needs worker URLs")
+        if reviewer_model:
+            raise ValueError("review_pool and reviewer_model are exclusive")
+        if reviewer_temperature is not None:
+            raise ValueError("review_pool does not support reviewer_temperature")
     lead = f"router/{LEAD_ALIAS}"
     walias = worker_alias or WORKER_ALIAS                      # trial: a worker serving another model
     providers = {"router": _provider("router", router_url, "WF_ROUTER_KEY", LEAD_ALIAS, LEAD_CONTEXT)}
@@ -126,6 +138,10 @@ def build_config(arm, router_url, worker_urls, reviewer_model=None, read_first=F
         agents["impl-1"] = _agent(lead, IMPLEMENTER_PROMPT, WRITE_PERMS, IMPL_STEPS)
         for i, url in enumerate(worker_urls, start=1):              # trial: a worker serves the reviewer
             providers[f"w{i}"] = _provider(f"w{i}", url, "WF_WORKER_KEY", walias, WORKER_CONTEXT)
+    if review_pool:
+        for i in range(1, len(worker_urls) + 1):
+            agents[f"reviewer-w{i}"] = dict(agents["reviewer"], model=f"w{i}/{walias}")
+            agents[f"reviewer-verdict-w{i}"] = dict(agents["reviewer-verdict"], model=f"w{i}/{walias}")
     cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
            "provider": providers, "model": lead, "mcp": {}, "permission": _DENY_ALL, "agent": agents}
     return cfg if reviewer_temperature is None else _with_temperature(cfg, reviewer_temperature)
@@ -172,10 +188,10 @@ def with_home(env, home):
     return out
 
 
-def keys_for(arm, lead_url=None):
+def keys_for(arm, lead_url=None, review_pool=False):
     """The keys an arm's agents need: arm G has no CPU workers, so no worker key -- unless the lead runs on
-    a keyed server of its own (the orchestration trial), which takes the worker key."""
-    return KEY_ENV if arm == "T" or lead_url else ("WF_ROUTER_KEY",)
+    a keyed server of its own (the orchestration trial) or the reviews run on the workers (review pool)."""
+    return KEY_ENV if arm == "T" or lead_url or review_pool else ("WF_ROUTER_KEY",)
 
 
 def opencode_env(base_env, home, config_path, keys=KEY_ENV):

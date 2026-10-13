@@ -42,6 +42,8 @@ import review
 import workspace
 
 UNREACHABLE_LIMIT_S = 300            # spec §9: worker unreachable for 5 minutes -> run invalid
+LANE_POLL_S = 5.0          # review lanes re-check worker health this often (health changes do not notify)
+MAX_REVIEW_INFRA = 2       # worker failures on one task before its review goes to the GPU lead
 _NOISE = ("__pycache__/", ".pytest_cache/", ".workforce_review/")
 LEAD = "lead"
 
@@ -77,6 +79,8 @@ class _Task:
     fix: dict = None
     t_start: float = None
     final: bool = False                              # the next implementer turn ships unreviewed
+    review_infra: list = field(default_factory=list)   # worker failures during a review (never a round)
+    force_lead: bool = False                           # MAX_REVIEW_INFRA reached: review on the GPU lead
 
 
 class HealthMonitor:
@@ -88,6 +92,7 @@ class HealthMonitor:
         self.timeout = timeout
         self._stop = threading.Event()
         self._down_since, self.max_down = {}, {u: 0.0 for u in self.urls}
+        self._lock = threading.Lock()
         self._t = threading.Thread(target=self._loop, daemon=True)
 
     def _probe(self, url):
@@ -100,11 +105,23 @@ class HealthMonitor:
     def poll_once(self):
         now = self.clock()
         for u in self.urls:
-            if self.probe(u):
-                self._down_since.pop(u, None)
-            else:
-                since = self._down_since.setdefault(u, now)
-                self.max_down[u] = max(self.max_down[u], now - since)
+            ok = self.probe(u)
+            with self._lock:
+                if ok:
+                    self._down_since.pop(u, None)
+                else:
+                    since = self._down_since.setdefault(u, now)
+                    self.max_down[u] = max(self.max_down[u], now - since)
+
+    def is_up(self, url):
+        """Current state: up unless the last poll failed or a caller saw it fail since."""
+        with self._lock:
+            return url not in self._down_since
+
+    def mark_down(self, url):
+        """A request to `url` just failed: treat it as down until the next successful poll."""
+        with self._lock:
+            self._down_since.setdefault(url, self.clock())
 
     def _loop(self):
         while not self._stop.is_set():
@@ -124,7 +141,8 @@ class HealthMonitor:
 
 class Pipeline:
     def __init__(self, arm, bundle_dirs, opencode, run_dir, grader, review=True, limits=None,
-                 monitor=None, own=None, review_steps=None, enforce_read=False, review_budget=None):
+                 monitor=None, own=None, review_steps=None, enforce_read=False, review_budget=None,
+                 review_lanes=None):
         if review_budget is not None and review_budget < 1:
             raise ValueError(f"review_budget must be >= 1, got {review_budget}")
         loaded = []
@@ -149,6 +167,12 @@ class Pipeline:
         # The cheap-review variant: at most `review_budget` reviews per task; the rework after the last one
         # is graded unreviewed and the lead never fixes. None keeps max_rounds + the lead fix.
         self.review_budget = review_budget
+        self.review_lanes = list(review_lanes or [])        # [(lane, url)]: coding engine phase 3
+        if self.review_lanes and monitor is None:
+            raise ValueError("review_lanes need a health monitor")
+        if self.review_lanes and review_budget is None:
+            raise ValueError("review_lanes need a review_budget (an unbudgeted REVISE would run the lead fix "
+                             "on a worker lane thread and exceed the GPU slot limit)")
         self.impls = profiles.implementers(arm)
         self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
                             os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
@@ -176,15 +200,26 @@ class Pipeline:
                     return
             self._guarded(t, self._implement, t, agent, feedback)
 
-    def _lead_loop(self):
+    def _eligible(self, t, lane, url):
+        if lane == "lead":
+            return t.force_lead or not any(self.monitor.is_up(u) for _, u in self.review_lanes)
+        return not t.force_lead and self.monitor.is_up(url)
+
+    def _lane_loop(self, lane, url):
+        """One review lane. Without review lanes the single "lead" lane takes every review (arms T/G as
+        before); with them, a worker lane takes reviews while its worker is up and the lead lane only takes
+        a task forced to it or any task while no worker is up -- it never competes with healthy workers."""
         while True:
             with self.cond:
-                while not (self.lead_q or self._finished()):
-                    self.cond.wait()
-                if not self.lead_q:
-                    return
-                t = self.lead_q.pop(0)
-            self._guarded(t, self._review, t)
+                while True:
+                    if self._finished():
+                        return
+                    i = next((k for k, t in enumerate(self.lead_q) if self._eligible(t, lane, url)), None)
+                    if i is not None:
+                        t = self.lead_q.pop(i)
+                        break
+                    self.cond.wait(timeout=LANE_POLL_S if self.review_lanes else None)
+            self._guarded(t, self._review, t, lane, url)
 
     def _guarded(self, t, fn, *args):
         try:
@@ -313,7 +348,21 @@ class Pipeline:
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
 
-    def _review(self, t):
+    def _worker_failed(self, t, lane, url, tree, rc):
+        """A worker failed mid-review (stopped, crashed, unreachable): not a review. Mark it down, put the
+        task back at the front of the queue, and after MAX_REVIEW_INFRA such failures send it to the lead."""
+        shutil.rmtree(tree, ignore_errors=True)
+        self.monitor.mark_down(url)
+        t.review_infra.append({"lane": lane, "rc": rc, "t": time.time()})
+        if len(t.review_infra) >= MAX_REVIEW_INFRA:
+            t.force_lead = True
+        with self.cond:
+            self.lead_q.insert(0, t)
+            self.cond.notify_all()
+
+    def _review(self, t, lane="lead", url=None):
+        ragent = "reviewer" if lane == "lead" else f"reviewer-{lane}"
+        vagent = "reviewer-verdict" if lane == "lead" else f"reviewer-verdict-{lane}"
         n = len(t.reviews)
         tree = t.ws.copy_to(os.path.join(t.adir, f"review-r{n}"))
         test_out, header = self._visible_tests(t, f"review-r{n}-check")
@@ -326,12 +375,18 @@ class Pipeline:
         self.own(pkt, LEAD)
         t0 = time.time()
         r = self._run_as(LEAD, tree, lambda: self.oc.run(
-            "reviewer", tree, "REVIEW the change described in the attached packet.", self.limits.review_s,
+            ragent, tree, "REVIEW the change described in the attached packet.", self.limits.review_s,
             os.path.join(t.dir, f"review-r{n}.jsonl"), attach=pkt, home=t.homes[LEAD], user=LEAD))
         with open(os.path.join(t.dir, f"review-r{n}.jsonl"), encoding="utf-8", errors="replace") as f:
             steps = loops.steps_from_events(f.read())
+        if lane != "lead" and r.rc != 0 and not r.timed_out:
+            # Measured 2026-10-13 (opencode 1.18.35 on the workstation; the VM pins 1.18.34): `opencode run`
+            # with a dead provider (connection refused) exits rc 1 after ~69 s with a single `error` event
+            # (APIError "Cannot connect to API") and no text. So rc != 0 is a reliable worker-failure signal.
+            self._worker_failed(t, lane, url, tree, r.rc)
+            return
         verdict, feedback = review.parse_verdict(r.text)
-        entry = {"round": n, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
+        entry = {"round": n, "lane": lane, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
                  "timed_out": r.timed_out, "steps": steps, "capped": steps >= self.review_steps,
                  "t_start": t0, "t_end": time.time(), "verdict_turn": None}
         if verdict == "NONE" and r.session_id:
@@ -340,9 +395,12 @@ class Pipeline:
             # falls through to rework / the lead fix exactly as before. Never graded unreviewed.
             t1 = time.time()
             v = self._run_as(LEAD, tree, lambda: self.oc.run(
-                "reviewer-verdict", tree, profiles.VERDICT_MESSAGE, self.limits.verdict_s,
+                vagent, tree, profiles.VERDICT_MESSAGE, self.limits.verdict_s,
                 os.path.join(t.dir, f"review-r{n}-verdict.jsonl"), session=r.session_id,
                 home=t.homes[LEAD], user=LEAD))
+            if lane != "lead" and v.rc != 0 and not v.timed_out:
+                self._worker_failed(t, lane, url, tree, v.rc)      # the worker died in the verdict turn
+                return
             verdict, feedback = review.parse_verdict(v.text)
             entry["verdict_turn"] = {"verdict": verdict, "rc": v.rc, "timed_out": v.timed_out,
                                      "t_start": t1, "t_end": time.time()}
@@ -355,7 +413,7 @@ class Pipeline:
             # first one, so this never turns a verdict into a no-verdict.
             t2 = time.time()
             rr = self._run_as(LEAD, tree, lambda: self.oc.run(
-                "reviewer", tree, profiles.READ_NOW_MESSAGE, self.limits.review_s,
+                ragent, tree, profiles.READ_NOW_MESSAGE, self.limits.review_s,
                 os.path.join(t.dir, f"review-r{n}-reread.jsonl"), session=r.session_id,
                 home=t.homes[LEAD], user=LEAD))
             v2, fb2 = review.parse_verdict(rr.text)
@@ -449,6 +507,7 @@ class Pipeline:
         return {"id": t.id, "arm": self.arm, "implementer": t.agent, "outcome": outcome, "accepted": accepted,
                 "grade": g, "dropped": dropped, "loops": loop, "rounds": t.rounds, "reviews": t.reviews,
                 "impl_failures": t.impl_failures, "rework_rounds": max(0, len(t.rounds) - 1), "fix": t.fix,
+                "review_infra": t.review_infra,
                 "time_cap_hits": sum(1 for r in t.rounds if r["timed_out"]) + int(bool(t.fix and t.fix["timed_out"])),
                 "t_start": t.t_start, "t_end": time.time()}
 
@@ -475,7 +534,8 @@ class Pipeline:
             self.monitor.start()
         threads = [threading.Thread(target=self._impl_loop, args=(a,), daemon=True) for a in self.impls]
         if self.review:
-            threads.append(threading.Thread(target=self._lead_loop, daemon=True))
+            for lane, url in self.review_lanes + [("lead", None)]:
+                threads.append(threading.Thread(target=self._lane_loop, args=(lane, url), daemon=True))
         for th in threads:
             th.start()
         for th in threads:
@@ -485,8 +545,9 @@ class Pipeline:
         recs = [self.records[t.id] for t in self.tasks]
         invalid = [f"harness exception: {e}" for e in self.errors]
         invalid += [f"infrastructure: {e}" for e in self.infra]
-        invalid += [f"worker {u} unreachable for {s:.0f} s" for u, s in health["max_unreachable_s"].items()
-                    if s >= UNREACHABLE_LIMIT_S]
+        if not self.review_lanes:                       # with lanes, an unreachable worker is handled by fallback
+            invalid += [f"worker {u} unreachable for {s:.0f} s" for u, s in health["max_unreachable_s"].items()
+                        if s >= UNREACHABLE_LIMIT_S]
         impl_acc = sum(1 for r in recs if r["accepted"] and r["outcome"] == "implementer-accepted")
         rework_acc = sum(1 for r in recs if r["accepted"] and r["outcome"] == "reworked-unreviewed")
         hours = max(t1 - t0, 1e-9) / 3600
@@ -508,6 +569,9 @@ class Pipeline:
                    "review_rereads": sum(1 for r in recs for rv in r["reviews"] if rv.get("reread")),
                    "review_none_after_turn": sum(1 for r in recs for rv in r["reviews"]
                                                  if rv.get("verdict_turn") and rv.get("verdict") == "NONE"),
+                   "review_lanes": {ln: sum(1 for r in recs for rv in r["reviews"] if rv.get("lane") == ln)
+                                    for ln in [x for x, _ in self.review_lanes] + ["lead"]},
+                   "review_infra": sum(len(r.get("review_infra", [])) for r in recs),
                    "health": health, "valid": not invalid, "invalid_reasons": invalid}
         with open(os.path.join(self.run_dir, "run.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=1)
