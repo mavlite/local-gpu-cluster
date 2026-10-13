@@ -4,6 +4,8 @@ import os
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import grade  # noqa: E402
@@ -539,3 +541,133 @@ def test_review_budget_rejects_values_below_one(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="review_budget"):
         run_pipeline(tmp_path, "G", {"rz": {"impl": [{"pkg/rz.py": SOL}], "review": ["ACCEPT"]}}, review_budget=0)
+
+
+LANES = [("w1", "http://w1/v1"), ("w2", "http://w2/v1"), ("w3", "http://w3/v1")]
+
+
+class PoolMonitor:
+    """Current health per URL. sticky=True: mark_down is recorded but the next poll says the worker is up
+    again (a flapping worker)."""
+
+    def __init__(self, up, unreachable=None, sticky=False):
+        self.up, self.marked, self.sticky = dict(up), [], sticky
+        self.unreachable = unreachable or {}
+
+    def start(self):
+        return self
+
+    def stop(self):
+        return {"max_unreachable_s": {u: self.unreachable.get(u, 0.0) for u in self.up}}
+
+    def is_up(self, url):
+        return self.up.get(url, False)
+
+    def mark_down(self, url):
+        self.marked.append(url)
+        if not self.sticky:
+            self.up[url] = False
+
+
+def all_up():
+    return PoolMonitor({u: True for _, u in LANES})
+
+
+def review_agents(fake):
+    return [c["agent"] for c in fake.calls if c["role"] == "review"]
+
+
+def test_pool_reviews_run_on_worker_lanes_and_record_the_lane(tmp_path):
+    script = {t: {"impl": [{f"pkg/{t}.py": SOL}], "review": ["ACCEPT"]} for t in ("pa", "pb")}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=all_up(), review_lanes=LANES, review_budget=1)
+    assert set(review_agents(fake)) <= {"reviewer-w1", "reviewer-w2", "reviewer-w3"}
+    for t in ("pa", "pb"):
+        assert record(tmp_path, t)["reviews"][0]["lane"] in ("w1", "w2", "w3")
+    assert summary["valid"] and summary["accepted"] == 2
+    assert sum(summary["review_lanes"].values()) == 2 and summary["review_infra"] == 0
+
+
+def test_reviews_spread_over_the_lanes_while_one_is_busy(tmp_path):
+    script = {t: {"impl": [{f"pkg/{t}.py": SOL}], "review": [{"text": "ACCEPT", "sleep": 0.6}]}
+              for t in ("sa", "sb", "sc")}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=all_up(), review_lanes=LANES, review_budget=1)
+    assert len({record(tmp_path, t)["reviews"][0]["lane"] for t in ("sa", "sb", "sc")}) >= 2
+    assert summary["accepted"] == 3
+
+
+def test_all_workers_down_sends_every_review_to_the_gpu_lead_and_the_run_stays_valid(tmp_path):
+    mon = PoolMonitor({u: False for _, u in LANES}, unreachable={u: 3600.0 for _, u in LANES})
+    script = {"da": {"impl": [{"pkg/da.py": SOL}], "review": ["ACCEPT"]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1)
+    assert review_agents(fake) == ["reviewer"]
+    assert record(tmp_path, "da")["reviews"][0]["lane"] == "lead"
+    assert summary["valid"], summary["invalid_reasons"]                 # the fallback is the design, not a fault
+    assert summary["health"]["max_unreachable_s"]["http://w1/v1"] == 3600.0
+
+
+def test_a_worker_that_fails_mid_review_is_marked_down_and_the_review_retried_elsewhere(tmp_path):
+    mon = PoolMonitor({"http://w1/v1": True, "http://w2/v1": False, "http://w3/v1": False})
+    script = {"fa": {"impl": [{"pkg/fa.py": SOL}], "review": [{"rc": 1, "text": ""}, "ACCEPT"]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1)
+    r = record(tmp_path, "fa")
+    assert review_agents(fake) == ["reviewer-w1", "reviewer"]
+    assert mon.marked == ["http://w1/v1"]
+    assert len(r["reviews"]) == 1 and r["reviews"][0]["lane"] == "lead"     # the failure is not a review round
+    assert r["review_infra"][0]["lane"] == "w1" and r["review_infra"][0]["rc"] == 1
+    assert r["outcome"] == "implementer-accepted" and r["rework_rounds"] == 0
+    assert summary["review_infra"] == 1 and summary["valid"]
+
+
+def test_two_worker_failures_send_the_task_to_the_gpu_lead(tmp_path):
+    mon = PoolMonitor({u: True for _, u in LANES}, sticky=True)              # flapping: back up at every poll
+    script = {"ff": {"impl": [{"pkg/ff.py": SOL}],
+                     "review": [{"rc": 1, "text": ""}, {"rc": 1, "text": ""}, "ACCEPT"]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1)
+    agents = review_agents(fake)
+    assert len(agents) == 3 and agents[-1] == "reviewer" and all(a.startswith("reviewer-w") for a in agents[:2])
+    assert record(tmp_path, "ff")["reviews"][0]["lane"] == "lead"
+
+
+def test_verdict_and_reread_turns_stay_on_the_reviewing_worker(tmp_path):
+    mon = PoolMonitor({"http://w1/v1": False, "http://w2/v1": True, "http://w3/v1": False})
+    # va: capped review -> verdict turn ACCEPT -> enforce-read re-read (no read tools) ACCEPT
+    script = {"va": {"impl": [{"pkg/va.py": SOL}], "review": [{"text": "I looked around.", "steps": 20}, "ACCEPT"],
+                     "verdict": ["ACCEPT"]},
+              "vb": {"impl": [{"pkg/vb.py": SOL}], "review": ["ACCEPT", "ACCEPT"]}}
+    run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1, enforce_read=True)
+    va = record(tmp_path, "va")["reviews"]
+    assert va[0]["lane"] == "w2" and va[0]["verdict_turn"]["verdict"] == "ACCEPT"
+    rec_vb = record(tmp_path, "vb")
+    assert rec_vb["reviews"][0]["reread"] is not None                       # the packet-only ACCEPT was re-read
+
+
+def test_verdict_and_reread_agents_match_the_lane(tmp_path):
+    mon = PoolMonitor({"http://w1/v1": False, "http://w2/v1": True, "http://w3/v1": False})
+    script = {"vc": {"impl": [{"pkg/vc.py": SOL}], "review": [{"text": "hmm", "steps": 20}, "ACCEPT"],
+                     "verdict": ["ACCEPT"]}}
+    _, fake = run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1,
+                           enforce_read=True)
+    by_role = [(c["role"], c["agent"], c["resumed"]) for c in fake.calls if c["role"] in ("review", "verdict")]
+    assert ("verdict", "reviewer-verdict-w2", True) in by_role
+    assert all(a.endswith("w2") for r, a, _ in by_role)
+
+
+def test_review_lanes_need_a_monitor(tmp_path):
+    with pytest.raises(ValueError, match="monitor"):
+        pipeline.Pipeline("G", [], FakeOpencode({}), str(tmp_path / "run"), grade.LocalRunner(),
+                          review_lanes=LANES)
+
+
+def test_health_monitor_current_state_and_mark_down():
+    state = {"http://w1/v1": True}
+    clock = iter(range(100)).__next__
+    m = pipeline.HealthMonitor(["http://w1/v1"], probe=lambda u: state[u], clock=clock)
+    m.poll_once()
+    assert m.is_up("http://w1/v1")
+    m.mark_down("http://w1/v1")
+    assert not m.is_up("http://w1/v1")
+    m.poll_once()                                                          # the next good poll restores it
+    assert m.is_up("http://w1/v1")
+    state["http://w1/v1"] = False
+    m.poll_once()
+    assert not m.is_up("http://w1/v1")

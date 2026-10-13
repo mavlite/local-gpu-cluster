@@ -5,6 +5,7 @@ import os
 import sys
 import tarfile
 import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -63,7 +64,7 @@ def _task_of(workdir):
 class FakeOpencode:
     """Scripted agents. script[task_id] = {
          "impl": [ {path: content, ...} per implementer turn ],
-         "review": ["ACCEPT" | "REVISE: ..." | other text | {"text", "steps", "timed_out"}, ... per review],
+         "review": ["ACCEPT" | "REVISE: ..." | other text | {"text", "steps", "timed_out", "rc", "sleep"}, ... per review],
          "verdict": [text, ... per verdict turn]   (the resumed reviewer-verdict agent),
          "fix": {path: content},
          "raise_on": "impl"|"review" (optional), "tool_calls": [(tool, input), ...] (export)}"""
@@ -77,7 +78,8 @@ class FakeOpencode:
             user=None):
         tid = _task_of(workdir)
         s = self.script[tid]
-        role = {"reviewer": "review", "reviewer-verdict": "verdict", "fixer": "fix"}.get(agent, "impl")
+        role = ("verdict" if agent.startswith("reviewer-verdict") else "review" if agent.startswith("reviewer")
+                else "fix" if agent == "fixer" else "impl")
         with self.lock:
             n = self.turns.get((tid, role), 0)
             self.turns[(tid, role)] = n + 1
@@ -103,6 +105,10 @@ class FakeOpencode:
         if role == "review":
             entry = s["review"][n]
             if isinstance(entry, dict):                      # a scripted step count / timeout / tool calls
+                if entry.get("sleep"):
+                    time.sleep(entry["sleep"])
+                if entry.get("rc"):                            # the worker died: no session, rc != 0
+                    return oc.RunResult(entry["rc"], False, None, "", 0.01)
                 with open(events_path, "w") as f:
                     for _ in range(entry.get("steps", 1)):
                         f.write(json.dumps({"type": "step_start", "sessionID": sid}) + "\n")
