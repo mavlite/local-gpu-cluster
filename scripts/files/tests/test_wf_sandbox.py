@@ -166,8 +166,8 @@ def test_76_start_run_sends_the_worker_key_for_a_gpu_lead():
     with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
         lines = f.read().splitlines()
     start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
-    block = "\n".join(lines[start:start + 14])
-    assert 'if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]]; then printf \'WF_WORKER_KEY=%s' in block
+    block = "\n".join(lines[start:start + 15])
+    assert 'if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]] || $pool; then printf \'WF_WORKER_KEY=%s' in block
 
 
 def test_76_never_puts_a_key_on_a_qm_command_line():
@@ -236,7 +236,7 @@ def test_76_warm_pipes_the_keys_like_start_run():
     with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
         lines = f.read().splitlines()
     start = next(i for i, l in enumerate(lines) if l.strip() == "warm)")
-    block = "\n".join(lines[start:start + 11])
+    block = "\n".join(lines[start:start + 12])
     assert block.rstrip().endswith(";;") and "| vm_run_stdin 900 /usr/local/sbin/wf-run-control warm" in block
     assert "printf 'WF_ROUTER_KEY=%s" in block and "printf 'WF_WORKER_KEY=%s" in block
     for line in block.splitlines():

@@ -52,11 +52,12 @@ check_opts() {
     [[ "$o" == --w1 || "$o" == --read-first || "$o" =~ ^--lead-url=https?://[A-Za-z0-9.:/_-]+$ \
        || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ \
        || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only \
-       || "$o" =~ ^--review-budget=[1-9]$ ]] \
-      || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first, --review-budget=<1-9>)"
+       || "$o" =~ ^--review-budget=[1-9]$ || "$o" == --review-pool ]] \
+      || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first, --review-budget=<1-9>, --review-pool)"
   done
 }
 has_lead_opt() { [[ " $* " == *" --lead-url="* ]]; }
+has_pool_opt() { [[ " $* " == *" --review-pool "* ]]; }
 safe_key() { [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
 # start-replay options (reviewer-model trial): --reviewer-model=<provider/model> and --worker=<url>.
 check_replay_opts() {
@@ -119,6 +120,8 @@ cmd_start() {
   read_keys
   [ "$arm" != T ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
   ! has_lead_opt "$@" || [ -n "$KEY_WORKER" ] || die "a --lead-url lead needs WF_WORKER_KEY on stdin"
+  ! has_pool_opt "$@" || [ "$arm" = G ] || die "--review-pool is for arm G"
+  ! has_pool_opt "$@" || [ -n "$KEY_WORKER" ] || die "--review-pool needs WF_WORKER_KEY on stdin"
   write_keys "$id"
   start_unit "$id" _exec "$id" "$arm" "$@"
   log "started wf-run-$id (arm $arm${*:+ $*}); log $RUNS/$id.log"
@@ -184,7 +187,7 @@ cmd_exec() {
   rm -f "$f"
   local w args=(run --arm "$arm" --bundles "$BUNDLES" --out "$RUNS/$id" --router "$ROUTER_URL"
                 --grader "$GRADER" --agent-user-prefix "$PREFIX")
-  if [ "$arm" = T ]; then
+  if [ "$arm" = T ] || has_pool_opt "$@"; then
     for w in $WORKERS; do args+=(--worker "http://$w:$WORKER_PORT/v1"); done
   fi
   local o
@@ -213,12 +216,14 @@ warm_one() {
 }
 
 cmd_warm() {
-  local arm="${1:-}" w ok=0
+  local arm="${1:-}" pool="${2:-}" w ok=0 workers=false
   [[ "$arm" == T || "$arm" == G || "$arm" == S ]] || die "arm must be T, G or S"
+  [[ -z "$pool" || ( "$pool" == --review-pool && "$arm" == G ) ]] || die "usage: warm <T|G|S> | warm G --review-pool"
+  [[ "$arm" == T || -n "$pool" ]] && workers=true
   read_keys
-  [ "$arm" != T ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
+  ! $workers || [ -n "$KEY_WORKER" ] || die "arm T / --review-pool needs WF_WORKER_KEY on stdin"
   warm_one lead "$ROUTER_URL" "$KEY_ROUTER" "$LEAD_ALIAS" || ok=1
-  if [ "$arm" = T ]; then
+  if $workers; then
     for w in $WORKERS; do warm_one "$w" "http://$w:$WORKER_PORT/v1" "$KEY_WORKER" "$WORKER_ALIAS" || ok=1; done
   fi
   return $ok
@@ -253,5 +258,5 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   pack) shift; cmd_pack "$@" ;;
   clear-keys) rm -f "$KEYS"/*.env; log "key files removed" ;;
-  *) echo "usage: $0 start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> | warm <T|G|S> | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
+  *) echo "usage: $0 start <run-id> <T|G|S> [--w1] | start-replay <run-id> <src-run-id> | warm <T|G|S> [--review-pool] | status <run-id> | pack <run-id> | clear-keys" >&2; exit 2 ;;
 esac

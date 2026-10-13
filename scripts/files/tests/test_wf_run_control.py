@@ -346,3 +346,22 @@ def test_review_budget_passes_through_start_and_is_validated(guest):
     assert argv[argv.index("--review-budget") + 1] == "1"
     for bad in ("--review-budget=0", "--review-budget=abc", "--review-budget=10"):
         assert run(f"start rb-2 T {bad}", KEYS_T).returncode != 0, bad
+
+
+def test_review_pool_is_arm_g_with_the_worker_key_and_the_guest_worker_list(guest):
+    run, _, _, tmp = guest
+    assert run("start rp-1 G --review-pool --review-budget=1", "WF_ROUTER_KEY=r\n").returncode != 0   # no worker key
+    assert run("start rp-2 S --review-pool", KEYS_T).returncode != 0                                    # not arm G
+    assert run("start rp-3 G --review-pool --review-budget=1 --read-first --defects-only", KEYS_T).returncode == 0
+    assert run("_exec rp-3 G --review-pool --review-budget=1 --read-first --defects-only").returncode == 0
+    dump = json.loads((tmp / "dump.json").read_text())
+    argv = dump["argv"]
+    assert "--review-pool" in argv and argv.count("--worker") == 3 and dump["worker"]
+    assert argv[argv.index("--review-budget") + 1] == "1"
+
+
+def test_warm_with_review_pool_touches_the_workers_too(guest):
+    run, log, _, _ = guest
+    r = run("warm G --review-pool", KEYS_T)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("warm ") == 4          # lead + three workers
