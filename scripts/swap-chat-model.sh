@@ -245,7 +245,7 @@ get_profile() {
       # CACHE_REUSE 1024 is set but llama.cpp emits "cache_reuse is not supported
       # by this context, it will be disabled" at load for this arch — effective
       # value is 0. Harmless; left at 1024 so it activates if upstream adds support.
-      echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 0 q8_0 tensor draft-mtp 3"
       ;;
     qwen3.8-redteam)
       # Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — the SAME base model as the
@@ -265,7 +265,7 @@ get_profile() {
       # chat slot is single-tenant, whatever profile is loaded answers every
       # chat request — so check /healthz active_chat_profile before assuming
       # which model is live (the profile-swap vs client-pinning hazard).
-      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 262144 0 q8_0 tensor draft-mtp 3"
       ;;
     *)
       return 1

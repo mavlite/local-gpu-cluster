@@ -14,6 +14,8 @@ set -Eeuo pipefail
 LGC_DIR="${LGC_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 # shellcheck source=lib/common.sh
 source "$LGC_DIR/lib/common.sh"
+# shellcheck source=lib/chat-flags.sh
+source "$LGC_DIR/lib/chat-flags.sh"
 
 require_root
 require_pve_host
@@ -55,7 +57,9 @@ LLAMA_KV_TYPE="${LLAMA_KV_TYPE:-q8_0}"             # q8_0 ~11GB @ 256K total; 64
 # parallel=1 also re-enables --cache-reuse (multi-slot + quantized KV trips an
 # unsupported code path in llama.cpp).
 LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"              # 1 slot of full 256K
-LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-1024}"     # prompt-prefix reuse window for RAG system prompts
+LLAMA_CACHE_REUSE="${LLAMA_CACHE_REUSE:-0}"        # 0 = off. Qwen3.8/3.6 are hybrid: llama.cpp disables cache-reuse
+                                                   # whenever memory cannot shift, so 1024 never took effect;
+                                                   # prefix reuse comes from --cache-ram + context checkpoints.
 # Prompt cache: stores processed KV for repeated prefixes. Default is 8 GB which
 # fits ~85K tokens; OpenCode reuses the same long system prompt every turn so
 # bumping to 16 GB doubles the hit window. LXC has 32 GB RAM, so 16 GB leaves
@@ -166,6 +170,10 @@ LLAMA_SPEC_NMIN="${LLAMA_SPEC_NMIN:-0}"
 #
 LLAMA_SPEC_TYPE="${LLAMA_SPEC_TYPE:-draft-mtp}"    # qwen3.8 ships MTP heads (+63.8%); MoE profiles override to none
 LLAMA_SPEC_PMIN="${LLAMA_SPEC_PMIN:-0}"
+LLAMA_SPEC_SAMPLING="${LLAMA_SPEC_SAMPLING:-}"     # greedy | probabilistic (--spec-draft-sampling, b11368+); empty = server default
+LLAMA_MMPROJ="${LLAMA_MMPROJ:-}"                   # vision projector GGUF path; empty = --no-mmproj (text only)
+LLAMA_MMPROJ_DEVICE="${LLAMA_MMPROJ_DEVICE:-}"     # e.g. ROCm1 (GPU0 has the least headroom under tensor split)
+LLAMA_IMAGE_MAX_TOKENS="${LLAMA_IMAGE_MAX_TOKENS:-}"  # cap per image; HIP issue #28608 crashes the vision encoder at 2048 px
 
 # ---------- Embedder unit (V620 #1) ----------
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
@@ -470,34 +478,15 @@ GUEST
 
 phase_5_11_3_chat_unit() {
   step "5.11.3 — Install llamacpp-chat.service (V620 tensor-split)"
-  # IMPORTANT: draft_lines MUST end with `\\\n` when non-empty so that
-  # substitution into the heredoc (right before `--no-mmproj` — see below)
-  # produces a proper systemd continuation. When empty, this variable
-  # expands to nothing and `--no-mmproj` slots in directly after
-  # --cache-reuse. The previous layout (standalone ${DRAFT_LINES} line)
-  # produced a BLANK LINE in ExecStart= when draft was disabled, which
-  # systemd treats as end-of-line — silently dropping --no-mmproj and
-  # every flag after it.
-  local draft_lines=""
-  if [[ -n "$LLAMA_DRAFT_REPO" ]]; then
-    # Path A: EXTERNAL draft model (separate GGUF). Disabled by default.
-    draft_lines="    --hf-repo-draft ${LLAMA_DRAFT_REPO}:${LLAMA_DRAFT_QUANT} \\
-    --n-gpu-layers-draft all \\
-    --spec-draft-n-max ${LLAMA_SPEC_NMAX} \\
-    --spec-draft-n-min ${LLAMA_SPEC_NMIN} \\
-"
-  elif [[ "$LLAMA_SPEC_TYPE" != "none" ]]; then
-    # Path B: IN-GGUF speculative decoding (MTP). No draft repo and no
-    # --n-gpu-layers-draft — the heads are part of the main model, so there is
-    # no second model to place. Passing --hf-repo-draft here would be wrong.
-    draft_lines="    --spec-type ${LLAMA_SPEC_TYPE} \\
-    --spec-draft-n-max ${LLAMA_SPEC_NMAX} \\
-"
-    if [[ "${LLAMA_SPEC_PMIN}" != "0" ]]; then
-      draft_lines+="    --spec-draft-p-min ${LLAMA_SPEC_PMIN} \\
-"
-    fi
-  fi
+  # The spec-decoding and projector blocks MUST end in a systemd continuation: a blank line inside
+  # ExecStart= ends the command and silently drops every later flag (it once dropped --no-mmproj).
+  # Rendered by lib/chat-flags.sh (tested in scripts/files/tests/test_chat_flags.py). printf x keeps the
+  # trailing newline that $( ) strips, so each block ends in a continuation and never in a blank line.
+  local draft_lines mmproj_lines
+  draft_lines="$(chat_spec_lines; rc=$?; printf x; exit $rc)" || die "chat_spec_lines failed"
+  draft_lines="${draft_lines%x}"
+  mmproj_lines="$(chat_mmproj_lines; rc=$?; printf x; exit $rc)" || die "chat_mmproj_lines failed"
+  mmproj_lines="${mmproj_lines%x}"
 
   pct exec "$AMD_VMID" -- env \
     "LLAMA_HF_REPO=$LLAMA_HF_REPO" \
@@ -513,6 +502,7 @@ phase_5_11_3_chat_unit() {
     "LLAMA_THREADS=$LLAMA_THREADS" \
     "LLAMA_FLASH_ATTN=$LLAMA_FLASH_ATTN" \
     "DRAFT_LINES=$draft_lines" \
+    "MMPROJ_LINES=$mmproj_lines" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
     # Remove the pre-pivot unit name if present (clean migration)
@@ -555,8 +545,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --parallel "${LLAMA_PARALLEL}" \\
     --cache-reuse "${LLAMA_CACHE_REUSE}" \\
     --cache-ram "${LLAMA_CACHE_RAM_MB}" \\
-${DRAFT_LINES}    --no-mmproj \\
-    --flash-attn "${LLAMA_FLASH_ATTN}" \\
+${DRAFT_LINES}${MMPROJ_LINES}    --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
     --load-mode mlock \\
