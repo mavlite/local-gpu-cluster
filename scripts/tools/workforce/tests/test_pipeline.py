@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 import pytest
 
@@ -23,7 +24,14 @@ def run_pipeline(tmp_path, arm, script, review=True, **kw):
     fake = FakeOpencode(script)
     p = pipeline.Pipeline(arm, bundles, fake, str(tmp_path / "run"), grade.LocalRunner(),
                           review=review, **kw)
-    return p.run(), fake
+    if not kw.get("review_lanes"):
+        return p.run(), fake
+    out = {}                                  # lane tests: a stranded task must fail, not hang the suite
+    th = threading.Thread(target=lambda: out.update(summary=p.run()), daemon=True)
+    th.start()
+    th.join(timeout=60)
+    assert not th.is_alive(), "pipeline did not finish: a task was stranded in the review queue"
+    return out["summary"], fake
 
 
 def record(tmp_path, tid):
