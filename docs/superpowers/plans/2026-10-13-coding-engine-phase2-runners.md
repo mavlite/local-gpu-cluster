@@ -30,7 +30,21 @@
 3. **Grading parity on VM 177** before export: push the frozen W2 bundles + the harvested `lt-9-s38` patches, grade
    with the harness's Docker grader, compare pass/fail per task with the records graded on VM 176.
 4. **Export**: zvol -> streamOptimized VMDK + OVF (vmx-22, pvscsi, vmxnet3 or e1000e, 8 vCPU, 16 GB).
-5. **Deploy** (after the soak): govc `import.ovf` host-direct to `hypNN-local`, port group `SDDC-DPortGroup-VM-Mgmt`
-   (ephemeral binding: works without vCenter), static IP via guestinfo, `sched.mem.enableTiering=FALSE` + full
-   reservation, HA restart disabled, added to the vcf-lab `AgentTier` group so Full mode stops it.
+5. **Deploy** (`79 deploy` -> `scripts/files/wf-runner-esx.sh`): govc `import.vmdk` host-direct to `hypNN-local`,
+   port group `SDDC-DPortGroup-VM-Mgmt` (ephemeral binding: works without vCenter), static IP via guestinfo,
+   `sched.mem.enableTiering=FALSE`. **Done 2026-10-13, powered off:** wf-runner-01 hyp01 .208, -02 hyp02 .209,
+   -03 hyp03 .210, all vmx-22. Learned on the way:
+   - a vCenter-managed host refuses the memory reservation host-direct while vCenter is up (extraConfig is
+     accepted), so `deploy` warns and **`79 power-on` sets the reservation** -- in Minimal mode, vCenter down;
+   - power-on refuses without the reservation, without `enableTiering=FALSE`, or if the runner would take the host
+     past 80% of DRAM, counting the larger of consumed memory and the memory of powered-on VMs (a VM started
+     moments ago has not touched its pages yet). During the soak hyp01 had 75.8 GB committed: it would refuse;
+   - credentials piped from PowerShell 5.1 gain a BOM on the first line: send a throwaway first line.
+
+   **Soak exit order** (after ~02:10Z 2026-10-14): `Stop-VCFLab` (records the license sync) -> Minimal with the
+   workers -> `79 power-on` each runner (sets the reservation once; it persists in the VMX) -> only then add the
+   runners to the vcf-lab `LlmWorkers` list after the workers, so later `Start-VCFLab -Minimal` cycles (which power
+   on host-direct without these guards) start them and Full mode stops them. HA restart priority "disabled" is a
+   cluster override that needs vCenter: set it at the next Full window (a runner's disk is host-local, so HA could
+   not restart it elsewhere meanwhile).
 6. **Parity on each runner**, then record results.
