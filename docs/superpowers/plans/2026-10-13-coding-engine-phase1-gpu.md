@@ -39,3 +39,41 @@ unchanged or better; vision passes its A/B (MTP decode within 5%, no crash at â‰
 5. **Post-swap verification**: Aider Polyglot Python-34 thinking (baseline 70.6% today); turn-2 prompt tokens in a
    real OpenCode session; the 16-task S arm with qwen3.8 (baseline 13/16 in 49 min).
 6. **Vision default** if step 2 passed, with the router vision fixes test-first.
+
+## Results (2026-10-13, steps 1-4 done)
+
+**Bench** (transient server, production flags at 3 x 128K, embed + rerank resident; `q38bench.py`):
+
+| Config | Gen t/s | Draft acceptance | Prefill t/s (9.3K) | Tool call |
+|---|---|---|---|---|
+| b11026 (production) | 47.4 | 66% | 556 | ok |
+| b11577 + PR #27558 | 48.1 | 67% | 594 (+6.8%) | ok |
+| + `--spec-draft-sampling probabilistic` | **50.8 (+5.7%)** | 73% | 593 | ok |
+| + vision projector F16 on ROCm1, cap 1280 | 46.8 (-2.7%) | 65% | 593 | ok |
+
+Vision: 8/8 key strings transcribed at 512, 1024 and 1280 px (155 / 539 / 827 prompt tokens, 3-4 s); projector
++1.0 GB on GPU1; no crash. Passes the A/B bar (MTP decode within 5%).
+
+**Turn-2 re-prefill (issue #28049) did not reproduce in our setup.** Non-thinking turns reuse the cache on both
+builds; in thinking mode the previous answer is re-processed only when the client drops the reasoning
+(`reasoning_content`). Sent back, b11026 reuses 1618 tokens (20 re-processed) and b11577 at 3 slots 1367-1501
+(18-19 re-processed; one cold-slot miss right after restart). Whether OpenCode sends reasoning back is the open
+question for real sessions.
+
+**Production swap 02:52-02:55Z:** build b11577 + PR #27558 in `/opt/llama.cpp/build` (b11026 kept as
+`build-b11026`); chat unit 3 x 131072 (verified via `/slots`), `--cache-reuse` removed,
+`--spec-draft-sampling probabilistic`; host redteam drop-in mirrored; router `MAX_CHAT_INPUT_TOKENS` 100000;
+AnythingLLM `GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT` 100000; OpenCode qwen3.8* `limit.context` 131072 (backup
+`config.json.bak-20261013-phase1`). Router `/healthz`: capacity 3, chat/embed/rerank ok. Backups:
+`/root/wf/phase1-backup-20261013T025225Z`; rollback `/root/wf/phase1-rollback.sh`. Incident: the first run's unit
+edit failed on a shell-mangled regex after the services were stopped (~2 min outage; services restarted on the
+unchanged unit, then the edit re-done with line-based scripts dry-run on copies).
+
+**Not yet durable.** The host checkout is on `main`; a profile swap (swap webhook) re-runs `51-lxc-amd.sh` from it
+and restores 1 x 262K with the old flags. That failure mode is safe (slower, client limits still valid), so the host
+`config.env` is deliberately unchanged until:
+- **Follow-up A:** slot count per swap profile (the profile tuple has CTX but not PARALLEL; a global
+  `LLAMA_PARALLEL=3` would give other profiles 3 x 87K) plus a per-slot context guard (â‰¤ the model's native 262144).
+- this branch is merged and the host checkout pulled.
+- **Follow-up B:** router vision fixes (test-first), then vision on by default.
+- Step 5 (post-swap Aider Polyglot thinking) running; S-arm re-measure pending.
