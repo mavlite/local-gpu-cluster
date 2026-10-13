@@ -196,3 +196,38 @@ def test_defects_only_rule_is_added_to_the_reviewer_and_its_verdict_turn():
     assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer"]["prompt"] and profiles.READ_FIRST_RULE in ruled["reviewer"]["prompt"]
     assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer-verdict"]["prompt"]       # the tools-off turn decides too
     assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]
+
+
+W = ["http://172.16.10.205:8090/v1", "http://172.16.10.206:8090/v1", "http://172.16.10.207:8090/v1"]
+
+
+def test_review_pool_adds_one_reviewer_and_verdict_agent_per_worker_and_keeps_the_lead_fallback():
+    cfg = profiles.build_config("G", "http://r/v1", W, review_pool=True, read_first=True, defects_only=True)
+    a = cfg["agent"]
+    for i in (1, 2, 3):
+        assert a[f"reviewer-w{i}"]["model"] == f"w{i}/qwen3.6"
+        assert a[f"reviewer-verdict-w{i}"]["model"] == f"w{i}/qwen3.6"
+        assert a[f"reviewer-w{i}"]["prompt"] == a["reviewer"]["prompt"]          # same rules as the lead reviewer
+        assert a[f"reviewer-w{i}"]["permission"] == a["reviewer"]["permission"]
+        assert a[f"reviewer-verdict-w{i}"]["permission"] == a["reviewer-verdict"]["permission"]
+        assert cfg["provider"][f"w{i}"]["options"]["baseURL"] == W[i - 1]
+    assert a["reviewer"]["model"] == "router/qwen3.8-nothink" and a["impl-1"]["model"] == "router/qwen3.8-nothink"
+    assert "READ" in a["reviewer-w1"]["prompt"].upper()
+
+
+@pytest.mark.parametrize("kw,msg", [
+    (dict(arm="T"), "arm G"),
+    (dict(arm="G", worker_urls=[]), "worker"),
+    (dict(arm="G", reviewer_model="w1/qwen3.6"), "reviewer_model"),
+    (dict(arm="G", reviewer_temperature=0.2), "temperature"),
+])
+def test_review_pool_refuses_combinations_it_does_not_support(kw, msg):
+    args = dict(arm="G", router_url="http://r/v1", worker_urls=W, review_pool=True)
+    args.update(kw)
+    with pytest.raises(ValueError, match=msg):
+        profiles.build_config(**args)
+
+
+def test_a_review_pool_run_gets_the_worker_key():
+    assert profiles.keys_for("G", review_pool=True) == profiles.KEY_ENV
+    assert profiles.keys_for("G") == ("WF_ROUTER_KEY",)
