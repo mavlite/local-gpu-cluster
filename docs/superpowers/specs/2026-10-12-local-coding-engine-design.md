@@ -1,6 +1,6 @@
 # Local coding engine: GPU server + three Minisforum nodes — recommendation and design
 
-**Status:** proposal, 2026-10-12. Written for the cluster owner. Builds on the measured results of
+**Status:** proposal rev 1.1, 2026-10-12 (D1 and D3 decided; D2 proposal added in §3.2.1). Written for the cluster owner. Builds on the measured results of
 2026-10-03..12 (sources in §9); supersedes nothing yet — §8 lists the decisions it needs.
 
 ## 1. Goal and honest ceiling
@@ -87,6 +87,49 @@ Each node runs, in VCF lab **Minimal mode** (the default, already shipped; Full 
 Three nodes give three parallel review/verify lanes, which matches the GPU's implement rate (one task every
 1.5-3 min against 2-5 min per CPU review).
 
+### 3.2.1 Operating model for the Minisforum nodes (D2 proposal)
+
+**Default state is "Agent mode" = today's Minimal mode plus the runners, always on.** No daily start/stop.
+
+| Per host | Today (Minimal) | Agent mode | Notes |
+|---|---|---|---|
+| ESXi + local VMFS (`hypNN-local`) + ephemeral VM-Mgmt port group | yes | yes | works with vCenter down (verified 2026-10-05) |
+| LLM worker VM (Qwen3.6, ik) | 24 GB, 16 vCPU | unchanged | llmbench01@hyp02, 02@hyp01, 03@hyp03 |
+| Runner VM (new) | — | 16 GB, 8 vCPU, local disk, same port group | toolchains baked into the template (VLAN 10 has no internet) |
+| DRAM used | ~26 GB of 96 | ~44 GB of 96 | stays under 50% of DRAM, so memory tiering is never exercised and power-on never depends on it |
+| vCPU | 16 of 32 threads | 24 of 32 | inference is memory-bandwidth-bound; tests are CPU-bound, so they share well |
+
+**Runner VM template.** Built once on the Proxmox side from the sandbox VM 176 recipe (Docker + the `wf-grader`
+image, Python/pytest, bash + shellcheck, ripgrep, PowerShell + Pester), exported as an OVA, deployed host-direct to
+each `hypNN-local` with HA restart off and explicit placement (the standing rule for benchmark/worker VMs). Package
+updates come with a template rebuild, not at run time. The runners only need to reach the harness and the router
+on 192.168.6.x, which VLAN 10 already allows.
+
+**VCF work ("Lab mode") stays on demand and pauses the agent tier, by design.** The full management stack needs
+219 of 288 GB, so it cannot share the hosts with the agent tier (Full already refuses while workers run). Switching:
+
+1. `Start-VCFLab -Mode Full -StopLlmWorkers` first **pauses the queue's CPU tier** (a flag the harness reads), waits
+   for in-flight reviews to finish (cap 10 min, then requeue them), then stops workers and runners and starts the
+   stack.
+2. While the lab is in Full mode **the coding engine keeps working on the GPU alone**: interactive work is
+   unaffected; the background queue falls back to the measured GPU-only shape (one review on the GPU, budget 1:
+   13 of 16 in 41 min) and grades on sandbox VM 176 instead of the runners.
+3. `Stop-VCFLab` (the default leaves hosts up, Full → Minimal) restarts workers and runners, health-checks them,
+   and clears the pause flag; the queue resumes using the CPU tier.
+
+**The 180-day licence window becomes a scheduled maintenance window.** Minimal already fails closed when the last
+24-hour Full run is more than 150 days old. Turn that into a calendar event: one Full weekend per month (also the
+patch window), started Friday evening with step 1 and ended Monday morning with step 3. Add a warning at 120 days
+to `Start-VCFLab -Mode Minimal` so the deadline never arrives as a refusal.
+
+**Failure handling.** The harness treats the CPU tier as optional: a worker or runner that fails its health check
+for five minutes is taken out of rotation and the queue degrades to the GPU-only shape, instead of invalidating the
+run as the experiment harness does today. A host failure therefore costs throughput, never work.
+
+**Prerequisites.** The Minimal/Full scripts and the Full-refusal live on the unmerged branch
+`feat/9-1-1-right-sized-capacity` (with 72 unrelated VCF-CA commits); they must reach `main` first, or be
+cherry-picked onto it. The scripts' `LlmWorkers` group grows into an `AgentTier` group (workers + runners).
+
 ### 3.3 Two ways of working
 
 **A. Interactive (most sessions):** OpenCode on the workstation, primary agent `qwen3.8-think`, explore/search
@@ -152,10 +195,10 @@ attempt, not the fifth.
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Working-hours GPU layout | 3 x 128K with the reserved user lane (1 x 262K as a swap profile) |
-| D2 | Minisforum default mode | Minimal + LLM workers + runners every day; Full (VCF stack) only on demand, which already stops the workers |
-| D3 | Claude's role | plan / review risky diffs / rescue after the second failed local attempt |
-| D4 | Background queue scope | tickets with an executable acceptance check only |
+| D1 | Working-hours GPU layout | **Decided 2026-10-12:** 3 x 128K with the reserved user lane (1 x 262K as a swap profile) |
+| D2 | Minisforum default mode | Proposal in §3.2.1: Agent mode always on; VCF Full on demand pauses the CPU tier, GPU carries on alone; monthly Full weekend covers the licence window |
+| D3 | Claude's role | **Decided 2026-10-12:** plan / review risky diffs / rescue after the second failed local attempt |
+| D4 | Background queue scope | Which tickets may go to the unattended queue: only those with a command that proves "done" (a test that fails before and passes after, a linter that must come back clean). Others stay interactive |
 | D5 | Phase order | 1 → 2 → 3 → 4 → 5; phase 1 is valuable on its own even if nothing else is built |
 
 ## 9. Sources (this repo)
