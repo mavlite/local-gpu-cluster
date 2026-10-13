@@ -50,6 +50,7 @@ from slowapi.util import get_remote_address
 from prometheus_fastapi_instrumentator import Instrumentator
 
 import access_keys
+import vision_guard
 import alias_defaults
 import contextvars
 import tavily_cache
@@ -91,6 +92,11 @@ LLAMACPP_API_KEY = os.environ.get("LLAMACPP_API_KEY", "")
 CHAT_CONCURRENCY = int(os.environ.get("CHAT_CONCURRENCY", "2"))
 EMBED_CONCURRENCY = int(os.environ.get("EMBED_CONCURRENCY", "4"))
 MAX_CHAT_INPUT_TOKENS = int(os.environ.get("MAX_CHAT_INPUT_TOKENS", "120000"))
+# Media (vision_guard.py). Images are accepted only as data: URIs and only when the chat unit loads a projector;
+# llama-server would otherwise fetch http(s) image URLs itself from inside the GPU container.
+VISION_ENABLED = os.environ.get("ROUTER_VISION_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+IMAGE_TOKEN_ESTIMATE = int(os.environ.get("ROUTER_IMAGE_TOKEN_ESTIMATE", "1280"))   # = the server's --image-max-tokens
+MAX_BODY_BYTES = int(os.environ.get("ROUTER_MAX_BODY_BYTES", str(32 * 1024 * 1024)))
 MAX_EMBED_INPUT_TOKENS = int(os.environ.get("MAX_EMBED_INPUT_TOKENS", "16384"))
 
 # Profile-match guard. When the chat unit serves profile A but a client requests
@@ -637,7 +643,7 @@ def should_strip_thinking(body: dict, header_value: Optional[str]) -> bool:
     # System-prompt hint (legacy AnythingLLM pattern).
     msgs = body.get("messages", [])
     if msgs and msgs[0].get("role") == "system":
-        if NOTHINK_HINT.search(msgs[0].get("content", "")):
+        if NOTHINK_HINT.search(vision_guard.message_text(msgs[0])):   # content may be a list of parts
             return True
     # Alias-based default. resolve_alias handles both ALIAS_MAP entries and
     # the legacy RAG_MODEL_RE regex fallback for unknown rag-* names.
@@ -1618,6 +1624,25 @@ async def trigger_swap_and_wait(wanted_backend: str) -> bool:
 _last_chat_ts: Optional[float] = None
 
 
+async def _read_json_body(request: Request) -> dict:
+    """Every route that takes a JSON body reads it here: capped at ROUTER_MAX_BODY_BYTES before it is buffered
+    (Content-Length first, then a running total over the stream), so a huge or chunked upload cannot exhaust the
+    router's memory."""
+    try:
+        raw = await vision_guard.read_body_capped(request, MAX_BODY_BYTES)
+    except vision_guard.BodyTooLarge:
+        raise HTTPException(status_code=413, detail=f"request body exceeds ROUTER_MAX_BODY_BYTES={MAX_BODY_BYTES}")
+    except vision_guard.BadRequestBody as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="request body is not valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be a JSON object")
+    return body
+
+
 @app.post("/v1/chat/completions")
 @limiter.limit(RATE_LIMIT_CHAT)
 async def chat(
@@ -1630,7 +1655,10 @@ async def chat(
         raise HTTPException(status_code=403, detail="unauthenticated")
     _last_chat_ts = time.monotonic()      # feed-forward signal for the host fan bridge
     await _ensure_slot_refresh()
-    body = await request.json()
+    body = await _read_json_body(request)
+    keys_check = vision_guard.check_chat_body(body)
+    if keys_check.error is not None:
+        raise HTTPException(status_code=keys_check.status, detail=keys_check.error)
     violation = access_keys.chat_violation(principal, body)
     if violation is not None:
         log_access("/v1/chat/completions", str(body.get("model", "?")), -1, 0, 0, 403,
@@ -1673,6 +1701,12 @@ async def chat(
     # Token-budget admission control. Use /tokenize on the chat upstream.
     # count_tokens returns -1 when /tokenize is unreachable (fail-open).
     messages = body.get("messages", [])
+    media = vision_guard.check_media(messages, VISION_ENABLED)
+    if media.error is not None:
+        log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - started) * 1000), media.status,
+                   client_ip, error="media_refused")
+        raise HTTPException(status_code=media.status, detail=media.error)
+    image_tokens = vision_guard.image_token_estimate(media.images, IMAGE_TOKEN_ESTIMATE)
     text = _approx_text_from_messages(messages)
     async with httpx.AsyncClient() as client:
         # Profile-match guard: a KNOWN alias whose backend != the loaded profile
@@ -1772,13 +1806,14 @@ async def chat(
                         ),
                     )
         token_count = await count_tokens(client, V620_URL, text)
-    if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
-        log_access("/v1/chat/completions", model, token_count, 0,
+    if token_count != -1 and token_count + image_tokens > MAX_CHAT_INPUT_TOKENS:
+        log_access("/v1/chat/completions", model, token_count + image_tokens, 0,
                    int((time.monotonic() - started) * 1000), 413, client_ip,
                    error="exceeds_max_chat_input_tokens")
         raise HTTPException(
             status_code=413,
-            detail=f"input is {token_count} tokens, exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}",
+            detail=(f"input is {token_count} text tokens + {image_tokens} estimated for {media.images} image(s), "
+                    f"exceeds MAX_CHAT_INPUT_TOKENS={MAX_CHAT_INPUT_TOKENS}"),
         )
 
     # Server-side tool-execution dispatch — if the client opted in via
@@ -1875,7 +1910,10 @@ async def completions(request: Request):
     are pure code so the regex would never match anyway).
     """
     await _ensure_slot_refresh()
-    body = await request.json()
+    body = await _read_json_body(request)
+    comp_check = vision_guard.check_completions_body(body)
+    if comp_check.error is not None:
+        raise HTTPException(status_code=comp_check.status, detail=comp_check.error)
     stream = body.get("stream", False)
     url = f"{V620_URL}/v1/completions"
     started = time.monotonic()
@@ -1971,7 +2009,11 @@ async def anthropic_messages(request: Request):
     global _last_chat_ts
     _last_chat_ts = time.monotonic()
     await _ensure_slot_refresh()
-    body = await request.json()
+    body = await _read_json_body(request)
+    ant_media = vision_guard.check_media_anthropic(body, VISION_ENABLED)
+    if ant_media.error is not None:
+        raise HTTPException(status_code=ant_media.status, detail=ant_media.error)
+    ant_image_tokens = vision_guard.image_token_estimate(ant_media.images, IMAGE_TOKEN_ESTIMATE)
     stream = bool(body.get("stream", False))
     url = f"{V620_URL}/v1/messages"
     started = time.monotonic()
@@ -1987,7 +2029,7 @@ async def anthropic_messages(request: Request):
     text = _approx_text_from_anthropic(body)
     async with httpx.AsyncClient() as client:
         token_count = await count_tokens(client, V620_URL, text)
-    if token_count != -1 and token_count > MAX_CHAT_INPUT_TOKENS:
+    if token_count != -1 and token_count + ant_image_tokens > MAX_CHAT_INPUT_TOKENS:
         log_access("/v1/messages", model, token_count, 0,
                    int((time.monotonic() - started) * 1000), 413, client_ip,
                    error="exceeds_max_chat_input_tokens")
@@ -2034,8 +2076,11 @@ async def anthropic_messages(request: Request):
 @app.post("/v1/messages/count_tokens")
 @limiter.limit(RATE_LIMIT_CHAT)
 async def anthropic_count_tokens(request: Request):
-    """Passthrough for Claude Code's token-counting preflight."""
-    body = await request.json()
+    """Passthrough for Claude Code's token-counting preflight (same content guard as /v1/messages)."""
+    body = await _read_json_body(request)
+    ct_media = vision_guard.check_media_anthropic(body, VISION_ENABLED)
+    if ct_media.error is not None:
+        raise HTTPException(status_code=ct_media.status, detail=ct_media.error)
     async with httpx.AsyncClient(timeout=SMALL_TIMEOUT) as c:
         try:
             r = await c.post(f"{V620_URL}/v1/messages/count_tokens",
@@ -2061,7 +2106,7 @@ def _ensure_eot(text: str) -> str:
 @app.post("/v1/embeddings")
 @limiter.limit(RATE_LIMIT_EMBED)
 async def embeddings(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     inp = body.get("input")
     texts = embed_texts(inp)
     if isinstance(inp, str):
@@ -2105,7 +2150,7 @@ async def embeddings(request: Request):
 @app.post("/v1/rerank")
 @limiter.limit(RATE_LIMIT_EMBED)
 async def rerank(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     async with embed_sem:  # share semaphore with embed (both are bulk-RAG)
         async with httpx.AsyncClient(timeout=60.0) as c:
             try:
@@ -2141,8 +2186,10 @@ async def tavily_search(request: Request):
         )
 
     try:
-        body = await request.json()
-    except Exception:
+        body = await _read_json_body(request)
+    except HTTPException as e:
+        if e.status_code == 413:
+            raise
         return JSONResponse(
             _error_body("bad_request", "request body must be JSON"),
             status_code=400,
