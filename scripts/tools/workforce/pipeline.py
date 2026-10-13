@@ -170,6 +170,9 @@ class Pipeline:
         self.review_lanes = list(review_lanes or [])        # [(lane, url)]: coding engine phase 3
         if self.review_lanes and monitor is None:
             raise ValueError("review_lanes need a health monitor")
+        if self.review_lanes and review_budget is None:
+            raise ValueError("review_lanes need a review_budget (an unbudgeted REVISE would run the lead fix "
+                             "on a worker lane thread and exceed the GPU slot limit)")
         self.impls = profiles.implementers(arm)
         self.tasks = [_Task(t["id"], b, t, req, os.path.join(run_dir, "tasks", t["id"]),
                             os.path.join(run_dir, "agent", t["id"])) for b, t, req in loaded]
@@ -345,6 +348,18 @@ class Pipeline:
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
 
+    def _worker_failed(self, t, lane, url, tree, rc):
+        """A worker failed mid-review (stopped, crashed, unreachable): not a review. Mark it down, put the
+        task back at the front of the queue, and after MAX_REVIEW_INFRA such failures send it to the lead."""
+        shutil.rmtree(tree, ignore_errors=True)
+        self.monitor.mark_down(url)
+        t.review_infra.append({"lane": lane, "rc": rc, "t": time.time()})
+        if len(t.review_infra) >= MAX_REVIEW_INFRA:
+            t.force_lead = True
+        with self.cond:
+            self.lead_q.insert(0, t)
+            self.cond.notify_all()
+
     def _review(self, t, lane="lead", url=None):
         ragent = "reviewer" if lane == "lead" else f"reviewer-{lane}"
         vagent = "reviewer-verdict" if lane == "lead" else f"reviewer-verdict-{lane}"
@@ -365,16 +380,10 @@ class Pipeline:
         with open(os.path.join(t.dir, f"review-r{n}.jsonl"), encoding="utf-8", errors="replace") as f:
             steps = loops.steps_from_events(f.read())
         if lane != "lead" and r.rc != 0 and not r.timed_out:
-            # The worker failed (stopped, crashed, unreachable): not a review. Mark it down, put the task back
-            # at the front of the queue, and after MAX_REVIEW_INFRA such failures send it to the GPU lead.
-            shutil.rmtree(tree, ignore_errors=True)
-            self.monitor.mark_down(url)
-            t.review_infra.append({"lane": lane, "rc": r.rc, "t": time.time()})
-            if len(t.review_infra) >= MAX_REVIEW_INFRA:
-                t.force_lead = True
-            with self.cond:
-                self.lead_q.insert(0, t)
-                self.cond.notify_all()
+            # Measured 2026-10-13 (opencode 1.18.35 on the workstation; the VM pins 1.18.34): `opencode run`
+            # with a dead provider (connection refused) exits rc 1 after ~69 s with a single `error` event
+            # (APIError "Cannot connect to API") and no text. So rc != 0 is a reliable worker-failure signal.
+            self._worker_failed(t, lane, url, tree, r.rc)
             return
         verdict, feedback = review.parse_verdict(r.text)
         entry = {"round": n, "lane": lane, "verdict": verdict, "feedback": feedback[:2000], "session": r.session_id,
@@ -389,6 +398,9 @@ class Pipeline:
                 vagent, tree, profiles.VERDICT_MESSAGE, self.limits.verdict_s,
                 os.path.join(t.dir, f"review-r{n}-verdict.jsonl"), session=r.session_id,
                 home=t.homes[LEAD], user=LEAD))
+            if lane != "lead" and v.rc != 0 and not v.timed_out:
+                self._worker_failed(t, lane, url, tree, v.rc)      # the worker died in the verdict turn
+                return
             verdict, feedback = review.parse_verdict(v.text)
             entry["verdict_turn"] = {"verdict": verdict, "rc": v.rc, "timed_out": v.timed_out,
                                      "t_start": t1, "t_end": time.time()}

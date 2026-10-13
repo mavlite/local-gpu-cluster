@@ -101,7 +101,10 @@ class FakeOpencode:
         if role == "impl" and n < s.get("fail_impl_turns", 0):
             return oc.RunResult(1, False, None, "", 0.01)          # opencode died: no session, rc 1
         if role == "verdict":
-            return oc.RunResult(0, False, sid, s["verdict"][n], 0.01)
+            entry = s["verdict"][n]
+            if isinstance(entry, dict):                      # the worker died during the verdict turn
+                return oc.RunResult(entry["rc"], False, None, "", 0.01)
+            return oc.RunResult(0, False, sid, entry, 0.01)
         if role == "review":
             entry = s["review"][n]
             if isinstance(entry, dict):                      # a scripted step count / timeout / tool calls

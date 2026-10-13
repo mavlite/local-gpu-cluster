@@ -476,3 +476,11 @@ def test_run_review_pool_is_arm_g_only(tmp_path):
                   "--router", "http://x/v1", "--review-pool", "--worker", "http://w/v1"],
                  env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"})
     assert "arm G" in str(e.value)
+
+
+def test_run_review_pool_needs_a_review_budget(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                  "--router", "http://x/v1", "--review-pool", "--worker", "http://w/v1"],
+                 env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"})
+    assert "--review-budget" in str(e.value)

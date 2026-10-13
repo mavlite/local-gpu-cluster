@@ -336,6 +336,9 @@ def main(argv=None, env=None):
                 raise SystemExit("--review-pool needs at least one --worker URL")
             if not env.get("WF_WORKER_KEY"):
                 raise SystemExit("WF_WORKER_KEY must be set for --review-pool")
+            if a.review_budget is None:
+                raise SystemExit("--review-pool needs --review-budget (a REVISE past the last round would "
+                                 "otherwise run the lead fix on a worker lane and take a third GPU slot)")
         if not env.get("WF_ROUTER_KEY") or ((a.arm == "T" or a.lead_url) and not env.get("WF_WORKER_KEY")):
             raise SystemExit("WF_ROUTER_KEY (and WF_WORKER_KEY for arm T or a --lead-url lead) must be set")
         if a.agent_user_prefix and not a.grader.startswith("docker:"):

@@ -666,6 +666,26 @@ def test_review_lanes_need_a_monitor(tmp_path):
                           review_lanes=LANES)
 
 
+def test_review_lanes_need_a_review_budget(tmp_path):
+    with pytest.raises(ValueError, match="review_budget"):
+        pipeline.Pipeline("G", [], FakeOpencode({}), str(tmp_path / "run"), grade.LocalRunner(),
+                          monitor=all_up(), review_lanes=LANES)
+
+
+def test_a_worker_that_dies_in_the_verdict_turn_does_not_burn_the_review(tmp_path):
+    mon = PoolMonitor({"http://w1/v1": True, "http://w2/v1": False, "http://w3/v1": False})
+    script = {"vd": {"impl": [{"pkg/vd.py": SOL}],
+                     "review": [{"text": "hmm", "steps": 20}, "ACCEPT"],
+                     "verdict": [{"rc": 1}]}}
+    summary, fake = run_pipeline(tmp_path, "G", script, monitor=mon, review_lanes=LANES, review_budget=1)
+    r = record(tmp_path, "vd")
+    assert review_agents(fake) == ["reviewer-w1", "reviewer"]               # reviewed again elsewhere
+    assert mon.marked == ["http://w1/v1"]
+    assert len(r["reviews"]) == 1 and r["reviews"][0]["lane"] == "lead"     # the failed attempt is not a review
+    assert r["review_infra"][0]["lane"] == "w1" and r["review_infra"][0]["rc"] == 1
+    assert summary["review_infra"] == 1 and summary["valid"]
+
+
 def test_health_monitor_current_state_and_mark_down():
     state = {"http://w1/v1": True}
     clock = iter(range(100)).__next__
