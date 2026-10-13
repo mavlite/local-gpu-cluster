@@ -1,0 +1,26 @@
+{
+  "q01": {
+    "X": {"score": 2, "why": "Correctly gives 4 nodes for a non-stretched HA management domain cluster and 8 (4+4) for stretched, plus the VCF Installer/Workbook pointer, all supported by the context."},
+    "Y": {"score": 1, "why": "Headline answer of 8 nodes applies only to stretched clusters, and the claim that best practices favor stretched clusters for HA is unsupported, though it does mention the supported 4-node non-stretched requirement."}
+  },
+  "q06": {
+    "X": {"score": 2, "why": "The context describes fleet management capabilities and the management services cluster but never lists which components the fleet management appliance manages, so the refusal is justified."},
+    "Y": {"score": 1, "why": "Service descriptions are accurate, but the split into fleet-level versus instance-level components is not given in the context, and the answer does not actually identify what the appliance manages."}
+  },
+  "q10": {
+    "X": {"score": 2, "why": "The AD/LDAP identity-provider procedure (directory fields, LDAPS certificate handling, Global Catalog limits, provisioning, weekly sync) matches the context, with only minor navigation conflation between the 9.0 and 9.1 pages."},
+    "Y": {"score": 1, "why": "The procedure is largely correct, but it adds unsupported claims: that VCF SSO is required for multi-domain trust scenarios, and that the identity source then becomes available in vCenter."}
+  },
+  "q15": {
+    "X": {"score": 2, "why": "Correctly reports the three-node requirement (separate ESX hosts, sufficient resources) and that the context only mentions non-clustered configurations through the VIP note, without overclaiming."},
+    "Y": {"score": 2, "why": "Gives the three-node requirement with accurate quotes, notes the non-clustered VIP mention, and correctly says the context does not state that a single node can be used."}
+  },
+  "q19": {
+    "X": {"score": 2, "why": "Form-factor attributes, the same-type-per-cluster rule, the size-mixing recommendation, the one-Tier-0-per-node limit, the single-node-must-be-in-a-cluster rule and the install requirements all match the context, and it correctly notes that no minimum node count is given."},
+    "Y": {"score": 2, "why": "Accurately covers both form factors, all edge cluster models including virtual-appliance-only vSphere HA recovery, cluster membership rules and the large/x-large size recommendation, all supported by the context."}
+  },
+  "q23": {
+    "X": {"score": 2, "why": "Purpose and the 9.0 fleet-management deployment plus post-deployment configuration steps match the context; only a minor speculative aside about the legacy Aria engine is unsupported."},
+    "Y": {"score": 2, "why": "Correctly describes the purpose, the 9.0 fleet-management add-on deployment, the 9.1 deployment from VCF Operations as part of VCF management services, and the post-import actions, all supported by the context."}
+  }
+}

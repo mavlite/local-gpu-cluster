@@ -268,3 +268,81 @@ def test_start_replay_options_are_validated(guest, args, stdin, msg):
     r = run(args, stdin)
     assert r.returncode != 0 and msg in r.stderr, r.stderr
     assert "systemd-run" not in log() and not list(d["keys"].iterdir())
+
+
+def test_start_replay_accepts_the_read_first_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-3 w3-2-t --read-first", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-3 w3-2-t --read-first").returncode == 0
+    assert "--read-first" in json.loads((tmp / "dump.json").read_text())["argv"]
+
+
+def test_start_replay_accepts_the_worker_alias_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    opts = "--reviewer-model=w1/gemma4 --worker=http://172.16.10.205:8090/v1 --worker-alias=gemma4 --read-first"
+    assert run(f"start-replay rp-4 w3-2-t {opts}", KEYS_T).returncode == 0
+    assert run(f"_exec_replay rp-4 w3-2-t {opts}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--worker-alias") + 1] == "gemma4"
+
+
+def test_start_replay_accepts_the_review_steps_option(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-5 w3-2-t --review-steps=30", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-5 w3-2-t --review-steps=30").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--review-steps") + 1] == "30"
+    assert run("start-replay rp-6 w3-2-t --review-steps=abc", "WF_ROUTER_KEY=r\n").returncode != 0
+
+
+def test_start_passes_lead_options_and_a_gpu_lead_needs_the_worker_key(guest):
+    # Orchestration trial: the lead on a keyed GPU server takes the worker key, also on arms G/S.
+    run, log, d, tmp = guest
+    opts = "--lead-url=http://192.168.6.151:8090/v1 --read-first --review-steps=30"
+    r = run(f"start l-1 G {opts}", "WF_ROUTER_KEY=r\n")
+    assert r.returncode != 0 and "WF_WORKER_KEY" in r.stderr
+    assert run(f"start l-2 T {opts}", KEYS_T).returncode == 0
+    assert run(f"_exec l-2 T {opts}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--lead-url") + 1] == "http://192.168.6.151:8090/v1"
+    assert "--read-first" in argv and argv[argv.index("--review-steps") + 1] == "30"
+    assert run("start l-3 T --lead-url=file:///etc/passwd", KEYS_T).returncode != 0
+
+
+def test_quality_options_pass_through_start_and_start_replay(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    q = "--enforce-read --reviewer-temperature=0.2"
+    assert run(f"start-replay rp-9 w3-2-t {q}", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run(f"_exec_replay rp-9 w3-2-t {q}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert "--enforce-read" in argv and argv[argv.index("--reviewer-temperature") + 1] == "0.2"
+    assert run(f"start q-1 T {q}", KEYS_T).returncode == 0
+    assert run(f"_exec q-1 T {q}").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert "--enforce-read" in argv and argv[argv.index("--reviewer-temperature") + 1] == "0.2"
+    assert run("start q-2 T --reviewer-temperature=hot", KEYS_T).returncode != 0
+
+
+def test_defects_only_passes_through_start_and_start_replay(guest):
+    run, log, d, tmp = guest
+    (d["replay"] / "w3-2-t").mkdir()
+    assert run("start-replay rp-10 w3-2-t --defects-only", "WF_ROUTER_KEY=r\n").returncode == 0
+    assert run("_exec_replay rp-10 w3-2-t --defects-only").returncode == 0
+    assert "--defects-only" in json.loads((tmp / "dump.json").read_text())["argv"]
+    assert run("start d-1 T --defects-only", KEYS_T).returncode == 0
+    assert run("_exec d-1 T --defects-only").returncode == 0
+    assert "--defects-only" in json.loads((tmp / "dump.json").read_text())["argv"]
+
+
+def test_review_budget_passes_through_start_and_is_validated(guest):
+    run, log, d, tmp = guest
+    assert run("start rb-1 T --review-budget=1", KEYS_T).returncode == 0
+    assert run("_exec rb-1 T --review-budget=1").returncode == 0
+    argv = json.loads((tmp / "dump.json").read_text())["argv"]
+    assert argv[argv.index("--review-budget") + 1] == "1"
+    for bad in ("--review-budget=0", "--review-budget=abc", "--review-budget=10"):
+        assert run(f"start rb-2 T {bad}", KEYS_T).returncode != 0, bad

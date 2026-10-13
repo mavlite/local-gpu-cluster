@@ -48,15 +48,24 @@ check_id() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9._-]{0,40}$ ]] || die "run id must m
 check_arm() { [[ "${1:-}" == T || "${1:-}" == G || "${1:-}" == S ]] || die "arm must be T, G or S"; }
 check_opts() {
   local o
-  for o in "$@"; do [[ "$o" == --w1 ]] || die "unknown option '$o' (only --w1)"; done
+  for o in "$@"; do
+    [[ "$o" == --w1 || "$o" == --read-first || "$o" =~ ^--lead-url=https?://[A-Za-z0-9.:/_-]+$ \
+       || "$o" =~ ^--lead-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only \
+       || "$o" =~ ^--review-budget=[1-9]$ ]] \
+      || die "unknown option '$o' (only --w1, --lead-url=<url>, --lead-alias=<name>, --review-steps=<n>, --read-first, --review-budget=<1-9>)"
+  done
 }
+has_lead_opt() { [[ " $* " == *" --lead-url="* ]]; }
 safe_key() { [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; }
 # start-replay options (reviewer-model trial): --reviewer-model=<provider/model> and --worker=<url>.
 check_replay_opts() {
   local o
   for o in "$@"; do
-    [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ ]] \
-      || die "unknown option '$o' (only --reviewer-model=<provider/model> and --worker=<url>)"
+    [[ "$o" =~ ^--reviewer-model=[A-Za-z0-9._/-]+$ || "$o" =~ ^--worker=https?://[A-Za-z0-9.:/_-]+$ \
+       || "$o" =~ ^--worker-alias=[A-Za-z0-9._-]+$ || "$o" =~ ^--review-steps=[0-9]{1,3}$ || "$o" == --read-first \
+       || "$o" == --enforce-read || "$o" =~ ^--reviewer-temperature=[0-9](\.[0-9]{1,2})?$ || "$o" == --defects-only ]] \
+      || die "unknown option '$o' (only --reviewer-model=<provider/model>, --worker=<url>, --worker-alias=<name>, --review-steps=<n>, --read-first)"
   done
 }
 has_worker_opt() { [[ " $* " == *" --worker="* ]]; }
@@ -109,6 +118,7 @@ cmd_start() {
   [ -e "$RUNS/$id" ] && die "run $id exists -- run ids are single-use"
   read_keys
   [ "$arm" != T ] || [ -n "$KEY_WORKER" ] || die "arm T needs WF_WORKER_KEY on stdin"
+  ! has_lead_opt "$@" || [ -n "$KEY_WORKER" ] || die "a --lead-url lead needs WF_WORKER_KEY on stdin"
   write_keys "$id"
   start_unit "$id" _exec "$id" "$arm" "$@"
   log "started wf-run-$id (arm $arm${*:+ $*}); log $RUNS/$id.log"
@@ -140,6 +150,12 @@ cmd_exec_replay() {
     case "$o" in
       --reviewer-model=*) extra+=(--reviewer-model "${o#--reviewer-model=}") ;;
       --worker=*) extra+=(--worker "${o#--worker=}") ;;
+      --read-first) extra+=(--read-first) ;;
+      --worker-alias=*) extra+=(--worker-alias "${o#--worker-alias=}") ;;
+      --review-steps=*) extra+=(--review-steps "${o#--review-steps=}") ;;
+      --enforce-read) extra+=(--enforce-read) ;;
+      --defects-only) extra+=(--defects-only) ;;
+      --reviewer-temperature=*) extra+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
     esac
   done
   local f="$KEYS/$id.env"
@@ -171,7 +187,18 @@ cmd_exec() {
   if [ "$arm" = T ]; then
     for w in $WORKERS; do args+=(--worker "http://$w:$WORKER_PORT/v1"); done
   fi
-  exec "$WF_RUN" "${args[@]}" "$@"
+  local o
+  for o in "$@"; do
+    case "$o" in
+      --lead-url=*) args+=(--lead-url "${o#--lead-url=}") ;;
+      --lead-alias=*) args+=(--lead-alias "${o#--lead-alias=}") ;;
+      --review-steps=*) args+=(--review-steps "${o#--review-steps=}") ;;
+      --review-budget=*) args+=(--review-budget "${o#--review-budget=}") ;;
+      --reviewer-temperature=*) args+=(--reviewer-temperature "${o#--reviewer-temperature=}") ;;
+      *) args+=("$o") ;;
+    esac
+  done
+  exec "$WF_RUN" "${args[@]}"
 }
 
 # warm_one <label> <url> <key> <model>: one short completion; prints "warm <label> <code> <seconds>".

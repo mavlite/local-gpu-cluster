@@ -121,3 +121,78 @@ def test_reviewer_model_override_puts_only_the_reviewer_on_a_worker():
     assert cfg["agent"]["fixer"]["model"] == cfg["agent"]["impl-1"]["model"] == "router/qwen3.8-nothink"
     assert sorted(a for a in cfg["agent"] if a.startswith("impl-")) == ["impl-1"]
     assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["model"] == "router/qwen3.8-nothink"
+
+
+def test_read_first_rule_is_added_to_the_reviewer_prompt_only_when_asked():
+    # Trial 2: one-step verdicts hallucinated bugs; the rule forces at least one read of a changed function.
+    plain = profiles.build_config("G", ROUTER, [])["agent"]
+    ruled = profiles.build_config("G", ROUTER, [], read_first=True)["agent"]
+    assert profiles.READ_FIRST_RULE not in plain["reviewer"]["prompt"]
+    assert ruled["reviewer"]["prompt"].endswith(profiles.READ_FIRST_RULE)
+    assert ruled["reviewer"]["prompt"].startswith(profiles.REVIEWER_PROMPT.split("Your reply must START")[0][:40])
+    assert "Your reply must START" in ruled["reviewer"]["prompt"]           # the verdict format stays last-but-one
+    assert ruled["reviewer-verdict"]["prompt"] == plain["reviewer-verdict"]["prompt"]   # the tools-off turn cannot read
+    assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]
+
+
+def test_worker_alias_override_names_the_worker_model_and_the_trial_reviewer():
+    # Trial 3: a worker serving Gemma 4 under alias "gemma4"; the reviewer model is w1/gemma4.
+    cfg = profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/gemma4", worker_alias="gemma4")
+    assert list(cfg["provider"]["w1"]["models"]) == ["gemma4"]
+    assert cfg["agent"]["reviewer"]["model"] == "w1/gemma4"
+    assert list(profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6")["provider"]["w1"]["models"]) == ["qwen3.6"]
+
+
+def test_review_steps_override_changes_only_the_reviewer_cap():
+    cfg = profiles.build_config("G", ROUTER, [], review_steps=30)["agent"]
+    assert cfg["reviewer"]["steps"] == 30 and cfg["reviewer-verdict"]["steps"] == profiles.VERDICT_STEPS
+    assert cfg["fixer"]["steps"] == profiles.FIX_STEPS and cfg["impl-1"]["steps"] == profiles.IMPL_STEPS
+    assert profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]["steps"] == profiles.REVIEW_STEPS == 20
+
+
+GPU_LEAD = "http://192.168.6.151:8090/v1"
+
+
+def test_lead_url_moves_the_whole_lead_to_its_own_provider():
+    # Orchestration trial: reviewer, verdict turn and fixer on the GPU lead server; the workers unchanged.
+    cfg = profiles.build_config("T", ROUTER, WORKERS, lead_url=GPU_LEAD)
+    assert cfg["provider"]["lead"]["options"]["baseURL"] == GPU_LEAD
+    assert cfg["provider"]["lead"]["options"]["apiKey"] == "{env:WF_WORKER_KEY}"
+    a = cfg["agent"]
+    assert a["reviewer"]["model"] == a["reviewer-verdict"]["model"] == a["fixer"]["model"] == "lead/qwen3.6"
+    assert [a[f"impl-{i}"]["model"] for i in (1, 2, 3)] == ["w1/qwen3.6", "w2/qwen3.6", "w3/qwen3.6"]
+    assert cfg["model"] == "lead/qwen3.6"
+    g = profiles.build_config("S", ROUTER, [], lead_url=GPU_LEAD, lead_alias="other")["agent"]
+    assert g["impl-1"]["model"] == "lead/other"
+    assert profiles.keys_for("S", lead_url=GPU_LEAD) == profiles.KEY_ENV and profiles.keys_for("S") == ("WF_ROUTER_KEY",)
+
+
+def test_reviewer_temperature_sets_only_the_reviewer_agents():
+    a = profiles.build_config("G", ROUTER, [], reviewer_temperature=0.2)["agent"]
+    assert a["reviewer"]["temperature"] == a["reviewer-verdict"]["temperature"] == 0.2
+    assert "temperature" not in profiles.build_config("G", ROUTER, [])["agent"]["reviewer"]
+
+
+def test_reviewer_temperature_is_actually_sent_and_leaves_other_agents_at_the_server_default():
+    # opencode sends an agent temperature only for a model marked temperature-capable (2026-10-12: replay-8
+    # ran at the server's 0.7 because it was not). Marking it makes opencode send ITS default to every other
+    # agent on that provider, so those are pinned to the Qwen card value the server uses anyway.
+    t = profiles.build_config("T", ROUTER, WORKERS, lead_url="http://192.168.6.151:8090/v1", reviewer_temperature=0.2)
+    assert t["provider"]["lead"]["models"]["qwen3.6"]["temperature"] is True
+    assert t["agent"]["fixer"]["temperature"] == profiles.QWEN_NOTHINK_TEMPERATURE == 0.7
+    assert all("temperature" not in t["provider"][w]["models"]["qwen3.6"] for w in ("w1", "w2", "w3"))
+    assert all("temperature" not in t["agent"][f"impl-{i}"] for i in (1, 2, 3))
+    assert "temperature" not in t["provider"]["router"]["models"][profiles.LEAD_ALIAS]
+    g = profiles.build_config("G", ROUTER, WORKERS[:1], reviewer_model="w1/qwen3.6", reviewer_temperature=0.2)
+    assert g["provider"]["w1"]["models"]["qwen3.6"]["temperature"] is True
+    assert "temperature" not in g["provider"]["router"]["models"][profiles.LEAD_ALIAS]
+    assert "temperature" not in g["agent"]["fixer"] and "temperature" not in g["agent"]["impl-1"]
+
+
+def test_defects_only_rule_is_added_to_the_reviewer_and_its_verdict_turn():
+    plain = profiles.build_config("G", ROUTER, [])["agent"]
+    ruled = profiles.build_config("G", ROUTER, [], defects_only=True, read_first=True)["agent"]
+    assert profiles.DEFECTS_ONLY_RULE not in plain["reviewer"]["prompt"]
+    assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer"]["prompt"] and profiles.READ_FIRST_RULE in ruled["reviewer"]["prompt"]
+    assert profiles.DEFECTS_ONLY_RULE in ruled["reviewer-verdict"]["prompt"]       # the tools-off turn decides too
+    assert ruled["fixer"]["prompt"] == plain["fixer"]["prompt"]

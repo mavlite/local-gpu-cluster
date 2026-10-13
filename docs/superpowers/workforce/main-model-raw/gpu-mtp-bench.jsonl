@@ -1,0 +1,38 @@
+{"config": "q4km-nomtp", "body": "mtpb-code-t0", "rep": 1, "predicted_n": 700, "gen_tps": 72.12461895965345, "prompt_n": 4, "prompt_tps": 64.87503446486207, "draft_n": null, "draft_accepted": null}
+{"config": "q4km-nomtp", "body": "mtpb-code-t0", "rep": 2, "predicted_n": 700, "gen_tps": 72.1854937931835, "prompt_n": 4, "prompt_tps": 65.21242948906061, "draft_n": null, "draft_accepted": null}
+{"config": "q4km-nomtp", "body": "mtpb-code-t07", "rep": 1, "predicted_n": 700, "gen_tps": 72.12868996550617, "prompt_n": 4, "prompt_tps": 63.62233780280256, "draft_n": null, "draft_accepted": null}
+{"config": "q4km-nomtp", "body": "mtpb-code-t07", "rep": 2, "predicted_n": 700, "gen_tps": 72.04841158505475, "prompt_n": 4, "prompt_tps": 65.9478352623075, "draft_n": null, "draft_accepted": null}
+{"config": "q4km-nomtp", "body": "mtpb-rag-t07", "rep": 1, "predicted_n": 700, "gen_tps": 69.46079246317609, "prompt_n": 7701, "prompt_tps": 2503.3595924409656, "draft_n": null, "draft_accepted": null}
+{"config": "q4km-nomtp", "body": "mtpb-rag-t07", "rep": 2, "predicted_n": 700, "gen_tps": 69.37949422050947, "prompt_n": 4, "prompt_tps": 61.951151517028826, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-code-t0", "rep": 1, "predicted_n": 700, "gen_tps": 66.56757399190599, "prompt_n": 4, "prompt_tps": 64.02048655569783, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-code-t0", "rep": 2, "predicted_n": 700, "gen_tps": 66.54871327729659, "prompt_n": 4, "prompt_tps": 64.82456851146584, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-code-t07", "rep": 1, "predicted_n": 700, "gen_tps": 66.56618569185075, "prompt_n": 4, "prompt_tps": 63.68818265770786, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-code-t07", "rep": 2, "predicted_n": 700, "gen_tps": 66.55811694803896, "prompt_n": 4, "prompt_tps": 63.91409945033874, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-rag-t07", "rep": 1, "predicted_n": 700, "gen_tps": 64.32110272319353, "prompt_n": 7701, "prompt_tps": 2416.344163215718, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-nomtp", "body": "mtpb-rag-t07", "rep": 2, "predicted_n": 700, "gen_tps": 64.29369876682111, "prompt_n": 4, "prompt_tps": 62.07517303454483, "draft_n": null, "draft_accepted": null}
+{"config": "q6xl-mtp1", "body": "mtpb-code-t0", "rep": 1, "predicted_n": 700, "gen_tps": 92.67483027181568, "prompt_n": 4, "prompt_tps": 62.91979299388105, "draft_n": 365, "draft_accepted": 334}
+{"config": "q6xl-mtp1", "body": "mtpb-code-t0", "rep": 2, "predicted_n": 700, "gen_tps": 92.34020191195738, "prompt_n": 4, "prompt_tps": 64.30868167202573, "draft_n": 365, "draft_accepted": 334}
+{"config": "q6xl-mtp1", "body": "mtpb-code-t07", "rep": 1, "predicted_n": 700, "gen_tps": 90.87626955383652, "prompt_n": 4, "prompt_tps": 61.32335806708776, "draft_n": 370, "draft_accepted": 328}
+{"config": "q6xl-mtp1", "body": "mtpb-code-t07", "rep": 2, "predicted_n": 700, "gen_tps": 90.33099136130743, "prompt_n": 4, "prompt_tps": 63.65068504049774, "draft_n": 373, "draft_accepted": 325}
+{"config": "q6xl-mtp1", "body": "mtpb-rag-t07", "rep": 1, "predicted_n": 700, "gen_tps": 88.98387291422566, "prompt_n": 7701, "prompt_tps": 1894.88540876721, "draft_n": 366, "draft_accepted": 333}
+{"config": "q6xl-mtp1", "body": "mtpb-rag-t07", "rep": 2, "predicted_n": 700, "gen_tps": 88.67736004835011, "prompt_n": 4, "prompt_tps": 57.227062677940395, "draft_n": 366, "draft_accepted": 332}
+{"config": "q6xl-mtp2", "body": "mtpb-code-t0", "rep": 1, "predicted_n": 700, "gen_tps": 109.67782022628464, "prompt_n": 4, "prompt_tps": 62.54788822692374, "draft_n": 507, "draft_accepted": 445}
+{"config": "q6xl-mtp2", "body": "mtpb-code-t0", "rep": 2, "predicted_n": 700, "gen_tps": 109.54866264434487, "prompt_n": 4, "prompt_tps": 64.05431806171633, "draft_n": 507, "draft_accepted": 445}
+{"config": "q6xl-mtp2", "body": "mtpb-code-t07", "rep": 1, "predicted_n": 700, "gen_tps": 106.58649654302938, "prompt_n": 4, "prompt_tps": 61.12095837662734, "draft_n": 522, "draft_accepted": 437}
+{"config": "q6xl-mtp2", "body": "mtpb-code-t07", "rep": 2, "predicted_n": 700, "gen_tps": 106.36476724147768, "prompt_n": 4, "prompt_tps": 61.51764018332256, "draft_n": 520, "draft_accepted": 438}
+{"config": "q6xl-mtp2", "body": "mtpb-rag-t07", "rep": 1, "predicted_n": 700, "gen_tps": 104.57978674700308, "prompt_n": 7701, "prompt_tps": 1888.758246302316, "draft_n": 512, "draft_accepted": 442}
+{"config": "q6xl-mtp2", "body": "mtpb-rag-t07", "rep": 2, "predicted_n": 700, "gen_tps": 104.5665358064092, "prompt_n": 4, "prompt_tps": 57.9248425168344, "draft_n": 510, "draft_accepted": 444}
+{"config": "q6xl-mtp3", "body": "mtpb-code-t0", "rep": 1, "predicted_n": 700, "gen_tps": 118.66439908450161, "prompt_n": 4, "prompt_tps": 62.61936817057516, "draft_n": 608, "draft_accepted": 495}
+{"config": "q6xl-mtp3", "body": "mtpb-code-t0", "rep": 2, "predicted_n": 700, "gen_tps": 118.82264606643496, "prompt_n": 4, "prompt_tps": 64.07689227072487, "draft_n": 608, "draft_accepted": 496}
+{"config": "q6xl-mtp3", "body": "mtpb-code-t07", "rep": 1, "predicted_n": 700, "gen_tps": 119.14138434789011, "prompt_n": 4, "prompt_tps": 62.31888573832299, "draft_n": 605, "draft_accepted": 497}
+{"config": "q6xl-mtp3", "body": "mtpb-code-t07", "rep": 2, "predicted_n": 700, "gen_tps": 109.73998061417339, "prompt_n": 4, "prompt_tps": 64.1179770778232, "draft_n": 660, "draft_accepted": 478}
+{"config": "q6xl-mtp3", "body": "mtpb-rag-t07", "rep": 1, "predicted_n": 700, "gen_tps": 111.68405332266451, "prompt_n": 7701, "prompt_tps": 1887.1535593098229, "draft_n": 625, "draft_accepted": 490}
+{"config": "q6xl-mtp3", "body": "mtpb-rag-t07", "rep": 2, "predicted_n": 700, "gen_tps": 112.01501225514745, "prompt_n": 4, "prompt_tps": 57.187790406748164, "draft_n": 619, "draft_accepted": 492}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-code-t0", "rep": 1, "error": "JSONDecodeError: "}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-code-t0", "rep": 2, "error": "JSONDecodeError: "}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-code-t07", "rep": 1, "error": "JSONDecodeError: "}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-code-t07", "rep": 2, "error": "JSONDecodeError: "}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-rag-t07", "rep": 1, "error": "JSONDecodeError: "}
+{"config": "q4xl-nomtp-retry", "body": "mtpb-rag-t07", "rep": 2, "error": "JSONDecodeError: "}
+{"config":"q4xl-nomtp-retry","note":"ROCm illegal memory access in log"}
+DONE

@@ -162,6 +162,14 @@ def test_closed_mode_denies_everything_both_ways():
     assert rules(r.stdout) == []
 
 
+def test_76_start_run_sends_the_worker_key_for_a_gpu_lead():
+    with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == "start-run)")
+    block = "\n".join(lines[start:start + 14])
+    assert 'if [[ "$arm" == T || " ${*:4} " == *" --lead-url="* ]]; then printf \'WF_WORKER_KEY=%s' in block
+
+
 def test_76_never_puts_a_key_on_a_qm_command_line():
     """Plan D start-run: keys reach the guest on stdin (printf builtins piped to vm_run_stdin)."""
     with open(os.path.join(FILES, "..", "76-vm-wf-sandbox.sh"), encoding="utf-8") as f:
@@ -248,3 +256,15 @@ def test_wf_r2_runs_the_preregistered_order_with_a_warm_up_before_each_stamp():
     for line in text.splitlines():
         assert "router.key" not in line or line.strip().startswith(("[", "#"))
 
+
+
+def test_provision_installs_ripgrep_for_opencode_glob_and_grep():
+    """2026-10-12: without rg on PATH opencode downloads ripgrep into each fresh per-task home; the locked VM
+    blocks that, so every glob/grep call failed after a long timeout ("ripgrep execution failed", 45 times in
+    one replay; glob+grep were most of a review's wall time)."""
+    with open(os.path.join(FILES, "wf-sandbox-provision.sh"), encoding="utf-8") as f:
+        text = f.read()
+    apt = text[text.index("apt-get install"):]
+    apt = apt[:apt.index(">/dev/null")]
+    assert " ripgrep" in apt
+    assert "command -v rg" in text

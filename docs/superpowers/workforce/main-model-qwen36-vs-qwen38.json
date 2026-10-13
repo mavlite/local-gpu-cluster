@@ -1,0 +1,190 @@
+{
+ "what": "Main GPU model research 2026-10-12: optimized Qwen3.6-35B-A3B vs Qwen3.8-27B (plan docs/superpowers/plans/2026-10-12-main-model-qwen36-vs-qwen38.md)",
+ "serving_qwen36": {
+  "bench": "LXC 151, llama.cpp b11026, both V620s, layer split 1,1, ub 1024, f16 KV, FA auto, ctx 65536, thinking off, embed + rerank resident; 700-token outputs, prompts: code (temp 0 and 0.7) and a 7.7K-token RAG context, two reps each",
+  "results_gen_tps": {
+   "UD-Q4_K_M (plain repo), no MTP": {
+    "code": 72,
+    "rag": 69,
+    "prefill_7k": 2503
+   },
+   "UD-Q6_K_XL (MTP repo), MTP off": {
+    "code": 67,
+    "rag": 64,
+    "prefill_7k": 2416,
+    "vram_gb": 40.3
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 1": {
+    "code": "91-93",
+    "rag": 89,
+    "acceptance": "88-92%",
+    "prefill_7k": 1895
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 2": {
+    "code": "106-110",
+    "rag": 105,
+    "acceptance": "84-88%",
+    "prefill_7k": 1889
+   },
+   "UD-Q6_K_XL, draft-mtp n-max 3": {
+    "code": "110-119",
+    "rag": 112,
+    "acceptance": "72-81%",
+    "prefill_7k": 1887
+   }
+  },
+  "failures": [
+   "Unsloth MTP UD-Q4_K_XL: ROCm illegal memory access on the first request, with or without MTP (4 of 4 attempts)",
+   "plain UD-Q6_K runs at layer 1:1 (57.7 t/s); its earlier crash was specific to layer 1:1.5"
+  ],
+  "chosen": "UD-Q6_K_XL + draft-mtp n-max 3: 1.6x the old Q4 generation at a higher-quality quant; costs ~25% prefill. Used for every Qwen3.6 quality run below.",
+  "vs_published": "Unsloth/community report 1.15-1.25x for MTP on this MoE on NVIDIA; measured 1.6-1.8x over MTP-off at the same quant here (110-119 vs 67 code, 112 vs 64 RAG)."
+ },
+ "polyglot_python34": {
+  "setup": "Aider Polyglot Python-34, whole edit format, --threads 1, aider sends temperature 0 (as in every earlier run); LXC 158 -> direct llama-server in 151 (gpu-q36.sh: Q6_K_XL + MTP n3, 1 x 128K)",
+  "qwen36_nothink": {
+   "run": "2026-10-12-17-00-37--q36-q6mtp3-nothink",
+   "pass_rate_1": 32.4,
+   "pass_rate_2": 55.9,
+   "passed_2": "19/34",
+   "exhausted_context_windows": 2,
+   "error_outputs": 7,
+   "seconds_per_case": 235.4,
+   "incident": "case 31 (forth) fell into a temperature-0 repetition loop: 52K+ tokens on one request with no client max_tokens; aider timed out and retried behind it. The server was restarted at 19:03Z with --n-predict 32768 so a loop fails fast; no real answer comes near that cap, so the score is unaffected (a loop never passes). All later runs use the cap."
+  },
+  "qwen38_reference_2026_09": {
+   "think": {
+    "run": "2026-09-06-02-05-32--py34-q38think",
+    "model": "openai/qwen3.8-think",
+    "pass_rate_1": 26.5,
+    "pass_rate_2": 73.5,
+    "seconds_per_case": 111.8
+   },
+   "nothink": {
+    "run": "2026-09-06-01-14-02--py34-q38nothink",
+    "pass_rate_2": 50.0
+   }
+  },
+  "reading_so_far": "Thinking (best mode for both): Qwen3.6 76.5 vs qwen3.8 70.6 same day (73.5 in Sept) -- +2 cases, within run-to-run noise but not behind. Qwen3.6 is slower per case in thinking mode (124.5 vs 102.4 s) because it reasons longer. Non-thinking: Qwen3.6 55.9 vs qwen3.8 50.0 (Sept).",
+  "qwen36_think": {
+   "run": "2026-10-12-19-15-21--q36-q6mtp3-think",
+   "pass_rate_1": 38.2,
+   "pass_rate_2": 76.5,
+   "passed_2": "26/34",
+   "error_outputs": 0,
+   "exhausted_context_windows": 0,
+   "seconds_per_case": 124.5,
+   "server": "same Q6_K_XL + MTP n3, enable_thinking true, server sampling 0.6/0.95/20 (aider overrides temperature to 0), --n-predict 32768",
+   "tokens": "2.0-4.7K generated per request at 108-117 t/s"
+  },
+  "qwen38_think_same_day": {
+   "run": "2026-10-12-21-35-51--py34-q38think-rerun",
+   "model": "openai/qwen3.8-think via the router (production chat, window 3-slot layout)",
+   "pass_rate_1": 32.4,
+   "pass_rate_2": 70.6,
+   "passed_2": "24/34",
+   "error_outputs": 0,
+   "exhausted_context_windows": 0,
+   "seconds_per_case": 102.4,
+   "note": "paused by the user at 30/34 (22:2xZ) and resumed in place with aider --cont; only cases without results re-ran"
+  }
+ },
+ "rag_frozen_retrieval": {
+  "setup": "22 answerable VCF questions (rag_questions.json), vcf-reference vector-search top-6 frozen once, workspace system prompt, non-thinking, identical explicit sampling 0.7/0.8/20 presence 1.5, max_tokens 1500. Qwen3.6 = gpu-q36.sh Q6_K_XL + MTP n3 direct; qwen3.8 = router alias qwen3.8-nothink (production chat, window 3-slot layout), no other load.",
+  "grading": "blind: 4 batches, X/Y labels randomised per question (seed 20261012), key kept apart until all grades were in; 4 Opus graders judged each answer against the frozen context only (2 correct+supported, 1 partly/unsupported claim, 0 wrong or unjustified refusal).",
+  "results": {
+   "qwen3.8-nothink": {
+    "points": "39/44",
+    "fully_correct": 17,
+    "partly": 5,
+    "wrong": 0,
+    "median_s": 39.6,
+    "total_s": 822
+   },
+   "qwen3.6": {
+    "points": "32/44",
+    "fully_correct": 12,
+    "partly": 8,
+    "wrong": 2,
+    "median_s": 13.7,
+    "total_s": 282
+   }
+  },
+  "per_question": {
+   "qwen3.6_better": [
+    "q05",
+    "q06",
+    "q22"
+   ],
+   "qwen3.8_better": [
+    "q01",
+    "q07",
+    "q08",
+    "q09",
+    "q10",
+    "q12",
+    "q16",
+    "q20"
+   ],
+   "tied": 11
+  },
+  "qwen36_failure_modes": [
+   "unjustified refusal 'Not in the provided VCF documents.' when the context held the answer (q08 component table, q09 certificate replacement)",
+   "claims the context does not support or contradicts: invented menu names (q12), VCF Automation and Identity Broker called core components (q20), 'VCF Automation does not need a Supervisor' where the context requires one (q16)"
+  ],
+  "decision_clause": "FAILS: Qwen3.6 has 5 fewer fully correct answers than qwen3.8 (12 vs 17); the clause allows at most 2. Qwen3.6 answers 2.9x faster.",
+  "files": "docs/superpowers/workforce/rag-eval/results/ (answers, grades, key)"
+ },
+ "workforce_arm_s": {
+  "setup": "the 16 frozen W2 tasks, hidden-test grading, harness 03b1dff, GPU implementer alone, non-thinking. Qwen3.6 = transient Q4_K_M server (no MTP; the S runs predate the MTP bench); qwen3.8 = router qwen3.8-nothink on the production chat (3-slot window layout, MTP n3).",
+  "qwen36": {
+   "runs": {
+    "lt-2-s": [
+     13,
+     27
+    ],
+    "lt-4-s": [
+     12,
+     36
+    ],
+    "lt-6-s": [
+     15,
+     37
+    ]
+   },
+   "mean_accepted": 13.3,
+   "mean_minutes": 33
+  },
+  "qwen38": {
+   "runs": {
+    "lt-9-s38": [
+     13,
+     49
+    ]
+   },
+   "failed": [
+    "w2-06",
+    "w2-10",
+    "w2-16"
+   ],
+   "valid": true
+  },
+  "reading": "Equal acceptance (13 vs 12-15). Qwen3.6 is 1.5x faster (33 vs 49 min) even WITHOUT MTP; with Q6+MTP its generation is ~1.6x faster again, so the real gap is likely larger (not measured). Run format: [accepted of 16, minutes]."
+ },
+ "decision": {
+  "rule_applied": {
+   "polyglot_within_5_points_of_qwen38_think": "PASS (76.5 vs 70.6 same day; ahead)",
+   "s_arm_acceptance_within_one_task": "PASS (13.3 mean vs 13)",
+   "speed_at_least_1_5x": "MIXED: S arm 1.48x (33 vs 49 min, Qwen3.6 without MTP); RAG 2.9x (14 vs 40 s); Polyglot think 0.82x (124.5 vs 102.4 s/case)",
+   "rag_no_more_than_2_below": "FAIL (12 vs 17 fully correct; 32 vs 39 points; two unjustified refusals)"
+  },
+  "outcome": "Qwen3.6 does NOT replace qwen3.8 as the main model: it fails the pre-registered RAG clause, and the speed clause is not met across the board.",
+  "beyond_the_rule": "The rule's middle band (keep qwen3.8 default, add Qwen3.6 as a fast profile) was written for a Polyglot gap of 5-10 points; the observed pattern is different (equal or better coding, worse RAG grounding, faster except on long reasoning). Recommendation, not a rule outcome: keep qwen3.8 for chat and RAG (vcf-lookup, AnythingLLM); offer Qwen3.6 Q6_K_XL + MTP n3 as a fast coding/agent profile (workforce lead, OpenCode subagents) where it matched qwen3.8's acceptance at 1.5x speed. That profile change is a separate decision for the user.",
+  "caveats": [
+   "one qwen3.8 S run vs three Qwen3.6 S runs; S noise is 3 tasks",
+   "the Qwen3.6 S runs used Q4_K_M without MTP; Q6+MTP was not re-run on S",
+   "RAG set is 22 questions graded by Opus against the frozen context, single grader per answer",
+   "Polyglot differences of 1-2 cases are within noise (qwen3.8 itself scored 73.5 then 70.6)"
+  ]
+ }
+}

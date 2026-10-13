@@ -156,11 +156,11 @@ def test_bundle_validate_can_use_the_docker_grader(tmp_path, repo, monkeypatch, 
 def test_replay_reviews_runs_only_the_reviewer_with_the_lead_config(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None):
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, **kw):
         seen["build"] = (arm, router, workers, launcher)
         return "OC"
 
-    def fake_replay(run, bundles, opencode, out, grader, limits=None, journal_text=None, own=None, reviewer_model=None):
+    def fake_replay(run, bundles, opencode, out, grader, limits=None, journal_text=None, own=None, reviewer_model=None, **kw):
         seen.update(run=run, bundles=bundles, opencode=opencode, out=out, grader=type(grader).__name__,
                     journal=journal_text, own=own)
         return {"totals": {"old_none": 0}}
@@ -197,7 +197,7 @@ def test_run_arm_s_needs_the_router_key_and_never_reviews(tmp_path, monkeypatch)
         def run(self):
             return {"arm": seen["arm"]}
 
-    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None: "OC")
+    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None, **kw: "OC")
     monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
     assert cli.main(["run", "--arm", "S", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
                      "--router", "http://x/v1"], env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
@@ -272,7 +272,7 @@ def test_round2_runs_carry_the_reviewer_health_fields(tmp_path):
 def test_replay_reviews_with_a_worker_reviewer_needs_the_worker_key_and_passes_both(tmp_path, monkeypatch, capsys):
     seen = {}
 
-    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None):
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, **kw):
         seen.update(arm=arm, workers=workers, reviewer_model=reviewer_model, keys=keys)
         return "OC"
 
@@ -286,3 +286,148 @@ def test_replay_reviews_with_a_worker_reviewer_needs_the_worker_key_and_passes_b
     assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
     assert seen == {"arm": "G", "workers": ["http://w/v1"], "reviewer_model": "w1/qwen3.6", "keys": ("WF_ROUTER_KEY", "WF_WORKER_KEY")}
     assert json.loads(capsys.readouterr().out)["reviewer_model"] == "w1/qwen3.6"
+
+
+def test_replay_reviews_read_first_flag_reaches_the_config_and_the_record(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, reviewer_model=None, keys=None, read_first=False, **kw):
+        seen["read_first"] = read_first
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: {"totals": {}, "read_first": k.get("read_first")})
+    args = ["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+            "--router", "http://x/v1", "--read-first"]
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["read_first"] is True and json.loads(capsys.readouterr().out)["read_first"] is True
+
+
+def test_replay_reviews_worker_alias_flag_reaches_the_config(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen.update(kw)
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: {"totals": {}})
+    args = ["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+            "--router", "http://x/v1", "--worker", "http://w/v1", "--reviewer-model", "w1/gemma4", "--worker-alias", "gemma4"]
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["worker_alias"] == "gemma4" and seen["reviewer_model"] == "w1/gemma4"
+
+
+def test_replay_reviews_review_steps_flag_reaches_config_and_pipeline(tmp_path, monkeypatch, capsys):
+    seen = {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen["build"] = kw
+        return "OC"
+
+    def fake_replay(*a, **k):
+        seen["replay"] = k
+        return {"totals": {}, "review_steps": k.get("review_steps")}
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.replay, "replay", fake_replay)
+    args = ["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+            "--router", "http://x/v1", "--review-steps", "30"]
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}) == 0
+    assert seen["build"]["review_steps"] == 30 and seen["replay"]["review_steps"] == 30
+    assert json.loads(capsys.readouterr().out)["review_steps"] == 30
+
+
+def test_run_lead_url_needs_the_worker_key_and_reaches_config_and_pipeline(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(arm=arm, review=review, **kw)
+
+        def run(self):
+            return {"arm": seen["arm"]}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen["build"] = kw
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    args = ["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+            "--lead-url", "http://192.168.6.151:8090/v1", "--read-first", "--review-steps", "30"]
+    with pytest.raises(SystemExit) as e:
+        cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"})
+    assert "WF_WORKER_KEY" in str(e.value)
+    assert cli.main(args, env={"WF_ROUTER_KEY": "k", "WF_WORKER_KEY": "w", "WF_OPENCODE": "opencode"}) == 0
+    b = seen["build"]
+    assert b["lead_url"] == "http://192.168.6.151:8090/v1" and b["lead_alias"] is None and b["read_first"] is True
+    assert b["review_steps"] == 30 and seen["review_steps"] == 30
+
+
+def test_quality_flags_reach_config_pipeline_and_replay(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen["pipeline"] = kw
+
+        def run(self):
+            return {}
+
+    def fake_build(arm, oc_dir, router, workers, cmd, env, launcher=None, **kw):
+        seen["build"] = kw
+        return "OC"
+
+    monkeypatch.setattr(cli, "build_opencode", fake_build)
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: seen.update(replay=k) or {"totals": {}})
+    env = {"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+                     "--enforce-read", "--reviewer-temperature", "0.2"], env=env) == 0
+    assert seen["build"]["reviewer_temperature"] == 0.2 and seen["pipeline"]["enforce_read"] is True
+    assert cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+                     "--router", "http://x/v1", "--enforce-read", "--reviewer-temperature", "0.2"], env=env) == 0
+    assert seen["build"]["reviewer_temperature"] == 0.2 and seen["replay"]["enforce_read"] is True
+
+
+def test_defects_only_flag_reaches_run_and_replay_configs(tmp_path, monkeypatch):
+    seen = []
+
+    class FakePipeline:
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cli, "build_opencode", lambda arm, d, router, workers, cmd, env, launcher=None, **kw: seen.append(kw) or "OC")
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    monkeypatch.setattr(cli.replay, "replay", lambda *a, **k: {"totals": {}})
+    env = {"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"), "--router", "http://x/v1",
+                     "--defects-only"], env=env) == 0
+    assert cli.main(["replay-reviews", "--run", "R", "--bundles", str(tmp_path), "--out", str(tmp_path / "o"),
+                     "--router", "http://x/v1", "--defects-only"], env=env) == 0
+    assert [kw["defects_only"] for kw in seen] == [True, True]
+
+
+def test_run_review_budget_reaches_the_pipeline(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakePipeline:
+        def __init__(self, arm, bundles, opencode, out, grader, review=True, monitor=None, own=None, **kw):
+            seen.update(kw)
+
+        def run(self):
+            return {}
+
+    monkeypatch.setattr(cli, "build_opencode", lambda *a, **k: "OC")
+    monkeypatch.setattr(cli.pipeline, "Pipeline", FakePipeline)
+    env = {"WF_ROUTER_KEY": "k", "WF_OPENCODE": "opencode"}
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r"),
+                     "--router", "http://x/v1", "--review-budget", "1"], env=env) == 0
+    assert seen["review_budget"] == 1
+    assert cli.main(["run", "--arm", "G", "--bundles", str(tmp_path), "--out", str(tmp_path / "r2"),
+                     "--router", "http://x/v1"], env=env) == 0
+    assert seen["review_budget"] is None
