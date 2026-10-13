@@ -1,6 +1,6 @@
 # Local coding engine: GPU server + three Minisforum nodes — recommendation and design
 
-**Status:** proposal rev 1.1, 2026-10-12 (D1 and D3 decided; D2 proposal added in §3.2.1). Written for the cluster owner. Builds on the measured results of
+**Status:** rev 1.2, 2026-10-12, **approved by the owner** (D1-D4 decided; phase order D5 as proposed). Written for the cluster owner. Builds on the measured results of
 2026-10-03..12 (sources in §9); supersedes nothing yet — §8 lists the decisions it needs.
 
 ## 1. Goal and honest ceiling
@@ -196,9 +196,9 @@ attempt, not the fifth.
 | # | Decision | Recommendation |
 |---|---|---|
 | D1 | Working-hours GPU layout | **Decided 2026-10-12:** 3 x 128K with the reserved user lane (1 x 262K as a swap profile) |
-| D2 | Minisforum default mode | Proposal in §3.2.1: Agent mode always on; VCF Full on demand pauses the CPU tier, GPU carries on alone; monthly Full weekend covers the licence window |
+| D2 | Minisforum default mode | **Decided 2026-10-12:** §3.2.1 — Agent mode always on; VCF Full on demand pauses the CPU tier, GPU carries on alone; monthly Full weekend covers the licence window |
 | D3 | Claude's role | **Decided 2026-10-12:** plan / review risky diffs / rescue after the second failed local attempt |
-| D4 | Background queue scope | Which tickets may go to the unattended queue: only those with a command that proves "done" (a test that fails before and passes after, a linter that must come back clean). Others stay interactive |
+| D4 | Background queue scope | **Decided 2026-10-12:** which tickets may go to the unattended queue: only those with a command that proves "done" (a test that fails before and passes after, a linter that must come back clean). Others stay interactive |
 | D5 | Phase order | 1 → 2 → 3 → 4 → 5; phase 1 is valuable on its own even if nothing else is built |
 
 ## 9. Sources (this repo)
