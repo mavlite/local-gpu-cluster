@@ -18,6 +18,8 @@ import pytest
 FILES = os.path.join(os.path.dirname(__file__), "..")
 SCRIPT = os.path.join(FILES, "wf-runner-esx.sh")
 
+HASH = "$6$saltsaltsalt$" + "A" * 86          # shape of a sha-512 crypt hash (openssl passwd -6)
+
 FAKE_GOVC = r'''#!/usr/bin/env bash
 st="$FAKE_STATE"
 printf '%s\n' "$*" >> "$st/calls"
@@ -96,7 +98,7 @@ class Esx:
         (tmp_path / "wf-runner.vmdk.sha256").write_text(hashlib.sha256(b"disk").hexdigest() + "\n", newline="\n")
         py = shutil.which("python3") or shutil.which("python") or "python3"
         self.env = {"PATH": f"{bin_dir.as_posix()}:{os.environ.get('PATH', '/usr/bin:/bin')}",
-                    "FAKE_STATE": self.state.as_posix(), "GOVC_USERNAME": "root", "GOVC_PASSWORD": "pw",
+                    "FAKE_STATE": self.state.as_posix(), "GOVC_USERNAME": "root", "GOVC_PASSWORD": "pw", "WF_RUNNER_GUEST_HASH": HASH,
                     "PYTHON": py}
         for k in ("SYSTEMROOT", "TEMP", "TMP"):
             if k in os.environ:
@@ -303,3 +305,49 @@ def test_the_password_never_reaches_argv_or_output(esx):
 def test_deploy_rejects_ambiguous_or_network_addresses(esx, ip):
     r = esx.deploy(ip=ip)
     assert r.returncode != 0 and esx.calls() == []
+
+
+def _decoded(esx, key):
+    change = next(c for c in esx.calls() if c.startswith("vm.change") and f"{key}=" in c)
+    return base64.b64decode(change.split(f"{key}=", 1)[1].split()[0]).decode()
+
+
+def test_deploy_creates_the_wfctl_guest_operations_account_through_cloud_init(esx):
+    # The runners have no ssh; VMware Tools guest operations are the control path and need an OS account with
+    # a password. cloud-init creates it from guestinfo.userdata (only the sha-512 crypt hash ever leaves the
+    # workstation's credential file).
+    r = esx.deploy()
+    assert r.returncode == 0, r.stderr
+    ud = _decoded(esx, "guestinfo.userdata")
+    assert ud.startswith("#cloud-config" + chr(10))
+    assert "name: wfctl" in ud and f"passwd: '{HASH}'" in ud and "lock_passwd: false" in ud
+    assert "docker" in ud and "ALL=(ALL) NOPASSWD:ALL" in ud
+    assert any("guestinfo.userdata.encoding=base64" in c for c in esx.calls())
+
+
+def test_the_instance_id_follows_the_userdata_so_a_changed_account_re_runs_cloud_init(esx):
+    esx.deploy()
+    first = _decoded(esx, "guestinfo.metadata").splitlines()[0]
+    esx.set("exists", "yes")
+    esx.env["WF_RUNNER_GUEST_HASH"] = "$6$othersalt$" + "B" * 86
+    esx.deploy()
+    second = [c for c in esx.calls() if "guestinfo.metadata=" in c][-1]
+    second_id = base64.b64decode(second.split("guestinfo.metadata=", 1)[1].split()[0]).decode().splitlines()[0]
+    assert first.startswith("instance-id: wf-runner-01-") and second_id.startswith("instance-id: wf-runner-01-")
+    assert first != second_id
+    assert "local-hostname: wf-runner-01" in _decoded(esx, "guestinfo.metadata")
+
+
+@pytest.mark.parametrize("value", [None, "", "plaintext-password", "$1$md5$abc"])
+def test_deploy_refuses_a_missing_or_non_sha512_hash(esx, value):
+    if value is None:
+        r = esx.deploy(drop=("WF_RUNNER_GUEST_HASH",))
+    else:
+        esx.env["WF_RUNNER_GUEST_HASH"] = value
+        r = esx.deploy()
+    assert r.returncode != 0 and "WF_RUNNER_GUEST_HASH" in r.stderr and esx.calls() == []
+
+
+def test_the_hash_never_reaches_output(esx):
+    r = esx.deploy()
+    assert HASH not in r.stdout + r.stderr

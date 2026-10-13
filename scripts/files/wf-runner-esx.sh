@@ -13,6 +13,9 @@
 #                                enableTiering is FALSE, and refuse if starting the runner would take the host past
 #                                80% of its DRAM (crash-hardening rule 6: never power on a large VM above ~80%).
 # Credentials: GOVC_USERNAME / GOVC_PASSWORD from the environment only (the caller pipes them in; never argv).
+# Guest account: deploy also writes cloud-init userdata creating `wfctl` (sudo, docker) -- the VMware Tools guest-
+# operations account, since runners have no ssh -- from WF_RUNNER_GUEST_HASH (sha-512 crypt of WF_RUNNER_GUEST_PASS;
+# the password itself never leaves the workstation's credential file). The instance-id follows the userdata.
 set -Eeuo pipefail
 
 RUNNER_MEM_MB="${RUNNER_MEM_MB:-16384}"
@@ -55,9 +58,13 @@ tiering_off() {
   grep -Eq '^[[:space:]]*sched\.mem\.enableTiering:[[:space:]]+FALSE[[:space:]]*$' <<<"$info"
 }
 
-cloud_metadata() {   # NAME IP -> base64 cloud-init metadata with a static v2 network config
+cloud_userdata() {   # HASH -> cloud-config creating `wfctl`, the VMware Tools guest-operations account (no ssh)
+  printf '#cloud-config\nusers:\n  - default\n  - name: wfctl\n    groups: [docker]\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    shell: /bin/bash\n    lock_passwd: false\n    passwd: '"'"'%s'"'"'\nssh_pwauth: false\n' "$1"
+}
+
+cloud_metadata() {   # INSTANCE_ID NAME IP -> base64 cloud-init metadata with a static v2 network config
   printf 'instance-id: %s\nlocal-hostname: %s\nnetwork:\n  version: 2\n  ethernets:\n    nics:\n      match: {name: "en*"}\n      addresses: [%s/24]\n      routes: [{to: default, via: %s}]\n      nameservers: {addresses: [%s]}\n' \
-    "$1" "$1" "$2" "$RUNNER_GW" "$RUNNER_DNS" | base64 -w0
+    "$1" "$2" "$3" "$RUNNER_GW" "$RUNNER_DNS" | base64 -w0
 }
 
 cmd_deploy() {
@@ -65,7 +72,14 @@ cmd_deploy() {
   check_name "$name"
   vlan10_ip "$ip" || die "runner IPs are on VLAN 10 (172.16.10.0/24): $ip"
   [[ "$ds" =~ ^[A-Za-z0-9._-]+$ ]] || die "bad datastore name: $ds"
+  [[ "${WF_RUNNER_GUEST_HASH:-}" =~ ^\$6\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$ ]] \
+    || die "WF_RUNNER_GUEST_HASH must come from the environment as a sha-512 crypt hash (openssl passwd -6)"
   govc_env "$host"
+  # The instance-id follows the userdata, so changing the account makes cloud-init treat the next boot as a new
+  # instance and run the users module again (IP and hostname are unchanged).
+  local ud iid
+  ud="$(cloud_userdata "$WF_RUNNER_GUEST_HASH")"
+  iid="$name-$(printf '%s' "$ud" | sha256sum | cut -c1-8)"
 
   if vm_exists "$name"; then
     [[ "$(vm_prop "$name" runtime.powerState)" == poweredOff ]] || die "$name exists on $host and is not powered off"
@@ -81,8 +95,10 @@ cmd_deploy() {
       -net "$RUNNER_NET" -net.adapter vmxnet3 -on=false "$name" || die "vm.create failed"
   fi
 
-  govc vm.change -vm "$name" -e "guestinfo.metadata=$(cloud_metadata "$name" "$ip")" \
-    -e "guestinfo.metadata.encoding=base64" -e "sched.mem.enableTiering=FALSE" \
+  govc vm.change -vm "$name" -e "guestinfo.metadata=$(cloud_metadata "$iid" "$name" "$ip")" \
+    -e "guestinfo.metadata.encoding=base64" \
+    -e "guestinfo.userdata=$(printf '%s' "$ud" | base64 -w0)" -e "guestinfo.userdata.encoding=base64" \
+    -e "sched.mem.enableTiering=FALSE" \
     || die "vm.change (guestinfo, sched.mem.enableTiering) failed"
   tiering_off "$name" || die "sched.mem.enableTiering did not read back FALSE on $name"
   govc vm.change -vm "$name" -mem.reservation "$RUNNER_MEM_MB" 2>/dev/null \
