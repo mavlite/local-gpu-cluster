@@ -482,6 +482,7 @@ phase_5_11_3_chat_unit() {
   # ExecStart= ends the command and silently drops every later flag (it once dropped --no-mmproj).
   # Rendered by lib/chat-flags.sh (tested in scripts/files/tests/test_chat_flags.py). printf x keeps the
   # trailing newline that $( ) strips, so each block ends in a continuation and never in a blank line.
+  LLAMA_CTX="$LLAMA_CTX" LLAMA_PARALLEL="$LLAMA_PARALLEL" chat_check_slot_ctx || die "chat slot layout rejected"
   local draft_lines mmproj_lines
   draft_lines="$(chat_spec_lines; rc=$?; printf x; exit $rc)" || die "chat_spec_lines failed"
   draft_lines="${draft_lines%x}"

@@ -56,3 +56,18 @@ chat_mmproj_lines() {
     printf '    --image-max-tokens %s \\\n' "$cap"
   fi
 }
+
+# chat_check_slot_ctx -- refuse a layout that gives one slot more context than the model's native window.
+#   LLAMA_CTX / LLAMA_PARALLEL   total context and slot count (llama.cpp gives each slot CTX / PARALLEL)
+#   LLAMA_MAX_SLOT_CTX           native window, default 262144 (Qwen3.6/3.8); above it needs YaRN, which we do not set
+chat_check_slot_ctx() {
+  local ctx="${LLAMA_CTX:-}" par="${LLAMA_PARALLEL:-1}" max="${LLAMA_MAX_SLOT_CTX:-262144}"
+  if [[ ! "$ctx" =~ ^[1-9][0-9]*$ || ! "$par" =~ ^[1-9][0-9]*$ || ! "$max" =~ ^[1-9][0-9]*$ ]]; then
+    echo "chat-flags: LLAMA_CTX, LLAMA_PARALLEL and LLAMA_MAX_SLOT_CTX must be positive integers (got '$ctx', '$par', '$max')" >&2
+    return 1
+  fi
+  if (( ctx / par > max )); then
+    echo "chat-flags: LLAMA_CTX/LLAMA_PARALLEL = $ctx/$par gives $(( ctx / par )) per slot, above LLAMA_MAX_SLOT_CTX $max" >&2
+    return 1
+  fi
+}
