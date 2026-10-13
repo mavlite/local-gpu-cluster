@@ -52,11 +52,15 @@ ROUTER_KEEPALIVE_INTERVAL="${ROUTER_KEEPALIVE_INTERVAL:-5min}"
 # the cleaner spot to hold them (router can emit keepalives while waiting).
 CHAT_CONCURRENCY="${CHAT_CONCURRENCY:-1}"
 EMBED_CONCURRENCY="${EMBED_CONCURRENCY:-4}"
-# MAX_CHAT_INPUT_TOKENS sized at ~200K to use most of the model's 256K window
-# while reserving ~56K for output + thinking. opencode.json's per-model
+# MAX_CHAT_INPUT_TOKENS: the chat unit runs 3 slots x 131072 (coding engine, 2026-10-13), so one request
+# gets at most ~131K; 100K leaves ~31K for output + thinking. opencode.json's per-model
 # limit.context should be set to this value (or limit.context - limit.output
 # should equal this) so OpenCode's compaction triggers before the router 413s.
-MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-200000}"
+MAX_CHAT_INPUT_TOKENS="${MAX_CHAT_INPUT_TOKENS:-100000}"
+# Media (vision_guard.py): images only as data: URIs and only with a projector loaded on the chat unit.
+ROUTER_VISION_ENABLED="${ROUTER_VISION_ENABLED:-0}"
+ROUTER_IMAGE_TOKEN_ESTIMATE="${ROUTER_IMAGE_TOKEN_ESTIMATE:-1280}"   # = the chat unit's --image-max-tokens
+ROUTER_MAX_BODY_BYTES="${ROUTER_MAX_BODY_BYTES:-33554432}"           # 32 MiB request cap
 MAX_EMBED_INPUT_TOKENS="${MAX_EMBED_INPUT_TOKENS:-16384}"  # must match EMBED_CTX/EMBED_PARALLEL per-slot ctx on LXC 151
 RATE_LIMIT_CHAT="${RATE_LIMIT_CHAT:-60/minute}"
 RATE_LIMIT_EMBED="${RATE_LIMIT_EMBED:-200/minute}"
@@ -114,6 +118,8 @@ ACCESS_KEYS_SRC="$LGC_DIR/files/access_keys.py"
 [[ -r "$ACCESS_KEYS_SRC" ]] || die "access_keys.py not found at $ACCESS_KEYS_SRC"
 WORKFORCE_LANE_SRC="$LGC_DIR/files/workforce_lane.py"
 [[ -r "$WORKFORCE_LANE_SRC" ]] || die "workforce_lane.py not found at $WORKFORCE_LANE_SRC"
+VISION_GUARD_SRC="$LGC_DIR/files/vision_guard.py"
+[[ -r "$VISION_GUARD_SRC" ]] || die "vision_guard.py not found at $VISION_GUARD_SRC"
 ROUTER_KEYS_CLI_SRC="$LGC_DIR/files/router-keys.py"
 [[ -r "$ROUTER_KEYS_CLI_SRC" ]] || die "router-keys.py not found at $ROUTER_KEYS_CLI_SRC"
 
@@ -226,6 +232,8 @@ phase_7_3_deploy_app() {
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/access_keys.py
   pct push "$ROUTER_VMID" "$WORKFORCE_LANE_SRC" /opt/llm-router/workforce_lane.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/workforce_lane.py
+  pct push "$ROUTER_VMID" "$VISION_GUARD_SRC" /opt/llm-router/vision_guard.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/vision_guard.py
   # Scoped per-run keys (workforce rev 2 sec 5.3): CLI for root, keys file readable by the router
   # only. Created empty when absent; an existing file (issued keys) is never overwritten.
   pct push "$ROUTER_VMID" "$ROUTER_KEYS_CLI_SRC" /usr/local/sbin/router-keys --perms 0750
@@ -257,6 +265,9 @@ phase_7_4_systemd() {
     "CHAT_CONCURRENCY=$CHAT_CONCURRENCY" \
     "EMBED_CONCURRENCY=$EMBED_CONCURRENCY" \
     "MAX_CHAT_INPUT_TOKENS=$MAX_CHAT_INPUT_TOKENS" \
+    "ROUTER_VISION_ENABLED=$ROUTER_VISION_ENABLED" \
+    "ROUTER_IMAGE_TOKEN_ESTIMATE=$ROUTER_IMAGE_TOKEN_ESTIMATE" \
+    "ROUTER_MAX_BODY_BYTES=$ROUTER_MAX_BODY_BYTES" \
     "MAX_EMBED_INPUT_TOKENS=$MAX_EMBED_INPUT_TOKENS" \
     "RATE_LIMIT_CHAT=$RATE_LIMIT_CHAT" \
     "RATE_LIMIT_EMBED=$RATE_LIMIT_EMBED" \
@@ -319,6 +330,9 @@ PY
     upsert_env CHAT_CONCURRENCY "$CHAT_CONCURRENCY"
     upsert_env EMBED_CONCURRENCY "$EMBED_CONCURRENCY"
     upsert_env MAX_CHAT_INPUT_TOKENS "$MAX_CHAT_INPUT_TOKENS"
+    upsert_env ROUTER_VISION_ENABLED "$ROUTER_VISION_ENABLED"
+    upsert_env ROUTER_IMAGE_TOKEN_ESTIMATE "$ROUTER_IMAGE_TOKEN_ESTIMATE"
+    upsert_env ROUTER_MAX_BODY_BYTES "$ROUTER_MAX_BODY_BYTES"
     upsert_env MAX_EMBED_INPUT_TOKENS "$MAX_EMBED_INPUT_TOKENS"
     upsert_env RATE_LIMIT_CHAT "$RATE_LIMIT_CHAT"
     upsert_env RATE_LIMIT_EMBED "$RATE_LIMIT_EMBED"

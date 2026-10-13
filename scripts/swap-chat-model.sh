@@ -245,7 +245,7 @@ get_profile() {
       # CACHE_REUSE 1024 is set but llama.cpp emits "cache_reuse is not supported
       # by this context, it will be disabled" at load for this arch — effective
       # value is 0. Harmless; left at 1024 so it activates if upstream adds support.
-      echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
       ;;
     qwen3.8-redteam)
       # Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — the SAME base model as the
@@ -265,7 +265,7 @@ get_profile() {
       # chat slot is single-tenant, whatever profile is loaded answers every
       # chat request — so check /healthz active_chat_profile before assuming
       # which model is live (the profile-swap vs client-pinning hazard).
-      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
       ;;
     *)
       return 1
@@ -367,17 +367,18 @@ identify_profile() {
 # special characters in values can never corrupt the file via shell quoting.
 write_config_env() {
   local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6" kv_type="$7"
-  local split_mode="$8" spec_type="$9" spec_nmax="${10}"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" "$split_mode" "$spec_type" "$spec_nmax" <<'PY'
+  local split_mode="$8" spec_type="$9" spec_nmax="${10}" parallel="${11:-1}"
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" "$split_mode" "$spec_type" "$spec_nmax" "$parallel" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type, split_mode, spec_type, spec_nmax = sys.argv[1:12]
+path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type, split_mode, spec_type, spec_nmax, parallel = sys.argv[1:13]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
     "LLAMA_ALIAS": alias,
     "LLAMA_TENSOR_SPLIT": tensor_split,
     "LLAMA_CTX": ctx,
+    "LLAMA_PARALLEL": parallel,
     "LLAMA_CACHE_REUSE": cache_reuse,
     "LLAMA_KV_TYPE": kv_type,
     "LLAMA_SPLIT_MODE": split_mode,
@@ -438,6 +439,9 @@ PY
 
 FORCE=false
 FOLLOW=false
+# Tests source this file for its functions only (scripts/files/tests/test_swap_profiles.py).
+if [[ "${SWAP_CHAT_MODEL_LIB_ONLY:-0}" == "1" ]]; then return 0 2>/dev/null || exit 0; fi
+
 TARGET=""
 
 while [[ $# -gt 0 ]]; do
@@ -476,7 +480,11 @@ fi
 # ─── validate target ─────────────────────────────────────────────────────────
 
 profile_line=$(get_profile "$TARGET") || { echo "unknown profile: $TARGET" >&2; usage 2; }
-read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE TARGET_KV_TYPE TARGET_SPLIT_MODE TARGET_SPEC_TYPE TARGET_SPEC_NMAX <<<"$profile_line"
+read -r TARGET_REPO TARGET_QUANT TARGET_ALIAS TARGET_SPLIT TARGET_CTX TARGET_CACHE_REUSE TARGET_KV_TYPE TARGET_SPLIT_MODE TARGET_SPEC_TYPE TARGET_SPEC_NMAX TARGET_PARALLEL <<<"$profile_line"
+TARGET_PARALLEL="${TARGET_PARALLEL:-1}"   # optional 11th field: slot count (qwen3.8 = 3 x 128K); 1 for older profiles
+# shellcheck source=lib/chat-flags.sh
+source "${LGC_DIR}/lib/chat-flags.sh"
+LLAMA_CTX="$TARGET_CTX" LLAMA_PARALLEL="$TARGET_PARALLEL" chat_check_slot_ctx || exit 1
 
 # ─── idempotency check ───────────────────────────────────────────────────────
 
@@ -501,7 +509,7 @@ target_vram=$(get_profile_vram_estimate "$TARGET")
 [[ -n "$target_vram" ]] && echo "  expected VRAM: $target_vram"
 echo "  updating config.env (LLAMA_HF_REPO=${TARGET_REPO} QUANT=${TARGET_QUANT} ALIAS=${TARGET_ALIAS} TENSOR_SPLIT=${TARGET_SPLIT} CTX=${TARGET_CTX} CACHE_REUSE=${TARGET_CACHE_REUSE} KV_TYPE=${TARGET_KV_TYPE} SPLIT_MODE=${TARGET_SPLIT_MODE} SPEC_TYPE=${TARGET_SPEC_TYPE} SPEC_NMAX=${TARGET_SPEC_NMAX})"
 
-write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE" "$TARGET_KV_TYPE" "$TARGET_SPLIT_MODE" "$TARGET_SPEC_TYPE" "$TARGET_SPEC_NMAX"
+write_config_env "$TARGET_REPO" "$TARGET_QUANT" "$TARGET_ALIAS" "$TARGET_SPLIT" "$TARGET_CTX" "$TARGET_CACHE_REUSE" "$TARGET_KV_TYPE" "$TARGET_SPLIT_MODE" "$TARGET_SPEC_TYPE" "$TARGET_SPEC_NMAX" "$TARGET_PARALLEL"
 
 echo "  re-running $PROVISION_SCRIPT (idempotent: regenerates unit + reloads systemd)"
 "$PROVISION_SCRIPT" >/tmp/swap-chat-model.51-lxc-amd.log 2>&1 \
