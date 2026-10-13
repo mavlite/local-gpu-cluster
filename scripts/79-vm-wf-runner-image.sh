@@ -11,6 +11,8 @@
 #                       (WF_RUNNER_TEMPLATE=0: the parity test still runs on 177), print /etc/wf-runner.json
 #   parity RUN BUNDLES  grade a harvested run's patches on 177 with the Docker grader and compare pass/fail per
 #                       task with the run's own records (graded on VM 176); exit 1 on any difference
+#   export              clear 177's instance identity (cloud-init state, machine-id), shut it down, and convert its
+#                       disk to a streamOptimized VMDK + sha256 in $RUNNER_DIR (govc import.vmdk on each host later)
 #
 # Why generic, not genericcloud like VM 176: the image is later imported onto ESXi, and genericcloud's cloud kernel
 # drops most hardware drivers (pvscsi, vmxnet3). Why Proxmox at all: VLAN 10 has no internet.
@@ -187,6 +189,23 @@ PY
     exit $rc
     ;;
 
+  export)
+    require_cmd qemu-img sha256sum
+    [[ "$(qm status "$RUNNER_VMID" | awk '{print $2}')" == running ]] || qm start "$RUNNER_VMID" >/dev/null
+    wait_agent
+    vm_run 120 sh -c "rm -rf /srv/wf/grading/* && cloud-init clean --logs && truncate -s 0 /etc/machine-id && rm -f /var/lib/dbus/machine-id && sync" >/dev/null \
+      || die "template cleanup failed"
+    qm shutdown "$RUNNER_VMID" --timeout 180 >/dev/null || die "VM $RUNNER_VMID did not shut down"
+    scsi0="$(qm config "$RUNNER_VMID" | awk -F': ' '/^scsi0:/{print $2; exit}' | cut -d, -f1)"
+    src="$(pvesm path "$scsi0")"
+    out="$RUNNER_DIR/wf-runner.vmdk"
+    rm -f "$out" "$out.sha256"
+    qemu-img convert -p -f raw -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic "$src" "$out" >/dev/null \
+      || die "qemu-img convert failed"
+    sha256sum "$out" | cut -d' ' -f1 > "$out.sha256"
+    ok "exported $out ($(du -h "$out" | cut -f1), sha256 $(cut -c1-16 "$out.sha256"))"
+    ;;
+
   *)
-    echo "usage: $0 fetch-constraints | create | provision | parity RUN_DIR BUNDLES_DIR" >&2; exit 2 ;;
+    echo "usage: $0 fetch-constraints | create | provision | parity RUN_DIR BUNDLES_DIR | export" >&2; exit 2 ;;
 esac
