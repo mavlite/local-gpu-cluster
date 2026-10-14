@@ -246,7 +246,11 @@ def test_parity_fails_closed_when_mktemp_fails(fleet, tmp_path):
     (run_dir / "patches").mkdir(parents=True)
     bundles = tmp_path / "bundles"
     bundles.mkdir()
-    fleet.env["TMPDIR"] = (tmp_path / "does-not-exist").as_posix()
+    # a mktemp that prints nothing and exits 0: without the guard ptmp would be empty and tar would write to /bundles.tar
+    fake = tmp_path / "bin" / "mktemp"
+    fake.write_text("#!/usr/bin/env bash\nexit 0\n", newline="\n")
+    fake.chmod(0o755)
     r = fleet.run("parity", run_dir.as_posix(), bundles.as_posix())
-    assert r.returncode == 1 and "temp" in r.stderr.lower()
+    assert r.returncode == 1
+    assert "could not create a temp directory" in r.stderr
     assert fleet.calls() == []
