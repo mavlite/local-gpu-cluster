@@ -32,7 +32,18 @@ case "$1" in
     exit 0 ;;
   guest.run)
     if [[ -f "$st/fail_guest" && "$*" == *"-vm $(cat "$st/fail_guest") "* ]]; then echo "guest boom" >&2; exit 1; fi
+    if [[ -f "$st/fail_cleanup" && "$*" == *"rm -rf /tmp/parity-in"* ]]; then echo "cleanup boom" >&2; exit 1; fi
+    if [[ "$*" == *"/bin/cat /tmp/parity.done"* ]]; then
+      if [[ -f "$st/done_line" ]]; then cat "$st/done_line"; exit 0; fi
+      exit 1
+    fi
     echo "ran: ${*: -1}"; exit 0 ;;
+  guest.start)
+    if [[ -f "$st/fail_start" ]]; then echo "start boom" >&2; exit 1; fi
+    exit 0 ;;
+  guest.download)
+    [[ -f "$st/result.json" ]] || exit 1
+    cp "$st/result.json" "${@: -1}"; exit 0 ;;
   vm.power) exit 0 ;;
 esac
 exit 0
@@ -254,3 +265,64 @@ def test_parity_fails_closed_when_mktemp_fails(fleet, tmp_path):
     assert r.returncode == 1
     assert "could not create a temp directory" in r.stderr
     assert fleet.calls() == []
+
+
+def parity_setup(fleet, tmp_path, expected=None, result=None, done="rc=0"):
+    """A harvested run (patches/ + tasks/<id>/record.json), a bundles dir, and the fake guest's state:
+    parity.done line `done` (None: never appears) and the runner's parity.json `result`."""
+    import json
+    expected = expected if expected is not None else {"t1": True, "t2": False}
+    run_dir = tmp_path / "run"
+    (run_dir / "patches").mkdir(parents=True)
+    for tid, ok in expected.items():
+        (run_dir / "tasks" / tid).mkdir(parents=True)
+        (run_dir / "tasks" / tid / "record.json").write_text(json.dumps({"id": tid, "grade": {"pass": ok}}))
+        (run_dir / "patches" / f"{tid}.patch").write_text("diff\n")
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    (bundles / "t1").mkdir()
+    if done is not None:
+        (fleet.state / "done_line").write_text(done + "\n", newline="\n")
+    (fleet.state / "result.json").write_text(json.dumps(result if result is not None else expected))
+    fleet.env.update({"WF_FLEET_POLL_SLEEP": "0"})
+    return run_dir.as_posix(), bundles.as_posix()
+
+
+def test_parity_matching_results_pass(fleet, tmp_path):
+    r = fleet.run("parity", *parity_setup(fleet, tmp_path))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert len([c for c in fleet.calls() if c.startswith("guest.download")]) == 3
+    assert r.stdout.count('"differences": {}') == 3
+
+
+def test_parity_differing_results_fail(fleet, tmp_path):
+    r = fleet.run("parity", *parity_setup(fleet, tmp_path, result={"t1": True, "t2": True}))
+    assert r.returncode == 1
+    assert '"t2": [false, true]' in r.stdout
+
+
+def test_parity_start_failure_fails_that_runner_without_download(fleet, tmp_path):
+    args = parity_setup(fleet, tmp_path)
+    (fleet.state / "fail_start").write_text("x\n")
+    r = fleet.run("parity", *args)
+    assert r.returncode == 1
+    assert not [c for c in fleet.calls() if c.startswith("guest.download")]
+    assert "wf-runner-01" in r.stderr and "start" in r.stderr
+
+
+def test_parity_cleanup_failure_fails_that_runner_before_upload(fleet, tmp_path):
+    args = parity_setup(fleet, tmp_path)
+    (fleet.state / "fail_cleanup").write_text("x\n")
+    r = fleet.run("parity", *args)
+    assert r.returncode == 1
+    calls = fleet.calls()
+    assert not [c for c in calls if c.startswith(("guest.upload", "guest.start", "guest.download"))]
+    assert "wf-runner-01" in r.stderr and "clean" in r.stderr
+
+
+def test_parity_nonzero_grader_rc_fails_without_compare(fleet, tmp_path):
+    r = fleet.run("parity", *parity_setup(fleet, tmp_path, done="rc=1"))
+    assert r.returncode == 1
+    assert not [c for c in fleet.calls() if c.startswith("guest.download")]
+    assert "differences" not in r.stdout
+    assert "wf-runner-01" in r.stderr and "rc=1" in r.stderr

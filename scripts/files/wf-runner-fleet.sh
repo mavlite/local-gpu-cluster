@@ -151,19 +151,27 @@ PY
 # parity_runner NAME TMP -- returns 1 on any failure or difference
 parity_runner() {
   local name="$1" tmp="$2" f t0 done_line=""
-  govc guest.run -vm "$name" /bin/bash -c 'rm -rf /tmp/parity-in /tmp/parity.json /tmp/parity.err /tmp/parity.done; mkdir -p /tmp/parity-in' >/dev/null
+  # a failed cleanup could leave a previous run's parity.json/parity.done to be compared: fail closed
+  govc guest.run -vm "$name" /bin/bash -c 'rm -rf /tmp/parity-in /tmp/parity.json /tmp/parity.err /tmp/parity.done; mkdir -p /tmp/parity-in' >/dev/null \
+    || { echo "$name: could not clean the previous parity files" >&2; return 1; }
   for f in bundles.tar patches.tar job.sh; do
     govc guest.upload -vm "$name" -f "$tmp/$f" "/tmp/parity-in/$f" || { echo "upload $f failed"; return 1; }
   done
   govc guest.upload -vm "$name" -f "$GRADE_PY" /tmp/parity-in/grade.py || { echo "upload grade.py failed"; return 1; }
   t0=$SECONDS
-  govc guest.start -vm "$name" /bin/bash /tmp/parity-in/job.sh >/dev/null
+  govc guest.start -vm "$name" /bin/bash /tmp/parity-in/job.sh >/dev/null \
+    || { echo "$name: could not start the parity job" >&2; return 1; }
   while (( SECONDS - t0 < 3600 )); do
-    sleep 20
+    sleep "${WF_FLEET_POLL_SLEEP:-20}"
     done_line="$(govc guest.run -vm "$name" /bin/cat /tmp/parity.done 2>/dev/null || true)"
     [[ "$done_line" == rc=* ]] && break
   done
   echo "  graded in $(( SECONDS - t0 )) s ($done_line)"
+  if [[ "$done_line" != "rc=0" ]]; then
+    echo "$name: grader did not finish with rc=0 (${done_line:-no parity.done}); not comparing" >&2
+    govc guest.run -vm "$name" /usr/bin/tail -n 5 /tmp/parity.err >&2
+    return 1
+  fi
   govc guest.download -vm "$name" /tmp/parity.json "$tmp/$name.json" 2>/dev/null \
     || { echo "  no result"; govc guest.run -vm "$name" /usr/bin/tail -n 5 /tmp/parity.err; return 1; }
   parity_compare "$tmp/expected.json" "$tmp/$name.json"
