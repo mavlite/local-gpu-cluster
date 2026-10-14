@@ -36,7 +36,7 @@ def world(tmp_path):
         (d / tool).chmod(0o755)
     boot = tmp_path / "boot_id"
     boot.write_text("boot-1\n")
-    w = {"capacity": 1, "boot_id": "boot-1", "rt_state": (tmp_path / "rt.state").as_posix(),
+    w = {"capacity": 3, "boot_id": "boot-1", "rt_state": (tmp_path / "rt.state").as_posix(),
          "units": {"host": {u: "active" for u in PERTURBERS_HOST},
                    "151": {"llamacpp-chat.service": "active", "llamacpp-embed.service": "active",
                            "llamacpp-rerank.service": "active", "llamacpp-chat-restart.timer": "active",
@@ -88,7 +88,7 @@ def test_close_puts_back_exactly_what_open_found(world):
     r = run("close")
     assert r.returncode == 0, r.stdout + r.stderr
     w = state()
-    assert w["capacity"] == 1
+    assert w["capacity"] == 3
     for place in ("host", "151"):
         for u, st in before[place].items():
             if u == "llamacpp-chat.service":
@@ -104,7 +104,7 @@ def test_open_refuses_while_redteam_mode_is_active(world):
         f.write("active\n")
     r = run("open")
     assert r.returncode != 0 and "redteam" in r.stderr
-    assert state()["capacity"] == 1
+    assert state()["capacity"] == 3
 
 
 def test_open_refuses_a_second_open(world):
@@ -123,7 +123,7 @@ def test_a_failed_open_can_still_be_closed(world):
     r = run("close")
     assert r.returncode == 0, r.stdout + r.stderr
     w = state()
-    assert w["capacity"] == 1 and w["units"]["host"]["rag-refresh.timer"] == "active"
+    assert w["capacity"] == 3 and w["units"]["host"]["rag-refresh.timer"] == "active"
 
 
 def test_stamp_records_boot_and_invocation_ids(world):
@@ -134,7 +134,7 @@ def test_stamp_records_boot_and_invocation_ids(world):
     rec = json.loads(out.read_text().splitlines()[-1])
     assert rec["label"] == "before-run-1" and rec["boot_id"] == "boot-1"
     assert rec["router_invocation"] == "router-a" and rec["chat_invocation"] == "chat-a"
-    assert rec["capacity"] == 1 and rec["ts"]
+    assert rec["capacity"] == 3 and rec["ts"]
 
 
 def test_close_without_open_is_an_error(world):
@@ -152,7 +152,7 @@ def test_open_refuses_while_a_timer_started_job_is_running(world, unit):
     patch(units=w["units"])
     r = run("open")
     assert r.returncode != 0 and unit in r.stderr
-    assert state()["capacity"] == 1
+    assert state()["capacity"] == 3
 
 
 def test_open_fails_if_a_perturber_survives_the_stop(world):
@@ -180,3 +180,36 @@ def test_stamp_records_any_active_perturber(world):
     assert run("stamp", out.as_posix(), "x").returncode == 0
     rec = json.loads(out.read_text().splitlines()[-1])
     assert rec["perturbers_active"] == ["rag-refresh.timer"]
+
+
+def calls(tmp):
+    p = tmp / "world.json.log"
+    return p.read_text() if p.exists() else ""
+
+
+def test_open_never_calls_the_redteam_scripts(world):
+    run, state, _, tmp = world
+    r = run("open")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "redteam-mode-enter.sh" not in calls(tmp) and "redteam-mode-exit.sh" not in calls(tmp)
+    assert state()["capacity"] == 3
+
+
+def test_open_refuses_a_non_production_layout_without_touching_anything(world):
+    run, state, patch, tmp = world
+    patch(capacity=1)                                   # a swap profile (1 x 262K) is active
+    before = state()["units"]
+    r = run("open")
+    assert r.returncode != 0 and "production layout" in r.stderr
+    assert state()["units"] == before and state()["capacity"] == 1
+    assert "redteam-mode-enter.sh" not in calls(tmp)
+    assert not (tmp / "state" / "window.env").exists()
+
+
+def test_close_waits_for_the_capacity_open_found(world):
+    run, state, patch, tmp = world
+    assert run("open").returncode == 0
+    assert "CAPACITY='3'" in (tmp / "state" / "window.env").read_text()
+    r = run("close")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert state()["capacity"] == 3
