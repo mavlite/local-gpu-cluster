@@ -3,11 +3,12 @@
 # (docs/superpowers/specs/2026-10-07-distributed-workforce-design.md §9-§10; Plan D). Runs ON the
 # Proxmox host as root, from the repo checkout: `bash scripts/files/wf-window.sh open`.
 #
-#   open    3 x 128K chat (redteam-mode-enter.sh) with embed + rerank loaded again on top -- decision H
-#           measured this to fit on 2026-10-08 -- and every unit that could restart chat or swap its
-#           profile stopped: the chat restart timer, the redteam watcher/idle revert, the fast server,
-#           rag-refresh and the swap webhook. Saves what it found first.
-#   close   put back exactly what `open` found, then wait for the normal 1-slot layout.
+#   open    the production chat layout (WF_WIN_CAPACITY slots, default 3 -- 3 x 131072 since Phase 1,
+#           2026-10-13) must already be in place: open never reshapes chat. It refuses any other layout
+#           (a swap profile), stops every unit that could restart chat or swap its profile (the chat
+#           restart timer, the redteam watcher/idle revert, the fast server, rag-refresh, the swap
+#           webhook), makes sure embed + rerank are loaded, and saves what it found first.
+#   close   put back exactly what `open` found, then wait for the capacity open found.
 #   stamp   append one JSON line: boot id, router and chat-server invocation ids, chat capacity.
 #           A run is valid only if its before/after stamps agree (spec §9 validity tests).
 #   status  window state and the router's /healthz.
@@ -22,6 +23,7 @@ RT_STATE="${WF_WIN_RT_STATE:-/run/redteam-mode.state}"
 RT_LAST="${WF_WIN_RT_LAST:-/run/redteam-mode.last}"
 BOOT_ID="${WF_WIN_BOOT_ID:-/proc/sys/kernel/random/boot_id}"
 WAIT_S="${WF_WIN_WAIT_S:-600}"
+WINDOW_CAPACITY="${WF_WIN_CAPACITY:-3}"
 HOST_UNITS=(redteam-mode-watch.service redteam-mode-idle.timer redteam-mode-precreate.service
             rag-refresh.timer swap-webhook.service)
 AMD_UNITS=(llamacpp-chat-restart.timer llamacpp-fast.service)
@@ -67,7 +69,10 @@ active_perturbers() {  # every perturber still active, space-separated
 cmd_open() {
   [ -f "$STATE" ] && die "window already open ($STATE) -- run close first"
   redteam_active && die "redteam mode is active -- refusing to open a window over an engagement"
-  [ "$(capacity)" = 1 ] || die "chat is not in the normal 1-slot layout; refusing to start from an unknown state"
+  local cap
+  cap="$(capacity)"
+  [ "$cap" = "$WINDOW_CAPACITY" ] \
+    || die "chat capacity is ${cap:-unknown}, not the ${WINDOW_CAPACITY}-slot production layout (a swap profile?) -- refusing to reshape chat"
   local busy
   for busy in "${BUSY_UNITS[@]}"; do
     [ "$(host_active "$busy")" = active ] && die "$busy is running -- wait for it to finish before opening a window"
@@ -78,19 +83,19 @@ cmd_open() {
   tmp="$(mktemp "$STATE_DIR/.window.XXXXXX")"
   { for u in "${HOST_UNITS[@]}"; do echo "HOST_$(key_of "$u")='$(host_active "$u")'"; done
     for u in "${AMD_UNITS[@]}" "${RAG_UNITS[@]}"; do echo "AMD_$(key_of "$u")='$(amd_active "$u")'"; done
+    echo "CAPACITY='$cap'"
     echo "OPENED_AT='$(date -u +%FT%TZ)'"
   } > "$tmp"
   mv "$tmp" "$STATE"
   log "saved the prior state to $STATE (close restores it, even after a failed open)"
-  date +%s > "$RT_LAST"            # as 77 and the router-keys runbook: the idle check must not revert us
-  "$SBIN/redteam-mode-enter.sh"
-  stop_perturbers                  # enter starts the watcher, idle revert and fast server
+  date +%s > "$RT_LAST"            # the redteam idle check must not act during the window
+  stop_perturbers
   local left
   left="$(active_perturbers | tr '\n' ' ')"
   [ -z "${left// }" ] || die "perturbers still active after stop: $left"
   pct exec "$AMD" -- systemctl start "${RAG_UNITS[@]}"
-  wait_layout 3 yes
-  log "open: 3 x 128K chat, embed + rerank loaded, perturbers stopped"
+  wait_layout "$WINDOW_CAPACITY" yes
+  log "open: ${WINDOW_CAPACITY}-slot production chat as found, embed + rerank loaded, perturbers stopped"
 }
 
 restore_unit() {       # restore_unit host|amd <unit> <saved state>
@@ -114,7 +119,7 @@ cmd_close() {
     var="HOST_$(key_of "$u")"
     restore_unit host "$u" "${!var:-inactive}"
   done
-  wait_layout 1 any
+  wait_layout "${CAPACITY:-$WINDOW_CAPACITY}" any
   mv "$STATE" "$STATE.closed.$(date -u +%Y%m%dT%H%M%SZ)"
   log "closed: restored the state saved at ${OPENED_AT:-?}"
 }
