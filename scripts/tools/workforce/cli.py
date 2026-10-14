@@ -1,7 +1,7 @@
 """Workforce harness CLI (workforce spec §5-§9). Every subcommand prints JSON.
 
 Workstation:  bundle-build, bundle-validate, manifest, import, w1, w3, run-meta, w3-schedule, scan,
-              recover-patches
+              recover-patches, report
 Sandbox VM:   run, replay-reviews
 Keys come from the environment only (WF_ROUTER_KEY: the per-run scoped router key; WF_WORKER_KEY:
 the throwaway worker key) and are never printed.
@@ -23,6 +23,7 @@ import paths
 import pipeline
 import profiles
 import replay
+import report
 import runmeta
 import scan
 
@@ -303,6 +304,9 @@ def main(argv=None, env=None):
     p.add_argument("--run", required=True)
     p.add_argument("--bundles", required=True)
     p.add_argument("--refs", required=True)
+    p = sub.add_parser("report", help="one markdown page per task + index from a harvested run")
+    p.add_argument("--run", required=True)
+    p.add_argument("--out", required=True)
     p = sub.add_parser("run-meta", help="judge one harvested W3 run; writes <run-dir>/meta.json")
     p.add_argument("--run-dir", required=True)
     p.add_argument("--stamps", required=True, help="wf-window.sh stamp file (before-/after-<label>)")
@@ -397,6 +401,8 @@ def main(argv=None, env=None):
         out = import_patch(a.repo, a.patch, a.bundle, a.run_id)
     elif a.cmd == "scan":
         out = scan.scan_run(a.run, a.bundles, a.refs)
+    elif a.cmd == "report":
+        out = {"written": report.write(a.run, a.out)}
     elif a.cmd == "run-meta":
         out = runmeta.run_meta(a.run_dir, a.stamps, a.label, a.probe, a.journal, a.fail_s)
     elif a.cmd == "w3-schedule":
