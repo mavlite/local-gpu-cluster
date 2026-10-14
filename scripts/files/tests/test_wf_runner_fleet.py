@@ -24,18 +24,24 @@ printf 'URL=%s USER=%s PW=%s LOGIN=%s INSECURE=%s PERSIST=%s\n' "${GOVC_URL-}" "
 case "$1" in
   object.collect)
     case "$*" in
-      *guest.toolsRunningStatus*) echo guestToolsRunning ;;
+      *guest.toolsRunningStatus*)
+        if [[ -f "$st/tools_down" && "$*" == *"$(cat "$st/tools_down")"* ]]; then echo guestToolsNotRunning
+        else echo guestToolsRunning; fi ;;
       *runtime.powerState*) echo poweredOff ;;
     esac
     exit 0 ;;
-  guest.run) echo "ran: ${*: -1}"; exit 0 ;;
+  guest.run)
+    if [[ -f "$st/fail_guest" && "$*" == *"-vm $(cat "$st/fail_guest") "* ]]; then echo "guest boom" >&2; exit 1; fi
+    echo "ran: ${*: -1}"; exit 0 ;;
   vm.power) exit 0 ;;
 esac
 exit 0
 '''
 
 FAKE_OPENSSL = r'''#!/usr/bin/env bash
-cat >/dev/null
+printf '%s
+' "$*" >> "$FAKE_STATE/openssl_argv"
+od -An -c > "$FAKE_STATE/openssl_stdin"
 echo "$FAKE_HASH"
 '''
 
@@ -72,7 +78,8 @@ class Fleet:
         tree = tmp_path / "tree" / "scripts"
         (tree / "files").mkdir(parents=True)
         self.script = tree / "files" / "wf-runner-fleet.sh"
-        shutil.copy(REAL_SCRIPT, self.script) if os.path.exists(REAL_SCRIPT) else None
+        if os.path.exists(REAL_SCRIPT):
+            shutil.copy(REAL_SCRIPT, self.script)
         (tree / "79-vm-wf-runner-image.sh").write_text(FAKE_79, newline="\n")
         (tree / "files" / "wf-runner-grade.py").write_text("# stub\n", newline="\n")
         self.env = {"PATH": f"{bin_dir.as_posix()}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -178,6 +185,10 @@ def test_deploy_calls_79_once_per_runner_with_hash_and_no_plain_password(fleet):
     envs = fleet._read("envs79")
     assert envs == [f"HASH={FAKE_HASH} PW={ESX_PW} USER=root"] * 3
     assert fleet._read("leaks79") == []
+    # openssl gets exactly the password on stdin (no CR, no trailing newline) and nothing secret on argv
+    od = "".join(fleet._read("openssl_stdin")).split()
+    assert od == list(GUEST_PW), od
+    assert fleet._read("openssl_argv") == ["passwd -6 -stdin"]
     blob = "\n".join([r.stdout, r.stderr, *fleet.calls79()])
     assert GUEST_PW not in blob and ESX_PW not in blob
 
@@ -211,3 +222,31 @@ def test_crlf_line_endings_on_stdin_are_tolerated(fleet):
     r = fleet.run("guest", "true", eol="\r\n")
     assert r.returncode == 0, r.stderr
     assert all("\r" not in e for e in fleet.envs())
+
+
+def test_guest_failure_on_one_runner_propagates_and_the_others_still_run(fleet):
+    (fleet.state / "fail_guest").write_text("wf-runner-02\n", newline="\n")
+    r = fleet.run("guest", "echo hi")
+    assert r.returncode == 1
+    runs = [c for c in fleet.calls() if c.startswith("guest.run")]
+    assert [c.split()[2] for c in runs] == ["wf-runner-01", "wf-runner-02", "wf-runner-03"]
+
+
+def test_guest_tools_never_running_is_a_failure_for_that_runner_only(fleet):
+    (fleet.state / "tools_down").write_text("wf-runner-01\n", newline="\n")
+    fleet.env.update({"WF_FLEET_TOOLS_POLLS": "1", "WF_FLEET_POLL_SLEEP": "0"})
+    r = fleet.run("guest", "echo hi")
+    assert r.returncode == 1
+    runs = [c for c in fleet.calls() if c.startswith("guest.run")]
+    assert [c.split()[2] for c in runs] == ["wf-runner-02", "wf-runner-03"]
+
+
+def test_parity_fails_closed_when_mktemp_fails(fleet, tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "patches").mkdir(parents=True)
+    bundles = tmp_path / "bundles"
+    bundles.mkdir()
+    fleet.env["TMPDIR"] = (tmp_path / "does-not-exist").as_posix()
+    r = fleet.run("parity", run_dir.as_posix(), bundles.as_posix())
+    assert r.returncode == 1 and "temp" in r.stderr.lower()
+    assert fleet.calls() == []

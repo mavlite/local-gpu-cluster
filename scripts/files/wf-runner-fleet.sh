@@ -94,17 +94,19 @@ shutdown_runner() {
 
 wait_for_tools() {
   local name="$1" i
-  for i in $(seq 1 36); do
+  for i in $(seq 1 "${WF_FLEET_TOOLS_POLLS:-36}"); do
     [[ "$(govc object.collect -s "vm/$name" guest.toolsRunningStatus 2>/dev/null)" == guestToolsRunning ]] && return 0
-    sleep 5
+    sleep "${WF_FLEET_POLL_SLEEP:-5}"
   done
-  return 0
+  echo "$name: VMware Tools not running after waiting" >&2
+  return 1
 }
 
 guest_cmd() {
   local name="$1" cmd="$2"
-  wait_for_tools "$name"
+  wait_for_tools "$name" || return 1
   govc guest.run -vm "$name" /bin/bash -c "$cmd" 2>&1 | tail -n 25
+  (( PIPESTATUS[0] == 0 ))
 }
 
 # --- parity -----------------------------------------------------------------------------------------------------
@@ -175,7 +177,8 @@ if [[ "$action" == parity ]]; then
     echo "need $run_dir/patches, $bundles, $GRADE_PY" >&2
     exit 2
   fi
-  ptmp="$(mktemp -d)"
+  ptmp="$(mktemp -d)" || { echo "could not create a temp directory" >&2; exit 1; }
+  [[ -n "$ptmp" && -d "$ptmp" ]] || { echo "could not create a temp directory" >&2; exit 1; }
   trap 'rm -rf "$ptmp"' EXIT
   parity_prepare "$run_dir" "$bundles" "$ptmp" || { echo "could not prepare the parity inputs" >&2; exit 1; }
 fi
@@ -193,7 +196,7 @@ for spec in "${FLEET[@]}"; do
       bash "$IMAGE_SCRIPT" power-on "$host" "$name" 2>&1 | strip_ansi
       (( PIPESTATUS[0] == 0 )) || rc=1 ;;
     shutdown) shutdown_runner "$name" || rc=1 ;;
-    guest) guest_cmd "$name" "$2" ;;
+    guest) guest_cmd "$name" "$2" || rc=1 ;;
     parity) parity_runner "$name" "$ptmp" || rc=1 ;;
   esac
 done
