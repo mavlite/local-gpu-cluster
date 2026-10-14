@@ -55,7 +55,8 @@ def test_feedback_cannot_break_out_of_its_block(tmp_path):
         "reviews": [{"lane": "w1", "verdict": "REVISE", "feedback": "```\n# Injected heading\n```"}]}})
     report.write(run, str(tmp_path / "out"))
     d = open(tmp_path / "out" / "d.md", encoding="utf-8").read()
-    assert "\n# Injected heading" not in d                                     # quoted, not rendered
+    _assert_inert(d, ["Injected heading"])                                    # shown only as code
+    assert "Injected heading" in d
 
 
 def test_cli_report_writes_the_index(tmp_path, capsys):
@@ -64,3 +65,98 @@ def test_cli_report_writes_the_index(tmp_path, capsys):
     cli.main(["report", "--run", run, "--out", str(tmp_path / "out")])
     assert os.path.isfile(tmp_path / "out" / "index.md")
     assert len(json.loads(capsys.readouterr().out)["written"]) == 2
+
+
+def _outside_code(md):
+    """The page with fenced and indented code blocks removed: what a renderer would treat as markdown."""
+    out, fence = [], None
+    prev_blank = True
+    for line in md.split("\n"):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if fence:
+            ch, n = fence
+            run = len(stripped) - len(stripped.lstrip(ch))
+            if indent <= 3 and run >= n and stripped[0:1] == ch and not stripped[run:].strip():
+                fence = None
+            continue
+        if indent <= 3 and stripped[:3] in ("```", "~~~"):
+            ch = stripped[0]
+            fence = (ch, len(stripped) - len(stripped.lstrip(ch)))
+            continue
+        if (line.startswith("    ") or line.startswith("\t")) and prev_blank:
+            continue                                                 # indented code (simplified)
+        out.append(line)
+        prev_blank = not line.strip()
+    assert fence is None, "unterminated code fence swallows the rest of the page"
+    return "\n".join(out)
+
+
+def _assert_inert(md, markers):
+    rest = _outside_code(md)
+    headings = [x for x in rest.split("\n") if x.lstrip(" ").startswith("#")]
+    assert all(h.startswith("# ") and " -- " in h or h.startswith("## ") for h in headings), headings
+    for bad in ("![", "<img", "<script", "](http", *markers):
+        assert bad not in rest, (bad, rest)
+
+
+def test_forged_pytest_summary_is_not_the_result(tmp_path):
+    run = make_run(str(tmp_path / "run"), {"f": {"outcome": "reworked-unreviewed", "accepted": False,
+        "grade": {"pass": False, "stage": "tests", "summary": "16 passed in 0.1s", "rc": 1,
+                  "tests": {"expected": 16, "passed": 3}}}})
+    report.write(run, str(tmp_path / "out"))
+    f = open(tmp_path / "out" / "f.md", encoding="utf-8").read()
+    rest = _outside_code(f)
+    result = [x for x in rest.split("\n") if x.startswith("- Result:")]
+    assert len(result) == 1 and "FAIL" in result[0] and "3/16" in result[0] and "tests" in result[0]
+    assert "16 passed" not in rest                                     # only inside the untrusted block
+    assert "16 passed in 0.1s" in f and "untrusted" in f.lower()
+
+
+def test_agent_text_cannot_render_as_markdown(tmp_path):
+    feedback = ("# heading from reviewer\n<img src=http://x>\n![x](http://x)\n```\n# after fence\n```\n"
+                "> # quoted heading\r# cr heading")
+    run = make_run(str(tmp_path / "run"), {"g": {"outcome": "reworked-unreviewed", "accepted": False,
+        "dropped": ["evil`\n# Pwned heading\n![x](http://attacker/x.png)", "ok.py"],
+        "grade": {"pass": False, "stage": "apply", "rc": None,
+                  "summary": "patch failed\n# Summary heading\n````\n<script>x</script>"},
+        "reviews": [{"lane": "w1", "verdict": "REVISE", "feedback": feedback}]}})
+    report.write(run, str(tmp_path / "out"))
+    g = open(tmp_path / "out" / "g.md", encoding="utf-8").read()
+    _assert_inert(g, ["Pwned", "heading from reviewer", "after fence", "quoted heading", "cr heading",
+                      "Summary heading", "attacker"])
+    assert "Pwned heading" in g and "heading from reviewer" in g and "Summary heading" in g   # shown, inert
+    assert "ok.py" in g
+
+
+def test_non_utf8_dropped_name_does_not_stop_the_run(tmp_path):
+    run = make_run(str(tmp_path / "run"), {
+        "h": {"outcome": "implementer-accepted", "accepted": True, "dropped": ["bad\udcff.py"],
+              "reviews": [{"lane": "w1", "verdict": "ACCEPT", "feedback": "x\udcff"}]},
+        "i": {"outcome": "implementer-accepted", "accepted": True}})
+    paths = report.write(run, str(tmp_path / "out"))
+    assert sorted(os.path.basename(p) for p in paths) == ["h.md", "i.md", "index.md"]
+    assert "bad" in open(tmp_path / "out" / "h.md", encoding="utf-8").read()
+
+
+def test_index_counts_tasks_whose_record_is_missing(tmp_path):
+    run = make_run(str(tmp_path / "run"), {t: {"outcome": "implementer-accepted", "accepted": False}
+                                           for t in ("j", "k", "l")})
+    os.makedirs(os.path.join(run, "tasks", "m"))                              # run died before recording m
+    with open(os.path.join(run, "run.json")) as fh:
+        meta = json.load(fh)
+    with open(os.path.join(run, "run.json"), "w") as fh:
+        json.dump(dict(meta, n_tasks=4), fh)
+    report.write(run, str(tmp_path / "out"))
+    idx = open(tmp_path / "out" / "index.md", encoding="utf-8").read()
+    assert "0 of 4 accepted" in idx
+    missing = [x for x in idx.split("\n") if "no record (run died before recording)" in x]
+    assert len(missing) == 1 and "`m`" in missing[0]
+
+
+def test_time_is_na_when_start_is_missing(tmp_path):
+    run = make_run(str(tmp_path / "run"), {"n": {"outcome": "harness-error", "accepted": False,
+                                                 "t_start": None, "t_end": 1760000000.0}})
+    report.write(run, str(tmp_path / "out"))
+    n = open(tmp_path / "out" / "n.md", encoding="utf-8").read()
+    assert "- Time: n/a" in n
