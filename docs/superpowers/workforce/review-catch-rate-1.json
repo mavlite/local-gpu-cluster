@@ -1,0 +1,105 @@
+{
+ "what": "Offline reviewer catch-rate replay (2026-10-15): every replayable review round of 7 harvested runs, its reviewed patch state graded against the hidden tests (VM Docker grader, wf-grader:1), then only the reviewer re-run with the Phase 3 CPU pool config. Catch = REVISE on a hidden-test-failing state; false alarm = REVISE on a passing state.",
+ "harness_commit": "a4007a719f13ad063c9b01648c54bf060f06b5fd",
+ "replayed_reviewer": "Qwen3.6-35B-A3B on CPU worker llmbench01 (C2T10), --read-first --defects-only, default step cap (20) -- the p3-gp-1 pool reviewer",
+ "original_reviewers": "per source run: qwen3.8 (router) for w3-2-t, p3-gp-1 pool = same CPU reviewer, the rest GPU lead Qwen3.6/qwen3.8 variants (see catch-rate inventory)",
+ "sources": {
+  "p3-gp-1": {
+   "bad": 4,
+   "good": 12,
+   "new_caught": 1,
+   "old_caught": 1,
+   "new_false_alarms": 4
+  },
+  "lt-8-gc": {
+   "bad": 4,
+   "good": 12,
+   "new_caught": 1,
+   "old_caught": 3,
+   "new_false_alarms": 0
+  },
+  "w3-2-t": {
+   "bad": 5,
+   "good": 22,
+   "new_caught": 3,
+   "old_caught": 2,
+   "new_false_alarms": 4
+  },
+  "lt-1-t": {
+   "bad": 2,
+   "good": 21,
+   "new_caught": 1,
+   "old_caught": 1,
+   "new_false_alarms": 5
+  },
+  "lt-3-g": {
+   "bad": 4,
+   "good": 21,
+   "new_caught": 0,
+   "old_caught": 3,
+   "new_false_alarms": 5
+  },
+  "lt-5-g": {
+   "bad": 8,
+   "good": 18,
+   "new_caught": 5,
+   "old_caught": 4,
+   "new_false_alarms": 5
+  },
+  "lt-7-g": {
+   "bad": 8,
+   "good": 17,
+   "new_caught": 1,
+   "old_caught": 5,
+   "new_false_alarms": 2
+  }
+ },
+ "totals": {
+  "rounds": 158,
+  "bad": 35,
+  "good": 123
+ },
+ "cpu_reviewer": {
+  "catch": "12/35",
+  "false_alarms": "25/123",
+  "median_steps": 7.0,
+  "median_s_per_review": 133,
+  "capped": 16
+ },
+ "original_reviewers_on_same_states": {
+  "catch": "19/35",
+  "false_alarms": "34/123"
+ },
+ "bad_states_by_task": {
+  "w2-05": 11,
+  "w2-10": 9,
+  "w2-16": 7,
+  "w2-07": 5,
+  "w2-01": 2,
+  "w2-02": 1
+ },
+ "bad_failing_exactly_one_hidden_test": "26 of 35",
+ "caught_by_task": {
+  "cpu_reviewer": {
+   "w2-10": 7,
+   "w2-07": 3,
+   "w2-05": 1,
+   "w2-02": 1
+  },
+  "original_reviewers": {
+   "w2-05": 8,
+   "w2-10": 6,
+   "w2-16": 2,
+   "w2-07": 2,
+   "w2-01": 1
+  }
+ },
+ "findings": [
+  "The CPU reviewer catches 12 of 35 failing states (34%) and raises 25 false alarms on 123 passing states (20%): a REVISE from it is right about 1 time in 3.",
+  "The original reviewers (mostly GPU) catch 19 of 35 (54%) with 34 of 123 false alarms (28%) on the same states -- better at catching, still wrong on about 2 of 3 REVISEs.",
+  "Failing states cluster in 6 tasks; 26 of 35 fail exactly one hidden test (an edge case the reviewer cannot see). The CPU reviewer misses w2-05 almost always (1 of 11) where the GPU reviewers catch it (8 of 11), and never catches w2-16.",
+  "States are not independent (the same task's bug recurs across runs), so the effective sample is about 6 distinct bugs; the direction is clear, the exact rates are not."
+ ],
+ "verdict": "CPU review as configured does not earn its place for quality: it catches a third of the bad patches and its REVISEs are mostly wrong. Keep S (GPU alone) as the default; keep --review-pool available but off. The GPU reviewer is better but still low-precision; the misses are single hidden edge cases, so the next lever is not more review of the diff but a reviewer that exercises the code (writes and runs targeted edge-case tests), measured offline on these same 158 labelled states.",
+ "labels_and_rows": "/root/wf/catch/labels-<src>.json, /root/wf/catch/catch-result.json; replays /root/wf/runs/cr-<src>"
+}
