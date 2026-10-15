@@ -163,3 +163,108 @@ def _padded(total_bytes):
 def test_413_boundary_is_exact():
     assert escalation.validate_brief(_padded(8192 * 3), "claude-ask") is None
     assert escalation.validate_brief(_padded(8192 * 3 + 1), "claude-ask")[1] == "brief_too_large"
+
+
+import json as _json
+import stat as _stat
+from datetime import datetime as _dt
+from zoneinfo import ZoneInfo as _ZI
+
+UTC = "UTC"
+PRICES = '{"claude-sonnet-5-5": [3, 15], "claude-opus-5-5": [15, 75]}'
+
+
+def cfg(tmp_path, **env):
+    base = {"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC,
+            "ESCALATION_LEDGER": str(tmp_path / "ledger.jsonl")}
+    base.update(env)
+    return escalation.load_config(base)
+
+
+def ts(y, mo, d, h=12, tz=UTC):
+    return _dt(y, mo, d, h, tzinfo=_ZI(tz)).timestamp()
+
+
+def test_period_bounds_day_and_month_in_the_configured_tz():
+    d0, m0, nd, nm = escalation.period_bounds(ts(2026, 10, 15, 9), UTC)
+    assert d0 == ts(2026, 10, 15, 0) and m0 == ts(2026, 10, 1, 0)
+    assert nd.timestamp() == ts(2026, 10, 16, 0) and nm.timestamp() == ts(2026, 11, 1, 0)
+    d0b, _, _, _ = escalation.period_bounds(ts(2026, 10, 15, 2), "America/New_York")
+    assert d0b == ts(2026, 10, 14, 0, "America/New_York")             # 02:00 UTC is still the 14th in New York
+
+
+def test_costs():
+    c = escalation.load_config({"ESCALATION_PRICES": PRICES})
+    assert abs(escalation.call_cost(c, "claude-sonnet-5-5", 1_000_000, 0) - 3.0) < 1e-9
+    assert abs(escalation.worst_cost(c, "claude-sonnet-5-5", 800, 2048) - ((1000 * 3 + 2048 * 15) / 1e6)) < 1e-12
+
+
+def test_ledger_appends_0600_and_sums_by_period(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    led.append({"ts": ts(2026, 9, 30), "alias": "claude-ask", "cost_usd": 5.0, "outcome": "ok"})
+    led.append({"ts": ts(2026, 10, 14), "alias": "claude-ask", "cost_usd": 1.0, "outcome": "ok"})
+    led.append({"ts": ts(2026, 10, 15, 8), "alias": "claude-auto", "cost_usd": 0.25, "outcome": "ok"})
+    led.append({"ts": ts(2026, 10, 15, 9), "alias": "claude-auto", "cost_usd": 0.0, "outcome": "refused:budget"})
+    led.append({"ts": ts(2026, 10, 15, 10), "alias": "claude-hard", "cost_usd": 0.0, "outcome": "error:transport"})
+    u = led.usage(c, ts(2026, 10, 15, 11))
+    assert u["month_cost"] == 1.25 and u["day_cost"] == 0.25
+    assert u["calls"] == {"claude-ask": 0, "claude-auto": 1, "claude-hard": 1}   # refusals do not count
+    if os.name == "posix":
+        assert _stat.S_IMODE(os.stat(c.ledger_path).st_mode) == 0o600
+
+
+def test_torn_line_is_skipped_and_next_append_starts_fresh(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    led.append({"ts": ts(2026, 10, 15), "alias": "claude-ask", "cost_usd": 0.5, "outcome": "ok"})
+    with open(c.ledger_path, "a", encoding="utf-8") as f:
+        f.write('{"ts": 1, "alias": "claude-a')                           # crash mid-write: no newline
+    led.append({"ts": ts(2026, 10, 15, 13), "alias": "claude-ask", "cost_usd": 0.25, "outcome": "ok"})
+    u = escalation.Ledger(c.ledger_path).usage(c, ts(2026, 10, 15, 14))   # a fresh instance = after a restart
+    assert u["day_cost"] == 0.75 and u["calls"]["claude-ask"] == 2
+
+
+def test_check_budget_caps_and_counts(tmp_path):
+    c = cfg(tmp_path)
+    u = {"day_cost": 6.9, "month_cost": 10.0, "calls": {"claude-ask": 0, "claude-auto": 0, "claude-hard": 0}}
+    assert escalation.check_budget(c, u, "claude-ask", 0.2) == "daily cap reached ($7.00)"
+    u = {"day_cost": 0.0, "month_cost": 149.95, "calls": {"claude-ask": 0, "claude-auto": 0, "claude-hard": 0}}
+    assert escalation.check_budget(c, u, "claude-ask", 0.1) == "monthly cap reached ($150.00)"
+    u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 10, "claude-auto": 5, "claude-hard": 0}}
+    assert escalation.check_budget(c, u, "claude-ask", 0.01) == "daily calls used (15)"
+    u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 2, "claude-auto": 5, "claude-hard": 0}}
+    assert escalation.check_budget(c, u, "claude-auto", 0.01) == "automatic calls for today used (5)"
+    assert escalation.check_budget(c, u, "claude-ask", 0.01) is None
+    u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 15, "claude-auto": 0, "claude-hard": 3}}
+    assert escalation.check_budget(c, u, "claude-hard", 0.01) == "Opus calls for today used (3)"
+
+
+def test_reservation_counts_until_released(tmp_path):
+    c = cfg(tmp_path, ESCALATION_DAY_CAP_USD="1")
+    led = escalation.Ledger(c.ledger_path)
+    now = ts(2026, 10, 15)
+    tok, why = led.reserve(c, "claude-ask", 0.6, now)
+    assert tok and why is None
+    tok2, why2 = led.reserve(c, "claude-ask", 0.6, now)                # the pending 0.6 counts
+    assert tok2 is None and why2.startswith("budget: daily cap reached ($1.00); resets 2026-10-16 00:00")
+    led.release(tok)
+    tok3, _ = led.reserve(c, "claude-ask", 0.6, now)
+    assert tok3
+
+
+def test_footer_and_report(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    led.append({"ts": ts(2026, 10, 15, 8), "alias": "claude-auto", "model": "claude-sonnet-5-5", "cost_usd": 0.05,
+                "input_tokens": 900, "output_tokens": 300, "outcome": "ok", "brief_sha256": "ab" * 32})
+    u = led.usage(c, ts(2026, 10, 15, 9))
+    f = escalation.footer(c, "claude-sonnet-5-5", 0.05, u)
+    assert f == ("\n\n---\nClaude claude-sonnet-5-5: $0.050 this call · $0.05 today of $7.00 · "
+                 "$0.05 this month of $150.00 · auto 4/5 left today")
+    rep = escalation.budget_report(c, led, ts(2026, 10, 15, 9))
+    assert rep["month"]["spent_usd"] == 0.05 and rep["month"]["cap_usd"] == 150.0
+    assert rep["day"]["spent_usd"] == 0.05 and rep["day"]["cap_usd"] == 7.0
+    assert rep["calls_left"] == {"claude-ask": 14, "claude-auto": 4, "claude-hard": 3}
+    assert rep["recent"][0]["alias"] == "claude-auto" and "brief_sha256" not in rep["recent"][0]
+    assert rep["resets"]["day"].startswith("2026-10-16") and rep["resets"]["month"].startswith("2026-11-01")

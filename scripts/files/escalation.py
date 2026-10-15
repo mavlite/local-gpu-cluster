@@ -15,8 +15,12 @@ import json
 import math
 import os
 import re
+import threading
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 ALIASES = {
     "claude-ask": {"origin": "user", "tier": "sonnet", "max_brief": 8192, "max_answer": 2048},
@@ -174,3 +178,164 @@ def validate_brief(text: str, alias: str):
 def build_request(model: str, brief: str, max_tokens: int) -> dict:
     return {"model": model, "max_tokens": max_tokens, "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": brief}]}
+
+
+def _zone(tz: str):
+    return ZoneInfo(tz) if tz else datetime.now().astimezone().tzinfo
+
+
+def period_bounds(now: float, tz: str):
+    """(day_start_ts, month_start_ts, next_day, next_month) for `now` in the configured timezone."""
+    local = datetime.fromtimestamp(now, _zone(tz))
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    month = day.replace(day=1)
+    next_day = (day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    next_month = (month + timedelta(days=32)).replace(day=1)
+    return day.timestamp(), month.timestamp(), next_day, next_month
+
+
+def _when(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def call_cost(cfg: Config, model: str, input_tokens: int, output_tokens: int) -> float:
+    pin, pout = cfg.prices[model]
+    return (input_tokens * pin + output_tokens * pout) / 1e6
+
+
+def worst_cost(cfg: Config, model: str, brief_tokens: int, max_answer: int) -> float:
+    return call_cost(cfg, model, brief_tokens + SYSTEM_TOKENS, max_answer)
+
+
+def check_budget(cfg: Config, usage: dict, alias: str, worst: float) -> Optional[str]:
+    calls = usage["calls"]
+    if usage["month_cost"] + worst > cfg.month_cap:
+        return f"monthly cap reached (${cfg.month_cap:.2f})"
+    if usage["day_cost"] + worst > cfg.day_cap:
+        return f"daily cap reached (${cfg.day_cap:.2f})"
+    if alias == "claude-hard":
+        if calls["claude-hard"] >= cfg.hard_daily_calls:
+            return f"Opus calls for today used ({cfg.hard_daily_calls})"
+        return None
+    if calls["claude-ask"] + calls["claude-auto"] >= cfg.shared_daily_calls:
+        return f"daily calls used ({cfg.shared_daily_calls})"
+    if alias == "claude-auto" and calls["claude-auto"] >= cfg.auto_daily_calls:
+        return f"automatic calls for today used ({cfg.auto_daily_calls})"
+    return None
+
+
+class Ledger:
+    """Append-only JSONL of every attempt. Budgets are recomputed from it (cached on size+mtime), so a router
+    restart loses nothing. In-flight calls hold a reservation of their worst-case cost until they finish, so two
+    concurrent escalations cannot both pass a check that only one fits."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+        self._pending = {}
+        self._cache = (None, [])
+
+    def rows(self) -> list:
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            return []
+        sig = (st.st_size, st.st_mtime_ns)
+        if self._cache[0] == sig:
+            return self._cache[1]
+        rows = []
+        with open(self.path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue                                # a torn line from a crash: skip it, keep the rest
+                if isinstance(r, dict):
+                    rows.append(r)
+        self._cache = (sig, rows)
+        return rows
+
+    def append(self, row: dict) -> None:
+        d = os.path.dirname(self.path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "r+b") as f:
+            f.seek(0, os.SEEK_END)
+            lead = b""
+            if f.tell() > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    lead = b"\n"                            # never glue a new line onto a torn one
+            f.write(lead + (json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
+
+    def usage(self, cfg: Config, now: float) -> dict:
+        day0, month0, _, _ = period_bounds(now, cfg.tz)
+        u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {a: 0 for a in ALIASES}}
+        for r in self.rows():
+            t = float(r.get("ts") or 0)
+            cost = float(r.get("cost_usd") or 0)
+            if t >= month0:
+                u["month_cost"] += cost
+            if t >= day0:
+                u["day_cost"] += cost
+                if r.get("alias") in u["calls"] and not str(r.get("outcome", "")).startswith("refused"):
+                    u["calls"][r["alias"]] += 1
+        for alias, worst in list(self._pending.values()):
+            u["day_cost"] += worst
+            u["month_cost"] += worst
+            u["calls"][alias] += 1
+        u["day_cost"] = round(u["day_cost"], 6)
+        u["month_cost"] = round(u["month_cost"], 6)
+        return u
+
+    def reserve(self, cfg: Config, alias: str, worst: float, now: float):
+        with self._lock:
+            reason = check_budget(cfg, self.usage(cfg, now), alias, worst)
+            if reason:
+                _, _, next_day, next_month = period_bounds(now, cfg.tz)
+                when = next_month if reason.startswith("monthly") else next_day
+                return None, f"budget: {reason}; resets {_when(when)}"
+            token = uuid.uuid4().hex
+            self._pending[token] = (alias, worst)
+            return token, None
+
+    def release(self, token: str) -> None:
+        with self._lock:
+            self._pending.pop(token, None)
+
+
+_LEDGERS = {}
+
+
+def ledger_for(path: str) -> Ledger:
+    if path not in _LEDGERS:
+        _LEDGERS[path] = Ledger(path)
+    return _LEDGERS[path]
+
+
+def _calls_left(cfg: Config, usage: dict) -> dict:
+    c = usage["calls"]
+    shared_left = max(0, cfg.shared_daily_calls - c["claude-ask"] - c["claude-auto"])
+    return {"claude-ask": shared_left,
+            "claude-auto": max(0, min(cfg.auto_daily_calls - c["claude-auto"], shared_left)),
+            "claude-hard": max(0, cfg.hard_daily_calls - c["claude-hard"])}
+
+
+def footer(cfg: Config, model: str, cost: float, usage: dict) -> str:
+    auto_left = _calls_left(cfg, usage)["claude-auto"]
+    return (f"\n\n---\nClaude {model}: ${cost:.3f} this call · ${usage['day_cost']:.2f} today of "
+            f"${cfg.day_cap:.2f} · ${usage['month_cost']:.2f} this month of ${cfg.month_cap:.2f} · "
+            f"auto {auto_left}/{cfg.auto_daily_calls} left today")
+
+
+def budget_report(cfg: Config, ledger: Ledger, now: float) -> dict:
+    u = ledger.usage(cfg, now)
+    _, _, next_day, next_month = period_bounds(now, cfg.tz)
+    keep = ("ts", "alias", "model", "origin", "input_tokens", "output_tokens", "cost_usd", "outcome")
+    recent = [{k: r.get(k) for k in keep} for r in reversed(ledger.rows()[-10:])]
+    return {"month": {"spent_usd": round(u["month_cost"], 4), "cap_usd": cfg.month_cap},
+            "day": {"spent_usd": round(u["day_cost"], 4), "cap_usd": cfg.day_cap},
+            "calls_left": _calls_left(cfg, u),
+            "resets": {"day": _when(next_day), "month": _when(next_month)},
+            "recent": recent}
