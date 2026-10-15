@@ -393,3 +393,185 @@ def test_empty_tz_is_host_local_time_across_dst(tmp_path, monkeypatch):
 
 def test_naive_local_reset_label_has_no_zone_name():
     assert escalation._when(_dt(2026, 11, 1, 0, 0)) == "2026-11-01 00:00 local"
+
+
+# ---------------------------------------------------------------- Task 3: the Anthropic call and handle()
+import asyncio as _asyncio  # noqa: E402
+import logging as _logging  # noqa: E402
+import socket as _socket  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from anthropic_stub import AnthropicStub  # noqa: E402
+
+SENTINEL_KEY = "sk-ant-SENTINEL-never-log-me"
+
+
+@pytest.fixture
+def broker(tmp_path):
+    stub = AnthropicStub()
+    key = tmp_path / "anthropic.key"
+    key.write_text(SENTINEL_KEY + "\n")
+    c = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
+                                "ESCALATION_LEDGER": str(tmp_path / "ledger.jsonl"), "ANTHROPIC_API_KEY_FILE": str(key),
+                                "ESCALATION_RETRY_DELAY_S": "0", "ESCALATION_TIMEOUT_S": "5"})
+    yield stub, c, tmp_path
+    stub.close()
+
+
+def run(body, c, now=None):
+    return _asyncio.run(escalation.handle(body, c, now))
+
+
+def ask(alias="claude-ask", brief=GOOD, **extra):
+    return {"model": alias, "messages": [{"role": "system", "content": "OPENCODE SYSTEM PROMPT " * 500},
+                                         {"role": "user", "content": "earlier turn"},
+                                         {"role": "user", "content": brief}],
+            "tools": [{"type": "function", "function": {"name": "bash"}}], "temperature": 1.0, **extra}
+
+
+def test_successful_call_strips_prices_ledgers_and_footers(broker, caplog):
+    stub, c, tmp = broker
+    caplog.set_level(_logging.DEBUG)
+    status, out = run(ask(), c, ts(2026, 10, 15, 9))
+    assert status == 200
+    headers, req = stub.requests[0]
+    assert req == escalation.build_request("claude-sonnet-5-5", GOOD, 2048)     # nothing but prompt + brief
+    assert headers["x-api-key"] == SENTINEL_KEY and headers["anthropic-version"] == "2023-06-01"
+    text = out["choices"][0]["message"]["content"]
+    assert text.startswith("Root cause: X.") and "\n---\nClaude claude-sonnet-5-5: $0.006 this call" in text
+    assert out["choices"][0]["finish_reason"] == "stop" and out["model"] == "claude-ask"
+    assert out["usage"] == {"prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200}
+    rows = escalation.Ledger(c.ledger_path).rows()
+    assert rows[-1]["outcome"] == "ok" and rows[-1]["origin"] == "user"
+    assert abs(rows[-1]["cost_usd"] - (1000 * 3 + 200 * 15) / 1e6) < 1e-9
+    assert "brief" not in rows[-1] and GOOD not in open(c.ledger_path, encoding="utf-8").read()
+    assert SENTINEL_KEY not in caplog.text and SENTINEL_KEY not in open(c.ledger_path, encoding="utf-8").read()
+    assert SENTINEL_KEY not in _json.dumps(out)
+
+
+def test_opus_alias_uses_opus_and_bigger_answer_cap(broker):
+    stub, c, _ = broker
+    assert run(ask("claude-hard"), c)[0] == 200
+    assert stub.requests[0][1]["model"] == "claude-opus-5-5" and stub.requests[0][1]["max_tokens"] == 4096
+
+
+def test_refusals_spend_nothing_and_are_ledgered(broker, tmp_path):
+    stub, c, _ = broker
+    assert run(ask(brief="no headings"), c)[0] == 422
+    assert run(ask(brief=GOOD + "x" * 30000), c)[0] == 413
+    unpriced = escalation.load_config({"ESCALATION_PRICES": "{}", "ESCALATION_LEDGER": c.ledger_path,
+                                       "ANTHROPIC_API_KEY_FILE": c.key_file})
+    s, o = run(ask(), unpriced)
+    assert s == 503 and o["error"]["message"] == "escalation: no price configured for claude-sonnet-5-5"
+    nokey = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_LEDGER": c.ledger_path,
+                                    "ANTHROPIC_API_KEY_FILE": str(tmp_path / "missing.key")})
+    s, o = run(ask(), nokey)
+    assert s == 503 and o["error"]["message"] == "escalation: no Anthropic key configured"
+    assert stub.requests == []
+    outcomes = [r["outcome"] for r in escalation.Ledger(c.ledger_path).rows()]
+    assert outcomes == ["refused:brief_section", "refused:brief_too_large", "refused:unpriced", "refused:no_key"]
+
+
+def test_budget_refusal_is_429_with_reset_time(broker):
+    stub, c, tmp = broker
+    tight = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
+                                    "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
+                                    "ESCALATION_DAY_CAP_USD": "0.01"})
+    s, o = run(ask(), tight, ts(2026, 10, 15, 9))
+    assert s == 429 and o["error"]["code"] == "budget"
+    assert o["error"]["message"].startswith("budget: daily cap reached ($0.01); resets 2026-10-16 00:00")
+    assert stub.requests == []
+
+
+def test_retry_once_on_5xx_then_succeed(broker):
+    stub, c, _ = broker
+    stub.responses = [(529, {"type": "error", "error": {"type": "overloaded_error"}})]
+    assert run(ask(), c)[0] == 200 and len(stub.requests) == 2
+
+
+def test_no_retry_on_400_and_error_is_ledgered_at_zero(broker):
+    stub, c, _ = broker
+    stub.responses = [(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}})]
+    s, o = run(ask(), c)
+    assert s == 502 and o["error"]["message"] == "escalation: Anthropic call failed (http_400)"
+    assert len(stub.requests) == 1
+    last = escalation.Ledger(c.ledger_path).rows()[-1]
+    assert last["outcome"] == "error:http_400" and last["cost_usd"] == 0.0
+
+
+def test_transport_failure_is_502_and_charged_the_worst_case(broker):
+    stub, c, tmp = broker
+    s = _socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                                       # nothing listens here now
+    dead = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC,
+                                   "ANTHROPIC_URL": f"http://127.0.0.1:{port}/v1/messages",
+                                   "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
+                                   "ESCALATION_RETRY_DELAY_S": "0", "ESCALATION_TIMEOUT_S": "5"})
+    st, o = run(ask(), dead)
+    assert st == 502 and "transport" in o["error"]["message"]
+    last = escalation.Ledger(c.ledger_path).rows()[-1]
+    assert last["outcome"].startswith("error:transport")
+    want = escalation.worst_cost(dead, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
+    assert abs(last["cost_usd"] - want) < 1e-6
+    assert escalation.ledger_for(c.ledger_path)._pending == {}
+
+
+def test_two_failures_give_502_transport_or_status(broker):
+    stub, c, _ = broker
+    stub.responses = [(500, {}), (503, {})]
+    s, o = run(ask(), c)
+    assert s == 502 and "http_503" in o["error"]["message"] and len(stub.requests) == 2
+
+
+def test_cut_answer_is_returned_charged_and_marked_length(broker):
+    stub, c, _ = broker
+    stub.responses = [(200, {"stop_reason": "max_tokens", "content": [{"type": "text", "text": "partial"}],
+                             "usage": {"input_tokens": 100, "output_tokens": 2048}})]
+    s, o = run(ask(), c)
+    assert s == 200 and o["choices"][0]["finish_reason"] == "length"
+    assert o["choices"][0]["message"]["content"].startswith("partial\n\n---\nClaude")
+    stub.responses = [(200, {"stop_reason": "end_turn", "content": [], "usage": {"input_tokens": 5, "output_tokens": 0}})]
+    s, o = run(ask(), c)
+    assert s == 200 and o["choices"][0]["message"]["content"].startswith("\n\n---\nClaude")
+
+
+def test_concurrent_calls_cannot_both_pass_a_cap_only_one_fits(broker):
+    stub, c, _ = broker
+    worst = escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
+    tight = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
+                                    "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
+                                    "ESCALATION_DAY_CAP_USD": str(worst * 1.5)})
+
+    async def both():
+        return await _asyncio.gather(escalation.handle(ask(), tight), escalation.handle(ask(), tight))
+
+    statuses = sorted(s for s, _ in _asyncio.run(both()))
+    assert statuses == [200, 429] and len(stub.requests) == 1
+
+
+def test_keep_briefs_writes_0600_and_prunes(broker, tmp_path):
+    stub, c, _ = broker
+    keep = escalation.load_config({"ESCALATION_PRICES": PRICES, "ANTHROPIC_URL": stub.url,
+                                   "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
+                                   "ESCALATION_KEEP_BRIEFS": "2", "ESCALATION_BRIEFS_DIR": str(tmp_path / "briefs")})
+    for i in range(3):
+        assert run(ask(brief=GOOD + f"\n<!-- {i} -->"), keep, 1_800_000_000 + i)[0] == 200
+    files = sorted(os.listdir(tmp_path / "briefs"))
+    assert len(files) == 2 and open(tmp_path / "briefs" / files[-1], encoding="utf-8").read().endswith("<!-- 2 -->")
+
+
+def test_sse_is_one_chunk_then_done():
+    comp = escalation.completion("claude-ask", "hello", 1, 2, "end_turn", 1_800_000_000)
+    s = escalation.sse(comp)
+    assert s.endswith("data: [DONE]\n\n") and s.count("data: ") == 2
+    chunk = _json.loads(s.split("\n\n")[0][len("data: "):])
+    assert chunk["object"] == "chat.completion.chunk"
+    assert chunk["choices"][0]["delta"] == {"role": "assistant", "content": "hello"}
+    assert chunk["choices"][0]["finish_reason"] == "stop"
+
+
+def test_model_entries_list_the_three_aliases():
+    ids = [m["id"] for m in escalation.model_entries(1)]
+    assert ids == ["claude-ask", "claude-auto", "claude-hard"]

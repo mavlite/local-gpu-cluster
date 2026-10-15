@@ -11,16 +11,22 @@ broker:
   - appends one ledger line per attempt;
   - returns an OpenAI-shaped answer with a budget footer.
 The Anthropic key is read from a file at each use and never logged."""
+import asyncio
+import hashlib
 import json
+import logging
 import math
 import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+import httpx
 
 ALIASES = {
     "claude-ask": {"origin": "user", "tier": "sonnet", "max_brief": 8192, "max_answer": 2048},
@@ -37,6 +43,7 @@ SYSTEM_PROMPT = (
 )
 SYSTEM_TOKENS = 200                 # allowance for SYSTEM_PROMPT in the worst-case budget check
 ANTHROPIC_VERSION = "2023-06-01"
+log = logging.getLogger("escalation")
 
 
 def handles(model) -> bool:
@@ -376,3 +383,149 @@ def budget_report(cfg: Config, ledger: Ledger, now: float) -> dict:
             "calls_left": _calls_left(cfg, u),
             "resets": {"day": _when(next_day), "month": _when(next_month)},
             "recent": recent}
+
+
+def read_key(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            key = f.read().strip()
+    except OSError:
+        return None
+    return key or None
+
+
+async def _post(cfg: Config, key: str, payload: dict):
+    """(200, json, None) on success, else (status, None, error_class). One retry on 429, >=500 and transport
+    errors. The key travels only in the request header; it is never put in an error, log or return value."""
+    headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"}
+    err, status = "transport", 502
+    for attempt in (0, 1):
+        try:
+            async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
+                r = await client.post(cfg.url, json=payload, headers=headers)
+        except httpx.HTTPError as e:
+            err, status = f"transport:{type(e).__name__}", 502
+        else:
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except ValueError:
+                    return 502, None, "transport:bad_response"      # billed but unreadable: charged as transport
+                if not isinstance(data, dict):
+                    return 502, None, "transport:bad_response"
+                return 200, data, None
+            err, status = f"http_{r.status_code}", r.status_code
+            if not (r.status_code == 429 or r.status_code >= 500):
+                return status, None, err
+        if attempt == 0:
+            await asyncio.sleep(cfg.retry_delay_s)
+    return status, None, err
+
+
+def completion(alias: str, text: str, input_tokens: int, output_tokens: int, stop_reason, now: float) -> dict:
+    return {"id": f"esc-{int(now * 1000)}", "object": "chat.completion", "created": int(now), "model": alias,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                         "finish_reason": "length" if stop_reason == "max_tokens" else "stop"}],
+            "usage": {"prompt_tokens": input_tokens, "completion_tokens": output_tokens,
+                      "total_tokens": input_tokens + output_tokens}}
+
+
+def sse(comp: dict) -> str:
+    choice = comp["choices"][0]
+    chunk = {"id": comp["id"], "object": "chat.completion.chunk", "created": comp["created"], "model": comp["model"],
+             "choices": [{"index": 0, "delta": {"role": "assistant", "content": choice["message"]["content"]},
+                          "finish_reason": choice["finish_reason"]}],
+             "usage": comp["usage"]}
+    return f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n"
+
+
+def model_entries(now: int) -> list:
+    return [{"id": a, "object": "model", "owned_by": "anthropic-via-router", "created": now} for a in ALIASES]
+
+
+def _keep_brief(cfg: Config, brief: str, sha: str, now: float) -> None:
+    if cfg.keep_briefs <= 0:
+        return
+    os.makedirs(cfg.briefs_dir, mode=0o700, exist_ok=True)
+    path = os.path.join(cfg.briefs_dir, f"{int(now)}-{sha[:12]}.md")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(brief)
+    for old in sorted(os.listdir(cfg.briefs_dir))[:-cfg.keep_briefs]:
+        os.remove(os.path.join(cfg.briefs_dir, old))
+
+
+async def handle(body: dict, cfg: Config, now: Optional[float] = None):
+    """(status, payload) for one escalation request whose model is one of ALIASES. The caller has already
+    checked that the principal is the owner."""
+    now = time.time() if now is None else now
+    alias = body["model"]
+    spec = ALIASES[alias]
+    model = cfg.models.get(spec["tier"])
+    ledger = ledger_for(cfg.ledger_path)
+    brief = brief_text(body)
+    sha = hashlib.sha256((brief or "").encode("utf-8")).hexdigest()
+    row = {"ts": now, "alias": alias, "model": model, "origin": spec["origin"], "input_tokens": 0,
+           "output_tokens": 0, "cost_usd": 0.0, "brief_sha256": sha, "brief_tokens_est": estimate_tokens(brief or "")}
+
+    def refuse(status, code, message):
+        ledger.append(dict(row, outcome=f"refused:{code}"))
+        return status, error_body(code, message)
+
+    if brief is None:
+        return refuse(422, "brief_missing", "brief: no user message")
+    bad = validate_brief(brief, alias)
+    if bad:
+        return refuse(*bad)
+    if not model or model not in cfg.prices:
+        return refuse(503, "unpriced", f"escalation: no price configured for {model}")
+    key = read_key(cfg.key_file)
+    if not key:
+        return refuse(503, "no_key", "escalation: no Anthropic key configured")
+    worst = worst_cost(cfg, model, row["brief_tokens_est"], spec["max_answer"])
+    token, reason = ledger.reserve(cfg, alias, worst, now)
+    if token is None:
+        return refuse(429, "budget", reason)
+
+    def settle(final_row):
+        """Record the call and drop its reservation together. If that fails the reservation stays held (fail
+        closed) and the caller gets a 500; the log names the alias and outcome, never the key or the brief."""
+        try:
+            ledger.settle(token, final_row)
+        except Exception:
+            log.error("escalation: ledger write failed for %s (%s); reservation held until restart",
+                      alias, final_row.get("outcome"), exc_info=True)
+            return 500, error_body("ledger", "escalation: could not record the call; budget held until restart")
+        return None
+
+    try:
+        status, data, err = await _post(cfg, key, build_request(model, brief, spec["max_answer"]))
+    except Exception:
+        log.error("escalation: unexpected failure calling Anthropic for %s", alias, exc_info=True)
+        status, data, err = 502, None, "transport:unexpected"
+    if status != 200:
+        # A transport error or timeout may still have been billed: charge the worst case. An HTTP error status
+        # carries no usage, so it is charged nothing.
+        cost = worst if err.startswith("transport") else 0.0
+        failed = settle(dict(row, cost_usd=round(cost, 6), outcome=f"error:{err}"))
+        return failed or (502, error_body("upstream", f"escalation: Anthropic call failed ({err})"))
+    try:
+        used = data.get("usage") or {}
+        it, ot = int(used.get("input_tokens") or 0), int(used.get("output_tokens") or 0)
+        cost = call_cost(cfg, model, it, ot)
+        if not math.isfinite(cost) or it < 0 or ot < 0:
+            raise ValueError("bad usage")
+    except (TypeError, ValueError, AttributeError):
+        failed = settle(dict(row, cost_usd=round(worst, 6), outcome="error:transport:bad_usage"))
+        return failed or (502, error_body("upstream", "escalation: Anthropic call failed (transport:bad_usage)"))
+    failed = settle(dict(row, input_tokens=it, output_tokens=ot, cost_usd=round(cost, 6), outcome="ok"))
+    if failed:
+        return failed
+    try:
+        _keep_brief(cfg, brief, sha, now)
+    except OSError:
+        log.error("escalation: could not keep the brief for %s", alias, exc_info=True)
+    text = "".join(b.get("text", "") for b in data.get("content") or []
+                   if isinstance(b, dict) and b.get("type") == "text")
+    text += footer(cfg, model, cost, ledger.usage(cfg, now))
+    return 200, completion(alias, text, it, ot, data.get("stop_reason"), now)
