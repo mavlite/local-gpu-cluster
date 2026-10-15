@@ -1645,7 +1645,8 @@ async def _read_json_body(request: Request) -> dict:
 
 
 def _escalation_config_error():
-    return JSONResponse(escalation.error_body("config", "escalation: invalid configuration"), status_code=503)
+    # 424, not 503: opencode resends 408/409/429/>=500 (see escalation._safe_message).
+    return JSONResponse(escalation.error_body("config", "escalation: invalid configuration"), status_code=424)
 
 
 async def _escalate(request: Request, principal, body: dict):
@@ -1661,7 +1662,7 @@ async def _escalate(request: Request, principal, body: dict):
     try:
         cfg = escalation.load_config()
     except ValueError:
-        log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - t0) * 1000), 503, ip,
+        log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - t0) * 1000), 424, ip,
                    error="config")
         return _escalation_config_error()
     status, payload = await escalation.handle(body, cfg)   # CancelledError propagates (spend already recorded)

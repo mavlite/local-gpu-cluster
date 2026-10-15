@@ -356,7 +356,7 @@ PY
     upsert_env METRICS_ALLOWED_IPS "$METRICS_ALLOWED_IPS"
     upsert_env CORS_ALLOW_ORIGINS "$CORS_ALLOW_ORIGINS"
     # Claude escalation broker caps (spec 2026-10-15). ESCALATION_PRICES is NOT seeded on purpose: the broker
-    # refuses (503) until the operator sets prices verified against Anthropic's current price list.
+    # refuses (424) until the operator sets prices verified against Anthropic's current price list.
     ensure_env ESCALATION_MONTH_CAP_USD 150
     ensure_env ESCALATION_DAY_CAP_USD 7
     ensure_env ESCALATION_DAILY_CALLS 15

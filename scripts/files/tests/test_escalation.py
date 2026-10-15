@@ -84,7 +84,7 @@ def test_oversized_brief_is_413_with_numbers():
     big = GOOD + "x" * (8192 * 3)
     status, code, msg = escalation.validate_brief(big, "claude-ask")
     assert status == 413 and code == "brief_too_large"
-    assert msg.startswith("brief: ") and "over the 8192 limit -- trim it" in msg
+    assert msg.startswith("brief: about ") and "k tokens, over the 8k limit -- trim it" in msg
     assert escalation.validate_brief(big, "claude-hard") is None       # Opus allows 16384
 
 
@@ -462,23 +462,23 @@ def test_refusals_spend_nothing_and_are_ledgered(broker, tmp_path):
     unpriced = escalation.load_config({"ESCALATION_PRICES": "{}", "ESCALATION_LEDGER": c.ledger_path,
                                        "ANTHROPIC_API_KEY_FILE": c.key_file})
     s, o = run(ask(), unpriced)
-    assert s == 503 and o["error"]["message"] == "escalation: no price configured for claude-sonnet-5-5"
+    assert s == 424 and o["error"]["message"] == "escalation: no price configured for claude-sonnet-5-5"
     nokey = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_LEDGER": c.ledger_path,
                                     "ANTHROPIC_API_KEY_FILE": str(tmp_path / "missing.key")})
     s, o = run(ask(), nokey)
-    assert s == 503 and o["error"]["message"] == "escalation: no Anthropic key configured"
+    assert s == 424 and o["error"]["message"] == "escalation: no Anthropic key configured"
     assert stub.requests == []
     outcomes = [r["outcome"] for r in escalation.Ledger(c.ledger_path).rows()]
     assert outcomes == ["refused:brief_section", "refused:brief_too_large", "refused:unpriced", "refused:no_key"]
 
 
-def test_budget_refusal_is_429_with_reset_time(broker):
+def test_budget_refusal_is_402_with_reset_time(broker):
     stub, c, tmp = broker
     tight = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
                                     "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
                                     "ESCALATION_DAY_CAP_USD": "0.01"})
     s, o = run(ask(), tight, ts(2026, 10, 15, 9))
-    assert s == 429 and o["error"]["code"] == "budget"
+    assert s == 402 and o["error"]["code"] == "budget"
     assert o["error"]["message"].startswith("budget: daily cap reached ($0.01); resets 2026-10-16 00:00")
     assert stub.requests == []
 
@@ -493,7 +493,7 @@ def test_no_retry_on_400_and_error_is_ledgered_at_zero(broker):
     stub, c, _ = broker
     stub.responses = [(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}})]
     s, o = run(ask(), c)
-    assert s == 502 and o["error"]["message"] == "escalation: Anthropic call failed (http_400)"
+    assert s == 424 and o["error"]["message"] == "escalation: Anthropic call failed (Anthropic rejected the request)"
     assert len(stub.requests) == 1
     last = escalation.Ledger(c.ledger_path).rows()[-1]
     assert last["outcome"] == "error:http_400" and last["cost_usd"] == 0.0
@@ -521,17 +521,19 @@ def test_connect_failure_is_retried_once_and_costs_nothing(broker):
         st, o = run(ask(), dead)
     finally:
         _httpx.AsyncClient.post = real_post
-    assert st == 502 and "transport:ConnectError" in o["error"]["message"] and len(attempts) == 2
+    assert st == 424 and "transport:ConnectError" in o["error"]["message"] and len(attempts) == 2
     last = escalation.Ledger(c.ledger_path).rows()[-1]
     assert last["outcome"] == "error:transport:ConnectError" and last["cost_usd"] == 0.0   # never sent: free
     assert escalation.ledger_for(c.ledger_path)._pending == {}
 
 
-def test_two_failures_give_502_transport_or_status(broker):
+def test_two_failures_give_424_with_a_word_class(broker):
     stub, c, _ = broker
     stub.responses = [(500, {}), (503, {})]
     s, o = run(ask(), c)
-    assert s == 502 and "http_503" in o["error"]["message"] and len(stub.requests) == 2
+    assert s == 424 and o["error"]["code"] == "upstream" and len(stub.requests) == 2
+    assert o["error"]["message"] == "escalation: Anthropic call failed (Anthropic server error)"
+    assert _last(c)["outcome"] == "error:http_503"                      # the ledger keeps the status
 
 
 def test_cut_answer_is_returned_charged_and_marked_length(broker):
@@ -542,7 +544,7 @@ def test_cut_answer_is_returned_charged_and_marked_length(broker):
     assert s == 200 and o["choices"][0]["finish_reason"] == "length"
     assert o["choices"][0]["message"]["content"].startswith("partial\n\n---\nClaude")
     stub.responses = [(200, {"stop_reason": "end_turn", "content": [], "usage": {"input_tokens": 5, "output_tokens": 0}})]
-    s, o = run(ask(), c)
+    s, o = run(ask(brief=GOOD + "\n<!-- 2 -->"), c)
     assert s == 200 and o["choices"][0]["message"]["content"].startswith("\n\n---\nClaude")
 
 
@@ -557,7 +559,7 @@ def test_concurrent_calls_cannot_both_pass_a_cap_only_one_fits(broker):
         return await _asyncio.gather(escalation.handle(ask(), tight), escalation.handle(ask(), tight))
 
     statuses = sorted(s for s, _ in _asyncio.run(both()))
-    assert statuses == [200, 429] and len(stub.requests) == 1
+    assert statuses == [200, 402] and len(stub.requests) == 1
 
 
 def test_keep_briefs_writes_0600_and_prunes(broker, tmp_path):
@@ -632,7 +634,7 @@ def test_read_timeout_is_not_retried_and_is_charged_the_worst_case(broker):
     stub.delay = 3.0                                                 # read clearly times out; 1.0 s leaves connect headroom
     slow = _cfg(c, stub, ESCALATION_TIMEOUT_S="1.0")
     st, o = run(ask(), slow)
-    assert st == 502 and "transport:" in o["error"]["message"]
+    assert st == 424 and "transport:" in o["error"]["message"]
     assert len(stub.requests) == 1                                   # sent once, never again
     last = _last(c)
     assert last["outcome"].startswith("error:transport:") and abs(last["cost_usd"] - _worst(c)) < 1e-6
@@ -653,7 +655,7 @@ def test_total_timeout_is_not_retried_and_is_charged_the_worst_case(broker):
         st, o = run(ask(), _cfg(c, stub, ESCALATION_TIMEOUT_S="0.2"))
     finally:
         _httpx.AsyncClient.post = real
-    assert st == 502 and len(calls) == 1
+    assert st == 424 and len(calls) == 1
     last = _last(c)
     assert last["outcome"] == "error:transport:TotalTimeout" and abs(last["cost_usd"] - _worst(c)) < 1e-6
 
@@ -663,7 +665,7 @@ def test_unreadable_200_is_not_retried_and_is_charged_the_worst_case(broker, raw
     stub, c, _ = broker
     stub.responses = [(200, raw)]
     st, _o = run(ask(), c)
-    assert st == 502 and len(stub.requests) == 1
+    assert st == 424 and len(stub.requests) == 1
     last = _last(c)
     assert last["outcome"] == "error:transport:bad_response" and abs(last["cost_usd"] - _worst(c)) < 1e-6
     assert _pending(c) == {}
@@ -679,7 +681,7 @@ def test_bad_usage_is_charged_the_worst_case(broker, usage):
     stub.responses = [(200, _json.dumps({"stop_reason": "end_turn", "content": [{"type": "text", "text": "x"}],
                                          "usage": usage}).encode())]
     st, _o = run(ask(), c)
-    assert st == 502
+    assert st == 424
     last = _last(c)
     assert last["outcome"] == "error:transport:bad_usage" and abs(last["cost_usd"] - _worst(c)) < 1e-6
     assert _pending(c) == {}
@@ -692,7 +694,7 @@ def test_content_not_a_list_still_answers_with_the_footer(broker):
     assert st == 200 and o["choices"][0]["message"]["content"].startswith("\n\n---\nClaude")
     stub.responses = [(200, {"stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 1},
                              "content": [{"type": "text", "text": 5}, "str", {"type": "text", "text": "ok"}]})]
-    st, o = run(ask(), c)
+    st, o = run(ask(brief=GOOD + "\n<!-- 2 -->"), c)
     assert st == 200 and o["choices"][0]["message"]["content"].startswith("ok\n\n---\nClaude")
 
 
@@ -718,14 +720,14 @@ def test_unexpected_post_exception_is_charged_worst_and_logged_without_the_key(b
     monkeypatch.setattr(escalation, "_post", boom)
     caplog.set_level(_logging.DEBUG)
     st, _o = run(ask(), c)
-    assert st == 502
+    assert st == 424
     last = _last(c)
     assert last["outcome"].startswith("error:transport") and abs(last["cost_usd"] - _worst(c)) < 1e-6
     assert any(r.levelno == _logging.ERROR for r in caplog.records) and SENTINEL_KEY not in caplog.text
     assert _pending(c) == {}
 
 
-def test_ledger_write_failure_on_the_ok_row_is_500_and_holds_the_reservation(broker, monkeypatch, caplog):
+def test_ledger_write_failure_on_the_ok_row_is_424_and_holds_the_reservation(broker, monkeypatch, caplog):
     stub, c, _ = broker
     real = escalation.Ledger.append
 
@@ -737,7 +739,7 @@ def test_ledger_write_failure_on_the_ok_row_is_500_and_holds_the_reservation(bro
     monkeypatch.setattr(escalation.Ledger, "append", flaky)
     caplog.set_level(_logging.DEBUG)
     st, o = run(ask(), c)
-    assert st == 500 and o["error"]["code"] == "ledger"
+    assert st == 424 and o["error"]["code"] == "ledger"
     assert o["error"]["message"] == "escalation: could not record the call; budget held until restart"
     assert len(_pending(c)) == 1
     assert any(r.levelno == _logging.ERROR for r in caplog.records) and SENTINEL_KEY not in caplog.text
@@ -750,7 +752,7 @@ def test_key_with_embedded_header_injection_is_rejected(broker, tmp_path, caplog
     evil.write_text("sk-ant-SENTINEL\nX-Evil: 1")
     caplog.set_level(_logging.DEBUG)
     st, o = run(ask(), _cfg(c, stub, ANTHROPIC_API_KEY_FILE=str(evil)))
-    assert st == 503 and o["error"]["message"] == "escalation: no Anthropic key configured"
+    assert st == 424 and o["error"]["message"] == "escalation: no Anthropic key configured"
     assert stub.requests == [] and "sk-ant-SENTINEL" not in caplog.text
     assert escalation.read_key(str(evil)) is None
     assert escalation.read_key(c.key_file) == SENTINEL_KEY
@@ -833,3 +835,212 @@ def test_ensure_env_keeps_operator_values_and_adds_absent_keys(tmp_path):
     assert got == {"OTHER": "1", "ESCALATION_DAY_CAP_USD": "3", "ESCALATION_MONTH_CAP_USD": "150"}
     subprocess.run([bash, str(runner)], check=True)                   # idempotent
     assert env.read_text().count("ESCALATION_MONTH_CAP_USD=") == 1
+
+
+# ---------------------------------------------------------------- final review fix wave
+# opencode (AI SDK) retries 408/409/429/>=500 and any error text matching these digit runs or phrases, so a
+# broker error must never look retryable: a charged failure would otherwise be billed up to six times.
+import re as _re  # noqa: E402
+
+RETRY_TRIGGER = _re.compile(r"408|409|429|500|502|503|504|524|rate limit|service unavailable|try again", _re.I)
+RETRYABLE = {408, 409, 429}
+
+
+def _non_retryable(status):
+    return status not in RETRYABLE and status < 500
+
+
+def test_safe_message_breaks_every_retry_trigger():
+    for raw in ("budget: monthly cap reached ($500.00)", "x 429 y", "1503 2524", "Rate Limit hit",
+                "Service Unavailable", "please try again", "model claude-x-20250408"):
+        assert not RETRY_TRIGGER.search(escalation._safe_message(raw)), raw
+    assert escalation._safe_message("budget: daily cap reached ($7.00)") == "budget: daily cap reached ($7.00)"
+
+
+def test_error_body_messages_are_always_scrubbed():
+    assert not RETRY_TRIGGER.search(escalation.error_body("budget", "cap $1500.00")["error"]["message"])
+
+
+@pytest.mark.parametrize("err,word", [("http_429", "Anthropic was busy"), ("http_500", "Anthropic server error"),
+                                      ("http_529", "Anthropic server error"),
+                                      ("http_400", "Anthropic rejected the request"),
+                                      ("http_408", "Anthropic rejected the request"),
+                                      ("transport:ReadTimeout", "transport:ReadTimeout")])
+def test_upstream_errors_become_word_classes(broker, err, word):
+    stub, c, _ = broker
+    code = int(err[5:]) if err.startswith("http_") else None
+    if code is not None:
+        stub.responses = [(code, {})] * 2
+        st, o = run(ask(), c)
+        assert _last(c)["outcome"] == f"error:{err}"                  # not user-facing: keeps the status
+    else:
+        stub.delay = 3.0
+        st, o = run(ask(), _cfg(c, stub, ESCALATION_TIMEOUT_S="1.0"))
+    assert st == 424 and o["error"]["code"] == "upstream"
+    assert o["error"]["message"] == f"escalation: Anthropic call failed ({word})"
+
+
+def test_every_refusal_and_error_path_is_non_retryable_and_clean(broker, tmp_path, monkeypatch):
+    """Drive each refusal/error path once and check status and message against opencode's retry triggers."""
+    stub, c, _ = broker
+    seen = []
+
+    def go(body, cf, now=None):
+        st, o = run(body, cf, now)
+        seen.append((st, o["error"]["code"] if st != 200 else None, o["error"]["message"] if st != 200 else ""))
+
+    go({"model": "claude-ask", "messages": []}, c)                                       # brief_missing
+    go(ask(brief="no headings"), c)                                                      # brief_section
+    go(ask(brief=GOOD + "x" * 30000), c)                                                 # brief_too_large
+    go(ask(brief=GOOD + "#1"), escalation.load_config({"ESCALATION_PRICES": "{}", "ESCALATION_LEDGER": c.ledger_path,
+                                                       "ANTHROPIC_API_KEY_FILE": c.key_file}))       # unpriced
+    go(ask(brief=GOOD + "#2"), _cfg(c, stub, ANTHROPIC_API_KEY_FILE=str(tmp_path / "missing.key")))  # no_key
+    go(ask(brief=GOOD + "#3"), _cfg(c, stub, ESCALATION_MONTH_CAP_USD="500", ESCALATION_DAY_CAP_USD="0.0001"))  # budget
+    stub.responses = [(429, {}), (503, {})]
+    go(ask(brief=GOOD + "#4"), c)                                                        # upstream, server error
+    stub.responses = [(429, {}), (429, {})]
+    go(ask(brief=GOOD + "#5"), c)                                                        # upstream, busy
+    go(ask(brief=GOOD + "#6"), c, 1_800_000_000)                                         # ok
+    go(ask(brief=GOOD + "#6"), c, 1_800_000_010)                                         # duplicate
+    real = escalation.Ledger.append
+
+    def flaky(self, row):
+        if row.get("outcome") == "ok":
+            raise OSError("disk full")
+        return real(self, row)
+    monkeypatch.setattr(escalation.Ledger, "append", flaky)
+    go(ask(brief=GOOD + "#7"), c)                                                        # ledger
+    codes = [code for _, code, _ in seen if code]
+    assert codes == ["brief_missing", "brief_section", "brief_too_large", "unpriced", "no_key", "budget",
+                     "upstream", "upstream", "duplicate", "ledger"], seen
+    for st, code, msg in seen:
+        if code:
+            assert _non_retryable(st), (st, code)
+            assert not RETRY_TRIGGER.search(msg), (code, msg)
+    statuses = {code: st for st, code, _ in seen if code}
+    assert statuses == {"brief_missing": 422, "brief_section": 422, "brief_too_large": 413, "unpriced": 424,
+                        "no_key": 424, "budget": 402, "upstream": 424, "duplicate": 400, "ledger": 424}
+
+
+def test_oversized_message_is_rounded_to_k():
+    big = GOOD + "x" * (8500 * 3)
+    assert escalation.validate_brief(big, "claude-ask")[2] == "brief: about 9k tokens, over the 8k limit -- trim it"
+
+
+def _outcomes(c):
+    return [r["outcome"] for r in escalation.Ledger(c.ledger_path).rows()]
+
+
+def test_identical_brief_within_the_window_is_refused_as_duplicate(broker):
+    stub, c, _ = broker
+    t0 = 1_800_000_000
+    assert run(ask(), c, t0)[0] == 200
+    st, o = run(ask(), c, t0 + 30)
+    assert st == 400 and o["error"]["code"] == "duplicate"
+    assert o["error"]["message"] == "brief: identical brief already sent under a minute ago -- change it or wait"
+    assert len(stub.requests) == 1
+    assert _outcomes(c) == ["ok", "refused:duplicate"] and _last(c)["cost_usd"] == 0.0
+    st, o = run(ask(), c, t0 + 90)
+    assert st == 400 and "under 2 minutes ago" in o["error"]["message"]
+
+
+def test_identical_brief_after_the_window_or_changed_brief_is_allowed(broker):
+    stub, c, _ = broker
+    t0 = 1_800_000_000
+    assert run(ask(), c, t0)[0] == 200
+    assert run(ask(brief=GOOD + "\nnew detail"), c, t0 + 5)[0] == 200
+    assert run(ask(), c, t0 + 121)[0] == 200
+    assert len(stub.requests) == 3
+
+
+@pytest.mark.parametrize("outcome,cost,dup", [("ok", 0.01, True), ("error:transport:ReadTimeout", 0.05, True),
+                                              ("error:http_400", 0.0, False),
+                                              ("error:transport:ConnectError", 0.0, False),
+                                              ("refused:budget", 0.0, True), ("refused:brief_section", 0.0, False)])
+def test_duplicate_guard_counts_only_spent_or_budget_refused_rows(broker, outcome, cost, dup):
+    stub, c, _ = broker
+    sha = escalation.hashlib.sha256(GOOD.encode()).hexdigest()
+    t0 = 1_800_000_000
+    escalation.Ledger(c.ledger_path).append({"ts": t0, "alias": "claude-ask", "cost_usd": cost, "outcome": outcome,
+                                             "brief_sha256": sha})
+    st, o = run(ask(), c, t0 + 10)
+    assert (st == 400 and o["error"]["code"] == "duplicate") if dup else st == 200
+
+
+def test_dedupe_zero_disables_the_guard(broker):
+    stub, c, _ = broker
+    off = _cfg(c, stub, ESCALATION_DEDUPE_S="0")
+    assert off.dedupe_s == 0 and escalation.load_config({}).dedupe_s == 120
+    assert run(ask(), off, 1_800_000_000)[0] == 200 and run(ask(), off, 1_800_000_001)[0] == 200
+
+
+def test_black_holed_connect_is_a_connect_timeout_retried_and_free(broker):
+    """A connect that hangs until httpx's connect timeout must surface as ConnectTimeout (never sent: free, retried
+    once), not be pre-empted by the outer total timeout and charged as a sent call."""
+    stub, c, _ = broker
+    attempts = []
+
+    async def black_hole(self, *a, **k):
+        attempts.append(self.timeout.connect)
+        await _asyncio.sleep(self.timeout.connect + 0.05)
+        raise _httpx.ConnectTimeout("connect timed out")
+
+    real = _httpx.AsyncClient.post
+    _httpx.AsyncClient.post = black_hole
+    try:
+        st, o = run(ask(), _cfg(c, stub, ESCALATION_TIMEOUT_S="0.3"))
+    finally:
+        _httpx.AsyncClient.post = real
+    assert st == 424 and len(attempts) == 2 and attempts[0] == 0.3
+    last = _last(c)
+    assert last["outcome"] == "error:transport:ConnectTimeout" and last["cost_usd"] == 0.0
+    assert _pending(c) == {}
+
+
+def test_connect_timeout_is_capped_at_ten_seconds():
+    t = escalation._timeout(escalation.load_config({"ESCALATION_TIMEOUT_S": "120"}))
+    assert t.connect == 10.0 and t.read == 120.0
+
+
+@pytest.mark.parametrize("env", [
+    {"ESCALATION_PRICES": "[1, 2]"},
+    {"ESCALATION_PRICES": '{"m": 3}'},
+    {"ESCALATION_PRICES": '{"m": [3]}'},
+    {"ESCALATION_PRICES": '{"m": [3, 4, 5]}'},
+    {"ESCALATION_PRICES": '{"m": ["3", 4]}'},
+    {"ESCALATION_PRICES": '{"m": [true, 4]}'},
+    {"ESCALATION_PRICES": "not json"},
+    {"ESCALATION_MODELS": "[]"},
+    {"ESCALATION_MODELS": '{"sonnet": "s"}'},
+    {"ESCALATION_MODELS": '{"sonnet": "s", "opus": 5}'},
+    {"ESCALATION_MODELS": "{"},
+    {"ESCALATION_TZ": "Mars/Olympus_Mons"},
+    {"ESCALATION_TZ": "../etc/passwd"},
+    {"ESCALATION_TIMEOUT_S": "0"},
+    {"ESCALATION_TIMEOUT_S": "-1"},
+    {"ESCALATION_TIMEOUT_S": "inf"},
+    {"ESCALATION_TIMEOUT_S": "nan"},
+    {"ESCALATION_TIMEOUT_S": "soon"},
+    {"ESCALATION_RETRY_DELAY_S": "-0.5"},
+    {"ESCALATION_RETRY_DELAY_S": "nan"},
+    {"ESCALATION_KEEP_BRIEFS": "-1"},
+    {"ESCALATION_KEEP_BRIEFS": "many"},
+    {"ESCALATION_DEDUPE_S": "-1"},
+    {"ESCALATION_DEDUPE_S": "nan"},
+])
+def test_config_shape_errors_are_value_errors_naming_the_variable(env):
+    with pytest.raises(ValueError) as e:
+        escalation.load_config(env)
+    name = next(iter(env))
+    assert name in str(e.value) and (len(env[name]) < 4 or env[name] not in str(e.value))
+
+
+def test_config_accepts_valid_tz_models_and_zero_retry_delay():
+    c = escalation.load_config({"ESCALATION_TZ": "Europe/London", "ESCALATION_RETRY_DELAY_S": "0",
+                                "ESCALATION_MODELS": '{"sonnet": "a", "opus": "b", "extra": 1}'})
+    assert c.tz == "Europe/London" and c.retry_delay_s == 0 and c.models["opus"] == "b"
+
+
+def test_ledger_docstring_does_not_overclaim_restarts():
+    doc = escalation.Ledger.__doc__
+    assert "loses nothing" not in doc and "unrecorded" in doc

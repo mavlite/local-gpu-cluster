@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 
@@ -60,9 +61,15 @@ def post(env, key, **body):
     return env["client"].post("/v1/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"})
 
 
-def esc_body(**extra):
+_N = iter(range(10 ** 6))
+
+
+def esc_body(brief=None, **extra):
+    """A fresh brief per call by default: the module shares one ledger, and the broker refuses an identical brief
+    sent again within ESCALATION_DEDUPE_S."""
+    brief = GOOD + f"\n<!-- {next(_N)} -->" if brief is None else brief
     return {"model": "claude-ask", "messages": [{"role": "system", "content": "big opencode prompt"},
-                                                {"role": "user", "content": GOOD}], **extra}
+                                                {"role": "user", "content": brief}], **extra}
 
 
 def test_owner_escalation_is_answered_by_the_broker_not_llamacpp(env):
@@ -71,7 +78,8 @@ def test_owner_escalation_is_answered_by_the_broker_not_llamacpp(env):
     assert r.status_code == 200, r.text
     assert "Claude claude-sonnet-5-5:" in r.json()["choices"][0]["message"]["content"]
     assert len(env["up"].chat_bodies) == before                        # llama.cpp never saw it
-    assert env["ant"].requests[-1][1]["messages"] == [{"role": "user", "content": GOOD}]
+    assert env["ant"].requests[-1][1]["messages"][0]["content"].startswith(GOOD)
+    assert len(env["ant"].requests[-1][1]["messages"]) == 1
 
 
 def test_streaming_request_gets_valid_sse(env):
@@ -113,15 +121,51 @@ def test_access_log_records_escalations_without_the_brief(env):
     assert '"claude-ask"' in log and "Make the parser accept trailing commas" not in log
 
 
-def test_invalid_config_is_a_503_without_leaking_the_error(env, monkeypatch):
+def test_invalid_config_is_a_424_without_leaking_the_error(env, monkeypatch):
     monkeypatch.setenv("ESCALATION_DAY_CAP_USD", "nan")
     n = len(env["ant"].requests)
     r = post(env, OWNER, **esc_body())
-    assert r.status_code == 503 and r.json()["error"]["code"] == "config"
+    assert r.status_code == 424 and r.json()["error"]["code"] == "config"
     assert r.json()["error"]["message"] == "escalation: invalid configuration" and "ESCALATION_DAY_CAP_USD" not in r.text
     assert len(env["ant"].requests) == n
     b = env["client"].get("/escalation/budget", headers={"Authorization": f"Bearer {OWNER}"})
-    assert b.status_code == 503 and b.json()["error"]["code"] == "config"
+    assert b.status_code == 424 and b.json()["error"]["code"] == "config"
     monkeypatch.undo()
     assert env["client"].get("/escalation/budget", headers={"Authorization": f"Bearer {OWNER}"}).status_code == 200
 
+
+
+# opencode retries 408/409/429/>=500 and error text matching these; a broker error must not look retryable.
+RETRY_TRIGGER = re.compile(r"408|409|429|500|502|503|504|524|rate limit|service unavailable|try again", re.I)
+
+
+def _clean_non_retryable(r):
+    assert r.status_code not in (408, 409, 429) and r.status_code < 500, r.status_code
+    assert not RETRY_TRIGGER.search(r.text), r.text
+
+
+def test_budget_refusal_and_upstream_failure_are_non_retryable_through_the_router(env, monkeypatch):
+    n = len(env["ant"].requests)
+    monkeypatch.setenv("ESCALATION_DAY_CAP_USD", "0.0001")
+    monkeypatch.setenv("ESCALATION_MONTH_CAP_USD", "500")
+    r = post(env, OWNER, **esc_body())
+    assert r.status_code == 402 and r.json()["error"]["code"] == "budget"
+    _clean_non_retryable(r)
+    assert len(env["ant"].requests) == n
+    monkeypatch.undo()
+    env["ant"].responses = [(529, {}), (503, {})]
+    r = post(env, OWNER, **esc_body())
+    assert r.status_code == 424 and r.json()["error"]["code"] == "upstream"
+    assert r.json()["error"]["message"] == "escalation: Anthropic call failed (Anthropic server error)"
+    _clean_non_retryable(r)
+    assert len(env["ant"].requests) == n + 2
+
+
+def test_identical_brief_resent_through_the_router_is_a_400_duplicate(env):
+    body = esc_body()
+    assert post(env, OWNER, **body).status_code == 200
+    n = len(env["ant"].requests)
+    r = post(env, OWNER, **body)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "duplicate"
+    _clean_non_retryable(r)
+    assert len(env["ant"].requests) == n

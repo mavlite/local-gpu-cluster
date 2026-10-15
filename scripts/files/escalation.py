@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -68,6 +68,7 @@ class Config:
     briefs_dir: str
     timeout_s: float
     retry_delay_s: float
+    dedupe_s: float
 
 
 def _money(name: str, raw) -> float:
@@ -92,32 +93,99 @@ def _count(name: str, raw) -> int:
     return v
 
 
+def _seconds(name: str, raw, positive: bool) -> float:
+    """A duration in seconds: finite, and > 0 (positive) or >= 0."""
+    bound = "> 0" if positive else ">= 0"
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"escalation config: {name} must be a finite number {bound}")
+    if not math.isfinite(v) or v < 0 or (positive and v == 0):
+        raise ValueError(f"escalation config: {name} must be a finite number {bound}")
+    return v
+
+
+def _json_object(name: str, raw: str) -> dict:
+    try:
+        v = json.loads(raw)
+    except ValueError:
+        raise ValueError(f"escalation config: {name} is not valid JSON")
+    if not isinstance(v, dict):
+        raise ValueError(f"escalation config: {name} must be a JSON object")
+    return v
+
+
+def _prices(raw: str) -> dict:
+    """ESCALATION_PRICES: {"model": [input_usd_per_mtok, output_usd_per_mtok], ...}."""
+    out = {}
+    for m, p in _json_object("ESCALATION_PRICES", raw).items():
+        if not (isinstance(p, list) and len(p) == 2
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in p)):
+            raise ValueError("escalation config: ESCALATION_PRICES values must be [input, output] number pairs")
+        out[m] = (_money(f"ESCALATION_PRICES[{m}] input", p[0]), _money(f"ESCALATION_PRICES[{m}] output", p[1]))
+    return out
+
+
+def _models(raw: str) -> dict:
+    models = _json_object("ESCALATION_MODELS", raw)
+    for tier in ("sonnet", "opus"):
+        if not isinstance(models.get(tier), str) or not models[tier]:
+            raise ValueError("escalation config: ESCALATION_MODELS needs string values for sonnet and opus")
+    return models
+
+
+def _tz(raw: str) -> str:
+    """Empty means the router host's local time; anything else must be a valid IANA zone."""
+    if raw:
+        try:
+            ZoneInfo(raw)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("escalation config: ESCALATION_TZ is not a valid IANA time zone")
+    return raw
+
+
 def load_config(env=None) -> Config:
     env = os.environ if env is None else env
-    prices = json.loads(env.get("ESCALATION_PRICES", "{}") or "{}")
     return Config(
-        models=json.loads(env.get("ESCALATION_MODELS", "") or
-                          '{"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}'),
-        prices={m: (_money(f"ESCALATION_PRICES[{m}] input", p[0]), _money(f"ESCALATION_PRICES[{m}] output", p[1]))
-                for m, p in prices.items()},
+        models=_models(env.get("ESCALATION_MODELS", "") or '{"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}'),
+        prices=_prices(env.get("ESCALATION_PRICES", "{}") or "{}"),
         month_cap=_money("ESCALATION_MONTH_CAP_USD", env.get("ESCALATION_MONTH_CAP_USD", "150")),
         day_cap=_money("ESCALATION_DAY_CAP_USD", env.get("ESCALATION_DAY_CAP_USD", "7")),
         shared_daily_calls=_count("ESCALATION_DAILY_CALLS", env.get("ESCALATION_DAILY_CALLS", "15")),
         auto_daily_calls=_count("ESCALATION_AUTO_DAILY_CALLS", env.get("ESCALATION_AUTO_DAILY_CALLS", "5")),
         hard_daily_calls=_count("ESCALATION_HARD_DAILY_CALLS", env.get("ESCALATION_HARD_DAILY_CALLS", "3")),
-        tz=env.get("ESCALATION_TZ", ""),
+        tz=_tz(env.get("ESCALATION_TZ", "")),
         ledger_path=env.get("ESCALATION_LEDGER", "/var/lib/llm-router/escalation-ledger.jsonl"),
         key_file=env.get("ANTHROPIC_API_KEY_FILE", "/etc/router-anthropic.key"),
         url=env.get("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"),
-        keep_briefs=int(env.get("ESCALATION_KEEP_BRIEFS", "0")),
+        keep_briefs=_count("ESCALATION_KEEP_BRIEFS", env.get("ESCALATION_KEEP_BRIEFS", "0")),
         briefs_dir=env.get("ESCALATION_BRIEFS_DIR", "/var/lib/llm-router/escalation-briefs"),
-        timeout_s=float(env.get("ESCALATION_TIMEOUT_S", "120")),
-        retry_delay_s=float(env.get("ESCALATION_RETRY_DELAY_S", "2")),
+        timeout_s=_seconds("ESCALATION_TIMEOUT_S", env.get("ESCALATION_TIMEOUT_S", "120"), positive=True),
+        retry_delay_s=_seconds("ESCALATION_RETRY_DELAY_S", env.get("ESCALATION_RETRY_DELAY_S", "2"), positive=False),
+        dedupe_s=_seconds("ESCALATION_DEDUPE_S", env.get("ESCALATION_DEDUPE_S", "120"), positive=False),
     )
 
 
+# opencode (AI SDK) retries 408/409/429/>=500 responses AND any error whose text matches these digit runs or
+# phrases, up to five times. A retried charged failure is billed again, so no broker message may contain them.
+_RETRY_DIGITS = re.compile(r"408|409|429|500|502|503|504|524")
+_RETRY_PHRASES = re.compile(r"rate limit|service unavailable|try again", re.IGNORECASE)
+
+
+def _safe_message(text: str) -> str:
+    """text with every retry trigger broken: a forbidden digit run gets an apostrophe after its first digit
+    ("$500.00" -> "$5'00.00", read like a digit-group mark), a forbidden phrase becomes "[...]". Fixed broker
+    messages never contain either; this guards interpolated values (caps, model names, counts)."""
+    text = _RETRY_PHRASES.sub("[...]", str(text))
+    while True:
+        m = _RETRY_DIGITS.search(text)
+        if m is None:
+            return text
+        text = text[:m.start() + 1] + "'" + text[m.start() + 1:]
+
+
 def error_body(code: str, message: str) -> dict:
-    return {"error": {"type": "escalation", "code": code, "message": message}}
+    return {"error": {"type": "escalation", "code": code, "message": _safe_message(message)}}
 
 
 def estimate_tokens(text: str) -> int:
@@ -179,7 +247,9 @@ def validate_brief(text: str, alias: str):
     cap = ALIASES[alias]["max_brief"]
     n = estimate_tokens(text)
     if n > cap:
-        return 413, "brief_too_large", f"brief: {n} tokens, over the {cap} limit -- trim it"
+        # Rounded to k (1024) so no raw count can look like a retryable status to the client.
+        return 413, "brief_too_large", (f"brief: about {math.ceil(n / 1024)}k tokens, over the {cap // 1024}k "
+                                        f"limit -- trim it")
     return None
 
 
@@ -245,8 +315,9 @@ def check_budget(cfg: Config, usage: dict, alias: str, worst: float) -> Optional
 
 
 class Ledger:
-    """Append-only JSONL of every attempt. Budgets are recomputed from it (cached on size+mtime), so a router
-    restart loses nothing. In-flight calls hold a reservation of their worst-case cost until they finish, so two
+    """Append-only JSONL of every attempt. Budgets are recomputed from it (cached on size+mtime), so the ledger
+    survives router restarts. A call in flight when the router is stopped can go unrecorded (the systemd stop
+    timeout, 90 s, is shorter than the call timeout, 120 s): at most one call per restart. In-flight calls hold a reservation of their worst-case cost until they finish, so two
     concurrent escalations cannot both pass a check that only one fits. Reservation costs are worst-case estimates
     (bytes/3 brief tokens), so a cap can be overshot by at most one call's estimation error."""
 
@@ -400,8 +471,14 @@ _NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 _NEVER_SENT_CLASSES = tuple(f"transport:{c.__name__}" for c in _NEVER_SENT)
 
 
+def _timeout(cfg: Config) -> httpx.Timeout:
+    """Connect gets its own, shorter limit so a black-holed connect surfaces as ConnectTimeout (never sent: free,
+    retried) before the outer total timeout in _post (cfg.timeout_s + 5) can pre-empt it as a possibly-sent call."""
+    return httpx.Timeout(cfg.timeout_s, connect=min(10.0, cfg.timeout_s))
+
+
 async def _send(cfg: Config, payload: dict, headers: dict):
-    async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
+    async with httpx.AsyncClient(timeout=_timeout(cfg)) as client:
         return await client.post(cfg.url, json=payload, headers=headers)
 
 
@@ -414,7 +491,7 @@ async def _post(cfg: Config, key: str, payload: dict):
     err, status = "transport", 502
     for attempt in (0, 1):
         try:
-            r = await asyncio.wait_for(_send(cfg, payload, headers), timeout=cfg.timeout_s)
+            r = await asyncio.wait_for(_send(cfg, payload, headers), timeout=cfg.timeout_s + 5)
         except asyncio.TimeoutError:
             return 502, None, "transport:TotalTimeout"
         except httpx.HTTPError as e:
@@ -485,6 +562,42 @@ def _keep_brief(cfg: Config, brief: str, sha: str, now: float) -> None:
         os.remove(os.path.join(cfg.briefs_dir, old))                 # foreign files are never touched
 
 
+def _upstream_message(err: str) -> str:
+    """A word class for an Anthropic failure: never the raw status, which the client could take as retryable."""
+    if err.startswith("http_"):
+        try:
+            code = int(err[5:])
+        except ValueError:
+            code = 0
+        what = ("Anthropic was busy" if code == 429 else "Anthropic server error" if code >= 500
+                else "Anthropic rejected the request")
+    else:
+        what = err
+    return f"escalation: Anthropic call failed ({what})"
+
+
+def _spent_or_budget_refused(r: dict) -> bool:
+    outcome = str(r.get("outcome", ""))
+    cost = _finite(r.get("cost_usd"))
+    return (outcome == "ok" or outcome == "refused:budget"
+            or (outcome.startswith("error:") and cost is not None and cost > 0))
+
+
+def _duplicate_age(cfg: Config, ledger: Ledger, sha: str, now: float) -> Optional[float]:
+    """Seconds since the latest identical brief that was answered, charged or budget-refused within
+    cfg.dedupe_s, else None. Rows with an unreadable ts are ignored here (the budget still counts them)."""
+    if cfg.dedupe_s <= 0:
+        return None
+    ages = [now - t for r in ledger.rows()
+            if r.get("brief_sha256") == sha and _spent_or_budget_refused(r)
+            for t in (_finite(r.get("ts")),) if t is not None and now - cfg.dedupe_s <= t <= now]
+    return min(ages) if ages else None
+
+
+def _ago(age: float) -> str:
+    return "under a minute ago" if age < 60 else f"under {int(age // 60) + 1} minutes ago"
+
+
 async def handle(body: dict, cfg: Config, now: Optional[float] = None):
     """(status, payload) for one escalation request whose model is one of ALIASES. The caller has already
     checked that the principal is the owner."""
@@ -507,25 +620,29 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
     bad = validate_brief(brief, alias)
     if bad:
         return refuse(*bad)
+    # Statuses are never 408/409/429/>=500: opencode would resend those (see _safe_message).
     if not model or model not in cfg.prices:
-        return refuse(503, "unpriced", f"escalation: no price configured for {model}")
+        return refuse(424, "unpriced", f"escalation: no price configured for {model}")
     key = read_key(cfg.key_file)
     if not key:
-        return refuse(503, "no_key", "escalation: no Anthropic key configured")
+        return refuse(424, "no_key", "escalation: no Anthropic key configured")
+    age = _duplicate_age(cfg, ledger, sha, now)
+    if age is not None:
+        return refuse(400, "duplicate", f"brief: identical brief already sent {_ago(age)} -- change it or wait")
     worst = worst_cost(cfg, model, row["brief_tokens_est"], spec["max_answer"])
     token, reason = ledger.reserve(cfg, alias, worst, now)
     if token is None:
-        return refuse(429, "budget", reason)
+        return refuse(402, "budget", reason)
 
     def settle(final_row):
         """Record the call and drop its reservation together. If that fails the reservation stays held (fail
-        closed) and the caller gets a 500; the log names the alias and outcome, never the key or the brief."""
+        closed) and the caller gets a 424; the log names the alias and outcome, never the key or the brief."""
         try:
             ledger.settle(token, final_row)
         except Exception:
             log.error("escalation: ledger write failed for %s (%s); reservation held until restart",
                       alias, final_row.get("outcome"), exc_info=True)
-            return 500, error_body("ledger", "escalation: could not record the call; budget held until restart")
+            return 424, error_body("ledger", "escalation: could not record the call; budget held until restart")
         return None
 
     try:
@@ -542,7 +659,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
         # A request that provably never left (connect error) and an HTTP error status (no usage) cost nothing.
         cost = worst if err.startswith("transport") and err not in _NEVER_SENT_CLASSES else 0.0
         failed = settle(dict(row, cost_usd=round(cost, 6), outcome=f"error:{err}"))
-        return failed or (502, error_body("upstream", f"escalation: Anthropic call failed ({err})"))
+        return failed or (424, error_body("upstream", _upstream_message(err)))
     try:
         used = data.get("usage") or {}
         it, ot = int(used.get("input_tokens") or 0), int(used.get("output_tokens") or 0)
@@ -551,7 +668,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
             raise ValueError("bad usage")
     except Exception:                                    # incl. OverflowError from a huge token count
         failed = settle(dict(row, cost_usd=round(worst, 6), outcome="error:transport:bad_usage"))
-        return failed or (502, error_body("upstream", "escalation: Anthropic call failed (transport:bad_usage)"))
+        return failed or (424, error_body("upstream", _upstream_message("transport:bad_usage")))
     failed = settle(dict(row, input_tokens=it, output_tokens=ot, cost_usd=round(cost, 6), outcome="ok"))
     if failed:
         return failed
