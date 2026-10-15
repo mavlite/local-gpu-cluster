@@ -50,6 +50,7 @@ from slowapi.util import get_remote_address
 from prometheus_fastapi_instrumentator import Instrumentator
 
 import access_keys
+import escalation
 import vision_guard
 import alias_defaults
 import contextvars
@@ -1643,6 +1644,36 @@ async def _read_json_body(request: Request) -> dict:
     return body
 
 
+def _escalation_config_error():
+    return JSONResponse(escalation.error_body("config", "escalation: invalid configuration"), status_code=503)
+
+
+async def _escalate(request: Request, principal, body: dict):
+    """claude-* aliases: owner key only, answered by the escalation broker, never forwarded to llama.cpp."""
+    t0 = time.monotonic()
+    ip = request.client.host if request.client else "?"
+    model = str(body.get("model"))
+    if not principal.is_owner:
+        log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - t0) * 1000), 403, ip,
+                   error="escalation_owner_only")
+        return JSONResponse(escalation.error_body("owner_only", "escalation aliases need the owner key"),
+                            status_code=403)
+    try:
+        cfg = escalation.load_config()
+    except ValueError:
+        log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - t0) * 1000), 503, ip,
+                   error="config")
+        return _escalation_config_error()
+    status, payload = await escalation.handle(body, cfg)   # CancelledError propagates (spend already recorded)
+    usage = payload.get("usage") or {}
+    log_access("/v1/chat/completions", model, int(usage.get("prompt_tokens", -1)),
+               int(usage.get("completion_tokens", 0)), int((time.monotonic() - t0) * 1000), status, ip,
+               error=None if status == 200 else payload.get("error", {}).get("code"))
+    if status == 200 and body.get("stream"):
+        return StreamingResponse(iter([escalation.sse(payload)]), media_type="text/event-stream")
+    return JSONResponse(payload, status_code=status)
+
+
 @app.post("/v1/chat/completions")
 @limiter.limit(RATE_LIMIT_CHAT)
 async def chat(
@@ -1656,6 +1687,8 @@ async def chat(
     _last_chat_ts = time.monotonic()      # feed-forward signal for the host fan bridge
     await _ensure_slot_refresh()
     body = await _read_json_body(request)
+    if escalation.handles(body.get("model")):
+        return await _escalate(request, principal, body)
     keys_check = vision_guard.check_chat_body(body)
     if keys_check.error is not None:
         raise HTTPException(status_code=keys_check.status, detail=keys_check.error)
@@ -2311,7 +2344,7 @@ async def tavily_usage(request: Request):
 
 
 @app.get("/v1/models")
-async def models():
+async def models(request: Request):
     """Enumerate client-facing model aliases.
 
     Chat aliases come from ALIAS_MAP filtered by which backend is ACTUALLY
@@ -2365,7 +2398,20 @@ async def models():
                 data.extend(r.json().get("data", []))
             except Exception:
                 pass
+    principal = getattr(request.state, "principal", None)
+    if principal is not None and principal.is_owner:
+        data.extend(escalation.model_entries(now))
     return {"object": "list", "data": data}
+
+
+@app.get("/escalation/budget")
+async def escalation_budget(request: Request):
+    """Claude escalation spend and allowances (owner key only: require_bearer limits scoped keys to chat + models)."""
+    try:
+        cfg = escalation.load_config()
+    except ValueError:
+        return _escalation_config_error()
+    return escalation.budget_report(cfg, escalation.ledger_for(cfg.ledger_path), time.time())
 
 
 @app.get("/healthz")
