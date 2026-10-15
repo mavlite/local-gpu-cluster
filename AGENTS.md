@@ -13,6 +13,10 @@ ruff/black/mypy or change build config without asking.
   - Deps: `scripts/rag/requirements.txt` (PyYAML, requests, trafilatura). If imports fail,
     `pip install -r scripts/rag/requirements.txt` first. On the host, the RAG code runs under
     `/opt/vcf-scraper-venv`.
+  - Router suites: `pip install -r scripts/files/tests/requirements.txt` (fastapi, slowapi,
+    prometheus-fastapi-instrumentator, httpx). Without them `test_router_*.py` skip silently —
+    check the skip count, not just "passed".
+  - Claude escalation installer: `python3 -m pytest scripts/tools/escalation/tests -q`.
 - **Bash scripts:** `bash -n <file>.sh` for every edited script; also run `shellcheck <file>.sh`
   if shellcheck is available.
 - Show the **real** command output, not a summary of it. Fix failures and re-run — never weaken

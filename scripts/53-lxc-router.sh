@@ -116,6 +116,8 @@ WEB_FETCH_GUARD_SRC="$LGC_DIR/files/web_fetch_guard.py"
 [[ -r "$WEB_FETCH_GUARD_SRC" ]] || die "web_fetch_guard.py not found at $WEB_FETCH_GUARD_SRC"
 ACCESS_KEYS_SRC="$LGC_DIR/files/access_keys.py"
 [[ -r "$ACCESS_KEYS_SRC" ]] || die "access_keys.py not found at $ACCESS_KEYS_SRC"
+ESCALATION_SRC="$LGC_DIR/files/escalation.py"
+[[ -r "$ESCALATION_SRC" ]] || die "escalation.py not found at $ESCALATION_SRC"
 WORKFORCE_LANE_SRC="$LGC_DIR/files/workforce_lane.py"
 [[ -r "$WORKFORCE_LANE_SRC" ]] || die "workforce_lane.py not found at $WORKFORCE_LANE_SRC"
 VISION_GUARD_SRC="$LGC_DIR/files/vision_guard.py"
@@ -230,6 +232,10 @@ phase_7_3_deploy_app() {
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/web_fetch_guard.py
   pct push "$ROUTER_VMID" "$ACCESS_KEYS_SRC" /opt/llm-router/access_keys.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/access_keys.py
+  pct push "$ROUTER_VMID" "$ESCALATION_SRC" /opt/llm-router/escalation.py --perms 0644
+  pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/escalation.py
+  # Claude escalation ledger + optional brief audit live here (spec 2026-10-15 sec 3.1); the router user only.
+  pct exec "$ROUTER_VMID" -- install -d -o router -g router -m 0700 /var/lib/llm-router
   pct push "$ROUTER_VMID" "$WORKFORCE_LANE_SRC" /opt/llm-router/workforce_lane.py --perms 0644
   pct exec "$ROUTER_VMID" -- chown router:router /opt/llm-router/workforce_lane.py
   pct push "$ROUTER_VMID" "$VISION_GUARD_SRC" /opt/llm-router/vision_guard.py --perms 0644
@@ -323,6 +329,11 @@ except Exception:
     raise
 PY
     }
+    # Add KEY=VAL only when KEY is absent: operator-tuned escalation caps survive a re-run.
+    ensure_env() {
+      local key="$1" val="$2"
+      grep -q "^${key}=" /etc/router.env 2>/dev/null || upsert_env "$key" "$val"
+    }
     upsert_env V620_URL "$V620_URL"
     upsert_env EMBED_URL "$EMBED_URL"
     upsert_env RERANK_URL "$RERANK_URL"
@@ -344,6 +355,13 @@ PY
     upsert_env WEB_FETCH_TIMEOUT_SECONDS "$WEB_FETCH_TIMEOUT_SECONDS"
     upsert_env METRICS_ALLOWED_IPS "$METRICS_ALLOWED_IPS"
     upsert_env CORS_ALLOW_ORIGINS "$CORS_ALLOW_ORIGINS"
+    # Claude escalation broker caps (spec 2026-10-15). ESCALATION_PRICES is NOT seeded on purpose: the broker
+    # refuses (424) until the operator sets prices verified against Anthropic's current price list.
+    ensure_env ESCALATION_MONTH_CAP_USD 150
+    ensure_env ESCALATION_DAY_CAP_USD 7
+    ensure_env ESCALATION_DAILY_CALLS 15
+    ensure_env ESCALATION_AUTO_DAILY_CALLS 5
+    ensure_env ESCALATION_HARD_DAILY_CALLS 3
     chmod 600 /etc/router.env
 
     cat > /etc/systemd/system/llm-router.service <<EOF
