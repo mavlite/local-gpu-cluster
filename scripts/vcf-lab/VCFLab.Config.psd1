@@ -86,14 +86,20 @@
     # same tier: listed AFTER the workers so Minimal starts them last. Their
     # first power-on and their reservation came from 79-vm-wf-runner-image.sh
     # power-on (DRAM guard); the reservation persists in the VMX.
-    LlmWorkers = @(
-        @{ VmName = 'llmbench01'; Host = 'hyp02' }
-        @{ VmName = 'llmbench02'; Host = 'hyp01' }
-        @{ VmName = 'llmbench03'; Host = 'hyp03' }
-        @{ VmName = 'wf-runner-01'; Host = 'hyp01' }
-        @{ VmName = 'wf-runner-02'; Host = 'hyp02' }
-        @{ VmName = 'wf-runner-03'; Host = 'hyp03' }
-    )
+    #
+    # 2026-10-15: the CPU agent tier is retired (measured: no quality gain from
+    # CPU review, CPU implementers ~3x slower than the GPU alone -- see
+    # local-gpu-cluster docs/superpowers/workforce/review-catch-rate-1.json).
+    # All six VMs are powered off and kept on their local datastores; Minimal
+    # mode now starts the hosts only. To bring the tier back, restore these
+    # entries (the worker keys were rotated -- mint a new one first):
+    #   @{ VmName = 'llmbench01'; Host = 'hyp02' }
+    #   @{ VmName = 'llmbench02'; Host = 'hyp01' }
+    #   @{ VmName = 'llmbench03'; Host = 'hyp03' }
+    #   @{ VmName = 'wf-runner-01'; Host = 'hyp01' }
+    #   @{ VmName = 'wf-runner-02'; Host = 'hyp02' }
+    #   @{ VmName = 'wf-runner-03'; Host = 'hyp03' }
+    LlmWorkers = @()
 
     # VCF 9 licensing must be refreshed at least every 180 days (in connected
     # mode VCF Operations reports usage every 24 h); miss it and licenses are
