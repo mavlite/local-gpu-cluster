@@ -499,7 +499,7 @@ def test_no_retry_on_400_and_error_is_ledgered_at_zero(broker):
     assert last["outcome"] == "error:http_400" and last["cost_usd"] == 0.0
 
 
-def test_transport_failure_is_502_and_charged_the_worst_case(broker):
+def test_connect_failure_is_retried_once_and_costs_nothing(broker):
     stub, c, tmp = broker
     s = _socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -509,12 +509,21 @@ def test_transport_failure_is_502_and_charged_the_worst_case(broker):
                                    "ANTHROPIC_URL": f"http://127.0.0.1:{port}/v1/messages",
                                    "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
                                    "ESCALATION_RETRY_DELAY_S": "0", "ESCALATION_TIMEOUT_S": "5"})
-    st, o = run(ask(), dead)
-    assert st == 502 and "transport" in o["error"]["message"]
+    attempts = []
+    real_post = _httpx.AsyncClient.post
+
+    async def counting(self, *a, **k):
+        attempts.append(1)
+        return await real_post(self, *a, **k)
+
+    _httpx.AsyncClient.post = counting
+    try:
+        st, o = run(ask(), dead)
+    finally:
+        _httpx.AsyncClient.post = real_post
+    assert st == 502 and "transport:ConnectError" in o["error"]["message"] and len(attempts) == 2
     last = escalation.Ledger(c.ledger_path).rows()[-1]
-    assert last["outcome"].startswith("error:transport")
-    want = escalation.worst_cost(dead, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
-    assert abs(last["cost_usd"] - want) < 1e-6
+    assert last["outcome"] == "error:transport:ConnectError" and last["cost_usd"] == 0.0   # never sent: free
     assert escalation.ledger_for(c.ledger_path)._pending == {}
 
 
@@ -575,3 +584,212 @@ def test_sse_is_one_chunk_then_done():
 def test_model_entries_list_the_three_aliases():
     ids = [m["id"] for m in escalation.model_entries(1)]
     assert ids == ["claude-ask", "claude-auto", "claude-hard"]
+
+
+# ---------------------------------------------------------------- Task 3 fix round 1
+import httpx as _httpx  # noqa: E402,F811
+
+
+def _worst(c):
+    return escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
+
+
+def _cfg(c, stub, **env):
+    base = {"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
+            "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
+            "ESCALATION_RETRY_DELAY_S": "0", "ESCALATION_TIMEOUT_S": "5"}
+    base.update(env)
+    return escalation.load_config(base)
+
+
+def _last(c):
+    return escalation.Ledger(c.ledger_path).rows()[-1]
+
+
+def _pending(c):
+    return escalation.ledger_for(c.ledger_path)._pending
+
+
+def test_cancelled_call_is_charged_the_worst_case_and_reraises(broker):
+    stub, c, _ = broker
+    stub.delay = 3
+
+    async def go():
+        t = _asyncio.create_task(escalation.handle(ask(), c))
+        await _asyncio.sleep(0.3)
+        t.cancel()
+        await t
+
+    with pytest.raises(_asyncio.CancelledError):
+        _asyncio.run(go())
+    rows = escalation.Ledger(c.ledger_path).rows()
+    assert len(rows) == 1 and rows[0]["outcome"] == "error:cancelled"
+    assert abs(rows[0]["cost_usd"] - _worst(c)) < 1e-6 and _pending(c) == {}
+
+
+def test_read_timeout_is_not_retried_and_is_charged_the_worst_case(broker):
+    stub, c, _ = broker
+    stub.delay = 1.0
+    slow = _cfg(c, stub, ESCALATION_TIMEOUT_S="0.2")
+    st, o = run(ask(), slow)
+    assert st == 502 and "transport:" in o["error"]["message"]
+    assert len(stub.requests) == 1                                   # sent once, never again
+    last = _last(c)
+    assert last["outcome"].startswith("error:transport:") and abs(last["cost_usd"] - _worst(c)) < 1e-6
+    assert _pending(c) == {}
+
+
+def test_total_timeout_is_not_retried_and_is_charged_the_worst_case(broker):
+    stub, c, _ = broker
+    calls = []
+
+    async def hang(self, *a, **k):
+        calls.append(1)
+        await _asyncio.sleep(30)
+
+    real = _httpx.AsyncClient.post
+    _httpx.AsyncClient.post = hang
+    try:
+        st, o = run(ask(), _cfg(c, stub, ESCALATION_TIMEOUT_S="0.2"))
+    finally:
+        _httpx.AsyncClient.post = real
+    assert st == 502 and len(calls) == 1
+    last = _last(c)
+    assert last["outcome"] == "error:transport:TotalTimeout" and abs(last["cost_usd"] - _worst(c)) < 1e-6
+
+
+@pytest.mark.parametrize("raw", [b"<html>not json</html>", b"[1, 2, 3]"])
+def test_unreadable_200_is_not_retried_and_is_charged_the_worst_case(broker, raw):
+    stub, c, _ = broker
+    stub.responses = [(200, raw)]
+    st, _o = run(ask(), c)
+    assert st == 502 and len(stub.requests) == 1
+    last = _last(c)
+    assert last["outcome"] == "error:transport:bad_response" and abs(last["cost_usd"] - _worst(c)) < 1e-6
+    assert _pending(c) == {}
+
+
+@pytest.mark.parametrize("usage", [{"input_tokens": 10 ** 400, "output_tokens": 1},
+                                   {"input_tokens": -5, "output_tokens": 1},
+                                   {"input_tokens": "lots", "output_tokens": 1},
+                                   {"input_tokens": float("nan"), "output_tokens": 1},
+                                   "oops"])
+def test_bad_usage_is_charged_the_worst_case(broker, usage):
+    stub, c, _ = broker
+    stub.responses = [(200, _json.dumps({"stop_reason": "end_turn", "content": [{"type": "text", "text": "x"}],
+                                         "usage": usage}).encode())]
+    st, _o = run(ask(), c)
+    assert st == 502
+    last = _last(c)
+    assert last["outcome"] == "error:transport:bad_usage" and abs(last["cost_usd"] - _worst(c)) < 1e-6
+    assert _pending(c) == {}
+
+
+def test_content_not_a_list_still_answers_with_the_footer(broker):
+    stub, c, _ = broker
+    stub.responses = [(200, {"stop_reason": "end_turn", "content": 7, "usage": {"input_tokens": 5, "output_tokens": 1}})]
+    st, o = run(ask(), c)
+    assert st == 200 and o["choices"][0]["message"]["content"].startswith("\n\n---\nClaude")
+    stub.responses = [(200, {"stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 1},
+                             "content": [{"type": "text", "text": 5}, "str", {"type": "text", "text": "ok"}]})]
+    st, o = run(ask(), c)
+    assert st == 200 and o["choices"][0]["message"]["content"].startswith("ok\n\n---\nClaude")
+
+
+def test_footer_failure_returns_the_answer_without_footer(broker, monkeypatch, caplog):
+    stub, c, _ = broker
+
+    def boom(*a, **k):
+        raise RuntimeError("footer broke")
+
+    monkeypatch.setattr(escalation, "footer", boom)
+    caplog.set_level(_logging.WARNING)
+    st, o = run(ask(), c)
+    assert st == 200 and o["choices"][0]["message"]["content"] == "Root cause: X. Fix: Y. Verify: pytest -q"
+    assert "footer" in caplog.text and _last(c)["outcome"] == "ok"
+
+
+def test_unexpected_post_exception_is_charged_worst_and_logged_without_the_key(broker, monkeypatch, caplog):
+    stub, c, _ = broker
+
+    async def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(escalation, "_post", boom)
+    caplog.set_level(_logging.DEBUG)
+    st, _o = run(ask(), c)
+    assert st == 502
+    last = _last(c)
+    assert last["outcome"].startswith("error:transport") and abs(last["cost_usd"] - _worst(c)) < 1e-6
+    assert any(r.levelno == _logging.ERROR for r in caplog.records) and SENTINEL_KEY not in caplog.text
+    assert _pending(c) == {}
+
+
+def test_ledger_write_failure_on_the_ok_row_is_500_and_holds_the_reservation(broker, monkeypatch, caplog):
+    stub, c, _ = broker
+    real = escalation.Ledger.append
+
+    def flaky(self, row):
+        if row.get("outcome") == "ok":
+            raise OSError("disk full")
+        return real(self, row)
+
+    monkeypatch.setattr(escalation.Ledger, "append", flaky)
+    caplog.set_level(_logging.DEBUG)
+    st, o = run(ask(), c)
+    assert st == 500 and o["error"]["code"] == "ledger"
+    assert o["error"]["message"] == "escalation: could not record the call; budget held until restart"
+    assert len(_pending(c)) == 1
+    assert any(r.levelno == _logging.ERROR for r in caplog.records) and SENTINEL_KEY not in caplog.text
+    assert GOOD not in caplog.text
+
+
+def test_key_with_embedded_header_injection_is_rejected(broker, tmp_path, caplog):
+    stub, c, _ = broker
+    evil = tmp_path / "evil.key"
+    evil.write_text("sk-ant-SENTINEL\nX-Evil: 1")
+    caplog.set_level(_logging.DEBUG)
+    st, o = run(ask(), _cfg(c, stub, ANTHROPIC_API_KEY_FILE=str(evil)))
+    assert st == 503 and o["error"]["message"] == "escalation: no Anthropic key configured"
+    assert stub.requests == [] and "sk-ant-SENTINEL" not in caplog.text
+    assert escalation.read_key(str(evil)) is None
+    assert escalation.read_key(c.key_file) == SENTINEL_KEY
+
+
+def test_kept_briefs_dir_and_files_are_private_and_foreign_files_survive(broker, tmp_path):
+    stub, c, _ = broker
+    bd = tmp_path / "briefs"
+    bd.mkdir(mode=0o755)
+    os.chmod(bd, 0o755)                                              # pre-existing, too open
+    (bd / "notes.txt").write_text("mine")
+    keep = _cfg(c, stub, ESCALATION_KEEP_BRIEFS="1", ESCALATION_BRIEFS_DIR=str(bd))
+    for i in range(2):
+        assert run(ask(brief=GOOD + f"\n<!-- {i} -->"), keep, 1_800_000_000 + i)[0] == 200
+    names = sorted(os.listdir(bd))
+    assert "notes.txt" in names and len([n for n in names if n.endswith(".md")]) == 1
+    assert not [n for n in names if n.endswith(".tmp")]
+    if os.name == "posix":
+        assert _stat.S_IMODE(os.stat(bd).st_mode) == 0o700
+        md = [n for n in names if n.endswith(".md")][0]
+        assert _stat.S_IMODE(os.stat(bd / md).st_mode) == 0o600
+
+
+def test_kept_brief_overwrites_a_looser_existing_file_privately(broker, tmp_path):
+    stub, c, _ = broker
+    bd = tmp_path / "briefs"
+    keep = _cfg(c, stub, ESCALATION_KEEP_BRIEFS="3", ESCALATION_BRIEFS_DIR=str(bd))
+    sha = escalation.hashlib.sha256(GOOD.encode()).hexdigest()
+    bd.mkdir()
+    victim = bd / f"1800000000-{sha[:12]}.md"
+    victim.write_text("old")
+    os.chmod(victim, 0o644)
+    assert run(ask(), keep, 1_800_000_000)[0] == 200
+    assert victim.read_text(encoding="utf-8") == GOOD
+    if os.name == "posix":
+        assert _stat.S_IMODE(os.stat(victim).st_mode) == 0o600
+
+
+def test_completion_ids_are_unique():
+    a = escalation.completion("claude-ask", "x", 1, 1, "end_turn", 1_800_000_000)
+    b = escalation.completion("claude-ask", "x", 1, 1, "end_turn", 1_800_000_000)
+    assert a["id"] != b["id"] and a["id"].startswith("esc-")

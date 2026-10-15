@@ -43,6 +43,7 @@ SYSTEM_PROMPT = (
 )
 SYSTEM_TOKENS = 200                 # allowance for SYSTEM_PROMPT in the worst-case budget check
 ANTHROPIC_VERSION = "2023-06-01"
+_KEY_RE = re.compile(r"[\x21-\x7e]+")
 log = logging.getLogger("escalation")
 
 
@@ -389,22 +390,37 @@ def read_key(path: str) -> Optional[str]:
     try:
         with open(path, encoding="utf-8") as f:
             key = f.read().strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
-    return key or None
+    return key if _KEY_RE.fullmatch(key) else None       # visible ASCII only: nothing that can inject a header
+
+
+# Failures that prove the request never reached Anthropic, so nothing can have been billed and a retry is safe.
+_NEVER_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+_NEVER_SENT_CLASSES = tuple(f"transport:{c.__name__}" for c in _NEVER_SENT)
+
+
+async def _send(cfg: Config, payload: dict, headers: dict):
+    async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
+        return await client.post(cfg.url, json=payload, headers=headers)
 
 
 async def _post(cfg: Config, key: str, payload: dict):
-    """(200, json, None) on success, else (status, None, error_class). One retry on 429, >=500 and transport
-    errors. The key travels only in the request header; it is never put in an error, log or return value."""
+    """(200, json, None) on success, else (status, None, error_class). One retry, only when the request provably
+    never reached Anthropic (connect error/timeout, pool timeout) or Anthropic answered 429 or >=500 (error
+    responses bill nothing). Any failure after the request may have been sent is final, because a retry could be
+    billed twice. The key travels only in the request header; it is never put in an error, log or return value."""
     headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"}
     err, status = "transport", 502
     for attempt in (0, 1):
         try:
-            async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
-                r = await client.post(cfg.url, json=payload, headers=headers)
+            r = await asyncio.wait_for(_send(cfg, payload, headers), timeout=cfg.timeout_s)
+        except asyncio.TimeoutError:
+            return 502, None, "transport:TotalTimeout"
         except httpx.HTTPError as e:
             err, status = f"transport:{type(e).__name__}", 502
+            if not isinstance(e, _NEVER_SENT):
+                return status, None, err
         else:
             if r.status_code == 200:
                 try:
@@ -423,7 +439,7 @@ async def _post(cfg: Config, key: str, payload: dict):
 
 
 def completion(alias: str, text: str, input_tokens: int, output_tokens: int, stop_reason, now: float) -> dict:
-    return {"id": f"esc-{int(now * 1000)}", "object": "chat.completion", "created": int(now), "model": alias,
+    return {"id": f"esc-{uuid.uuid4().hex}", "object": "chat.completion", "created": int(now), "model": alias,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": "length" if stop_reason == "max_tokens" else "stop"}],
             "usage": {"prompt_tokens": input_tokens, "completion_tokens": output_tokens,
@@ -443,16 +459,30 @@ def model_entries(now: int) -> list:
     return [{"id": a, "object": "model", "owned_by": "anthropic-via-router", "created": now} for a in ALIASES]
 
 
+_BRIEF_NAME = re.compile(r"\d+-[0-9a-f]{12}\.md")
+
+
 def _keep_brief(cfg: Config, brief: str, sha: str, now: float) -> None:
     if cfg.keep_briefs <= 0:
         return
     os.makedirs(cfg.briefs_dir, mode=0o700, exist_ok=True)
+    os.chmod(cfg.briefs_dir, 0o700)                                  # an existing directory may be looser
     path = os.path.join(cfg.briefs_dir, f"{int(now)}-{sha[:12]}.md")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(brief)
-    for old in sorted(os.listdir(cfg.briefs_dir))[:-cfg.keep_briefs]:
-        os.remove(os.path.join(cfg.briefs_dir, old))
+    tmp = os.path.join(cfg.briefs_dir, f".{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)   # fresh file: never inherits a looser mode
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(brief)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    ours = sorted(n for n in os.listdir(cfg.briefs_dir) if _BRIEF_NAME.fullmatch(n))
+    for old in ours[:-cfg.keep_briefs]:
+        os.remove(os.path.join(cfg.briefs_dir, old))                 # foreign files are never touched
 
 
 async def handle(body: dict, cfg: Config, now: Optional[float] = None):
@@ -500,13 +530,17 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
 
     try:
         status, data, err = await _post(cfg, key, build_request(model, brief, spec["max_answer"]))
+    except asyncio.CancelledError:
+        # The client went away mid-call; Anthropic may still bill it. Charge the worst case, then let it unwind.
+        settle(dict(row, cost_usd=round(worst, 6), outcome="error:cancelled"))
+        raise
     except Exception:
         log.error("escalation: unexpected failure calling Anthropic for %s", alias, exc_info=True)
         status, data, err = 502, None, "transport:unexpected"
     if status != 200:
-        # A transport error or timeout may still have been billed: charge the worst case. An HTTP error status
-        # carries no usage, so it is charged nothing.
-        cost = worst if err.startswith("transport") else 0.0
+        # A failure after the request may have been sent can still have been billed: charge the worst case.
+        # A request that provably never left (connect error) and an HTTP error status (no usage) cost nothing.
+        cost = worst if err.startswith("transport") and err not in _NEVER_SENT_CLASSES else 0.0
         failed = settle(dict(row, cost_usd=round(cost, 6), outcome=f"error:{err}"))
         return failed or (502, error_body("upstream", f"escalation: Anthropic call failed ({err})"))
     try:
@@ -515,7 +549,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
         cost = call_cost(cfg, model, it, ot)
         if not math.isfinite(cost) or it < 0 or ot < 0:
             raise ValueError("bad usage")
-    except (TypeError, ValueError, AttributeError):
+    except Exception:                                    # incl. OverflowError from a huge token count
         failed = settle(dict(row, cost_usd=round(worst, 6), outcome="error:transport:bad_usage"))
         return failed or (502, error_body("upstream", "escalation: Anthropic call failed (transport:bad_usage)"))
     failed = settle(dict(row, input_tokens=it, output_tokens=ot, cost_usd=round(cost, 6), outcome="ok"))
@@ -525,7 +559,11 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
         _keep_brief(cfg, brief, sha, now)
     except OSError:
         log.error("escalation: could not keep the brief for %s", alias, exc_info=True)
-    text = "".join(b.get("text", "") for b in data.get("content") or []
-                   if isinstance(b, dict) and b.get("type") == "text")
-    text += footer(cfg, model, cost, ledger.usage(cfg, now))
+    blocks = data.get("content")
+    text = "".join(b["text"] for b in (blocks if isinstance(blocks, list) else [])
+                   if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
+    try:
+        text += footer(cfg, model, cost, ledger.usage(cfg, now))
+    except Exception:
+        log.warning("escalation: budget footer failed for %s; answer returned without it", alias, exc_info=True)
     return 200, completion(alias, text, it, ot, data.get("stop_reason"), now)
