@@ -1,0 +1,57 @@
+{
+  "what": "Coding engine phase 3 done-check (plan docs/superpowers/plans/2026-10-13-coding-engine-phase3-review-offload.md, Task 7): S (qwen3.8 GPU alone) vs G with CPU review lanes (GPU implements, one reviewer per CPU worker, GPU lead as fallback) in one measurement window on the Phase 1 layout.",
+  "date": "2026-10-14",
+  "harness_commit": "a4007a719f13ad063c9b01648c54bf060f06b5fd",
+  "harness_manifest_sha256": "45ae81e957fd9eca505700a083468f2b1e9e9377e9b1eac760041934c4468bd8",
+  "setup": {
+    "chat": "qwen3.8, llama.cpp b11577, 3 x 131072 slots, vision on (production Phase 1 layout); router alias qwen3.8-nothink",
+    "workers": "llmbench01-03 (172.16.10.205-207:8090), Qwen3.6-35B-A3B, config C2T10 (ik_llama.cpp, MTP off, nothink, -t 10 -tb 10), 12 vCPU each, VCF lab in Agent mode",
+    "sandbox": "VM 176, locked policy, opencode 1.18.34, python 3.13.5, wf-grader:1",
+    "router_key": "wf-p3, aliases qwen3.8-nothink, TTL 12 h, revoked after the window",
+    "worker_key": "throwaway worker key (load-test key), shredded from /root/wf/keys after the window",
+    "window": "wf-window.sh (Task 1 version) open 2026-10-14T18:10:12Z, closed after the G harvest; embed + rerank ok throughout"
+  },
+  "stamps": [
+    {"label": "before-s", "ts": "2026-10-14T18:10:16Z"},
+    {"label": "after-s", "ts": "2026-10-14T19:13:25Z"},
+    {"label": "after-gp", "ts": "2026-10-14T21:28:02Z"}
+  ],
+  "stamps_agree": {"boot_id": "f58c3be5-29fe-46e1-b48b-174c075130e8", "router_invocation": "b84fb5bb1c5142369aa2128da42ed7c7", "chat_invocation": "0ecbb2eb62c6449dbd655447c5b0f9f7", "capacity": 3, "perturbers_active": [], "all_three_identical": true},
+  "runs": {
+    "p3-s-1": {"arm": "S", "options": [], "wall_s": 3489.1, "accepted": 13, "n_tasks": 16, "outcomes": {"implemented": 16}, "valid": true,
+               "not_accepted": ["w2-01", "w2-09", "w2-16"]},
+    "p3-gp-1": {"arm": "G", "options": ["--review-pool", "--review-budget=1", "--read-first", "--defects-only"],
+                "wall_s_raw": 7642.5, "paused_s": 4435.0, "wall_s_excluding_pause": 3207.5,
+                "accepted": 12, "n_tasks": 16, "implementer_accepted": 11, "reworked_accepted": 1, "lead_fixed": 0,
+                "rework_rounds": 2, "review_capped": 3, "verdict_turns": 2,
+                "review_lanes": {"w1": 6, "w2": 3, "w3": 7, "lead": 0}, "review_infra_worker_failures": 0,
+                "time_cap_hits": 0, "outcomes": {"implementer-accepted": 14, "reworked-unreviewed": 2}, "valid": true,
+                "not_accepted": {
+                  "w2-05": "reviewer w2 REVISE (correct: the implementer edited an out-of-scope file, scripts/files/stream_admission.py, which the harness dropped, so the import broke); the rework did not fix it: 0/13",
+                  "w2-07": "reviewer w3 ACCEPT; 17/18 tests (one hidden test fails) -- reviewer miss",
+                  "w2-10": "reviewer w3 ACCEPT; 7/8 tests -- reviewer miss; this task spanned the pause (83 min) but hit no time cap",
+                  "w2-16": "reviewer w1 ACCEPT; failing -- S failed it too"
+                }}
+  },
+  "pause": {
+    "why": "user request (needed the GPU) during p3-gp-1",
+    "how": "systemctl freeze wf-run-p3-gp-1 in VM 176 at 2026-10-14T19:56:03Z, thaw at 21:09:58Z (4435 s); in-flight requests drained by 19:59:55Z",
+    "effect": "wall time corrected by subtracting the pause; no task hit a time cap and no worker failure was recorded, so the pause changed no outcome visible in the records. Two tasks (w2-08 accepted, w2-10 not) were in flight across it. The corrected wall time is weaker evidence than an uninterrupted run."
+  },
+  "criteria": {
+    "wall_ratio_gp_over_s": {"value": 0.919, "bar": "<= 1.20", "pass": true},
+    "accepted_gp_ge_accepted_s": {"value": "12 vs 13", "pass": false},
+    "accepted_gp_ge_13": {"value": 12, "pass": false},
+    "both_valid_and_stamps_agree": {"pass": true}
+  },
+  "verdict": "FAIL on acceptance (12 < 13), PASS on wall time (0.92 x S with the pause removed). The one-task gap is inside the stated run-to-run noise (about 3 tasks of 16): S and G fail different tasks (S: w2-01, w2-09, w2-16; G: w2-05, w2-07, w2-10, w2-16). The CPU review lanes worked mechanically -- 16 reviews spread over all three workers, no worker failures, no GPU lead fallback, and G was not slower than S -- but this run shows no quality gain from review: two worker ACCEPTs passed patches that fail a hidden test, and the one correct REVISE did not lead to a passing rework. Per the plan, no re-run until these numbers are read.",
+  "reports": "cli.py report written to /root/wf/runs/p3-gp-1/report and /root/wf/runs/p3-s-1/report on the Proxmox host; spot-read w2-05, w2-07, w2-10 (Result lines show the harness JUnit counts; agent text fenced as untrusted).",
+  "harvests": {
+    "p3-s-1": {"path": "/root/wf/runs/p3-s-1", "sha256": "064bd2a210a1f97c55b2cae9c5459c880d54dda512baf070aeadce5765a7e0e7"},
+    "p3-gp-1": {"path": "/root/wf/runs/p3-gp-1", "sha256": "b5e8e13cc2644498a447f3b318dda23ffd4d9e9b014ac149573e7d6b2a4869ef"}
+  },
+  "open": [
+    "opencode 1.18.34 (VM) exit code on a dead provider is still unmeasured: no worker failed in this run, so the review-infra path was not exercised live.",
+    "S itself ran 58 min here vs 49 min for lt-9-s38 (2026-10-12) at the same 13/16."
+  ]
+}

@@ -69,7 +69,7 @@ The window was written when the normal layout was 1 × 262K: `open` called `redt
 - Consumes: nothing new.
 - Produces: `bash scripts/files/wf-window.sh open|close|stamp|status` with the same CLI; env `WF_WIN_CAPACITY` (default 3). Task 7 uses it unchanged.
 
-- [ ] **Step 1: Update the fixture and expectations to the Phase 1 layout, and add the new tests**
+- [x] **Step 1: Update the fixture and expectations to the Phase 1 layout, and add the new tests**
 
 In the `world` fixture change `"capacity": 1` to `"capacity": 3`. Every assertion that the normal layout is 1 becomes 3 (`test_close_puts_back_exactly_what_open_found`, `test_open_refuses_while_redteam_mode_is_active`, `test_a_failed_open_can_still_be_closed`, `test_stamp_records_boot_and_invocation_ids`, `test_open_refuses_while_a_timer_started_job_is_running`) — this follows the spec change, it does not weaken them. Add:
 
@@ -107,12 +107,12 @@ def test_close_waits_for_the_capacity_open_found(world):
     assert state()["capacity"] == 3
 ```
 
-- [ ] **Step 2: Run the window tests to verify the new ones fail**
+- [x] **Step 2: Run the window tests to verify the new ones fail**
 
 Run: `python -m pytest scripts/files/tests/test_wf_window.py -q`
 Expected: FAIL — `open` dies with "not in the normal 1-slot layout" at capacity 3; `test_open_never_calls_the_redteam_scripts` fails on the enter call.
 
-- [ ] **Step 3: Implement the new open/close**
+- [x] **Step 3: Implement the new open/close**
 
 In `scripts/files/wf-window.sh` replace the `open` lines of the header comment with:
 
@@ -173,16 +173,16 @@ In `cmd_close` replace `wait_layout 1 any` with:
   wait_layout "${CAPACITY:-$WINDOW_CAPACITY}" any
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `python -m pytest scripts/files/tests/test_wf_window.py -q` then `bash -n scripts/files/wf-window.sh`
 Expected: all pass; syntax OK.
 
-- [ ] **Step 5: Mutation-check the refusal**
+- [x] **Step 5: Mutation-check the refusal**
 
 Matched replace of `[ "$cap" = "$WINDOW_CAPACITY" ] \` with `true \`, run the window tests (expect `test_open_refuses_a_non_production_layout_without_touching_anything` to FAIL), restore the exact original text, re-run (all pass).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/files/wf-window.sh scripts/files/tests/test_wf_window.py
@@ -201,7 +201,7 @@ git commit -m "fix(window): open against the Phase 1 3-slot production layout, n
 - Consumes: existing `_provider`, `_agent`, `REVIEWER_PROMPT`, `READ_FIRST_RULE`, `DEFECTS_ONLY_RULE`.
 - Produces: `build_config(arm, router_url, worker_urls, ..., review_pool=False)` adds, for each worker i (1-based), agents `f"reviewer-w{i}"` and `f"reviewer-verdict-w{i}"` identical to `reviewer` / `reviewer-verdict` except `model = f"w{i}/{walias}"`; `reviewer` / `reviewer-verdict` stay on the lead (the fallback lane). `keys_for(arm, lead_url=None, review_pool=False)` returns `KEY_ENV` (both keys) when `review_pool`. Task 3 uses the agent names; Task 4 calls both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test_profiles.py`:
 
@@ -243,12 +243,12 @@ def test_a_review_pool_run_gets_the_worker_key():
 
 (If `pytest` is not yet imported in `test_profiles.py`, add `import pytest` at the top.)
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_profiles.py -q`
 Expected: FAIL — `build_config() got an unexpected keyword argument 'review_pool'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Change the signature and add the checks at the top of `build_config`:
 
@@ -290,12 +290,12 @@ def keys_for(arm, lead_url=None, review_pool=False):
     return KEY_ENV if arm == "T" or lead_url or review_pool else ("WF_ROUTER_KEY",)
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_profiles.py -q`
 Expected: PASS (all, including the existing ones).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/tools/workforce/profiles.py scripts/tools/workforce/tests/test_profiles.py
@@ -315,7 +315,7 @@ git commit -m "feat(workforce): review-pool agents - one reviewer and verdict ag
 - Consumes: Task 2's agent names `reviewer-w{i}` / `reviewer-verdict-w{i}`.
 - Produces: `Pipeline(..., review_lanes=None)` where `review_lanes` is a list of `(lane, url)` like `[("w1", "http://172.16.10.205:8090/v1"), ...]` and requires `monitor`; `HealthMonitor.is_up(url) -> bool`, `HealthMonitor.mark_down(url) -> None`; each review entry carries `"lane"` (`"w1"`..`"w3"` or `"lead"`); each record carries `"review_infra": [{"lane", "rc", "t"}]`; `run.json` carries `"review_lanes": {lane: count}` and `"review_infra": int`. Task 4 constructs it; Task 6 reads the records.
 
-- [ ] **Step 1: Teach the fake about pool agents, failed and slow reviews**
+- [x] **Step 1: Teach the fake about pool agents, failed and slow reviews**
 
 In `wf_fixtures.py` `FakeOpencode.run`, replace the `role = {...}.get(agent, "impl")` line with:
 
@@ -335,7 +335,7 @@ and at the top of the `if isinstance(entry, dict):` branch for `role == "review"
 
 (Add `import time` to `wf_fixtures.py` if missing; update the class docstring: review entries may carry `"rc"` and `"sleep"`.)
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Append to `test_pipeline.py`:
 
@@ -472,12 +472,12 @@ def test_health_monitor_current_state_and_mark_down():
 
 (Add `import pytest` to `test_pipeline.py` if missing.)
 
-- [ ] **Step 3: Run them to verify they fail**
+- [x] **Step 3: Run them to verify they fail**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_pipeline.py -q`
 Expected: FAIL — `unexpected keyword argument 'review_lanes'` and `HealthMonitor has no attribute 'is_up'`.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Module constants next to `UNREACHABLE_LIMIT_S`:
 
@@ -607,19 +607,19 @@ and add to `summary`:
                    "review_infra": sum(len(r.get("review_infra", [])) for r in recs),
 ```
 
-- [ ] **Step 5: Run the pipeline tests, then the whole harness suite**
+- [x] **Step 5: Run the pipeline tests, then the whole harness suite**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_pipeline.py -q` then `python -m pytest scripts/tools/workforce/tests -q`
 Expected: PASS everywhere (existing T/G/S tests unchanged: without lanes the single "lead" lane behaves like the old `_lead_loop`).
 
-- [ ] **Step 6: Mutation-check the three guards**
+- [x] **Step 6: Mutation-check the three guards**
 
 One at a time, matched replace + run `test_pipeline.py` + restore the exact text:
 - `if lane != "lead" and r.rc != 0 and not r.timed_out:` → `if False:` (expect the mid-review failure test to FAIL);
 - `return t.force_lead or not any(` → `return not any(` (expect `test_two_worker_failures_send_the_task_to_the_gpu_lead` to FAIL);
 - `ragent = "reviewer" if lane == "lead" else f"reviewer-{lane}"` → `ragent = "reviewer"` (expect the lane-agent tests to FAIL).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add scripts/tools/workforce/pipeline.py scripts/tools/workforce/tests/wf_fixtures.py scripts/tools/workforce/tests/test_pipeline.py
@@ -638,7 +638,7 @@ git commit -m "feat(workforce): review lanes - reviews on healthy CPU workers, G
 - Consumes: Task 2 `build_config(..., review_pool=)`, `keys_for(..., review_pool=)`; Task 3 `Pipeline(..., review_lanes=)`, `HealthMonitor`.
 - Produces: `cli.py run --arm G --review-pool --worker URL [--worker URL ...] --review-budget 1 --read-first --defects-only ...`. Task 5 passes these flags from the guest.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_run_review_pool_wires_lanes_monitor_and_both_keys(tmp_path, monkeypatch):
@@ -686,12 +686,12 @@ def test_run_review_pool_is_arm_g_only(tmp_path):
     assert "arm G" in str(e.value)
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_cli.py -q -k review_pool`
 Expected: FAIL — `unrecognized arguments: --review-pool`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `build_opencode`: add `review_pool=False` to the signature, pass `review_pool=review_pool` into `profiles.build_config(...)`, and use `keys=keys or profiles.keys_for(arm, lead_url=lead_url, review_pool=review_pool)`.
 
@@ -726,12 +726,12 @@ pass `review_pool=a.review_pool` to `build_opencode(...)`, and replace the monit
                                 review_lanes=lanes).run()
 ```
 
-- [ ] **Step 4: Run the harness suite**
+- [x] **Step 4: Run the harness suite**
 
 Run: `python -m pytest scripts/tools/workforce/tests -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/tools/workforce/cli.py scripts/tools/workforce/tests/test_cli.py
@@ -753,7 +753,7 @@ The guest owns the worker list (`WORKERS`, `WORKER_PORT`), exactly as for arm T,
 - Consumes: Task 4's CLI flags.
 - Produces: `76-vm-wf-sandbox.sh start-run <id> G --review-pool [--review-budget=1 --read-first --defects-only]` and `76-vm-wf-sandbox.sh warm G --review-pool`. Task 7 runs them.
 
-- [ ] **Step 1: Write the failing tests** (in `test_wf_run_control.py`, using the module's `guest` fixture and `KEYS_T`)
+- [x] **Step 1: Write the failing tests** (in `test_wf_run_control.py`, using the module's `guest` fixture and `KEYS_T`)
 
 ```python
 def test_review_pool_is_arm_g_with_the_worker_key_and_the_guest_worker_list(guest):
@@ -775,12 +775,12 @@ def test_warm_with_review_pool_touches_the_workers_too(guest):
     assert r.stdout.count("warm ") == 4          # lead + three workers
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `python -m pytest scripts/files/tests/test_wf_run_control.py -q -k review_pool`
 Expected: FAIL — `unknown option '--review-pool'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `check_opts`: add `|| "$o" == --review-pool` to the accepted list and `--review-pool` to the error text. Add next to `has_lead_opt`:
 
@@ -842,12 +842,12 @@ and update the usage line to `warm <T|G|S> [--review-pool]`.
     ;;
 ```
 
-- [ ] **Step 4: Run the tests and syntax checks**
+- [x] **Step 4: Run the tests and syntax checks**
 
 Run: `python -m pytest scripts/files/tests/test_wf_run_control.py -q` then `bash -n scripts/files/wf-run-control.sh && bash -n scripts/76-vm-wf-sandbox.sh`
 Expected: PASS; syntax OK.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/files/wf-run-control.sh scripts/76-vm-wf-sandbox.sh scripts/files/tests/test_wf_run_control.py
@@ -867,7 +867,7 @@ git commit -m "feat(sandbox): --review-pool through start-run and warm, worker k
 - Consumes: `<run>/run.json`, `<run>/tasks/<id>/record.json` (fields from Task 3: `reviews[].lane`, `reviews[].verdict`, `reviews[].feedback`, `review_infra`; existing: `outcome`, `accepted`, `grade`, `rework_rounds`, `dropped`, `t_start`, `t_end`), `<run>/patches/<id>.patch`.
 - Produces: `report.write(run_dir, out_dir) -> list[str]` (paths written: one `<id>.md` per task + `index.md`); `cli.py report --run DIR --out DIR`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 """Per-ticket report: one page a human or Claude reads to decide on a background task's branch (spec §3.3 B)."""
@@ -930,12 +930,12 @@ def test_feedback_cannot_break_out_of_its_block(tmp_path):
     assert "\n# Injected heading" not in d                                     # quoted, not rendered
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `python -m pytest scripts/tools/workforce/tests/test_report.py -q`
 Expected: FAIL — `No module named 'report'`.
 
-- [ ] **Step 3: Implement `report.py`**
+- [x] **Step 3: Implement `report.py`**
 
 ```python
 """report.py -- one page per background task (coding engine spec §3.3 B: "results land as branches plus a
@@ -1015,12 +1015,12 @@ In `cli.py`: `import report` with the other harness imports; add a subparser
 
 and in `main`'s dispatch: `elif a.cmd == "report": out = {"written": report.write(a.run, a.out)}` (match how the other subcommands return `out`).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `python -m pytest scripts/tools/workforce/tests -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/tools/workforce/report.py scripts/tools/workforce/cli.py scripts/tools/workforce/tests/test_report.py
@@ -1033,15 +1033,15 @@ git commit -m "feat(workforce): per-ticket report - one page per task plus an in
 
 Runs on the Proxmox host, in VCF lab **Minimal/Agent mode** (after the 2026-10-14 soak exit), never during a user session. Every step has its own rollback; nothing here edits production config.
 
-- [ ] **Step 1: Preconditions** — `pct exec 151 -- systemctl is-active llamacpp-chat`; router `/healthz` shows `capacity 3`, chat/embed/rerank ok; the three workers answer `/v1/models` with the worker key (stdin, never argv); `qm status 176` stopped or running with the locked policy (`75-vm-wf-sandbox-firewall.sh locked`).
-- [ ] **Step 2: Harness checkout** — `git -C /root/local-gpu-cluster fetch origin && git -C /root/local-gpu-cluster worktree add --detach /root/wf/lgc-p3 origin/main` (after this branch is merged; never deploy from the host's own checkout, it lags main); from `/root/wf/lgc-p3`: `bash scripts/76-vm-wf-sandbox.sh push-control && bash scripts/76-vm-wf-sandbox.sh push-harness` so VM 176 runs this harness and run-control; record `git -C /root/wf/lgc-p3 rev-parse HEAD` in the results.
-- [ ] **Step 3: Keys** — mint a scoped router key with the router-keys runbook (`pct exec 153 -- /opt/llm-router/router-keys add --out ...`; full path under `pct exec`), `pct pull` it to `/root/wf/keys/router.key` (0600); write the worker key from the workstation over stdin to `/root/wf/keys/worker.key` (0600). Never print either.
-- [ ] **Step 4: Window** — `bash scripts/files/wf-window.sh open` (Task 1 version), `stamp /root/wf/p3-stamps.jsonl before-s`.
-- [ ] **Step 5: S re-measure** — `76 warm S`, then the lead-trial driver for `p3-s-1 S` (as `wf-lead-trial3.sh`, LGC_CHECKOUT=/root/wf/lgc-p3); harvest; `stamp after-s`.
-- [ ] **Step 6: G-pool** — `76 warm G --review-pool`, then `p3-gp-1 G --review-pool --review-budget=1 --read-first --defects-only`; harvest; `stamp after-gp`.
-- [ ] **Step 7: Close** — `wf-window.sh close`; `76 ... clear-keys` in the guest; shred `/root/wf/keys/*.key`; revoke the scoped router key.
-- [ ] **Step 8: Decide and record** — compute from the two `run.json` files: `wall_gp / wall_s` (pass if ≤ 1.20), `accepted_gp >= accepted_s` and `>= 13` (the S mean); both runs valid, stamps agree (same boot/router/chat invocation). Write `docs/superpowers/workforce/phase3-review-offload.json` with the two summaries, harness commit, review-lane counts, worker failures, and the verdict; generate `cli.py report --run <gp run> --out <run>/report` and spot-read three pages. If wall time fails by > 20%, the record says so — no re-runs until the numbers are read (16 tasks: run-to-run noise ≈ 3 tasks).
-- [ ] **Step 9: Commit**
+- [x] **Step 1: Preconditions** — `pct exec 151 -- systemctl is-active llamacpp-chat`; router `/healthz` shows `capacity 3`, chat/embed/rerank ok; the three workers answer `/v1/models` with the worker key (stdin, never argv); `qm status 176` stopped or running with the locked policy (`75-vm-wf-sandbox-firewall.sh locked`).
+- [x] **Step 2: Harness checkout** — `git -C /root/local-gpu-cluster fetch origin && git -C /root/local-gpu-cluster worktree add --detach /root/wf/lgc-p3 origin/main` (after this branch is merged; never deploy from the host's own checkout, it lags main); from `/root/wf/lgc-p3`: `bash scripts/76-vm-wf-sandbox.sh push-control && bash scripts/76-vm-wf-sandbox.sh push-harness` so VM 176 runs this harness and run-control; record `git -C /root/wf/lgc-p3 rev-parse HEAD` in the results.
+- [x] **Step 3: Keys** — mint a scoped router key with the router-keys runbook (`pct exec 153 -- /opt/llm-router/router-keys add --out ...`; full path under `pct exec`), `pct pull` it to `/root/wf/keys/router.key` (0600); write the worker key from the workstation over stdin to `/root/wf/keys/worker.key` (0600). Never print either.
+- [x] **Step 4: Window** — `bash scripts/files/wf-window.sh open` (Task 1 version), `stamp /root/wf/p3-stamps.jsonl before-s`.
+- [x] **Step 5: S re-measure** — `76 warm S`, then the lead-trial driver for `p3-s-1 S` (as `wf-lead-trial3.sh`, LGC_CHECKOUT=/root/wf/lgc-p3); harvest; `stamp after-s`.
+- [x] **Step 6: G-pool** — `76 warm G --review-pool`, then `p3-gp-1 G --review-pool --review-budget=1 --read-first --defects-only`; harvest; `stamp after-gp`.
+- [x] **Step 7: Close** — `wf-window.sh close`; `76 ... clear-keys` in the guest; shred `/root/wf/keys/*.key`; revoke the scoped router key.
+- [x] **Step 8: Decide and record** — compute from the two `run.json` files: `wall_gp / wall_s` (pass if ≤ 1.20), `accepted_gp >= accepted_s` and `>= 13` (the S mean); both runs valid, stamps agree (same boot/router/chat invocation). Write `docs/superpowers/workforce/phase3-review-offload.json` with the two summaries, harness commit, review-lane counts, worker failures, and the verdict; generate `cli.py report --run <gp run> --out <run>/report` and spot-read three pages. If wall time fails by > 20%, the record says so — no re-runs until the numbers are read (16 tasks: run-to-run noise ≈ 3 tasks).
+- [x] **Step 9: Commit**
 
 ```bash
 git add docs/superpowers/workforce/phase3-review-offload.json docs/superpowers/plans/2026-10-13-coding-engine-phase3-review-offload.md
