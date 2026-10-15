@@ -67,6 +67,7 @@ and run the verification it names. The answer ends with a budget footer; mention
 
 ## When the broker refuses
 
-422/413: fix the brief (missing section / too large) and resend; that costs nothing. 429 (budget or daily calls):
+422/413: fix the brief (missing section / too large) and resend; that costs nothing. 400 duplicate: the same
+brief was already sent moments ago -- never resend it unchanged; change it or wait. 402 (budget or daily calls):
 stop escalating. Continue without Claude where you can, otherwise tell the user you are stuck, what you tried,
 and that the escalation budget is used for now.

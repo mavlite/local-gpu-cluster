@@ -20,7 +20,7 @@ def test_merge_adds_models_agents_commands_without_mutating_input():
     assert BASE == before
     models = out["provider"]["router"]["models"]
     for alias, cap in (("claude-ask", 2048), ("claude-auto", 2048), ("claude-hard", 4096)):
-        assert models[alias]["tools"] is False and models[alias]["limit"] == {"context": 16384, "output": cap}
+        assert models[alias]["tool_call"] is False and models[alias]["limit"] == {"context": 16384, "output": cap}
     assert models["qwen3.8-think"] == {"name": "q"}
     agents = out["agent"]
     assert agents["claude"]["model"] == "router/claude-ask" and agents["claude"]["mode"] == "subagent"
@@ -180,3 +180,110 @@ def test_budget_opener_does_not_follow_redirects():
     handler = claude_budget.NoRedirect()
     req = urllib.request.Request("http://h/x")
     assert handler.redirect_request(req, None, 302, "Found", {}, "http://evil/") is None
+
+
+# ---- final review fix wave ----
+REP = {"month": {"spent_usd": 1, "cap_usd": 2}, "day": {"spent_usd": 1, "cap_usd": 2},
+       "calls_left": {"claude-ask": 1, "claude-auto": 1, "claude-hard": 1},
+       "resets": {"day": "d", "month": "m"}, "recent": []}
+
+
+def test_router_models_use_tool_call_false_which_opencode_reads():
+    models = inst.merge_config(BASE)["provider"]["router"]["models"]
+    for alias in ("claude-ask", "claude-auto", "claude-hard"):
+        assert models[alias]["tool_call"] is False and "tools" not in models[alias]
+
+
+def _oc_home(tmp_path, monkeypatch):
+    oc = tmp_path / ".config" / "opencode"
+    oc.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    return oc
+
+
+def _capture(monkeypatch):
+    seen = []
+
+    def fake(req):
+        seen.append((req.full_url, req.get_header("Authorization")))
+        return io.BytesIO(json.dumps(REP).encode())
+    monkeypatch.setattr(claude_budget, "_open", fake)
+    return seen
+
+
+def _router_cfg(api_key, base="http://h:8000/v1"):
+    return {"provider": {"router": {"options": {"baseURL": base, "apiKey": api_key}}}}
+
+
+def test_budget_falls_back_to_opencode_json(tmp_path, monkeypatch, capsys):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (oc / "opencode.json").write_text(json.dumps(_router_cfg("JSONKEY")), encoding="utf-8")
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 0
+    assert seen == [("http://h:8000/escalation/budget", "Bearer JSONKEY")]
+    assert "JSONKEY" not in capsys.readouterr().out
+
+
+def test_budget_config_json_wins_over_opencode_json(tmp_path, monkeypatch):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (oc / "config.json").write_text(json.dumps(_router_cfg("FIRST")), encoding="utf-8")
+    (oc / "opencode.json").write_text(json.dumps(_router_cfg("SECOND")), encoding="utf-8")
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 0 and seen[0][1] == "Bearer FIRST"
+
+
+def test_budget_reads_opencode_jsonc_with_comments(tmp_path, monkeypatch, capsys):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (oc / "opencode.jsonc").write_text(
+        '// opencode config\n{\n  /* the router */\n  "provider": {"router": {"options": {\n'
+        '    "baseURL": "http://h:8000/v1", // a URL keeps its //\n'
+        '    "apiKey": "JSONCKEY" /* inline */,\n  }}}\n}\n', encoding="utf-8")
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 0
+    assert seen == [("http://h:8000/escalation/budget", "Bearer JSONCKEY")]
+    assert "JSONCKEY" not in capsys.readouterr().out
+
+
+def test_budget_resolves_env_api_key(tmp_path, monkeypatch, capsys):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (oc / "config.json").write_text(json.dumps(_router_cfg("{env:ROUTER_OWNER_KEY}")), encoding="utf-8")
+    monkeypatch.setenv("ROUTER_OWNER_KEY", "ENVSECRET")
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 0 and seen[0][1] == "Bearer ENVSECRET"
+    cap = capsys.readouterr()
+    assert "ENVSECRET" not in cap.out + cap.err
+
+
+def test_budget_missing_env_api_key_fails_without_sending(tmp_path, monkeypatch, capsys):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (oc / "config.json").write_text(json.dumps(_router_cfg("{env:NOT_SET_ANYWHERE_XYZ}")), encoding="utf-8")
+    monkeypatch.delenv("NOT_SET_ANYWHERE_XYZ", raising=False)
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 1 and seen == []
+
+
+def test_budget_resolves_file_api_key_with_tilde(tmp_path, monkeypatch, capsys):
+    oc = _oc_home(tmp_path, monkeypatch)
+    (tmp_path / "router.key").write_text("FILESECRET\n", encoding="utf-8")
+    (oc / "config.json").write_text(json.dumps(_router_cfg("{file:~/router.key}")), encoding="utf-8")
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 0 and seen[0][1] == "Bearer FILESECRET"
+    cap = capsys.readouterr()
+    assert "FILESECRET" not in cap.out + cap.err
+
+
+def test_budget_no_config_at_all_returns_1(tmp_path, monkeypatch, capsys):
+    _oc_home(tmp_path, monkeypatch)
+    seen = _capture(monkeypatch)
+    assert claude_budget.main() == 1 and seen == []
+
+
+def test_skill_md_has_lf_line_endings():
+    raw = open(os.path.join(inst.HERE, "skill", "SKILL.md"), "rb").read()
+    assert b"\r\n" not in raw and raw.endswith(b"\n")
+
+
+def test_skill_md_names_the_broker_statuses():
+    skill = open(os.path.join(inst.HERE, "skill", "SKILL.md"), encoding="utf-8").read()
+    assert "402" in skill and "429" not in skill and "duplicate" in skill

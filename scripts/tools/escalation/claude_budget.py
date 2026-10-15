@@ -1,9 +1,18 @@
 """claude_budget.py -- print the Claude escalation budget from the router (GET /escalation/budget). Reads the
-router URL and owner key from the opencode config; the key is sent only in the request header and never printed."""
+router URL and owner key from the opencode config (config.json, opencode.json or opencode.jsonc under
+~/.config/opencode, first found wins; apiKey may be "{env:NAME}" or "{file:PATH}"). The key is sent only in the
+request header and never printed."""
 import json
 import os
+import re
 import sys
 import urllib.request
+
+CONFIG_NAMES = ("config.json", "opencode.json", "opencode.jsonc")
+# A JSON string (kept as is), a // line comment or a /* */ block comment (dropped).
+_JSONC_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+_TRAILING_COMMA = re.compile(r'"(?:\\.|[^"\\])*"|,(\s*[}\]])', re.DOTALL)
+_REF = re.compile(r"\{(env|file):([^}]+)\}")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -30,17 +39,47 @@ def format_report(rep: dict) -> str:
     return "\n".join(lines)
 
 
+def strip_jsonc(text: str) -> str:
+    """JSONC -> JSON: drop // and /* */ comments and trailing commas, never touching string contents."""
+    text = _JSONC_TOKEN.sub(lambda m: m.group(0) if m.group(0).startswith('"') else "", text)
+    return _TRAILING_COMMA.sub(lambda m: m.group(1) if m.group(1) is not None else m.group(0), text)
+
+
+def load_opencode_config(home: str) -> dict:
+    oc = os.path.join(home, ".config", "opencode")
+    for name in CONFIG_NAMES:
+        path = os.path.join(oc, name)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            return json.loads(strip_jsonc(text) if name.endswith(".jsonc") else text)
+    raise FileNotFoundError("no opencode config")
+
+
+def resolve_secret(value: str) -> str:
+    """opencode's variable forms: "{env:NAME}" -> os.environ[NAME], "{file:PATH}" -> the file's stripped text
+    (~ expanded). Raises KeyError/OSError when the source is missing; the caller prints only the class name."""
+    m = _REF.fullmatch(value.strip())
+    if m is None:
+        return value
+    kind, ref = m.group(1), m.group(2).strip()
+    if kind == "env":
+        return os.environ[ref]
+    with open(os.path.expanduser(ref), encoding="utf-8") as f:
+        return f.read().strip()
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    path = os.path.join(os.path.expanduser("~"), ".config", "opencode", "config.json")
     try:
-        with open(path, encoding="utf-8") as f:
-            opts = json.load(f)["provider"]["router"]["options"]
+        opts = load_opencode_config(os.path.expanduser("~"))["provider"]["router"]["options"]
         base = opts["baseURL"].rstrip("/")
         base = (base[:-3] if base.endswith("/v1") else base).rstrip("/")
-        req = urllib.request.Request(f"{base}/escalation/budget",
-                                     headers={"Authorization": f"Bearer {opts['apiKey']}"})
+        key = resolve_secret(opts["apiKey"])
+        if not key:
+            raise ValueError("empty key")
+        req = urllib.request.Request(f"{base}/escalation/budget", headers={"Authorization": f"Bearer {key}"})
         with _open(req) as r:
             print(format_report(json.load(r)))
     except Exception as e:                                   # class name only: never echo headers or values

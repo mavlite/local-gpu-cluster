@@ -42,7 +42,8 @@ def merge_config(cfg: dict) -> dict:
     out = copy.deepcopy(cfg)
     models = out.setdefault("provider", {}).setdefault("router", {}).setdefault("models", {})
     for alias, cap in (("claude-ask", 2048), ("claude-auto", 2048), ("claude-hard", 4096)):
-        models[alias] = {"name": f"Claude via escalation broker ({alias})", "tools": False,
+        # "tool_call" is the field opencode 1.18.35 reads on a provider model; "tools" there is ignored.
+        models[alias] = {"name": f"Claude via escalation broker ({alias})", "tool_call": False,
                          "limit": {"context": 16384, "output": cap}}
     agents = out.setdefault("agent", {})
     for name, alias, desc in (("claude", "claude-ask", "Claude Sonnet (user-asked); send a brief from the escalate skill"),
