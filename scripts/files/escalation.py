@@ -14,6 +14,7 @@ The Anthropic key is read from a file at each use and never logged."""
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -57,18 +58,41 @@ class Config:
     retry_delay_s: float
 
 
+def _money(name: str, raw) -> float:
+    """A cap or price: a finite number >= 0. Anything else fails loudly at startup, never at spend time."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"escalation config: {name} must be a finite number >= 0")
+    if not math.isfinite(v) or v < 0:
+        raise ValueError(f"escalation config: {name} must be a finite number >= 0")
+    return v
+
+
+def _count(name: str, raw) -> int:
+    """A daily call count: an integer >= 0."""
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"escalation config: {name} must be an integer >= 0")
+    if v < 0:
+        raise ValueError(f"escalation config: {name} must be an integer >= 0")
+    return v
+
+
 def load_config(env=None) -> Config:
     env = os.environ if env is None else env
     prices = json.loads(env.get("ESCALATION_PRICES", "{}") or "{}")
     return Config(
         models=json.loads(env.get("ESCALATION_MODELS", "") or
                           '{"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}'),
-        prices={m: (float(p[0]), float(p[1])) for m, p in prices.items()},
-        month_cap=float(env.get("ESCALATION_MONTH_CAP_USD", "150")),
-        day_cap=float(env.get("ESCALATION_DAY_CAP_USD", "7")),
-        shared_daily_calls=int(env.get("ESCALATION_DAILY_CALLS", "15")),
-        auto_daily_calls=int(env.get("ESCALATION_AUTO_DAILY_CALLS", "5")),
-        hard_daily_calls=int(env.get("ESCALATION_HARD_DAILY_CALLS", "3")),
+        prices={m: (_money(f"ESCALATION_PRICES[{m}] input", p[0]), _money(f"ESCALATION_PRICES[{m}] output", p[1]))
+                for m, p in prices.items()},
+        month_cap=_money("ESCALATION_MONTH_CAP_USD", env.get("ESCALATION_MONTH_CAP_USD", "150")),
+        day_cap=_money("ESCALATION_DAY_CAP_USD", env.get("ESCALATION_DAY_CAP_USD", "7")),
+        shared_daily_calls=_count("ESCALATION_DAILY_CALLS", env.get("ESCALATION_DAILY_CALLS", "15")),
+        auto_daily_calls=_count("ESCALATION_AUTO_DAILY_CALLS", env.get("ESCALATION_AUTO_DAILY_CALLS", "5")),
+        hard_daily_calls=_count("ESCALATION_HARD_DAILY_CALLS", env.get("ESCALATION_HARD_DAILY_CALLS", "3")),
         tz=env.get("ESCALATION_TZ", ""),
         ledger_path=env.get("ESCALATION_LEDGER", "/var/lib/llm-router/escalation-ledger.jsonl"),
         key_file=env.get("ANTHROPIC_API_KEY_FILE", "/etc/router-anthropic.key"),
@@ -85,8 +109,9 @@ def error_body(code: str, message: str) -> dict:
 
 
 def estimate_tokens(text: str) -> int:
-    """Deliberate over-estimate (3 bytes per token) so a brief that passes the cap fits the real limit."""
-    return math.ceil(len(text.encode("utf-8")) / 3)
+    """An approximation, not a guarantee: UTF-8 bytes / 3, rounded up. It over-counts ordinary text, but it is not
+    a true tokenizer. Lone surrogates encode as a replacement character instead of raising."""
+    return math.ceil(len(text.encode("utf-8", errors="replace")) / 3)
 
 
 def brief_text(body) -> Optional[str]:
@@ -100,20 +125,35 @@ def brief_text(body) -> Optional[str]:
             if isinstance(c, str):
                 return c
             if isinstance(c, list):
-                return "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                return "\n".join(p["text"] for p in c
+                                 if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str))
             return None
     return None
 
 
+_HEADINGS = {f"## {name}" for name in SECTIONS}
+_NA_EDGE = " \t\r\n*_`-()>"
+_NA_RE = re.compile(r"^n/a(:|$)", re.IGNORECASE)
+
+
 def parse_sections(text: str) -> dict:
-    out, cur = {}, None
+    """A heading is a line that is exactly "## <name>" for a known section, outside a ``` fence. Every other line,
+    including unknown "## x" lines and anything inside a fence, belongs to the current section's body."""
+    out, cur, in_fence = {}, None, False
     for line in text.splitlines():
-        if line.startswith("## "):
-            cur = line[3:].strip()
+        if not in_fence and line.rstrip() in _HEADINGS:
+            cur = line.strip()[3:]
             out.setdefault(cur, [])
-        elif cur is not None:
+            continue
+        if cur is not None:
             out[cur].append(line)
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
     return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def _is_na(content: str) -> bool:
+    return _NA_RE.match(content.strip(_NA_EDGE)) is not None
 
 
 def validate_brief(text: str, alias: str):
@@ -122,7 +162,7 @@ def validate_brief(text: str, alias: str):
     secs = parse_sections(text)
     for name in SECTIONS:
         content = secs.get(name, "")
-        if not content or (name in NEVER_NA and content.lower().startswith("n/a")):
+        if not content or (name in NEVER_NA and _is_na(content)):
             return 422, "brief_section", f"brief: missing or empty section {name}"
     cap = ALIASES[alias]["max_brief"]
     n = estimate_tokens(text)
