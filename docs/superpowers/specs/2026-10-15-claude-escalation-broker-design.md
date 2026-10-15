@@ -62,7 +62,8 @@ The broker is a new module beside `tavily_cache.py` and `web_fetch_guard.py`, fo
 The upstream request is then exactly: the broker's fixed system prompt, plus the brief as the single user message, plus the alias's `max_tokens`.
 
 **Brief validation**, before any spend:
-- The final user message must contain the headings `## Goal`, `## Exact error` and `## Question`; `## Context`, `## What was tried` and `## Code` are optional. If one is missing, the call gets 422 `brief: missing section <name>`.
+- The final user message must contain all seven headings of the §4 template (`## Goal`, `## Context`, `## Reproduce`, `## Exact error`, `## Code`, `## What was tried`, `## Question`), each with content. A section may be `n/a: <reason>`, but `## Goal`, `## Exact error` and `## Question` may not. Otherwise the call gets 422 `brief: missing or empty section <name>`.
+- This is a structural guard only. Sufficiency is the job of the local checklist in §4, which the broker cannot judge.
 - The brief size is estimated as `ceil(len(utf8_bytes)/3)` tokens, a deliberate over-estimate. Over the alias limit, the call gets 413 `brief: <n> tokens over the <limit> limit -- trim it`, and nothing is sent.
 
 **Budget check**, before any spend:
@@ -110,7 +111,9 @@ It is open to the owner key and to `METRICS_ALLOWED_IPS`, the same rule the dash
 
 **Fixed system prompt** (on the broker, not editable by the client):
 
-> You are a senior engineer helping a local coding model that is stuck. Answer the Question using only the brief. Be concise: diagnosis in a few sentences, then the minimal fix as a diff or a short snippet. If the brief lacks information you need, say exactly what is missing and stop — do not guess.
+> You are a senior engineer helping a local coding model that is stuck. Answer the Question using only the brief. Be concise: diagnosis in a few sentences, then the minimal fix as a diff or a short snippet, plus how to verify it (the command or test to run). If the brief lacks information you need, say exactly what is missing and stop — do not guess.
+
+The answer is short, but the brief carries full context (§4). Spend goes where it buys the fix: on a complete brief, not on a long answer.
 
 ### 3.2 opencode (workstation `~/.config/opencode/config.json`)
 
@@ -124,12 +127,12 @@ The config is backed up before editing (`config.json.bak-<date>-escalation`).
   - `claude-hard`: subagent, model `router/claude-hard`, set up the same way.
   - `claude-auto`: subagent, model `router/claude-auto`, set up the same way.
 - **Command `/ask-claude [hard] [note]`:**
-  1. qwen3.8 writes the brief from the current session using the template in §4, including the user's note.
+  1. qwen3.8 writes the brief from the current session using the template in §4, including the user's note, and runs the sufficiency check.
   2. It shows the brief and its estimated size.
   3. It sends the brief through the `claude` subagent, or `claude-hard` with `hard`.
   4. It applies or explains the answer.
 - **Command `/claude-budget`:** prints `GET /escalation/budget` in readable form, using opencode's command shell-injection. If 1.18.x does not support injection, the command tells the model to run one `curl` through bash. This costs no Claude tokens.
-- **Skill `escalate`** (in `~/.config/opencode/skills/escalate/`): the brief template, the size discipline, the auto-escalation rules in §4, and how to apply an answer.
+- **Skill `escalate`** (in `~/.config/opencode/skills/escalate/`): the brief template, the sufficiency check, the size discipline, the auto-escalation rules in §4, and how to apply an answer.
 - **RULES.md** gets two lines pointing at the skill and at the "carry on or tell the user" fallback when the broker refuses.
 - **Removing the direct path:** the `anthropic` entry is removed from opencode's `auth.json`, after a backup, once the key is on the router. This leaves no path to Claude that bypasses the broker.
 
@@ -139,20 +142,40 @@ A budget panel (month-to-date, today, calls left, last 10 calls) reads `GET /esc
 
 ## 4. Behaviour rules (the `escalate` skill)
 
-**Brief template:**
+**The principle (user requirement, 2026-10-15): a brief must be sufficient before it is small.**
+- An escalation succeeds only if Claude can get us past the blocker from the brief alone. A cheap brief that leaves Claude guessing is the most expensive outcome: it wastes the call and a follow-up.
+- The size caps are a ceiling, not a target. The Sonnet cap of 8K tokens is roughly 600 lines, which is room for everything below.
+- Brevity comes from leaving out *irrelevant* material (unrelated files, passing tests, chat history), never from cutting relevant context.
+
+**Brief template.** Every section is required. A section that truly does not apply says `n/a: <why>`.
 
 ```
-## Goal            1-3 sentences
-## Context         repo / language / framework / versions that matter
-## What was tried  bullets "attempt -> result", at most 5
-## Exact error     verbatim, trimmed to the relevant lines
-## Code            only the relevant excerpts, each headed path:line-range
-## Question        one specific question
+## Goal            1-3 sentences: what we are trying to achieve and why
+## Context         repo purpose in one line; language, framework and the versions that matter;
+                   OS/runtime; any constraint on the fix (can't change API X, must stay on lib Y)
+## Reproduce       the exact command(s) that show the problem; expected vs actual behaviour
+## Exact error     verbatim: the full relevant traceback / compiler / test output
+                   (first cause through to the failing line, not just the last line)
+## Code            every excerpt needed to reason about the failure, each headed path:line-range:
+                   the failing function, its callers/callees on the failing path, the relevant
+                   types/config, and the test that fails
+## What was tried  bullets "attempt -> what happened", including hypotheses ruled out and why
+## Question        one specific question, and what a useful answer looks like
+                   (e.g. "the root cause and a minimal diff")
 ```
+
+**Sufficiency check before sending.** qwen3.8 runs this checklist and fixes every "no":
+1. Could a senior engineer who has never seen this repo reproduce or reason about the problem from this brief alone?
+2. Is the full causal chain of the error present: the code on the failing path, not just the line that throws?
+3. Are versions and constraints stated wherever the fix could depend on them?
+4. Is every attempted fix listed with its result, so Claude won't suggest it again?
+5. Is the question answerable, and does it say what form of answer we need?
+
+For `/ask-claude`, the brief and its checklist answers are shown to the user before sending. The user can add context or say "send". For auto-escalation, the checklist must pass. A brief the model can't make sufficient within the cap means it should ask the user rather than send a weak brief.
 
 **Discipline:**
-- Never paste a whole file, a whole log or the transcript.
-- Excerpts are at most about 60 lines each, and as few as possible.
+- Never paste the transcript or unrelated files. Whole files are allowed only when the file is short and wholly relevant.
+- Prefer the code on the failing path over code merely nearby.
 - Keep secrets out of the brief. Redact anything that looks like a key or password, which the broker cannot do reliably.
 
 **Auto-escalation** is allowed only when one of these holds:
