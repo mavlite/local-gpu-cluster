@@ -9,14 +9,18 @@ Claude is reached ONLY through the subagents `claude` (Sonnet, user-asked), `cla
 `claude-auto` (Sonnet, your own decision). Every call costs real money from a capped budget. The broker on the
 router enforces the caps; never try to work around a refusal.
 
+You may call `claude-auto` on your own, under the rules below. NEVER call `claude` or `claude-hard` unless the
+user invoked /ask-claude or explicitly asked you to ask Claude in this turn.
+
 ## The brief: sufficient first, small second
 
 Claude sees ONLY the brief: no repo, no transcript, no tools. A brief that leaves Claude guessing wastes the call.
 Leave out irrelevant material, never relevant context. The cap is ~8K tokens for Sonnet, ~16K for Opus.
 
-Use exactly these headings. All are required; a section that truly does not apply says `n/a: <why>`. Goal, Exact
-error and Question can never be n/a.
+Use exactly these headings, copied from the template below. All are required; a section that truly does not
+apply says `n/a: <why>`. Goal, Exact error and Question can never be n/a.
 
+```
 ## Goal
 1-3 sentences: what we are trying to achieve and why.
 ## Context
@@ -32,6 +36,7 @@ callers/callees on the failing path, the relevant types/config, and the failing 
 Bullets "attempt -> what happened", including hypotheses ruled out and why.
 ## Question
 One specific question, and what a useful answer looks like (e.g. "root cause and a minimal diff").
+```
 
 Never paste the transcript or unrelated files. A whole file only when it is short and wholly relevant. Redact
 anything that looks like a key, token or password.

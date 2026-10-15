@@ -6,6 +6,17 @@ import sys
 import urllib.request
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the Authorization header must go only to the configured router."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open(req):
+    return urllib.request.build_opener(NoRedirect).open(req, timeout=10)
+
+
 def format_report(rep: dict) -> str:
     m, d, left = rep["month"], rep["day"], rep["calls_left"]
     lines = [f"Claude escalation: ${m['spent_usd']:.2f} of ${m['cap_usd']:.2f} this month "
@@ -20,15 +31,17 @@ def format_report(rep: dict) -> str:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     path = os.path.join(os.path.expanduser("~"), ".config", "opencode", "config.json")
     try:
         with open(path, encoding="utf-8") as f:
             opts = json.load(f)["provider"]["router"]["options"]
         base = opts["baseURL"].rstrip("/")
-        base = base[:-3] if base.endswith("/v1") else base
+        base = (base[:-3] if base.endswith("/v1") else base).rstrip("/")
         req = urllib.request.Request(f"{base}/escalation/budget",
                                      headers={"Authorization": f"Bearer {opts['apiKey']}"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with _open(req) as r:
             print(format_report(json.load(r)))
     except Exception as e:                                   # class name only: never echo headers or values
         print(f"claude-budget: could not read the budget ({type(e).__name__})", file=sys.stderr)
