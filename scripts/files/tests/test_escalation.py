@@ -629,8 +629,8 @@ def test_cancelled_call_is_charged_the_worst_case_and_reraises(broker):
 
 def test_read_timeout_is_not_retried_and_is_charged_the_worst_case(broker):
     stub, c, _ = broker
-    stub.delay = 1.0
-    slow = _cfg(c, stub, ESCALATION_TIMEOUT_S="0.2")
+    stub.delay = 3.0                                                 # read clearly times out; 1.0 s leaves connect headroom
+    slow = _cfg(c, stub, ESCALATION_TIMEOUT_S="1.0")
     st, o = run(ask(), slow)
     assert st == 502 and "transport:" in o["error"]["message"]
     assert len(stub.requests) == 1                                   # sent once, never again
