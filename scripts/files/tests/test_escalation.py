@@ -793,3 +793,43 @@ def test_completion_ids_are_unique():
     a = escalation.completion("claude-ask", "x", 1, 1, "end_turn", 1_800_000_000)
     b = escalation.completion("claude-ask", "x", 1, 1, "end_turn", 1_800_000_000)
     assert a["id"] != b["id"] and a["id"].startswith("esc-")
+
+
+def test_deploy_script_ships_escalation_and_seeds_env_only_when_absent():
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    s = open(os.path.join(root, "53-lxc-router.sh"), encoding="utf-8").read()
+    assert "files/escalation.py" in s and "/opt/llm-router/escalation.py" in s
+    assert "install -d -o router -g router -m 0700 /var/lib/llm-router" in s
+    for k in ("ESCALATION_MONTH_CAP_USD 150", "ESCALATION_DAY_CAP_USD 7", "ESCALATION_DAILY_CALLS 15",
+              "ESCALATION_AUTO_DAILY_CALLS 5", "ESCALATION_HARD_DAILY_CALLS 3"):
+        assert f"ensure_env {k}" in s
+    assert "ensure_env ESCALATION_PRICES" not in s                    # prices are set by the operator, verified
+    assert "ensure_env() {" in s
+
+
+def test_ensure_env_keeps_operator_values_and_adds_absent_keys(tmp_path):
+    import shutil
+    import subprocess
+    import sys
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    s = open(os.path.join(root, "53-lxc-router.sh"), encoding="utf-8").read()
+    start = s.index("    upsert_env() {")
+    end = s.index("    upsert_env V620_URL")
+    env = tmp_path / "router.env"
+    env.write_text("OTHER=1\nESCALATION_DAY_CAP_USD=3\n", newline="\n")
+    block = tmp_path / "block.sh"
+    block.write_text(s[start:end].replace("/etc/router.env", env.as_posix()), newline="\n")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        f'python3() {{ "{sys.executable.replace(chr(92), "/")}" "$@"; }}\n'
+        f'. "{block.as_posix()}"\n'
+        "ensure_env ESCALATION_DAY_CAP_USD 7\n"
+        "ensure_env ESCALATION_MONTH_CAP_USD 150\n", newline="\n")
+    subprocess.run([bash, str(runner)], check=True)
+    got = dict(l.split("=", 1) for l in env.read_text().splitlines())
+    assert got == {"OTHER": "1", "ESCALATION_DAY_CAP_USD": "3", "ESCALATION_MONTH_CAP_USD": "150"}
+    subprocess.run([bash, str(runner)], check=True)                   # idempotent
+    assert env.read_text().count("ESCALATION_MONTH_CAP_USD=") == 1
