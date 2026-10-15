@@ -180,13 +180,11 @@ def build_request(model: str, brief: str, max_tokens: int) -> dict:
             "messages": [{"role": "user", "content": brief}]}
 
 
-def _zone(tz: str):
-    return ZoneInfo(tz) if tz else datetime.now().astimezone().tzinfo
-
-
 def period_bounds(now: float, tz: str):
-    """(day_start_ts, month_start_ts, next_day, next_month) for `now` in the configured timezone."""
-    local = datetime.fromtimestamp(now, _zone(tz))
+    """(day_start_ts, month_start_ts, next_day, next_month) for `now`. A named tz uses ZoneInfo (aware datetimes).
+    An empty tz uses the router host's local time: naive datetimes, whose .timestamp() goes through mktime and so
+    stays DST-correct."""
+    local = datetime.fromtimestamp(now, ZoneInfo(tz)) if tz else datetime.fromtimestamp(now)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0)
     month = day.replace(day=1)
     next_day = (day + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -195,7 +193,18 @@ def period_bounds(now: float, tz: str):
 
 
 def _when(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        return dt.strftime("%Y-%m-%d %H:%M") + " local"
     return dt.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _finite(v) -> Optional[float]:
+    """float(v) if it parses to a finite number, else None. Never raises."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def call_cost(cfg: Config, model: str, input_tokens: int, output_tokens: int) -> float:
@@ -204,14 +213,17 @@ def call_cost(cfg: Config, model: str, input_tokens: int, output_tokens: int) ->
 
 
 def worst_cost(cfg: Config, model: str, brief_tokens: int, max_answer: int) -> float:
+    """Worst-case cost of one call. brief_tokens is the bytes/3 estimate (estimate_tokens), so this is approximate:
+    a cap can be overshot by at most one call's estimation error."""
     return call_cost(cfg, model, brief_tokens + SYSTEM_TOKENS, max_answer)
 
 
 def check_budget(cfg: Config, usage: dict, alias: str, worst: float) -> Optional[str]:
     calls = usage["calls"]
-    if usage["month_cost"] + worst > cfg.month_cap:
+    # Written as "not (fits)" so that a NaN anywhere refuses rather than passing.
+    if not (usage["month_cost"] + worst <= cfg.month_cap):
         return f"monthly cap reached (${cfg.month_cap:.2f})"
-    if usage["day_cost"] + worst > cfg.day_cap:
+    if not (usage["day_cost"] + worst <= cfg.day_cap):
         return f"daily cap reached (${cfg.day_cap:.2f})"
     if alias == "claude-hard":
         if calls["claude-hard"] >= cfg.hard_daily_calls:
@@ -227,11 +239,12 @@ def check_budget(cfg: Config, usage: dict, alias: str, worst: float) -> Optional
 class Ledger:
     """Append-only JSONL of every attempt. Budgets are recomputed from it (cached on size+mtime), so a router
     restart loses nothing. In-flight calls hold a reservation of their worst-case cost until they finish, so two
-    concurrent escalations cannot both pass a check that only one fits."""
+    concurrent escalations cannot both pass a check that only one fits. Reservation costs are worst-case estimates
+    (bytes/3 brief tokens), so a cap can be overshot by at most one call's estimation error."""
 
     def __init__(self, path: str):
         self.path = path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()                 # re-entrant: reserve() calls usage() under the lock
         self._pending = {}
         self._cache = (None, [])
 
@@ -242,7 +255,7 @@ class Ledger:
             return []
         sig = (st.st_size, st.st_mtime_ns)
         if self._cache[0] == sig:
-            return self._cache[1]
+            return list(self._cache[1])
         rows = []
         with open(self.path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -253,35 +266,44 @@ class Ledger:
                 if isinstance(r, dict):
                     rows.append(r)
         self._cache = (sig, rows)
-        return rows
+        return list(rows)
 
     def append(self, row: dict) -> None:
+        line = json.dumps(row, sort_keys=True, allow_nan=False) + "\n"   # ValueError on NaN, before any write
         d = os.path.dirname(self.path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "r+b") as f:
-            f.seek(0, os.SEEK_END)
-            lead = b""
-            if f.tell() > 0:
-                f.seek(-1, os.SEEK_END)
-                if f.read(1) != b"\n":
-                    lead = b"\n"                            # never glue a new line onto a torn one
-            f.write(lead + (json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
+        with self._lock:
+            if d:
+                os.makedirs(d, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "r+b") as f:
+                f.seek(0, os.SEEK_END)
+                lead = b""
+                if f.tell() > 0:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        lead = b"\n"                        # never glue a new line onto a torn one
+                f.write(lead + line.encode("utf-8"))
 
     def usage(self, cfg: Config, now: float) -> dict:
+        """Never raises on a malformed row: an unreadable cost counts as cfg.day_cap (fail closed), an unreadable
+        ts counts as `now`."""
         day0, month0, _, _ = period_bounds(now, cfg.tz)
         u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {a: 0 for a in ALIASES}}
         for r in self.rows():
-            t = float(r.get("ts") or 0)
-            cost = float(r.get("cost_usd") or 0)
+            t = _finite(r.get("ts"))
+            t = now if t is None else t
+            cost = _finite(r.get("cost_usd"))
+            cost = cfg.day_cap if cost is None or cost < 0 else cost
             if t >= month0:
                 u["month_cost"] += cost
             if t >= day0:
                 u["day_cost"] += cost
-                if r.get("alias") in u["calls"] and not str(r.get("outcome", "")).startswith("refused"):
-                    u["calls"][r["alias"]] += 1
-        for alias, worst in list(self._pending.values()):
+                alias = r.get("alias")
+                if isinstance(alias, str) and alias in u["calls"] and not str(r.get("outcome", "")).startswith("refused"):
+                    u["calls"][alias] += 1
+        with self._lock:
+            pending = list(self._pending.values())
+        for alias, worst in pending:
             u["day_cost"] += worst
             u["month_cost"] += worst
             u["calls"][alias] += 1
@@ -290,6 +312,10 @@ class Ledger:
         return u
 
     def reserve(self, cfg: Config, alias: str, worst: float, now: float):
+        if not (isinstance(alias, str) and alias in ALIASES):
+            return None, "budget: unknown alias"
+        if not (isinstance(worst, (int, float)) and math.isfinite(worst) and worst >= 0):
+            return None, "budget: invalid cost estimate"
         with self._lock:
             reason = check_budget(cfg, self.usage(cfg, now), alias, worst)
             if reason:
@@ -301,17 +327,28 @@ class Ledger:
             return token, None
 
     def release(self, token: str) -> None:
+        """Drop a reservation for a call that writes no ledger row."""
         with self._lock:
+            self._pending.pop(token, None)
+
+    def settle(self, token: str, row: dict) -> None:
+        """Write the call's ledger row, then drop its reservation, under one lock: the spend is never in neither
+        place. If append raises (a bad row), the reservation stays held, which fails closed."""
+        with self._lock:
+            self.append(row)
             self._pending.pop(token, None)
 
 
 _LEDGERS = {}
+_LEDGERS_LOCK = threading.Lock()
 
 
 def ledger_for(path: str) -> Ledger:
-    if path not in _LEDGERS:
-        _LEDGERS[path] = Ledger(path)
-    return _LEDGERS[path]
+    """One Ledger per path, process-wide, so every caller shares one set of reservations."""
+    with _LEDGERS_LOCK:
+        if path not in _LEDGERS:
+            _LEDGERS[path] = Ledger(path)
+        return _LEDGERS[path]
 
 
 def _calls_left(cfg: Config, usage: dict) -> dict:

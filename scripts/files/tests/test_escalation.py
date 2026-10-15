@@ -268,3 +268,128 @@ def test_footer_and_report(tmp_path):
     assert rep["calls_left"] == {"claude-ask": 14, "claude-auto": 4, "claude-hard": 3}
     assert rep["recent"][0]["alias"] == "claude-auto" and "brief_sha256" not in rep["recent"][0]
     assert rep["resets"]["day"].startswith("2026-10-16") and rep["resets"]["month"].startswith("2026-11-01")
+
+
+# --- fix round 1 (review of 1a4eb21) ---
+
+import time  # noqa: E402
+
+
+def _raw(path, line):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def _local(y, mo, d, h, mi=0):
+    return _dt(y, mo, d, h, mi).timestamp()                      # naive -> host local time
+
+
+def test_nan_cost_row_fails_the_day_closed(tmp_path):
+    c = cfg(tmp_path, ESCALATION_DAY_CAP_USD="1")
+    _raw(c.ledger_path, f'{{"ts": {ts(2026, 10, 15, 8)}, "alias": "claude-ask", "cost_usd": NaN, "outcome": "ok"}}')
+    tok, why = escalation.Ledger(c.ledger_path).reserve(c, "claude-ask", 0.1, ts(2026, 10, 15, 9))
+    assert tok is None and why.startswith("budget: ")
+
+
+def test_string_nan_cost_fails_the_day_closed(tmp_path):
+    c = cfg(tmp_path, ESCALATION_DAY_CAP_USD="1")
+    _raw(c.ledger_path, f'{{"ts": {ts(2026, 10, 15, 8)}, "alias": "claude-ask", "cost_usd": "nan", "outcome": "ok"}}')
+    tok, why = escalation.Ledger(c.ledger_path).reserve(c, "claude-ask", 0.1, ts(2026, 10, 15, 9))
+    assert tok is None and why.startswith("budget: ")
+
+
+def test_missing_ts_counts_as_now(tmp_path):
+    c = cfg(tmp_path, ESCALATION_DAY_CAP_USD="1")
+    _raw(c.ledger_path, '{"alias": "claude-ask", "cost_usd": 5, "outcome": "ok"}')
+    led = escalation.Ledger(c.ledger_path)
+    assert led.usage(c, ts(2026, 10, 15, 9))["day_cost"] == 5
+    tok, why = led.reserve(c, "claude-ask", 0.1, ts(2026, 10, 15, 9))
+    assert tok is None and why.startswith("budget: ")
+
+
+def test_garbage_ts_is_counted_not_dropped_and_usage_never_raises(tmp_path):
+    c = cfg(tmp_path)
+    _raw(c.ledger_path, '{"ts": "2026-10-15T09:00", "alias": "claude-ask", "cost_usd": 0.5, "outcome": "ok"}')
+    _raw(c.ledger_path, f'{{"ts": {ts(2026, 10, 15, 9)}, "alias": ["unhashable"], "cost_usd": 0.1, "outcome": "ok"}}')
+    _raw(c.ledger_path, '{"ts": 1e400, "alias": "claude-ask", "cost_usd": 1' + "0" * 400 + ', "outcome": "ok"}')
+    u = escalation.Ledger(c.ledger_path).usage(c, ts(2026, 10, 15, 10))
+    assert abs(u["day_cost"] - (0.5 + 0.1 + c.day_cap)) < 1e-9       # bad cost fails closed at day_cap
+    assert u["calls"]["claude-ask"] == 2                              # garbage ts row counts at now
+
+
+def test_reserve_refuses_nan_negative_and_unknown_alias(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    now = ts(2026, 10, 15)
+    assert led.reserve(c, "claude-ask", float("nan"), now) == (None, "budget: invalid cost estimate")
+    assert led.reserve(c, "claude-ask", -1.0, now) == (None, "budget: invalid cost estimate")
+    assert led.reserve(c, "claude-x", 0.1, now) == (None, "budget: unknown alias")
+    assert led._pending == {}
+
+
+def test_check_budget_fails_closed_on_nan(tmp_path):
+    c = cfg(tmp_path)
+    zero = {"claude-ask": 0, "claude-auto": 0, "claude-hard": 0}
+    assert escalation.check_budget(c, {"day_cost": float("nan"), "month_cost": 0.0, "calls": zero},
+                                   "claude-ask", 0.1) == "daily cap reached ($7.00)"
+    assert escalation.check_budget(c, {"day_cost": 0.0, "month_cost": 0.0, "calls": zero},
+                                   "claude-ask", float("nan")) is not None
+
+
+def test_append_rejects_nan_and_writes_nothing(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    led.append({"ts": ts(2026, 10, 15), "alias": "claude-ask", "cost_usd": 0.5, "outcome": "ok"})
+    before = open(c.ledger_path, "rb").read()
+    with pytest.raises(ValueError):
+        led.append({"ts": ts(2026, 10, 15), "alias": "claude-ask", "cost_usd": float("nan"), "outcome": "ok"})
+    assert open(c.ledger_path, "rb").read() == before
+
+
+def test_settle_moves_spend_from_pending_to_ledger_atomically(tmp_path):
+    c = cfg(tmp_path, ESCALATION_DAY_CAP_USD="1")
+    led = escalation.Ledger(c.ledger_path)
+    now = ts(2026, 10, 15)
+    tok, _ = led.reserve(c, "claude-ask", 0.6, now)
+    led.settle(tok, {"ts": now, "alias": "claude-ask", "cost_usd": 0.6, "outcome": "ok"})
+    assert led._pending == {}
+    tok2, why2 = led.reserve(c, "claude-ask", 0.6, now)
+    assert tok2 is None and why2.startswith("budget: daily cap reached ($1.00)")
+
+
+def test_rows_returns_a_copy(tmp_path):
+    c = cfg(tmp_path)
+    led = escalation.Ledger(c.ledger_path)
+    led.append({"ts": ts(2026, 10, 15), "alias": "claude-ask", "cost_usd": 0.5, "outcome": "ok"})
+    led.rows().append({"x": 1})
+    assert len(led.rows()) == 1
+
+
+def test_zoneinfo_day_and_month_bounds_across_dst_and_year_end():
+    ny, ldn = "America/New_York", "Europe/London"
+    assert escalation.period_bounds(ts(2026, 11, 1, 12, ny), ny)[0] == ts(2026, 11, 1, 0, ny)
+    assert escalation.period_bounds(ts(2026, 3, 8, 12, ny), ny)[0] == ts(2026, 3, 8, 0, ny)
+    _, m0, _, nm = escalation.period_bounds(ts(2026, 10, 31, 23, ldn), ldn)
+    assert m0 == ts(2026, 10, 1, 0, ldn) and nm.timestamp() == ts(2026, 11, 1, 0, ldn)
+    _, _, _, nm2 = escalation.period_bounds(ts(2026, 12, 31, 23, ny), ny)
+    assert nm2.timestamp() == ts(2027, 1, 1, 0, ny)
+
+
+def test_empty_tz_is_host_local_time_across_dst(tmp_path, monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        c = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": "",
+                                    "ESCALATION_LEDGER": str(tmp_path / "l.jsonl")})
+        led = escalation.Ledger(c.ledger_path)
+        led.append({"ts": _local(2026, 11, 1, 0, 30), "alias": "claude-ask", "cost_usd": 0.5, "outcome": "ok"})
+        assert led.usage(c, _local(2026, 11, 1, 10))["day_cost"] == 0.5
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_naive_local_reset_label_has_no_zone_name():
+    assert escalation._when(_dt(2026, 11, 1, 0, 0)) == "2026-11-01 00:00 local"
