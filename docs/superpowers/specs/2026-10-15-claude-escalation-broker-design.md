@@ -101,7 +101,7 @@ Claude <model>: $0.054 this call · $1.84 today of $7.00 · $23.10 this month of
 - the last 10 ledger lines, without hashes;
 - the reset times.
 
-It is open to the owner key and to `METRICS_ALLOWED_IPS`, the same rule the dashboard already uses.
+It is open to the owner key only. The router's `require_bearer` middleware already limits scoped keys to chat completions and the model list, and the cluster monitor already reads the owner key from `/etc/router.env` for its Tavily probe.
 
 **Credentials:**
 - The key file is `ANTHROPIC_API_KEY_FILE` (default `/etc/router-anthropic.key`, `root:router` 0640).
