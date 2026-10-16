@@ -43,10 +43,13 @@ def test_config_defaults_and_overrides():
     assert c2.prices == {"m": (3.0, 15.0)} and c2.day_cap == 2.5
 
 
-def test_estimate_overcounts_bytes_over_three():
-    assert escalation.estimate_tokens("abcdef") == 2
-    assert escalation.estimate_tokens("abcdefg") == 3
+def test_estimate_is_bytes_over_two_point_four():
+    # 2.4 bytes/token, measured on the live smoke test: a 3547-byte code-heavy brief was ~1460 Anthropic tokens.
+    assert escalation.estimate_tokens("abcdef") == 3                     # 6 / 2.4 = 2.5
+    assert escalation.estimate_tokens("abcdefghijkl") == 5               # 12 / 2.4 = 5.0 exactly
+    assert escalation.estimate_tokens("abcdefghijklm") == 6              # 13 / 2.4 = 5.42
     assert escalation.estimate_tokens("é") == 1                       # 2 utf-8 bytes
+    assert escalation.estimate_tokens("x" * 3547) >= 1460                # no longer under the measured count
 
 
 def test_brief_is_the_last_user_message_string_or_text_parts():
@@ -161,8 +164,9 @@ def _padded(total_bytes):
 
 
 def test_413_boundary_is_exact():
-    assert escalation.validate_brief(_padded(8192 * 3), "claude-ask") is None
-    assert escalation.validate_brief(_padded(8192 * 3 + 1), "claude-ask")[1] == "brief_too_large"
+    # 8192 tokens * 2.4 bytes/token = 19660.8 bytes: 19660 bytes estimate to 8192, 19661 to 8193
+    assert escalation.validate_brief(_padded(19660), "claude-ask") is None
+    assert escalation.validate_brief(_padded(19661), "claude-ask")[1] == "brief_too_large"
 
 
 import json as _json
@@ -923,7 +927,7 @@ def test_every_refusal_and_error_path_is_non_retryable_and_clean(broker, tmp_pat
 
 
 def test_oversized_message_is_rounded_to_k():
-    big = GOOD + "x" * (8500 * 3)
+    big = GOOD + "x" * int(8500 * 2.4)                                   # ~8.75k tokens at 2.4 bytes/token
     assert escalation.validate_brief(big, "claude-ask")[2] == "brief: about 9k tokens, over the 8k limit -- trim it"
 
 
@@ -965,6 +969,27 @@ def test_duplicate_guard_counts_only_spent_or_budget_refused_rows(broker, outcom
                                              "brief_sha256": sha})
     st, o = run(ask(), c, t0 + 10)
     assert (st == 400 and o["error"]["code"] == "duplicate") if dup else st == 200
+
+
+def test_duplicate_window_runs_from_when_the_call_finished(broker):
+    """A charged call that took ~125 s (a post-send timeout) must still block an identical resend right after the
+    client sees the error: the window is measured from the settle time (done_ts), not the arrival time (ts)."""
+    stub, c, _ = broker
+    sha = escalation.hashlib.sha256(GOOD.encode()).hexdigest()
+    t0 = 1_800_000_000
+    escalation.Ledger(c.ledger_path).append({"ts": t0, "done_ts": t0 + 125, "alias": "claude-ask", "cost_usd": 0.05,
+                                             "outcome": "error:transport:TotalTimeout", "brief_sha256": sha})
+    st, o = run(ask(), c, t0 + 130)
+    assert st == 400 and o["error"]["code"] == "duplicate" and stub.requests == []
+    assert run(ask(), c, t0 + 125 + 121)[0] == 200                       # window over 120 s after it finished
+
+
+def test_settled_rows_record_done_ts(broker):
+    stub, c, _ = broker
+    t0 = 1_800_000_000
+    assert run(ask(), c, t0)[0] == 200
+    row = _last(c)
+    assert row["outcome"] == "ok" and row["done_ts"] >= row["ts"] == t0
 
 
 def test_dedupe_zero_disables_the_guard(broker):

@@ -64,7 +64,7 @@ The upstream request is then exactly: the broker's fixed system prompt, plus the
 **Brief validation**, before any spend:
 - The final user message must contain all seven headings of the §4 template (`## Goal`, `## Context`, `## Reproduce`, `## Exact error`, `## Code`, `## What was tried`, `## Question`), each with content. A section may be `n/a: <reason>`, but `## Goal`, `## Exact error` and `## Question` may not. Otherwise the call gets 422 `brief: missing or empty section <name>`.
 - This is a structural guard only. Sufficiency is the job of the local checklist in §4, which the broker cannot judge.
-- The brief size is estimated as `ceil(len(utf8_bytes)/3)` tokens, a deliberate over-estimate. Over the alias limit, the call gets 413 `brief: <n> tokens over the <limit> limit -- trim it`, and nothing is sent.
+- The brief size is estimated as `ceil(len(utf8_bytes)/2.4)` tokens. (It was bytes/3 at launch; the 2026-10-15 smoke test measured 2.4 bytes per token on a code-heavy brief, so bytes/3 under-counted by about 20%.) Over the alias limit, the call gets 413 `brief: about <n>k tokens, over the <limit>k limit -- trim it`, and nothing is sent.
 
 **Budget check**, before any spend:
 - The worst case is `max_brief_tokens_estimate × input_price + max_tokens × output_price`.
