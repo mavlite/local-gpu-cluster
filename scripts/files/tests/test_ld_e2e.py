@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -42,9 +43,13 @@ def test_stream_over_http_with_journal_request(tmp_path, monkeypatch):
         c.request("GET", "/api/stream")
         r = c.getresponse()
         buf = b""
+        deadline = time.monotonic() + 10
         # the stream opens with a "retry: 3000" preamble event; the snapshot is the first "data:" event
         while b"data: " not in buf or buf.count(b"\n\n") < 2:
-            buf += r.read1(65536)
+            assert time.monotonic() < deadline, "no data event within 10 s"
+            chunk = r.read1(65536)
+            assert chunk, "stream closed (EOF) before a data event"
+            buf += chunk
         event = next(e for e in buf.split(b"\n\n") if e.startswith(b"data: "))
         snap = json.loads(event[6:])
         assert snap["recent"][0]["task"] == 4772 and snap["sources"]["slots"]["ok"] is True
@@ -69,13 +74,21 @@ def test_deploy_script_shape():
         assert needle in s, needle
     # cutover must roll back itself when the dashboard does not answer on :8888
     cut = s.split("cutover)", 1)[1].split("rollback)", 1)[0]
-    assert "wait_health 8888" in cut and 'bash "$ROLLBACK"' in cut and "exit 1" in cut
+    gate = cut.index("if ! wait_health 8888")
+    assert "check_sources 8888" in cut[gate:cut.index("then", gate)]
+    assert gate < cut.index('bash "$ROLLBACK"') < cut.index("exit 1", gate)
+    assert "ROLLBACK FAILED" in cut
+    # side-by-side must refuse unless cluster-monitor is still active, before touching anything
+    sbs = s.split("side-by-side)", 1)[1].split("cutover)", 1)[0]
+    assert sbs.index("is-active --quiet cluster-monitor") < sbs.index("install_files")
     u = open(os.path.join(ROOT, "files", "live-dashboard.service"), encoding="utf-8").read()
     assert "python3 -m live_dashboard.main --config /etc/live-dashboard.json" in u
     assert "WorkingDirectory=/opt/live-dashboard" in u and "Restart=always" in u
-    for hardening in ("NoNewPrivileges=true", "ProtectHome=true", "PrivateTmp=true"):
+    for hardening in ("ProtectHome=true", "PrivateTmp=true"):
         assert hardening in u, hardening
-    assert "User=" not in u
+    unit_lines = [ln.strip() for ln in u.splitlines() if not ln.lstrip().startswith("#")]
+    assert "NoNewPrivileges=true" not in unit_lines
+    assert not any(ln.startswith("User=") for ln in unit_lines)
 
 
 def test_deploy_config_template_passes_validate_config():

@@ -11,7 +11,8 @@ Restart=always
 RestartSec=5
 Nice=10
 # Runs as root: it needs `pct exec` and /proc/<pid>/{cmdline,environ} of other users' processes.
-NoNewPrivileges=true
+# No NoNewPrivileges (no benefit for a root service; risk for pct exec / lxc-attach).
+# ProtectHome and PrivateTmp are verified during the side-by-side run (check_sources must report ok).
 ProtectHome=true
 PrivateTmp=true
 
