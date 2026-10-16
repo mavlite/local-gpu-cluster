@@ -189,9 +189,12 @@ def error_body(code: str, message: str) -> dict:
 
 
 def estimate_tokens(text: str) -> int:
-    """An approximation, not a guarantee: UTF-8 bytes / 3, rounded up. It over-counts ordinary text, but it is not
-    a true tokenizer. Lone surrogates encode as a replacement character instead of raising."""
-    return math.ceil(len(text.encode("utf-8", errors="replace")) / 3)
+    """An approximation, not a guarantee: UTF-8 bytes / 2.4, rounded up. 2.4 bytes/token was measured on the live
+    smoke test (2026-10-15: a 3547-byte code-heavy brief was ~1460 Anthropic tokens; bytes/3 under-counted ~20%).
+    Prose over-counts. It is not a true tokenizer; spend is always charged from the usage Anthropic reports.
+    Lone surrogates encode as a replacement character instead of raising."""
+    n = len(text.encode("utf-8", errors="replace"))
+    return (n * 5 + 11) // 12                                   # ceil(n / 2.4) in integers
 
 
 def brief_text(body) -> Optional[str]:
@@ -585,12 +588,22 @@ def _spent_or_budget_refused(r: dict) -> bool:
 
 def _duplicate_age(cfg: Config, ledger: Ledger, sha: str, now: float) -> Optional[float]:
     """Seconds since the latest identical brief that was answered, charged or budget-refused within
-    cfg.dedupe_s, else None. Rows with an unreadable ts are ignored here (the budget still counts them)."""
+    cfg.dedupe_s, else None. The window runs from when that call FINISHED (done_ts, written at settle), so a resend
+    right after a ~2-minute timeout is still caught; rows without done_ts fall back to their arrival ts. Rows with an
+    unreadable ts are ignored here (the budget still counts them)."""
     if cfg.dedupe_s <= 0:
         return None
-    ages = [now - t for r in ledger.rows()
-            if r.get("brief_sha256") == sha and _spent_or_budget_refused(r)
-            for t in (_finite(r.get("ts")),) if t is not None and now - cfg.dedupe_s <= t <= now]
+    ages = []
+    for r in ledger.rows():
+        if r.get("brief_sha256") != sha or not _spent_or_budget_refused(r):
+            continue
+        ts = _finite(r.get("ts"))
+        if ts is None or ts > now:
+            continue
+        done = _finite(r.get("done_ts"))
+        ref = max(ts, done) if done is not None else ts
+        if ref >= now - cfg.dedupe_s:
+            ages.append(max(0.0, now - ref))
     return min(ages) if ages else None
 
 
@@ -602,6 +615,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
     """(status, payload) for one escalation request whose model is one of ALIASES. The caller has already
     checked that the principal is the owner."""
     now = time.time() if now is None else now
+    started = time.monotonic()                          # done_ts = now + elapsed, so injected test clocks stay coherent
     alias = body["model"]
     spec = ALIASES[alias]
     model = cfg.models.get(spec["tier"])
@@ -637,6 +651,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
     def settle(final_row):
         """Record the call and drop its reservation together. If that fails the reservation stays held (fail
         closed) and the caller gets a 424; the log names the alias and outcome, never the key or the brief."""
+        final_row = dict(final_row, done_ts=round(now + (time.monotonic() - started), 3))
         try:
             ledger.settle(token, final_row)
         except Exception:
