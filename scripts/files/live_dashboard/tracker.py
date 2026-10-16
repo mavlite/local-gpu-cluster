@@ -14,6 +14,7 @@ class Tracker:
         self.restarting = False
         self.journal_up = True
         self.unreachable_since = None
+        self.unreachable_rekeyed = False
         self.open = {}                  # slot -> row dict (+ private live fields)
         self.cancelled = set()          # task ids cancelled in this run
         self.last_done = {}             # slot -> wall time
@@ -116,7 +117,7 @@ class Tracker:
         elif kind == "gen":
             if row["status"] != "generating":
                 row["_live_tok_s"] = None
-            row.update(status="generating", _live_tok_s=ev["tok_s"])   # /slots owns _dec/_dec_t
+            row.update(status="generating", _progress=1.0, _live_tok_s=ev["tok_s"])   # /slots owns _dec/_dec_t
         elif kind == "prompt_eval":
             row["_pe"] = {"ms": ev["ms"], "n": ev["n"]}
         elif kind == "eval":
@@ -135,13 +136,16 @@ class Tracker:
         if slots is None:
             if self.unreachable_since is None:
                 self.unreachable_since = now
-            if not self.journal_up and now - self.unreachable_since >= self.unreachable_s and self.open:
+            if not self.journal_up and now - self.unreachable_since >= self.unreachable_s:
                 for slot in list(self.open):
                     self._finish(slot, "interrupted", now)
-                self.server_run = now       # the server may have restarted unseen
-                self.cancelled.clear()
+                if not self.unreachable_rekeyed:    # once per episode: the server may have restarted unseen
+                    self.unreachable_rekeyed = True
+                    self.server_run = now
+                    self.cancelled.clear()
             return
         self.unreachable_since = None
+        self.unreachable_rekeyed = False
         for s in slots:
             slot = s["id"]
             row = self.open.get(slot)
@@ -164,7 +168,7 @@ class Tracker:
                         row["_live_tok_s"] = None   # never show the prefill rate as gen speed
                     if row["_dec"] is not None and row["_dec_t"] is not None and now > row["_dec_t"]:
                         row["_live_tok_s"] = max(0.0, (s["n_decoded"] - row["_dec"]) / (now - row["_dec_t"]))
-                    row.update(status="generating", _dec=s["n_decoded"], _dec_t=now)
+                    row.update(status="generating", _progress=1.0, _dec=s["n_decoded"], _dec_t=now)
             elif row is not None:
                 first = self.idle_since.setdefault(slot, now)
                 if not self.journal_up or now - first >= self.approx_grace_s:
@@ -172,6 +176,7 @@ class Tracker:
 
     def set_journal_up(self, up: bool, now: float) -> None:
         self.journal_up = up
+        self.last_since = None          # never compare journal prefixes across a gap
 
     # ---- outputs
     def slot_views(self, now: float) -> list:

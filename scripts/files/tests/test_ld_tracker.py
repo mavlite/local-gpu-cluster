@@ -144,7 +144,7 @@ def test_server_start_while_stuck_restarting_still_interrupts_and_rekeys():
     first = tr.pop_finished()
     assert len(first) == 1
     tr.on_slots(None, 111.0)
-    # missed server_ready; a row opened by a slot-less path, then another server_start
+    # server_ready was missed: two more server_start lines arrive while still restarting
     tr.on_journal(ev("server_start", 0.02), 112.0)
     tr.on_journal(ev("server_start", 0.03), 113.0)
     assert tr.server_run == 113.0
@@ -284,3 +284,44 @@ def test_finish_clears_idle_since_so_next_row_gets_full_grace():
     tr.on_journal(ev("start", 3.0, slot=0, task=2), 150.0)
     tr.on_slots(slots(), 155.0)                          # only 0 s idle for the new row
     assert tr.open_rows()[0]["task"] == 2 and tr.pop_finished()[-1]["task"] == 1
+
+
+def test_journal_gap_does_not_compare_prefixes_across_runs():
+    tr = Tracker()
+    tr.on_journal(ev("start", 9000.0, slot=0, task=0), 50.0)       # old run, stale last_since
+    tr.on_journal(ev("release", 9001.0, slot=0, task=0, n=1), 51.0)
+    tr.pop_finished()
+    tr.set_journal_up(False, 100.0)
+    tr.on_slots(slots({0: {"is_processing": True, "id_task": 0, "n_prompt_tokens": 9, "n_decoded": 0}}), 100.0)
+    tr.set_journal_up(True, 101.0)
+    tr.on_journal(ev("start", 3.0, slot=0, task=0), 101.0)
+    assert tr.slot_views(101.5)[0]["state"] != "idle"
+    tr.on_journal(ev("prompt_eval", 4.0, slot=0, task=0, ms=1000.0, n=100), 102.0)
+    tr.on_journal(ev("eval", 5.0, slot=0, task=0, ms=1000.0, n=10), 102.0)
+    tr.on_journal(ev("total", 5.0, slot=0, task=0, ms=2000.0, n=110), 102.0)
+    tr.on_journal(ev("release", 5.0, slot=0, task=0, n=110), 102.0)
+    rows = tr.pop_finished()
+    assert [r["status"] for r in rows] == ["done"]
+
+
+def test_idle_unreachable_episode_rekeys_once():
+    tr = Tracker(approx_grace_s=0.0, unreachable_s=10.0)
+    tr.set_journal_up(False, 100.0)
+    tr.on_slots(slots({0: {"is_processing": True, "id_task": 0, "n_prompt_tokens": 9}}), 100.0)
+    tr.on_slots(slots(), 101.0)
+    first = tr.pop_finished()[0]
+    tr.on_slots(None, 102.0)
+    tr.on_slots(None, 113.0)
+    run = tr.server_run
+    tr.on_slots(None, 120.0)
+    assert tr.server_run == run                      # once per episode
+    tr.on_slots(slots({0: {"is_processing": True, "id_task": 0, "n_prompt_tokens": 9}}), 130.0)
+    assert tr.open_rows()[0]["key"] != first["key"]
+
+
+def test_progress_is_complete_once_generating():
+    tr = Tracker()
+    tr.on_journal(ev("start", 1.0, slot=0, task=5), 100.0)
+    tr.on_journal(ev("prefill", 2.0, slot=0, task=5, n=2048, progress=0.55, tok_s=600.0), 102.0)
+    tr.on_slots(slots({0: {"is_processing": True, "id_task": 5, "n_prompt_tokens": 9, "n_decoded": 4}}), 103.0)
+    assert tr.slot_views(103.0)[0]["progress"] == 1.0
