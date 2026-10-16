@@ -4,6 +4,8 @@ import os
 import sys
 import time
 
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 FX = os.path.join(HERE, "fixtures", "live_dashboard")
@@ -17,10 +19,11 @@ def fx(name):
 
 
 def fake_proc(tmp_path, entries):
-    for pid, (argv, environ) in entries.items():
+    for pid, (argv, environ, *cg) in entries.items():
         d = tmp_path / str(pid)
         d.mkdir()
         (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (d / "cgroup").write_text(cg[0] if cg else "0::/lxc/151/ns/system.slice/x.service\n")
         (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in environ.items()) + b"\0")
     (tmp_path / "self").mkdir()
     return str(tmp_path)
@@ -31,7 +34,7 @@ def test_key_discovery_from_proc(tmp_path):
         11: (["/opt/llama.cpp/build/bin/llama-server", "--port", "8082", "--api-key", "EMBEDKEY"], {}),
         12: (["/opt/llama.cpp/build/bin/llama-server", "--port", "8080", "--api-key", "CHATKEY"], {}),
         13: (["/opt/llm-router/venv/bin/python3", "/opt/llm-router/venv/bin/uvicorn", "app:app"],
-             {"ROUTER_API_KEY": "ROUTERKEY", "OTHER": "x"}),
+             {"ROUTER_API_KEY": "ROUTERKEY", "OTHER": "x"}, "0::/lxc/153/ns/system.slice/r.service\n"),
     })
     assert C.find_llama_key(root) == "CHATKEY"
     assert C.find_router_key(root) == "ROUTERKEY"
@@ -93,7 +96,7 @@ def make_hub(tmp_path, world, monkeypatch):
     monkeypatch.setattr(C, "find_llama_key", lambda *a, **k: (setattr(world, "key_reads", world.key_reads + 1), "CHATKEY")[1])
     monkeypatch.setattr(C, "find_router_key", lambda *a, **k: "ROUTERKEY")
     cfg = dict(C.DEFAULTS, history_path=str(tmp_path / "h.db"), drm_root=str(tmp_path / "nodrm"),
-               hwmon_root=str(tmp_path / "nohwmon"))
+               hwmon_root=str(tmp_path / "nohwmon"), proc_root=str(tmp_path / "noproc"))
     return C.Hub(cfg, world.http_get, world.read_text, world.run_cmd, now_fn=lambda: 1000.0)
 
 
@@ -222,3 +225,184 @@ def test_raising_run_cmd_and_read_text_never_escape(tmp_path, monkeypatch):
     hub.poll_timer(1000.0)
     hub.poll_fast(1000.0)
     assert hub.snapshot(1000.0)["sources"]["host"]["ok"] is False
+
+
+# ---- fix round 1
+import threading  # noqa: E402
+
+
+def _follow(code, seconds, backoff=(0.05,)):
+    lines, states = [], []
+    f = C.JournalFollower([sys.executable, "-c", code], on_line=lines.append, on_state=states.append, backoff=backoff)
+    f.start()
+    time.sleep(seconds)
+    f.stop()
+    return lines, states
+
+
+def test_follower_survives_invalid_utf8_and_reports_up_then_down():
+    code = r"import sys; sys.stdout.buffer.write(b'ok1\n\xff\xfe b\nok2\n')"
+    lines, states = _follow(code, 0.6)
+    assert lines[:3] == ["ok1", "�� b", "ok2"]
+    assert len(lines) >= 6                               # restarted after the child exited
+    assert states[0] is True and False in states
+
+
+def test_follower_silent_child_never_reports_up():
+    lines, states = _follow("pass", 0.4)
+    assert lines == [] and True not in states and False in states
+
+
+def test_follower_missing_binary_still_backs_off_and_reports_down():
+    f_states = []
+    f = C.JournalFollower(["/nonexistent/definitely-not-here"], on_line=lambda l: None,
+                          on_state=f_states.append, backoff=(0.05,))
+    f.start()
+    time.sleep(0.3)
+    f.stop()
+    assert f_states and set(f_states) == {False}
+
+
+def test_follower_stop_kills_a_quiet_child_promptly():
+    f = C.JournalFollower([sys.executable, "-c", "import time; time.sleep(60)"], on_line=lambda l: None,
+                          on_state=lambda u: None, backoff=(0.05,))
+    f.start()
+    time.sleep(0.3)
+    t0 = time.time()
+    f.stop()
+    assert time.time() - t0 < 4
+
+
+@pytest.mark.parametrize("which", ["fast", "services"])
+def test_snapshot_not_blocked_by_slow_network(tmp_path, monkeypatch, which):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    inner = w.http_get
+
+    def slow(url, headers):
+        time.sleep(1)
+        return inner(url, headers)
+    hub.http_get = slow
+    t = threading.Thread(target=hub.poll_fast if which == "fast" else hub.poll_services, args=(1000.0,))
+    t.start()
+    time.sleep(0.2)
+    t0 = time.time()
+    hub.snapshot(1000.0)
+    took = time.time() - t0
+    t.join()
+    assert took < 0.2
+
+
+def test_host_rates_use_read_time_and_clamp_negative(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    clock = iter([100.0, 110.0, 120.0])
+    hub.now_fn = lambda: next(clock)
+    hub.poll_fast(1.0)
+    hub.poll_fast(2.0)                                   # same files: 10 s elapsed by read time, zero deltas
+    s = hub.snapshot(2.0)
+    assert s["host"]["disk_read_mbs"] == 0.0 and s["host"]["cpu_pct"] is None
+    w.files["/proc/stat"] = "cpu  10 0 5 80 5 0 0 0 0 0\n"      # counters went backwards
+    hub.poll_fast(3.0)
+    assert hub.snapshot(3.0)["host"]["cpu_pct"] is None
+
+
+def _two_llamas(tmp_path):
+    base = ["/opt/llama.cpp/build/bin/llama-server", "--port", "8080", "--api-key"]
+    return fake_proc(tmp_path, {
+        10: (base + ["OTHERCT"], {}, "0::/lxc/157/ns/x\n"),
+        20: (base + ["CHAT151"], {}, "0::/lxc/151/ns/x\n"),
+        30: (["/usr/bin/python3", "/opt/venv/bin/uvicorn", "app:app"], {"ROUTER_API_KEY": "R157"}, "0::/lxc/157/ns/r\n"),
+    })
+
+
+def test_keys_are_scoped_to_their_container(tmp_path):
+    root = _two_llamas(tmp_path)
+    assert C.find_llama_key(root, port="8080", ct=151) == "CHAT151"
+    assert C.find_llama_key(root, port="8080", ct=157) == "OTHERCT"
+    assert C.find_llama_key(root, port="8080", ct=999) is None
+    assert C.find_chat_pid(root, port="8080", ct=151) == "20"
+    assert C.find_router_key(root, ct=153) is None        # the only router is in 157
+    assert C.find_router_key(root, ct=157) == "R157"
+
+
+def test_hub_derives_port_and_ct_from_cfg(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    monkeypatch.undo()
+    (tmp_path / "p").mkdir()
+    root = _two_llamas(tmp_path / "p")
+    hub.cfg = dict(hub.cfg, proc_root=root, chat_url="http://x:8080", chat_ct=151)
+    assert hub._find_llama_key() == "CHAT151"
+    hub.cfg = dict(hub.cfg, chat_url="http://x:8081")
+    assert hub._find_llama_key() is None
+
+
+def test_read_stamp_regular_symlink_dir_and_size(tmp_path):
+    good = tmp_path / "stamp"
+    good.write_text("1700000000\n")
+    assert C.read_stamp(str(good)) == 1700000000.0
+    assert C.read_stamp(str(tmp_path / "missing")) is None
+    assert C.read_stamp(str(tmp_path)) is None            # not a regular file
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(good)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("O_NOFOLLOW unavailable on this platform")
+    assert C.read_stamp(str(link)) is None
+
+
+def test_stamp_read_is_bounded_to_64_bytes(tmp_path):
+    big = tmp_path / "big"
+    big.write_text("9" * 200)
+    assert C.read_stamp(str(big)) == float("9" * 64)
+
+
+def test_healthz_non_dict_is_not_ok_and_never_stale_ok(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    hub.poll_services(1000.0)
+    assert hub.snapshot(1000.0)["services"]["router"]["ok"] is True
+    w.status["http://192.168.6.153:8000/healthz"] = (200, "[1, 2]")
+    hub.poll_services(1001.0)
+    s = hub.snapshot(1001.0)
+    assert s["services"]["router"]["ok"] is False and s["sources"]["services"]["ok"] is False
+
+
+def test_escalation_is_whitelisted_and_non_dict_is_none(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    doc = json.loads(fx("router_escalation_budget.txt").split("\n", 1)[1])
+    doc["secret_note"] = "free text"
+    doc["month"]["note"] = "free text"
+    doc["recent"] = [dict(doc["recent"][0], prompt="TOPSECRETPROMPT") for _ in range(15)]
+    w.status["http://192.168.6.153:8000/escalation/budget"] = (200, json.dumps(doc))
+    hub.poll_escalation(1000.0)
+    e = hub.snapshot(1000.0)["escalation"]
+    text = json.dumps(e)
+    assert "free text" not in text and "TOPSECRETPROMPT" not in text
+    assert set(e) == {"month", "day", "calls_left", "resets", "recent"} and len(e["recent"]) == 10
+    assert set(e["month"]) == {"spent_usd", "cap_usd"} and e["month"]["cap_usd"] == 150.0
+    w.status["http://192.168.6.153:8000/escalation/budget"] = (200, "[]")
+    hub.poll_escalation(1001.0)
+    s = hub.snapshot(1001.0)
+    assert s["escalation"] is None and s["sources"]["escalation"]["ok"] is False
+
+
+def test_restart_timer_stale_marker(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    hub.poll_timer(1000.0)
+    r = hub.snapshot(1000.0)["services"]["restart"]
+    assert r["next_possible"] is not None and r["stale_since"] is None
+    good = r["next_possible"]
+    hub.run_cmd = lambda argv: (1, "")
+    hub.poll_timer(1010.0)
+    hub.poll_timer(1020.0)
+    r = hub.snapshot(1020.0)["services"]["restart"]
+    assert r["next_possible"] == good and r["stale_since"] == 1010.0
+    hub.run_cmd = w.run_cmd
+    hub.poll_timer(1030.0)
+    assert hub.snapshot(1030.0)["services"]["restart"]["stale_since"] is None
