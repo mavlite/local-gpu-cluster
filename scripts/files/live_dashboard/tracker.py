@@ -33,7 +33,8 @@ class Tracker:
                "new_prompt_tokens": None, "cached_tokens": None, "output_tokens": None, "prefill_tok_s": None,
                "gen_tok_s": None, "duration_s": None, "draft_accept": None, "slow": False,
                "_progress": None, "_processed": None, "_live_tok_s": None, "_ctx": None,
-               "_dec": None, "_dec_t": None, "_eval": None, "_pe": None, "_total": None}
+               "_dec": None, "_dec_t": None, "_eval": None, "_pe": None, "_total": None,
+               "_prompt_est": None, "_rel_n": None}
         self.open[slot] = row
         return row
 
@@ -54,10 +55,12 @@ class Tracker:
             row["duration_s"] = tot["ms"] / 1e3
             if ev:
                 row["prompt_tokens"] = tot["n"] - ev["n"]
-        elif status in ("approx", "interrupted"):
+        else:
             row["duration_s"] = now - row["started"]
-            if status == "approx" and row["_dec"] is not None:
-                row["output_tokens"] = row["_dec"]
+        if row["output_tokens"] is None and status in ("approx", "cancelled") and row["_dec"] is not None:
+            row["output_tokens"] = row["_dec"]
+        if status == "approx" and not tot and row["prompt_tokens"] is None and row["_rel_n"] is not None:
+            row["prompt_tokens"] = max(0, row["_rel_n"] - (row["_dec"] or 0))
         if row["prompt_tokens"] is not None and row["new_prompt_tokens"] is not None:
             row["cached_tokens"] = max(0, row["prompt_tokens"] - row["new_prompt_tokens"])
         row["slow"] = bool(row["new_prompt_tokens"] and row["new_prompt_tokens"] > SLOW_NEW_PROMPT_TOKENS)
@@ -75,8 +78,7 @@ class Tracker:
     def on_journal(self, ev: dict, now: float) -> None:
         kind, since = ev["kind"], ev.get("since_start_s")
         backwards = since is not None and self.last_since is not None and since < self.last_since - 1.0
-        # A server_start while already restarting is the same restart: do not interrupt/re-key twice.
-        if (kind == "server_start" and not self.restarting) or (kind != "server_start" and backwards):
+        if kind == "server_start" or backwards:
             self._restart(now)
         if kind == "server_start":
             self.restarting = True
@@ -86,6 +88,8 @@ class Tracker:
             return
         if kind == "server_start":
             return
+        if kind in ("start", "prefill", "gen", "prompt_eval", "release"):
+            self.restarting = False     # serving again, even if server_ready was missed
         if self.server_run is None:
             self.server_run = now
         if kind == "cancel":
@@ -93,7 +97,10 @@ class Tracker:
             return
         slot, task = ev.get("slot"), ev.get("task")
         if kind == "start":
-            if slot in self.open:
+            cur = self.open.get(slot)
+            if cur is not None and cur["task"] == task:
+                return                  # adopt the row already opened from /slots
+            if cur is not None:
                 self._finish(slot, "approx", now)
             self._new_row(slot, task, now)
             return
@@ -101,9 +108,15 @@ class Tracker:
         if row is None or row["task"] != task:
             return
         if kind == "prefill":
-            row.update(_progress=ev["progress"], _processed=ev["n"], _live_tok_s=ev["tok_s"])
+            if row["status"] == "generating":
+                return
+            row.update(_progress=ev["progress"], _processed=ev["n"], _live_tok_s=ev["tok_s"], _ctx=ev["n"])
+            if ev["progress"] and ev["progress"] > 0:
+                row["_prompt_est"] = round(ev["n"] / ev["progress"])
         elif kind == "gen":
-            row.update(status="generating", _dec=ev["n"], _live_tok_s=ev["tok_s"])
+            if row["status"] != "generating":
+                row["_live_tok_s"] = None
+            row.update(status="generating", _live_tok_s=ev["tok_s"])   # /slots owns _dec/_dec_t
         elif kind == "prompt_eval":
             row["_pe"] = {"ms": ev["ms"], "n": ev["n"]}
         elif kind == "eval":
@@ -113,6 +126,7 @@ class Tracker:
         elif kind == "draft":
             row["draft_accept"] = ev["accepted"] / ev["generated"] if ev["generated"] else None
         elif kind == "release":
+            row["_rel_n"] = ev.get("n")
             status = "cancelled" if task in self.cancelled else "done" if row["_eval"] else "approx"
             self.cancelled.discard(task)
             self._finish(slot, status, now)
@@ -121,24 +135,35 @@ class Tracker:
         if slots is None:
             if self.unreachable_since is None:
                 self.unreachable_since = now
-            if now - self.unreachable_since >= self.unreachable_s:
+            if not self.journal_up and now - self.unreachable_since >= self.unreachable_s and self.open:
                 for slot in list(self.open):
                     self._finish(slot, "interrupted", now)
+                self.server_run = now       # the server may have restarted unseen
+                self.cancelled.clear()
             return
         self.unreachable_since = None
         for s in slots:
             slot = s["id"]
             row = self.open.get(slot)
             if s["is_processing"]:
+                self.restarting = False
+                if row is not None and row["task"] != s["id_task"]:
+                    if self.journal_up:
+                        continue        # journal start/release will sort it out
+                    self._finish(slot, "approx", now)
+                    row = None
                 if row is None and not self.journal_up:
                     row = self._new_row(slot, s["id_task"], now)
                 if row is None:
                     continue
                 self.idle_since.pop(slot, None)
-                row["_ctx"] = s["n_prompt_tokens"]
+                if s["n_decoded"] > 0 or not self.journal_up:
+                    row["_ctx"] = s["n_prompt_tokens"]
                 if s["n_decoded"] > 0:
+                    if row["status"] != "generating":
+                        row["_live_tok_s"] = None   # never show the prefill rate as gen speed
                     if row["_dec"] is not None and row["_dec_t"] is not None and now > row["_dec_t"]:
-                        row["_live_tok_s"] = (s["n_decoded"] - row["_dec"]) / (now - row["_dec_t"])
+                        row["_live_tok_s"] = max(0.0, (s["n_decoded"] - row["_dec"]) / (now - row["_dec_t"]))
                     row.update(status="generating", _dec=s["n_decoded"], _dec_t=now)
             elif row is not None:
                 first = self.idle_since.setdefault(slot, now)
@@ -156,7 +181,7 @@ class Tracker:
             state = "restarting" if self.restarting else (row["status"] if row else "idle")
             views.append({"id": i, "state": state, "task": row["task"] if row else None,
                           "progress": row["_progress"] if row else None,
-                          "prompt_tokens": row["prompt_tokens"] if row else None,
+                          "prompt_tokens": (row["prompt_tokens"] if row["prompt_tokens"] is not None else row["_prompt_est"]) if row else None,
                           "processed_tokens": row["_processed"] if row else None,
                           "cached_tokens": row["cached_tokens"] if row else None,
                           "output_tokens": row["_dec"] if row else None,
