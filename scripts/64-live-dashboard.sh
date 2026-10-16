@@ -18,6 +18,21 @@ CFG_TEMPLATE='{"bind_host": "192.168.6.175", "bind_port": @PORT@, "history_path"
 # Sources that must be ok before the dashboard may own :8888.
 REQUIRED_SOURCES="slots journal gpu host"
 
+# Prints SOURCES_OK only if every named source is explicitly ok; otherwise the failing names or "unparseable-snapshot".
+SOURCES_CHECK_PY='import json, sys
+try:
+    need = sys.argv[1].split()
+    snap = json.loads(sys.stdin.read())
+    src = snap.get("sources") if isinstance(snap, dict) else None
+    if not isinstance(src, dict):
+        out = "unparseable-snapshot"
+    else:
+        bad = [n for n in need if not (isinstance(src.get(n), dict) and src[n].get("ok") is True)]
+        out = " ".join(bad) if bad else "SOURCES_OK"
+except Exception:
+    out = "unparseable-snapshot"
+print(out)'
+
 [[ "${EUID}" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
 
 write_cfg() {
@@ -58,17 +73,10 @@ check_sources() {
     echo "no snapshot received from :$port/api/stream within 10 s" >&2
     return 1
   fi
-  bad="$(printf '%s' "${line#data: }" | "$PY" -c '
-import json, sys
-need = sys.argv[1].split()
-try:
-    src = json.loads(sys.stdin.read()).get("sources", {})
-except ValueError:
-    print("unparseable-snapshot"); sys.exit(0)
-print(" ".join(n for n in need if not (isinstance(src.get(n), dict) and src[n].get("ok") is True)))
-' "$REQUIRED_SOURCES")"
-  if [[ -n "$bad" ]]; then
-    echo "sources not ok: $bad" >&2
+  bad="$(printf '%s' "${line#data: }" | "$PY" -c "$SOURCES_CHECK_PY" "$REQUIRED_SOURCES")" || bad="check-failed"
+  # fail closed: only the explicit marker passes; empty or unknown output is "not ok"
+  if [[ "$bad" != "SOURCES_OK" ]]; then
+    echo "sources not ok: ${bad:-no-output}" >&2
     return 1
   fi
   echo "sources ok: $REQUIRED_SOURCES"

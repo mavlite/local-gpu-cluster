@@ -100,3 +100,36 @@ def test_deploy_config_template_passes_validate_config():
         cfg = dict(C.DEFAULTS)
         cfg.update(loaded)
         M.validate_config(cfg)
+
+
+def _run_source_gate(stdin_text):
+    """Run the script's own SOURCES_CHECK_PY snippet (as check_sources does) and return its stdout."""
+    import subprocess
+    m = re.search(r"^SOURCES_CHECK_PY='(.*?)'$", _script(), re.M | re.S)
+    assert m, "SOURCES_CHECK_PY not found"
+    r = subprocess.run([sys.executable, "-c", m.group(1), "slots journal gpu host"], input=stdin_text,
+                       capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+
+
+def _snap(**oks):
+    return json.dumps({"sources": {n: {"ok": v} for n, v in oks.items()}})
+
+
+def test_source_gate_passes_only_on_explicit_success():
+    assert _run_source_gate(_snap(slots=True, journal=True, gpu=True, host=True, extra=False)) == "SOURCES_OK"
+
+
+def test_source_gate_names_failing_sources():
+    out = _run_source_gate(_snap(slots=True, journal=False, gpu=True, host=True))
+    assert out != "SOURCES_OK" and out == "journal"
+    assert _run_source_gate(_snap(slots=True, journal=True, gpu=True)) == "host"      # missing source
+    assert _run_source_gate(_snap(slots=True, journal=True, gpu=True, host="yes")) == "host"   # not literally true
+
+
+def test_source_gate_fails_closed_on_unexpected_snapshots():
+    for bad in ("{}", "[]", '{"sources": null}', '{"sources": []}', '{"sources": {"slots": null}}', "null", "3",
+                '"x"', "{not json", ""):
+        assert _run_source_gate(bad) != "SOURCES_OK", bad
+    # bash side: only the explicit marker passes
+    assert '[[ "$bad" != "SOURCES_OK" ]]' in _script()
