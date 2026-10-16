@@ -366,3 +366,16 @@ def test_live_view_cached_from_slots_then_finished_row():
     tr.on_journal(ev("release", 2.0, slot=1, task=7, n=40050), 103.0)
     v = tr.slot_views(104.0)[1]
     assert v["state"] == "idle" and v["cached_tokens"] == 34000 and v["prompt_tokens"] == 40000
+
+
+# ---- rollout finding: a max_tokens stop leaves the last sampled token out of the KV cache
+def test_prompt_never_below_new_tokens_when_stopped_at_max_tokens():
+    # recorded live 2026-10-16 (b11578): prompt eval 26, eval 60, total 86, but release n_tokens = 85
+    tr = Tracker()
+    tr.on_journal(ev("start", 1.0, slot=1, task=88), 10.0)
+    tr.on_journal(ev("prompt_eval", 2.0, slot=1, task=88, ms=271.31, n=26), 12.0)
+    tr.on_journal(ev("eval", 2.0, slot=1, task=88, ms=1427.0, n=60), 12.0)
+    tr.on_journal(ev("total", 2.0, slot=1, task=88, ms=1698.34, n=86), 12.0)
+    tr.on_journal(ev("release", 2.0, slot=1, task=88, n=85), 12.0)
+    r = tr.pop_finished()[0]
+    assert r["prompt_tokens"] == 26 and r["new_prompt_tokens"] == 26 and r["cached_tokens"] == 0

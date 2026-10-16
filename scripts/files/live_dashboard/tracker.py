@@ -63,6 +63,9 @@ class Tracker:
         elif row["_prompt_est"] is not None:
             row["prompt_tokens"] = row["_prompt_est"]
         if row["prompt_tokens"] is not None and row["new_prompt_tokens"] is not None:
+            # a max_tokens stop leaves the last sampled token out of the KV cache, so release n can be one short;
+            # the prompt is never smaller than the tokens llama.cpp just processed for it
+            row["prompt_tokens"] = max(row["prompt_tokens"], row["new_prompt_tokens"])
             row["cached_tokens"] = max(0, row["prompt_tokens"] - row["new_prompt_tokens"])
         row["slow"] = bool(row["new_prompt_tokens"] and row["new_prompt_tokens"] > SLOW_NEW_PROMPT_TOKENS)
         self.last_done[slot] = now
