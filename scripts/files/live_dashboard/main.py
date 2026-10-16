@@ -8,7 +8,7 @@ import threading
 import time
 
 from . import collectors as C
-from .server import make_server
+from .server import PageMissing, make_server
 
 log = logging.getLogger("live_dashboard")
 
@@ -17,8 +17,42 @@ def load_config(path):
     cfg = dict(C.DEFAULTS)
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ConfigError("config (must be a JSON object)")
+        cfg.update(loaded)
     return cfg
+
+
+class ConfigError(ValueError):
+    """Names the offending key only -- never its value."""
+
+
+_NUMERIC = ("retention_days", "sample_window_s", "max_stream_clients", "slot_count", "chat_ct", "router_ct",
+            "stream_interval_s", "socket_timeout_s", "header_deadline_s", "max_connections")
+_STRINGS = ("bind_host", "history_path", "chat_url", "embed_url", "rerank_url", "router_url", "drm_root",
+            "hwmon_root", "proc_root")
+_STR_LISTS = ("gpu_buses", "disk_devices", "journal_argv")
+
+
+def validate_config(cfg):
+    if not isinstance(cfg, dict):
+        raise ConfigError("config (must be a JSON object)")
+    port = cfg.get("bind_port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ConfigError("bind_port")
+    for k in _STRINGS:
+        if k in cfg and not (isinstance(cfg[k], str) and cfg[k]):
+            raise ConfigError(k)
+    for k in _NUMERIC:
+        v = cfg.get(k)
+        if k in cfg and (isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v <= 0
+                         or v == float("inf")):
+            raise ConfigError(k)
+    for k in _STR_LISTS:
+        v = cfg.get(k)
+        if k in cfg and not (isinstance(v, list) and v and all(isinstance(x, str) for x in v)):
+            raise ConfigError(k)
 
 
 def _every(period, fn, stop, name="x"):
@@ -74,6 +108,10 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         cfg = load_config(a.config)
+        validate_config(cfg)
+    except ConfigError as e:
+        log.error("invalid config: %s", e)
+        return 2
     except (OSError, ValueError) as e:
         log.error("cannot load config %s: %s", a.config, type(e).__name__)
         return 2
@@ -85,6 +123,10 @@ def main(argv=None) -> int:
     hub = C.Hub(cfg, C.default_http_get, C.default_read_text, C.default_run_cmd)
     try:
         srv = make_server(hub, cfg, a.static_dir)
+    except PageMissing:
+        log.error("missing static/index.html in %s", a.static_dir)
+        hub.history.close()
+        return 1
     except OSError as e:
         log.error("cannot start server on %s:%s: %s", cfg.get("bind_host"), cfg.get("bind_port"), e.strerror or type(e).__name__)
         hub.history.close()

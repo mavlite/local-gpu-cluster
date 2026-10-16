@@ -283,3 +283,124 @@ def test_run_service_clean_shutdown(tmp_path):
     ev.set()
     t.join(15)
     assert not t.is_alive() and f.stopped and hub.history.closed
+
+
+def _recv_closed(s, timeout):
+    """True if the server closed/reset this socket within timeout."""
+    s.settimeout(timeout)
+    try:
+        return s.recv(1) == b""
+    except (ConnectionError, OSError) as e:
+        return not isinstance(e, socket.timeout)
+
+
+def test_connection_cap_refuses_extra_without_threads(tmp_path):
+    srv, _ = start(tmp_path, max_connections=3, header_deadline_s=30, socket_timeout_s=30)
+    held = []
+    try:
+        for _ in range(3):
+            s = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+            s.sendall(b"GET /heal")
+            held.append(s)
+        time.sleep(0.5)
+        base = threading.active_count()
+        extra = []
+        for _ in range(10):
+            e = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+            extra.append(e)
+        t0 = time.time()
+        assert all(_recv_closed(e, 2) for e in extra)
+        assert time.time() - t0 < 3
+        assert threading.active_count() <= base + 1
+        for e in extra:
+            e.close()
+        for s in held:
+            s.close()
+        assert wait_for(lambda: get(srv, "/healthz")[0] == 200, timeout=8)
+    finally:
+        stop(srv)
+
+
+def test_header_dribbler_dropped_by_deadline(tmp_path):
+    srv, _ = start(tmp_path, header_deadline_s=1.0, socket_timeout_s=10)
+    s = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+    try:
+        s.sendall(b"GET /healthz HTTP/1.1\r\n")
+        t0 = time.time()
+        dropped = False
+        while time.time() - t0 < 4:
+            try:
+                s.sendall(b"X-A: b\r\n")
+            except OSError:
+                dropped = True
+                break
+            time.sleep(0.4)
+            s.settimeout(0.01)
+            try:
+                if s.recv(1) == b"":
+                    dropped = True
+                    break
+            except socket.timeout:
+                pass
+            except OSError:
+                dropped = True
+                break
+        assert dropped and time.time() - t0 < 2.0
+        assert get(srv, "/healthz")[0] == 200
+    finally:
+        s.close()
+        stop(srv)
+
+
+def test_too_many_query_params_is_400(tmp_path):
+    srv, _ = start(tmp_path)
+    try:
+        assert get(srv, "/api/history?" + "&".join(f"a{i}=1" for i in range(30)))[0] == 400
+        assert get(srv, "/api/requests?limit=%C2%B2")[0] == 400   # non-ASCII digit
+    finally:
+        stop(srv)
+
+
+def test_stream_starts_with_retry(tmp_path):
+    srv, _ = start(tmp_path)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)
+        c.request("GET", "/api/stream")
+        r = c.getresponse()
+        assert r.read1(100).startswith(b"retry: 3000\n\n")
+        r.close()
+        c.close()
+    finally:
+        stop(srv)
+
+
+def _cfg_file(tmp_path, **kw):
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    base = {"bind_host": "127.0.0.1", "bind_port": port, "history_path": str(tmp_path / "h" / "h.db")}
+    base.update(kw)
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps(base))
+    return str(p)
+
+
+def test_config_validation_names_key_not_value(tmp_path, caplog):
+    for kw, key in (({"bind_port": 70000}, "bind_port"), ({"bind_port": "8889"}, "bind_port"),
+                    ({"bind_host": 5}, "bind_host"), ({"retention_days": "SECRET"}, "retention_days")):
+        caplog.clear()
+        with caplog.at_level("ERROR"):
+            assert M.main(["--config", _cfg_file(tmp_path, **kw), "--static-dir", str(tmp_path)]) == 2
+        assert key in caplog.text and "SECRET" not in caplog.text
+    p = tmp_path / "list.json"
+    p.write_text("[1]")
+    assert M.main(["--config", str(p)]) == 2
+
+
+def test_missing_index_html_own_error(tmp_path, caplog):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with caplog.at_level("ERROR"):
+        rc = M.main(["--config", _cfg_file(tmp_path), "--static-dir", str(empty)])
+    assert rc == 1 and "index.html" in caplog.text and "cannot start server" not in caplog.text

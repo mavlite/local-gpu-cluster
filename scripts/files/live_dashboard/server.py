@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +18,33 @@ def _dumps(obj) -> bytes:
     return json.dumps(obj, allow_nan=False).encode()
 
 
+class PageMissing(Exception):
+    """static/index.html could not be read."""
+
+
 class _Server(ThreadingHTTPServer):
+    max_connections = 40
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._conn_sem = threading.BoundedSemaphore(self.max_connections)
+
+    def process_request(self, request, client_address):
+        if not self._conn_sem.acquire(blocking=False):      # full: drop at once, no thread
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._conn_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_sem.release()
+
     def handle_error(self, request, client_address):
         import sys
         exc = sys.exc_info()[1]
@@ -33,8 +60,13 @@ def make_server(hub, cfg, static_dir):
     interval = float(cfg.get("stream_interval_s", 1.0))
     cap = int(cfg.get("max_stream_clients", 8))
     io_timeout = float(cfg.get("socket_timeout_s", 10.0))
-    with open(os.path.join(static_dir, "index.html"), "rb") as f:
-        page = f.read()
+    header_deadline = float(cfg.get("header_deadline_s", 10.0))
+    max_conn = int(cfg.get("max_connections", cap + 32))
+    try:
+        with open(os.path.join(static_dir, "index.html"), "rb") as f:
+            page = f.read()
+    except OSError as e:
+        raise PageMissing(os.path.join(static_dir, "index.html")) from e
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -42,6 +74,29 @@ def make_server(hub, cfg, static_dir):
 
         def log_message(self, *a):
             pass
+
+        def handle_one_request(self):
+            # Whole-request deadline for request line + headers: per-read timeouts alone let a
+            # dribbler hold a thread. The timer cuts the socket; parse_request() cancels it.
+            self._hdr_timer = threading.Timer(header_deadline, self._cut)
+            self._hdr_timer.daemon = True
+            self._hdr_timer.start()
+            try:
+                super().handle_one_request()
+            finally:
+                self._hdr_timer.cancel()
+
+        def _cut(self):
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def parse_request(self):
+            try:
+                return super().parse_request()
+            finally:
+                self._hdr_timer.cancel()
 
         def _send(self, code, body, ctype="application/json", extra=()):
             data = body if isinstance(body, bytes) else body.encode()
@@ -65,14 +120,14 @@ def make_server(hub, cfg, static_dir):
 
         def _int(self, q, name, default):
             v = q.get(name, [str(default)])[0]
-            if not v.isdigit() or len(v) > _MAX_DIGITS:
+            if not (v.isascii() and v.isdigit()) or len(v) > _MAX_DIGITS:
                 raise ValueError(name)
             return int(v)
 
         def _handle(self):
             u = urlparse(self.path)
-            q = parse_qs(u.query, max_num_fields=20)
             try:
+                q = parse_qs(u.query, max_num_fields=20)
                 if u.path in ("/", "/index.html"):
                     return self._send(200, page, "text/html; charset=utf-8")
                 if u.path == "/healthz":
@@ -126,6 +181,8 @@ def make_server(hub, cfg, static_dir):
                 self.send_header("Connection", "close")
                 self.end_headers()
                 self.close_connection = True
+                self.wfile.write(b"retry: 3000\n\n")
+                self.wfile.flush()
                 while not stop_event.is_set():
                     ev = self._event()
                     if ev is not None:
@@ -138,7 +195,7 @@ def make_server(hub, cfg, static_dir):
                 with lock:
                     clients["n"] -= 1
 
-    srv = _Server((cfg["bind_host"], int(cfg["bind_port"])), Handler)
+    srv = type("Srv", (_Server,), {"max_connections": max_conn})((cfg["bind_host"], int(cfg["bind_port"])), Handler)
     srv.daemon_threads = True
     srv.stop_event = stop_event
     srv.client_count = lambda: clients["n"]
