@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V620 Cluster - Live (mockup)</title>
+<style>
+  :root{--bg:#0b0e14;--panel:#121722;--panel2:#161c29;--line:#232b3b;--fg:#e6e9ef;--mut:#8a93a6;
+        --blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--violet:#a78bfa;--teal:#2dd4bf}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.35 system-ui,Segoe UI,sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line)}
+  .brand{font-weight:700;font-size:18px} .pill{padding:5px 12px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:13px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .sp{flex:1} main{padding:18px 22px;display:grid;gap:16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  h3{margin:0 0 10px;font-size:15px} .mut{color:var(--mut);font-size:12px}
+  .slots{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .slot{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+  .bar{height:8px;background:#1e2533;border-radius:6px;overflow:hidden;margin:8px 0 4px} .bar>i{display:block;height:100%}
+  .row{display:flex;justify-content:space-between;align-items:baseline}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .big{font-size:30px;font-weight:700;letter-spacing:-.5px} .unit{font-size:13px;color:var(--mut);margin-left:3px;font-weight:400}
+  svg.spark{width:100%;height:38px;margin-top:6px}
+  .two{display:grid;grid-template-columns:1.1fr 1.9fr;gap:16px}
+  table{width:100%;border-collapse:collapse;font-size:13px} th{color:var(--mut);font-weight:500;text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+  td{text-align:right;padding:7px 8px;border-bottom:1px solid #1a2130} th:first-child,td:first-child,th:nth-child(2),td:nth-child(2),th:nth-child(3),td:nth-child(3){text-align:left}
+  .gpu{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .mini .big{font-size:22px}
+  .svc{display:flex;gap:10px;flex-wrap:wrap} .svc .pill{font-size:12px}
+  .gauge{display:flex;gap:18px;align-items:center}
+  .note{border-left:3px solid var(--violet);padding:6px 10px;background:#141a27;border-radius:6px;color:#cdd3e0;font-size:12.5px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">V620 Cluster <span class="mut" style="font-weight:400">· live</span></div>
+  <span class="pill"><span class="dot" style="background:var(--blue)"></span>slot 0 reading prompt · 97%</span>
+  <span class="pill"><span class="dot" style="background:var(--green)"></span>slot 1 generating · 48.6 tok/s</span>
+  <span class="pill"><span class="dot" style="background:var(--mut)"></span>slot 2 idle</span>
+  <div class="sp"></div>
+  <span class="pill">qwen3.8 · b11578 · 3 × 128K · MTP n3</span>
+  <span class="mut">updated 0.4 s ago</span>
+</header>
+
+<main>
+  <!-- 1. Slots -->
+  <section class="panel">
+    <div class="row"><h3>Chat slots</h3><span class="mut">queue: <b style="color:var(--fg)">0</b> deferred · reserved user lane: slot 2</span></div>
+    <div class="slots">
+      <div class="slot">
+        <div class="row"><b>Slot 0</b><span class="tag" style="color:var(--blue);border-color:#1e3a6e">Reading prompt</span></div>
+        <div class="bar"><i style="width:97%;background:var(--blue)"></i></div>
+        <div class="row mut"><span>35,610 / 36,742 tokens · 97%</span><span>612 tok/s</span></div>
+        <div class="row mut" style="margin-top:6px"><span>reused from cache: 29,104 (79%)</span><span>ctx 37K / 128K</span></div>
+      </div>
+      <div class="slot">
+        <div class="row"><b>Slot 1</b><span class="tag" style="color:var(--green);border-color:#1d4d33">Generating</span></div>
+        <div class="bar"><i style="width:34%;background:var(--green)"></i></div>
+        <div class="row mut"><span>1,392 tokens out · 28.6 s</span><span>48.6 tok/s</span></div>
+        <div class="row mut" style="margin-top:6px"><span>MTP accept 81% · prompt 12,772 (cached 11,940)</span><span>ctx 14K / 128K</span></div>
+      </div>
+      <div class="slot">
+        <div class="row"><b>Slot 2</b><span class="tag">Idle</span></div>
+        <div class="bar"><i style="width:0"></i></div>
+        <div class="row mut"><span>last: 4.0 s ago · 626 in / 11 out</span><span>—</span></div>
+        <div class="row mut" style="margin-top:6px"><span>cached prefix kept: 18,402 tokens</span><span>ctx 18K / 128K</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Speed cards -->
+  <section class="cards">
+    <div class="card"><div class="mut">Generation</div><div class="big">48.6<span class="unit">tok/s</span></div>
+      <div class="mut">15-min avg 44.1 · bench 50.8</div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#22c55e" stroke-width="1.6" points="0,12 8,11 16,13 24,12 32,16 40,15 48,22 56,21 64,13 72,12 80,11 88,12 100,11"/></svg></div>
+    <div class="card"><div class="mut">Prompt processing</div><div class="big">612<span class="unit">tok/s</span></div>
+      <div class="mut">15-min avg 498 · drops ~325 above 60K</div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#3b82f6" stroke-width="1.6" points="0,20 10,8 18,9 26,22 34,24 42,10 50,9 58,26 66,25 74,9 82,8 90,11 100,8"/></svg></div>
+    <div class="card"><div class="mut">Cache reuse (last 15 min)</div><div class="big">88<span class="unit">%</span></div>
+      <div class="mut">412K of 468K prompt tokens served from cache</div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#2dd4bf" stroke-width="1.6" points="0,6 10,7 20,5 30,18 40,7 50,6 60,6 70,20 80,6 90,5 100,6"/></svg></div>
+    <div class="card"><div class="mut">MTP draft acceptance</div><div class="big">81<span class="unit">%</span></div>
+      <div class="mut">pos 1: 92% · pos 2: 81% · pos 3: 70%</div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#a78bfa" stroke-width="1.6" points="0,10 10,9 20,11 30,9 40,10 50,8 60,9 70,10 80,9 90,9 100,8"/></svg></div>
+  </section>
+
+  <!-- 3. GPUs + host -->
+  <section class="grid3">
+    <div class="panel mini"><div class="row"><h3>GPU 0 · V620</h3><span class="mut">PCIe Gen4 x16</span></div>
+      <div class="gpu">
+        <div><div class="mut">Load</div><div class="big">91<span class="unit">%</span></div></div>
+        <div><div class="mut">VRAM</div><div class="big">28.1<span class="unit">/32 GB</span></div></div>
+        <div><div class="mut">Junction</div><div class="big">84<span class="unit">°C</span></div></div>
+        <div><div class="mut">Power</div><div class="big">176<span class="unit">/180 W</span></div></div>
+      </div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#f59e0b" stroke-width="1.4" points="0,22 10,20 20,8 30,6 40,7 50,20 60,6 70,5 80,7 90,6 100,6"/></svg>
+      <div class="mut">fan 90% · chat (tensor-split) + embed</div></div>
+    <div class="panel mini"><div class="row"><h3>GPU 1 · V620</h3><span class="mut">PCIe Gen4 x16</span></div>
+      <div class="gpu">
+        <div><div class="mut">Load</div><div class="big">88<span class="unit">%</span></div></div>
+        <div><div class="mut">VRAM</div><div class="big">24.6<span class="unit">/32 GB</span></div></div>
+        <div><div class="mut">Junction</div><div class="big">81<span class="unit">°C</span></div></div>
+        <div><div class="mut">Power</div><div class="big">171<span class="unit">/180 W</span></div></div>
+      </div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#f59e0b" stroke-width="1.4" points="0,23 10,21 20,9 30,7 40,8 50,21 60,7 70,6 80,8 90,7 100,7"/></svg>
+      <div class="mut">fan 90% · chat (tensor-split) + rerank + vision projector</div></div>
+    <div class="panel mini"><div class="row"><h3>Host · Ryzen 5 7600</h3><span class="mut">128 GB</span></div>
+      <div class="gpu">
+        <div><div class="mut">CPU</div><div class="big">14<span class="unit">%</span></div></div>
+        <div><div class="mut">RAM</div><div class="big">24<span class="unit">/124 GB</span></div></div>
+        <div><div class="mut">Disk read</div><div class="big">0.1<span class="unit">MB/s</span></div></div>
+        <div><div class="mut">ZFS ARC</div><div class="big">11<span class="unit">GB</span></div></div>
+      </div>
+      <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"><polyline fill="none" stroke="#8a93a6" stroke-width="1.4" points="0,25 10,24 20,22 30,25 40,24 50,23 60,25 70,22 80,24 90,25 100,24"/></svg>
+      <div class="svc" style="margin-top:6px">
+        <span class="pill"><span class="dot" style="background:var(--green)"></span>router</span>
+        <span class="pill"><span class="dot" style="background:var(--green)"></span>embed · 12 req/min</span>
+        <span class="pill"><span class="dot" style="background:var(--green)"></span>rerank</span>
+        <span class="pill"><span class="dot" style="background:var(--amber)"></span>chat restart in 3 h (16:00 UTC)</span>
+      </div></div>
+  </section>
+
+  <!-- 4. Requests + history -->
+  <section class="two">
+    <div class="panel">
+      <h3>Claude escalation</h3>
+      <div class="gauge">
+        <svg width="110" height="110" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="#1e2533" stroke-width="3.2"/>
+          <circle cx="18" cy="18" r="15.9" fill="none" stroke="#a78bfa" stroke-width="3.2" stroke-dasharray="1 99" transform="rotate(-90 18 18)"/>
+          <text x="18" y="17" text-anchor="middle" font-size="5.5" fill="#e6e9ef" font-weight="700">$0.01</text>
+          <text x="18" y="23" text-anchor="middle" font-size="3" fill="#8a93a6">of $150 / month</text></svg>
+        <div>
+          <div>Today <b>$0.01</b> <span class="mut">of $7.00</span></div>
+          <div class="mut" style="margin-top:4px">calls left today: ask 14 · auto 5 · hard 3</div>
+          <div class="mut" style="margin-top:4px">last: claude-ask · Sonnet · 1,540 in / 327 out · $0.006</div>
+        </div>
+      </div>
+      <h3 style="margin-top:18px">Speed vs context (last 7 days)</h3>
+      <svg viewBox="0 0 220 110" style="width:100%">
+        <line x1="25" y1="95" x2="215" y2="95" stroke="#232b3b"/><line x1="25" y1="5" x2="25" y2="95" stroke="#232b3b"/>
+        <polyline fill="none" stroke="#22c55e" stroke-width="1.8" points="30,30 70,34 110,40 150,50 190,58 210,62"/>
+        <polyline fill="none" stroke="#3b82f6" stroke-width="1.8" points="30,20 70,26 110,44 150,66 190,74 210,78"/>
+        <text x="30" y="106" font-size="7" fill="#8a93a6">0K</text><text x="105" y="106" font-size="7" fill="#8a93a6">60K</text><text x="195" y="106" font-size="7" fill="#8a93a6">128K</text>
+        <text x="150" y="44" font-size="7" fill="#22c55e">gen tok/s</text><text x="150" y="86" font-size="7" fill="#3b82f6">prefill tok/s</text>
+      </svg>
+      <div class="note">From the 30-day request history: lets you see whether a change (e.g. the skills fix) moved real-world speed, not just bench numbers.</div>
+    </div>
+
+    <div class="panel">
+      <div class="row"><h3>Recent requests</h3><span class="mut">kept 30 days · numbers only, never prompt text</span></div>
+      <table>
+        <tr><th>Time</th><th>Slot</th><th>Status</th><th>Prompt</th><th>Reused</th><th>Output</th><th>Prefill t/s</th><th>Gen t/s</th><th>Think</th><th>Duration</th></tr>
+        <tr><td>14:11:31</td><td>0</td><td><span class="tag" style="color:var(--blue)">reading</span></td><td>36,742</td><td>29,104</td><td>—</td><td>612</td><td>—</td><td>—</td><td>12.8 s</td></tr>
+        <tr><td>14:11:27</td><td>1</td><td><span class="tag" style="color:var(--green)">generating</span></td><td>12,772</td><td>11,940</td><td>1,392</td><td>540</td><td>48.6</td><td>61%</td><td>30.1 s</td></tr>
+        <tr><td>14:10:50</td><td>2</td><td><span class="tag">done</span></td><td>626</td><td>0</td><td>11</td><td>410</td><td>26.7</td><td>0%</td><td>4.0 s</td></tr>
+        <tr><td>14:07:35</td><td>0</td><td><span class="tag">done</span></td><td>10,437</td><td>9,980</td><td>6,615</td><td>498</td><td>40.0</td><td>72%</td><td>195.2 s</td></tr>
+        <tr><td>14:05:02</td><td>1</td><td><span class="tag" style="color:var(--amber)">slow</span></td><td>68,210</td><td>2,400</td><td>540</td><td>331</td><td>33.9</td><td>18%</td><td>215.5 s</td></tr>
+        <tr><td>14:01:44</td><td>0</td><td><span class="tag">done</span></td><td>9,881</td><td>9,880</td><td>230</td><td>—</td><td>47.2</td><td>40%</td><td>5.1 s</td></tr>
+      </table>
+      <div class="note" style="margin-top:10px">"Reused" = prompt tokens served from the slot's cache; a low value on a big prompt (row 5) is the expensive re-prefill the measurements found. "Think" = share of output spent in reasoning, when the router can attribute it.</div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
