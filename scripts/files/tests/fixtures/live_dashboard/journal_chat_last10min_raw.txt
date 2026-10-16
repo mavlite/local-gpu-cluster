@@ -1,0 +1,18 @@
+552.57.632.231 W srv    operator(): unauthorized: Invalid API Key
+552.57.632.557 W srv    operator(): unauthorized: Invalid API Key
+552.57.633.056 W srv    operator(): unauthorized: Invalid API Key
+552.57.641.293 I slot get_availabl: id  1 | task -1 | selected slot by LRU, t_last = 220508837368
+552.57.641.854 I slot launch_slot_: id  1 | task 4772 | processing task, is_child = 0
+552.57.644.125 W srv         alloc:  - making room for prompt cache entry, removing oldest entry (size = 451.206 MiB)
+552.57.679.909 W srv         alloc:  - making room for prompt cache entry, removing oldest entry (size = 300.043 MiB)
+552.57.700.350 W srv         alloc:  - making room for prompt cache entry, removing oldest entry (size = 776.194 MiB)
+553.03.456.405 I slot print_timing: id  1 | task 4772 | prompt processing, n_tokens =   2048, progress = 0.55, t =   3.08 s / 665.88 tokens per second
+553.05.354.338 I slot print_timing: id  1 | task 4772 | prompt processing, n_tokens =   3211, progress = 0.86, t =   5.03 s / 638.90 tokens per second
+553.06.248.641 I slot print_timing: id  1 | task 4772 | prompt processing, n_tokens =   3723, progress = 1.00, t =   5.96 s / 624.75 tokens per second
+553.06.878.021 I slot print_timing: id  1 | task 4772 | prompt eval time =    6154.43 ms /  3727 tokens (    1.65 ms per token,   605.58 tokens per second)
+553.06.878.024 I slot print_timing: id  1 | task 4772 |        eval time =     459.73 ms /    23 tokens (   20.90 ms per token,    47.85 tokens per second)
+553.06.878.025 I slot print_timing: id  1 | task 4772 |       total time =    6614.16 ms /  3750 tokens
+553.06.878.025 I slot print_timing: id  1 | task 4772 |    graphs reused =       4570
+553.06.878.026 I slot print_timing: id  1 | task 4772 |   graph reallocs =          0    /     0        (same size) / (changed size)
+553.06.878.028 I slot print_timing: id  1 | task 4772 | draft acceptance = 0.76190 (   16 accepted /    21 generated), mean len =  3.29
+553.06.878.179 I slot      release: id  1 | task 4772 | stop processing: n_tokens = 3750, truncated = 0

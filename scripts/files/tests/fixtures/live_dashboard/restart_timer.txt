@@ -1,0 +1,63 @@
+NEXT                            LEFT LAST                              PASSED UNIT                           ACTIVATES
+Fri 2026-10-16 02:20:00 UTC 3min 22s Fri 2026-10-16 02:10:38 UTC     5min ago sysstat-collect.timer          sysstat-collect.service
+Fri 2026-10-16 03:00:00 UTC    43min Fri 2026-10-16 02:00:01 UTC    16min ago logrotate.timer                logrotate.service
+Fri 2026-10-16 03:02:27 UTC    45min Fri 2026-10-16 02:01:38 UTC    14min ago llamacpp-chat-restart.timer    llamacpp-chat-restart.service
+Fri 2026-10-16 03:41:40 UTC 1h 25min Thu 2026-10-15 11:42:41 UTC      14h ago apt-daily.timer                apt-daily.service
+Fri 2026-10-16 04:21:23 UTC  2h 4min Thu 2026-10-15 11:37:54 UTC      14h ago man-db.timer                   man-db.service
+Fri 2026-10-16 06:49:09 UTC 4h 32min Thu 2026-10-15 06:10:41 UTC      20h ago apt-daily-upgrade.timer        apt-daily-upgrade.service
+Fri 2026-10-16 11:23:46 UTC       9h Thu 2026-10-15 21:05:54 UTC 5h 10min ago motd-news.timer                motd-news.service
+Fri 2026-10-16 11:30:01 UTC       9h Thu 2026-10-15 11:30:01 UTC      14h ago systemd-tmpfiles-clean.timer   systemd-tmpfiles-clean.service
+Sat 2026-10-17 00:00:00 UTC      21h Fri 2026-10-16 00:00:41 UTC 2h 15min ago dpkg-db-backup.timer           dpkg-db-backup.service
+Sat 2026-10-17 00:07:00 UTC      21h Fri 2026-10-16 00:07:22 UTC  2h 9min ago sysstat-summary.timer          sysstat-summary.service
+Sun 2026-10-18 03:10:34 UTC   2 days Sun 2026-10-11 03:10:17 UTC            - e2scrub_all.timer              e2scrub_all.service
+-                                  - -                                      - fstrim.timer                   fstrim.service
+-                                  - -                                      - systemd-sysupdate-reboot.timer systemd-sysupdate-reboot.service
+-                                  - -                                      - systemd-sysupdate.timer        systemd-sysupdate.service
+-                                  - -                                      - ua-timer.timer                 ua-timer.service
+
+15 timers listed.
+Fri Oct 16 02:16:37 AM UTC 2026
+Fri Oct 16 02:16:38 UTC 2026
+# /etc/systemd/system/llamacpp-chat-restart.timer
+[Unit]
+Description=Schedule for idle-gated llamacpp-chat restart
+# See llamacpp-chat-restart.service for context; Documentation= requires a
+# URL-shaped value so we omit it on the timer rather than carry a comment
+# that systemd will misparse as URLs.
+
+[Timer]
+# Fires often; the guard decides whether to act. This is what lets the restart
+# land in a real lull instead of at a fixed wall-clock time that may be busy.
+OnCalendar=hourly
+# Spreads load only. Jitter is NOT a safety mechanism for in-flight requests —
+# the idle gate in the service is.
+RandomizedDelaySec=5min
+# Persistent=true catches up if the host was off when a window was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+# /etc/systemd/system/llamacpp-chat-restart.service
+[Unit]
+Description=Idle-gated proactive restart of llamacpp-chat
+# Context: /usr/local/bin/chat-restart-if-idle.sh documents the decision table.
+Documentation=https://github.com/ggerganov/llama.cpp/issues
+# NOTE: do NOT use Requires=llamacpp-chat.service here. The guard issues
+# `systemctl restart llamacpp-chat`, which transiently stops chat. With
+# Requires=, systemd kills this in-flight restart command with SIGTERM the
+# moment chat goes down — leaving both units in a broken state and triggering
+# a tight ~5s restart loop. Use no dependency at all; the restart command
+# will start chat back up itself even if it was already stopped.
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/llamacpp-chat-restart.env
+# The guard exits 0 whether it restarts or skips; a skip is a normal outcome.
+ExecStart=/usr/local/bin/chat-restart-if-idle.sh
+# The guard polls for up to ~60s after a restart to confirm the unit came back
+# before arming its rate limit, plus up to ~13s of probing. Give it headroom
+# over the 90s oneshot default.
+TimersCalendar={ OnCalendar=*-*-* *:00:00 ; next_elapse=Fri 2026-10-16 03:00:00 UTC }
+NextElapseUSecRealtime=Fri 2026-10-16 03:02:27 UTC
+LastTriggerUSec=Fri 2026-10-16 02:01:38 UTC

@@ -1,0 +1,4 @@
+200
+200
+embed diff {'llamacpp:prompt_tokens_total': ('0', '2'), 'llamacpp:prompt_seconds_total': ('0', '0.009624'), 'llamacpp:n_decode_total': ('0', '1'), 'llamacpp:n_tokens_max': ('0', '2'), 'llamacpp:prompt_tokens_seconds': ('0', '207.814'), 'llamacpp:n_busy_slots_per_decode': ('0', '1')}
+rerank diff {'llamacpp:prompt_tokens_total': ('0', '10'), 'llamacpp:prompt_seconds_total': ('0', '0.172892'), 'llamacpp:n_decode_total': ('0', '1'), 'llamacpp:n_tokens_max': ('0', '5'), 'llamacpp:prompt_tokens_seconds': ('0', '57.8396'), 'llamacpp:n_busy_slots_per_decode': ('0', '2')}

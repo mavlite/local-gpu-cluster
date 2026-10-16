@@ -1,0 +1,17 @@
+== /sys/class/hwmon/hwmon14/name
+nct6798
+== /sys/class/hwmon/hwmon14/pwm5
+64
+== /sys/class/hwmon/hwmon14/pwm5_enable
+1
+== /sys/class/hwmon/hwmon14/pwm6
+64
+== /sys/class/hwmon/hwmon14/pwm6_enable
+1
+== /var/lib/v620-temps/current-junction
+33
+total 16
+drwxr-xr-x  2 root root 4096 Oct 15 21:13 .
+drwxr-xr-x 45 root root 4096 Sep 17 10:12 ..
+-rw-r--r--  1 root root    3 Oct 15 21:13 current-junction
+-rw-r--r--  1 root root    3 Oct 15 21:13 current-temp
