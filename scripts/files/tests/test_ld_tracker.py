@@ -69,9 +69,10 @@ def test_generating_from_slots_then_done_row_from_journal():
 def test_cached_prompt_and_slow_flag():
     tr = Tracker()
     tr.on_journal(ev("start", 1.0, slot=0, task=9), 10.0)
+    # a real cache hit: prompt eval and total count only NEWLY processed tokens; release n is the full context
     tr.on_journal(ev("prompt_eval", 2.0, slot=0, task=9, ms=10000.0, n=6000), 20.0)
     tr.on_journal(ev("eval", 2.0, slot=0, task=9, ms=1000.0, n=50), 20.0)
-    tr.on_journal(ev("total", 2.0, slot=0, task=9, ms=11000.0, n=40050), 20.0)
+    tr.on_journal(ev("total", 2.0, slot=0, task=9, ms=11000.0, n=6050), 20.0)
     tr.on_journal(ev("release", 2.0, slot=0, task=9, n=40050), 20.0)
     r = tr.pop_finished()[0]
     assert r["prompt_tokens"] == 40000 and r["new_prompt_tokens"] == 6000 and r["cached_tokens"] == 34000
@@ -325,3 +326,43 @@ def test_progress_is_complete_once_generating():
     tr.on_journal(ev("prefill", 2.0, slot=0, task=5, n=2048, progress=0.55, tok_s=600.0), 102.0)
     tr.on_slots(slots({0: {"is_processing": True, "id_task": 5, "n_prompt_tokens": 9, "n_decoded": 4}}), 103.0)
     assert tr.slot_views(103.0)[0]["progress"] == 1.0
+
+
+# ---- final fix wave: F1 (prompt/cached from the release line), M9 (live cached from /slots)
+def test_prompt_tokens_fall_back_to_reading_estimate_without_release_n():
+    tr = Tracker()
+    tr.on_journal(ev("start", 1.0, slot=0, task=9), 10.0)
+    tr.on_journal(ev("prefill", 1.5, slot=0, task=9, n=2000, progress=0.5, tok_s=600.0), 12.0)
+    tr.on_journal(ev("prompt_eval", 2.0, slot=0, task=9, ms=4000.0, n=2000), 20.0)
+    tr.on_journal(ev("eval", 2.0, slot=0, task=9, ms=1000.0, n=10), 20.0)
+    tr.on_journal(ev("total", 2.0, slot=0, task=9, ms=5000.0, n=2010), 20.0)
+    tr.on_journal(ev("release", 2.0, slot=0, task=9), 20.0)          # no n on the release event
+    r = tr.pop_finished()[0]
+    assert r["prompt_tokens"] == 4000 and r["new_prompt_tokens"] == 2000 and r["cached_tokens"] == 2000
+
+
+def test_total_n_is_never_used_for_prompt_tokens():
+    tr = Tracker()
+    tr.on_journal(ev("start", 1.0, slot=0, task=9), 10.0)
+    tr.on_journal(ev("prompt_eval", 2.0, slot=0, task=9, ms=1000.0, n=100), 20.0)
+    tr.on_journal(ev("eval", 2.0, slot=0, task=9, ms=1000.0, n=10), 20.0)
+    tr.on_journal(ev("total", 2.0, slot=0, task=9, ms=2000.0, n=110), 20.0)
+    tr.on_journal(ev("release", 2.0, slot=0, task=9), 20.0)          # no release n, no reading estimate
+    r = tr.pop_finished()[0]
+    assert r["prompt_tokens"] is None and r["cached_tokens"] is None and r["new_prompt_tokens"] == 100
+
+
+def test_live_view_cached_from_slots_then_finished_row():
+    tr = Tracker()
+    tr.on_journal(ev("start", 1.0, slot=1, task=7), 100.0)
+    tr.on_slots(slots({1: {"is_processing": True, "id_task": 7, "n_prompt_tokens": 40000, "cache": 0}}), 101.0)
+    assert tr.slot_views(101.0)[1]["cached_tokens"] is None              # 0 = nothing known yet
+    tr.on_slots(slots({1: {"is_processing": True, "id_task": 7, "n_prompt_tokens": 40000, "cache": 34000,
+                           "n_decoded": 5}}), 102.0)
+    assert tr.slot_views(102.0)[1]["cached_tokens"] == 34000
+    tr.on_journal(ev("prompt_eval", 2.0, slot=1, task=7, ms=10000.0, n=6000), 103.0)
+    tr.on_journal(ev("eval", 2.0, slot=1, task=7, ms=1000.0, n=50), 103.0)
+    tr.on_journal(ev("total", 2.0, slot=1, task=7, ms=11000.0, n=6050), 103.0)
+    tr.on_journal(ev("release", 2.0, slot=1, task=7, n=40050), 103.0)
+    v = tr.slot_views(104.0)[1]
+    assert v["state"] == "idle" and v["cached_tokens"] == 34000 and v["prompt_tokens"] == 40000

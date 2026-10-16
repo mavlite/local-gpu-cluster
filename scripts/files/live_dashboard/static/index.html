@@ -95,14 +95,14 @@
 
   <!-- 2. Speed cards -->
   <section class="cards">
-    <div class="card" id="card-gen"><div class="mut">Generation</div><div class="big"><span id="gen-now">—</span><span class="unit">tok/s</span></div>
+    <div class="card" id="card-gen"><div class="mut">Generation <span id="gen-label"></span></div><div class="big"><span id="gen-now">—</span><span class="unit">tok/s</span></div>
       <div class="mut">15-min avg <span id="gen-avg">—</span> · bench 50.8</div>
       <svg class="spark" id="spark-gen" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
-    <div class="card" id="card-prefill"><div class="mut">Prompt processing</div><div class="big"><span id="prefill-now">—</span><span class="unit">tok/s</span></div>
+    <div class="card" id="card-prefill"><div class="mut">Prompt processing <span id="prefill-label"></span></div><div class="big"><span id="prefill-now">—</span><span class="unit">tok/s</span></div>
       <div class="mut">15-min avg <span id="prefill-avg">—</span></div>
       <svg class="spark" id="spark-prefill" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
     <div class="card" id="card-cache"><div class="mut">Cache reuse (last 15 min)</div><div class="big"><span id="cache-now">—</span><span class="unit">%</span></div>
-      <div class="mut">share of prompt tokens served from cache</div>
+      <div class="mut">share of prompt tokens served from cache · line: per request</div>
       <svg class="spark" id="spark-cache" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
     <div class="card" id="card-mtp"><div class="mut">MTP draft acceptance</div><div class="big"><span id="mtp-now">—</span><span class="unit">%</span></div>
       <div class="mut" id="mtp-pos">—</div>
@@ -305,11 +305,14 @@ function render(s) {
   setText("model-pill", `${mo.profile || "—"} · ${fmt(mo.slot_count)} × ${isNum(mo.n_ctx) ? Math.round(mo.n_ctx / 1024) + "K" : "—"}`);
   lastTs = isNum(now) ? now : lastTs; showAge();
   const sp = obj(s.speed);
+  const liveLabel = (v, live) => !isNum(v) ? "" : live === true ? "· live" : "· last request";
   setText("gen-now", fmt(sp.gen_tok_s, 1)); setText("gen-avg", fmt(sp.gen_avg15, 1));
+  setText("gen-label", liveLabel(sp.gen_tok_s, sp.gen_live));
   setText("prefill-now", fmt(sp.prefill_tok_s)); setText("prefill-avg", fmt(sp.prefill_avg15));
+  setText("prefill-label", liveLabel(sp.prefill_tok_s, sp.prefill_live));
   setText("cache-now", fmt(sp.cache_reuse_pct15)); setText("mtp-now", isNum(sp.mtp_accept) ? fmt(100 * sp.mtp_accept) : "—");
   setText("mtp-pos", [0, 1, 2].map(i => { const p = arr(sp.mtp_pos)[i]; return `pos ${i + 1}: ${isNum(p) ? fmt(100 * p) + "%" : "—"}`; }).join(" · "));
-  push("gen", now, sp.gen_tok_s); push("prefill", now, sp.prefill_tok_s); push("cache", now, sp.cache_reuse_pct15); push("mtp", now, sp.mtp_accept);
+  push("gen", now, sp.gen_tok_s); push("prefill", now, sp.prefill_tok_s); push("cache", now, sp.cache_reuse_pct); push("mtp", now, sp.mtp_accept);
   [0, 1].forEach(i => {
     const g = obj(arr(s.gpus)[i]);
     setText(`gpu${i}-load`, fmt(g.load_pct)); setText(`gpu${i}-vram`, GB(g.vram_used));

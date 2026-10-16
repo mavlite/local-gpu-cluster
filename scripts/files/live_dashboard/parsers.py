@@ -89,10 +89,18 @@ def find_gpu_dirs(drm_root: str, buses: list) -> dict:
         try:
             for line in _read(os.path.join(dev, "uevent")).splitlines():
                 if line.startswith("PCI_SLOT_NAME=") and line.split("=", 1)[1] in buses:
-                    found[line.split("=", 1)[1]] = dev
+                    found[line.split("=", 1)[1]] = os.path.realpath(dev)
         except (OSError, ValueError):
             continue
     return found
+
+
+def gpu_dir_matches(device_dir: str, bus: str) -> bool:
+    """True while device_dir's uevent still names this bus (False after a driver reload renumbers the cards)."""
+    try:
+        return f"PCI_SLOT_NAME={bus}" in _read(os.path.join(device_dir, "uevent")).splitlines()
+    except (OSError, ValueError):
+        return False
 
 
 def read_gpu(device_dir: str) -> dict:
@@ -131,7 +139,7 @@ def read_fans(hwmon_root: str, chip: str = "nct6798") -> dict:
                 continue
             return {f"{p}_pct": round(float(_read(os.path.join(d, p))) * 100 / 255, 3) for p in ("pwm5", "pwm6")}
         except (OSError, ValueError):
-            break
+            continue                                # one unreadable hwmon dir must not hide the fan chip
     return {"pwm5_pct": None, "pwm6_pct": None}
 
 

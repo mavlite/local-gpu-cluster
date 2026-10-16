@@ -25,6 +25,7 @@ DEFAULTS = {
     "drm_root": "/sys/class/drm", "hwmon_root": "/sys/class/hwmon", "disk_devices": ["nvme1n1", "nvme2n1"],
     "history_path": "/var/lib/live-dashboard/history.db", "retention_days": 30, "sample_window_s": 900,
     "max_stream_clients": 8, "slot_count": 3, "chat_ct": 151, "router_ct": 153, "proc_root": "/proc",
+    "llama_timeout_s": 1.0,         # /slots + /metrics: a dead LXC 151 must not delay the GPU/host updates
     "journal_argv": ["pct", "exec", "151", "--", "journalctl", "-u", "llamacpp-chat", "-f", "-o", "cat", "-n", "0"],
 }
 SOURCES = ("slots", "metrics", "journal", "gpu", "host", "services", "escalation")
@@ -93,13 +94,6 @@ def find_router_key(proc_root: str = "/proc", ct=153):
                             return kv.split(b"=", 1)[1].decode()
             except OSError:
                 continue
-    return None
-
-
-def find_chat_pid(proc_root: str = "/proc", port="8080", ct=151):
-    for pid in _pids(proc_root):
-        if _is_llama(_argv(proc_root, pid), port) and _in_ct(proc_root, pid, ct):
-            return pid
     return None
 
 
@@ -182,9 +176,11 @@ class Ring:
 
 class JournalFollower:
     """Runs argv (pct exec ... journalctl -f), feeds each line to on_line; restarts with backoff when it exits.
-    Reports "up" only once the first line arrives, so a fast-failing child never flaps the state."""
-    def __init__(self, argv, on_line, on_state, backoff=(1, 2, 5, 10, 30)):
+    Reports "up" once the first line arrives OR the child has stayed alive for up_after_s: a fast-failing child
+    never flaps the state, and a healthy stream of an idle chat server (no lines at all) is not reported down."""
+    def __init__(self, argv, on_line, on_state, backoff=(1, 2, 5, 10, 30), up_after_s=2.0):
         self.argv, self.on_line, self.on_state, self.backoff = argv, on_line, on_state, backoff
+        self.up_after_s = up_after_s
         self._stop, self._proc, self._t = threading.Event(), None, None
 
     def start(self):
@@ -205,18 +201,29 @@ class JournalFollower:
             log.warning("journal child cleanup failed: %s", type(e).__name__)
 
     def _cycle(self):
-        """One child lifetime. Returns True when at least one line arrived."""
-        got = False
+        """One child lifetime. Returns True when it was reported up (a line arrived, or it stayed alive)."""
+        up = {"reported": False}
+        ended, gate = threading.Event(), threading.Lock()
+
+        def report_up():
+            with gate:                                  # never report up after this cycle has ended
+                if not ended.is_set() and not up["reported"]:
+                    up["reported"] = True
+                    self.on_state(True)
+
+        def alive_watch(proc):
+            if not ended.wait(self.up_after_s) and proc.poll() is None:
+                report_up()
+
         proc = subprocess.Popen(self.argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                 encoding="utf-8", errors="replace", bufsize=1)
         self._proc = proc
         try:
             if self._stop.is_set():                    # stop() ran before _proc was published
                 return False
+            threading.Thread(target=alive_watch, args=(proc,), name="journal-alive", daemon=True).start()
             for line in proc.stdout:
-                if not got:
-                    got = True
-                    self.on_state(True)
+                report_up()
                 try:
                     self.on_line(line.rstrip("\r\n"))
                 except Exception as e:  # noqa: BLE001 -- a bad line must not end the stream
@@ -224,8 +231,10 @@ class JournalFollower:
                 if self._stop.is_set():
                     break
         finally:
+            with gate:
+                ended.set()
             self._end(proc)
-        return got
+        return up["reported"]
 
     def _run(self):
         attempt = 0
@@ -291,6 +300,8 @@ class Hub:
         self.history = History(cfg["history_path"], cfg["retention_days"])
         w = cfg["sample_window_s"]
         self.rings = {n: Ring(w) for n in ("gen", "prefill", "cache", "mtp", "gpu0_load", "gpu1_load", "host_cpu")}
+        self.cache15 = Ring(w)          # metric-delta reuse % (15-min average); rings["cache"] is per request
+        self.held = {"gen_tok_s": None, "prefill_tok_s": None, "cache_reuse_pct": None}   # last finished request
         self.recent_done = []
         self._key = None
         self._router_key = None
@@ -305,6 +316,26 @@ class Hub:
                                                             "rerank": {"ok": False, "activity_per_min": None},
                                                             "restart": {"next_possible": None, "stale_since": None}},
                       "escalation": None}
+        self._seed_held()
+
+    def _seed_held(self):
+        """Hold the last request's speeds across a dashboard restart (one read at start-up, no lock needed yet)."""
+        try:
+            rows = self.history.recent(50)
+        except Exception as e:  # noqa: BLE001 -- start-up must not depend on the history file
+            log.warning("history seed failed: %s", type(e).__name__)
+            return
+        for row in reversed(rows):                      # oldest first: the newest value wins
+            self._hold(row)
+
+    def _hold(self, row):
+        for k in ("gen_tok_s", "prefill_tok_s"):
+            v = row.get(k)
+            if _num(v) is not None and math.isfinite(v):
+                self.held[k] = float(v)
+        p, c = _num(row.get("prompt_tokens")), _num(row.get("cached_tokens"))
+        if p and c is not None and p > 0:
+            self.held["cache_reuse_pct"] = 100.0 * c / p
 
     # ---- key lookup (reads /proc: always called outside the lock)
     def _find_llama_key(self):
@@ -317,7 +348,8 @@ class Hub:
     def _llama(self, path):
         if self._key is None:
             self._key = self._find_llama_key()
-        status, body = self.http_get(self.cfg["chat_url"] + path, {"Authorization": f"Bearer {self._key or ''}"})
+        status, body = self.http_get(self.cfg["chat_url"] + path, {"Authorization": f"Bearer {self._key or ''}"},
+                                     timeout=self.cfg.get("llama_timeout_s", 1.0))
         if status == 401:
             self._key = self._find_llama_key()
         return status, body
@@ -352,6 +384,7 @@ class Hub:
             self._apply("gpu", fetched["gpu"], self._apply_gpu, now)
             self._apply("host", fetched["host"], self._apply_host, now)
             self._drain_finished()
+            self.rings["cache"].push(now, self.held["cache_reuse_pct"])
 
     def _apply_slots(self, fetched, now):
         status, body = fetched
@@ -383,14 +416,13 @@ class Hub:
                 dt = m.get(sec, 0) - prev.get(sec, 0)
                 dn = m.get(tok, 0) - prev.get(tok, 0)
                 return dn / dt if dt > 0 and dn >= 0 else None
-            sp["gen_tok_s"] = rate("llamacpp:tokens_predicted_total", "llamacpp:tokens_predicted_seconds_total")
-            sp["prefill_tok_s"] = rate("llamacpp:prompt_tokens_total", "llamacpp:prompt_seconds_total")
+            # counters move only at the end of prefill/generation: good for 15-min averages, not for a headline
+            self.rings["gen"].push(now, rate("llamacpp:tokens_predicted_total", "llamacpp:tokens_predicted_seconds_total"))
+            self.rings["prefill"].push(now, rate("llamacpp:prompt_tokens_total", "llamacpp:prompt_seconds_total"))
             new = m.get("llamacpp:prompt_tokens_total", 0) - prev.get("llamacpp:prompt_tokens_total", 0)
             cached = m.get("llamacpp:prompt_tokens_cached_total", 0) - prev.get("llamacpp:prompt_tokens_cached_total", 0)
             if new + cached > 0 and new >= 0 and cached >= 0:
-                self.rings["cache"].push(now, 100.0 * cached / (new + cached))
-            self.rings["gen"].push(now, sp["gen_tok_s"])
-            self.rings["prefill"].push(now, sp["prefill_tok_s"])
+                self.cache15.push(now, 100.0 * cached / (new + cached))
         self._prev_metrics = m
         drafted = m.get("llamacpp:spec_decode_num_draft_tokens_total")
         acc = m.get("llamacpp:spec_decode_num_accepted_tokens_total")
@@ -404,7 +436,7 @@ class Hub:
 
     def _read_gpus(self):
         """sysfs reads (outside the lock). Returns (gpus, fans, errors)."""
-        if not self.gpu_dirs:
+        if not self.gpu_dirs or not all(P.gpu_dir_matches(d, b) for b, d in self.gpu_dirs.items()):
             self.gpu_dirs = P.find_gpu_dirs(self.cfg["drm_root"], self.cfg["gpu_buses"])
         gpus, errors = [], []
         for bus in self.cfg["gpu_buses"]:
@@ -579,6 +611,7 @@ class Hub:
                 self.history.add(row)
             except Exception as e:  # noqa: BLE001 -- history trouble must not lose the live row
                 log.warning("history add failed: %s", type(e).__name__)
+            self._hold(row)
             self.recent_done.insert(0, row)
         del self.recent_done[50:]
 
@@ -597,12 +630,14 @@ class Hub:
                 v["n_ctx"] = s["n_ctx"]
                 n_ctx = n_ctx or s["n_ctx"]
         sp = dict(self.state["speed"])
-        sp.setdefault("gen_tok_s", None)
-        sp.setdefault("prefill_tok_s", None)
         sp.setdefault("mtp_accept", None)
         sp.setdefault("mtp_pos", [None, None, None])
+        for key, live_key, state in (("gen_tok_s", "gen_live", "generating"), ("prefill_tok_s", "prefill_live", "reading")):
+            live = [v["tok_s"] for v in views if v["state"] == state and _num(v["tok_s"]) is not None]
+            sp[key], sp[live_key] = (float(sum(live)), True) if live else (self.held[key], False)
         sp["gen_avg15"], sp["prefill_avg15"] = self.rings["gen"].avg(), self.rings["prefill"].avg()
-        sp["cache_reuse_pct15"] = self.rings["cache"].avg()
+        sp["cache_reuse_pct15"] = self.cache15.avg()
+        sp["cache_reuse_pct"] = self.held["cache_reuse_pct"]
         recent = (self.tracker.open_rows() + self.recent_done)[:20]
         return {"ts": now,
                 "sources": {n: s.as_dict() for n, s in self.src.items()},

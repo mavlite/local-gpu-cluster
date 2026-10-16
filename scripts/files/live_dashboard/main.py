@@ -29,7 +29,7 @@ class ConfigError(ValueError):
 
 
 _NUMERIC = ("retention_days", "sample_window_s", "max_stream_clients", "slot_count", "chat_ct", "router_ct",
-            "stream_interval_s", "socket_timeout_s", "header_deadline_s", "max_connections")
+            "stream_interval_s", "socket_timeout_s", "header_deadline_s", "max_connections", "llama_timeout_s")
 _STRINGS = ("bind_host", "history_path", "chat_url", "embed_url", "rerank_url", "router_url", "drm_root",
             "hwmon_root", "proc_root")
 _STR_LISTS = ("gpu_buses", "disk_devices", "journal_argv")

@@ -82,8 +82,10 @@ class FakeHub:
                 slot(2, "idle", last_done=now - 4, prompt_tokens=626, cached_tokens=0, ctx_used=18 * 1024),
             ],
             "queue": {"deferred": 0, "processing": 2},
-            "speed": {"gen_tok_s": 48.6 + 3 * w, "prefill_tok_s": 612.0 + 20 * w, "gen_avg15": 44.1,
-                      "prefill_avg15": 498.0, "cache_reuse_pct15": 88.0, "mtp_accept": 0.81,
+            # gen is live (slot 1 generating); prefill flips between live and "last request" every ~12 s
+            "speed": {"gen_tok_s": 48.6 + 3 * w, "gen_live": True, "prefill_tok_s": 612.0 + 20 * w,
+                      "prefill_live": w > 0, "gen_avg15": 44.1, "prefill_avg15": 498.0, "cache_reuse_pct15": 88.0,
+                      "cache_reuse_pct": 79.2 + 10 * w, "mtp_accept": 0.81,
                       "mtp_pos": [0.92, 0.81, 0.70]},
             "gpus": [gpu("0000:03:00.0", 91.0 + 4 * w, 28.1, 84.0, 176.0), gpu("0000:06:00.0", 88.0 - 4 * w, 24.6, 81.0, 171.0)],
             "fans": {"pwm5_pct": 90.0, "pwm6_pct": 90.0},

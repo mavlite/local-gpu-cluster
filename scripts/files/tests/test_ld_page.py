@@ -20,7 +20,7 @@ def test_uses_the_api_and_schema_fields():
     for needle in ('new EventSource("/api/stream")', '"/api/series"', '"/api/requests?limit=20"',
                    '"/api/history?days=7"', ".slots", ".speed", ".gpus", ".host", ".services", ".escalation",
                    ".recent", ".sources", "stale_since", "history_ok", "prefill_tok_s", "gen_tok_s",
-                   "cached_tokens", "progress"):
+                   "cached_tokens", "progress", "gen_live", "prefill_live", "cache_reuse_pct)"):
         assert needle in p, needle
 
 

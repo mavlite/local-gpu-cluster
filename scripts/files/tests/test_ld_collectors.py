@@ -68,8 +68,10 @@ class World:
                       "/proc/diskstats": fx("proc_diskstats_and_zfs.txt"),
                       "/proc/spl/kstat/zfs/arcstats": fx("proc_diskstats_and_zfs.txt")}
         self.key_reads = 0
+        self.timeouts = {}
 
-    def http_get(self, url, headers):
+    def http_get(self, url, headers, timeout=None):
+        self.timeouts[url] = timeout
         if url in self.status:
             return self.status[url]
         if url.endswith("/slots"):
@@ -202,7 +204,7 @@ def test_raising_http_get_never_escapes_and_leaks_no_key(tmp_path, monkeypatch):
     w = World(tmp_path)
     hub = make_hub(tmp_path, w, monkeypatch)
 
-    def boom(url, headers):
+    def boom(url, headers, timeout=None):
         raise RuntimeError("kaboom " + headers.get("Authorization", ""))
     hub.http_get = boom
     hub.poll_fast(1000.0)
@@ -279,7 +281,7 @@ def test_snapshot_not_blocked_by_slow_network(tmp_path, monkeypatch, which):
     hub = make_hub(tmp_path, w, monkeypatch)
     inner = w.http_get
 
-    def slow(url, headers):
+    def slow(url, headers, timeout=None):
         time.sleep(1)
         return inner(url, headers)
     hub.http_get = slow
@@ -321,7 +323,6 @@ def test_keys_are_scoped_to_their_container(tmp_path):
     assert C.find_llama_key(root, port="8080", ct=151) == "CHAT151"
     assert C.find_llama_key(root, port="8080", ct=157) == "OTHERCT"
     assert C.find_llama_key(root, port="8080", ct=999) is None
-    assert C.find_chat_pid(root, port="8080", ct=151) == "20"
     assert C.find_router_key(root, ct=153) is None        # the only router is in 157
     assert C.find_router_key(root, ct=157) == "R157"
 
@@ -383,7 +384,6 @@ def test_cgroup_match_is_anchored_to_the_path_start(tmp_path):
             "0::/lxc/157/ns/lxc/153/r\n"),
     })
     assert C.find_llama_key(root, port="8080", ct=151) == "REAL"
-    assert C.find_chat_pid(root, port="8080", ct=151) == "7"
     assert C.find_router_key(root, ct=153) is None
 
 
@@ -392,7 +392,7 @@ def test_stale_slots_not_applied_when_journal_flips_mid_fetch(tmp_path, monkeypa
     hub = make_hub(tmp_path, w, monkeypatch)
     inner, gate, entered = w.http_get, threading.Event(), threading.Event()
 
-    def blocked(url, headers):
+    def blocked(url, headers, timeout=None):
         if url.endswith("/slots"):
             entered.set()
             gate.wait(5)
@@ -454,3 +454,184 @@ def test_restart_timer_stale_marker(tmp_path, monkeypatch):
     hub.run_cmd = w.run_cmd
     hub.poll_timer(1030.0)
     assert hub.snapshot(1030.0)["services"]["restart"]["stale_since"] is None
+
+
+# ---- final fix wave
+def _ev(kind, **kw):
+    return dict(kind=kind, since_start_s=1.0, **kw)
+
+
+def _finish_request(hub, slot, task, now, pe_n=6000, pe_ms=10000.0, ev_n=50, ev_ms=1000.0, rel_n=40050):
+    t = hub.tracker
+    t.on_journal(_ev("start", slot=slot, task=task), now)
+    t.on_journal(_ev("prompt_eval", slot=slot, task=task, ms=pe_ms, n=pe_n), now)
+    t.on_journal(_ev("eval", slot=slot, task=task, ms=ev_ms, n=ev_n), now)
+    t.on_journal(_ev("total", slot=slot, task=task, ms=pe_ms + ev_ms, n=pe_n + ev_n), now)
+    t.on_journal(_ev("release", slot=slot, task=task, n=rel_n), now)
+    with hub.lock:
+        hub._drain_finished()
+
+
+def test_headline_speed_nothing_yet_is_null_and_not_live(tmp_path, monkeypatch):
+    hub = make_hub(tmp_path, World(tmp_path), monkeypatch)
+    hub.poll_fast(1000.0)
+    sp = hub.snapshot(1000.0)["speed"]
+    assert sp["gen_tok_s"] is None and sp["prefill_tok_s"] is None
+    assert sp["gen_live"] is False and sp["prefill_live"] is False and sp["cache_reuse_pct"] is None
+
+
+def test_headline_speed_live_sums_while_slots_work(tmp_path, monkeypatch):
+    hub = make_hub(tmp_path, World(tmp_path), monkeypatch)
+    _finish_request(hub, 2, 1, 990.0)                      # an older finished request must not win over live ones
+    t = hub.tracker
+    for slot, task in ((0, 10), (1, 11)):
+        t.on_journal(_ev("start", slot=slot, task=task), 999.0)
+        t.on_journal(_ev("gen", slot=slot, task=task, n=5, tok_s=30.0 + slot), 999.5)
+    t.on_journal(_ev("start", slot=2, task=12), 999.0)
+    t.on_journal(_ev("prefill", slot=2, task=12, n=2048, progress=0.5, tok_s=600.0), 999.5)
+    sp = hub.snapshot(1000.0)["speed"]
+    assert sp["gen_tok_s"] == 61.0 and sp["gen_live"] is True
+    assert sp["prefill_tok_s"] == 600.0 and sp["prefill_live"] is True
+
+
+def test_headline_speed_held_from_last_finished_request(tmp_path, monkeypatch):
+    hub = make_hub(tmp_path, World(tmp_path), monkeypatch)
+    _finish_request(hub, 0, 1, 990.0, pe_n=1000, pe_ms=2000.0, ev_n=40, ev_ms=1000.0, rel_n=1040)
+    _finish_request(hub, 1, 2, 995.0, pe_n=6000, pe_ms=10000.0, ev_n=50, ev_ms=1000.0, rel_n=40050)
+    hub.poll_fast(1000.0)
+    sp = hub.snapshot(1000.0)["speed"]
+    assert sp["gen_tok_s"] == 50.0 and sp["gen_live"] is False
+    assert sp["prefill_tok_s"] == 600.0 and sp["prefill_live"] is False
+    assert sp["cache_reuse_pct"] == 85.0                     # 34000 of 40000 reused, latest request
+
+
+def test_headline_speed_held_value_seeded_from_history(tmp_path, monkeypatch):
+    hub = make_hub(tmp_path, World(tmp_path), monkeypatch)
+    _finish_request(hub, 1, 2, 995.0)
+    assert hub.history.flush()
+    hub.history.close()
+    hub2 = make_hub(tmp_path, World(tmp_path), monkeypatch)
+    sp = hub2.snapshot(1000.0)["speed"]
+    assert sp["gen_tok_s"] == 50.0 and sp["prefill_tok_s"] == 600.0 and sp["cache_reuse_pct"] == 85.0
+    assert sp["gen_live"] is False and sp["prefill_live"] is False
+
+
+def test_cache_series_is_per_request_reuse_and_card_keeps_15min_average(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    hub.poll_fast(1000.0)
+    w.metrics = w.metrics.replace("llamacpp:prompt_tokens_total 72775", "llamacpp:prompt_tokens_total 72875")
+    w.metrics = w.metrics.replace("llamacpp:prompt_tokens_cached_total 650897",
+                                  "llamacpp:prompt_tokens_cached_total 651197")
+    _finish_request(hub, 1, 2, 1000.5)
+    hub.poll_fast(1001.0)
+    sp = hub.snapshot(1001.0)["speed"]
+    assert sp["cache_reuse_pct15"] == 75.0                   # metric deltas: 300 cached of 400
+    assert sp["cache_reuse_pct"] == 85.0
+    assert [v for _, v in hub.series()["cache"]] == [85.0]
+
+
+def test_llama_fetches_use_short_timeout(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    hub.poll_fast(1000.0)
+    assert w.timeouts["http://192.168.6.151:8080/slots"] == 1.0
+    assert w.timeouts["http://192.168.6.151:8080/metrics"] == 1.0
+    hub.cfg = dict(hub.cfg, llama_timeout_s=0.25)
+    hub.poll_fast(1001.0)
+    assert w.timeouts["http://192.168.6.151:8080/slots"] == 0.25
+
+
+def test_llama_timeout_is_a_validated_config_key():
+    from live_dashboard import main as M
+    assert C.DEFAULTS["llama_timeout_s"] == 1.0
+    cfg = dict(C.DEFAULTS, llama_timeout_s=0)
+    with pytest.raises(M.ConfigError):
+        M.validate_config(cfg)
+
+
+def _gpu_tree(tmp_path):
+    for path, content in json.loads(fx("gpu_sysfs.json")).items():
+        f = tmp_path / path.lstrip("/")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content)
+    return os.path.join(str(tmp_path), "sys", "class", "drm")
+
+
+def test_gpu_dirs_stored_as_realpath_and_rediscovered_on_renumbering(tmp_path, monkeypatch):
+    import shutil
+    from live_dashboard import parsers as P
+    drm = _gpu_tree(tmp_path)
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    hub.cfg = dict(hub.cfg, drm_root=drm)
+    hub.poll_fast(1000.0)
+    bus = "0000:03:00.0"
+    first = hub.gpu_dirs[bus]
+    assert first == os.path.realpath(first) and hub.snapshot(1000.0)["gpus"][0]["vram_total"] == 32195477504
+    # the driver reloads: card numbers move; the stored dir no longer carries this bus
+    newdev = os.path.join(drm, "card9", "device")
+    shutil.copytree(first, newdev)
+    with open(os.path.join(first, "uevent"), "w", encoding="utf-8") as f:
+        f.write("PCI_SLOT_NAME=0000:99:00.0\n")
+    calls = []
+    real = P.find_gpu_dirs
+    monkeypatch.setattr(P, "find_gpu_dirs", lambda *a: (calls.append(1), real(*a))[1])
+    hub.poll_fast(1001.0)
+    assert calls and hub.gpu_dirs[bus] == os.path.realpath(newdev)
+    calls.clear()
+    hub.poll_fast(1002.0)
+    assert calls == []                                      # valid paths are not re-discovered every poll
+
+
+def test_read_fans_skips_an_unreadable_hwmon_dir(tmp_path):
+    from live_dashboard import parsers as P
+    hw = tmp_path / "hwmon"
+    (hw / "hwmon0").mkdir(parents=True)                      # no name file: unreadable
+    (hw / "hwmon14").mkdir()
+    (hw / "hwmon14" / "name").write_text("nct6798\n")
+    (hw / "hwmon14" / "pwm5").write_text("255\n")
+    (hw / "hwmon14" / "pwm6").write_text("255\n")
+    assert P.read_fans(str(hw)) == {"pwm5_pct": 100.0, "pwm6_pct": 100.0}
+
+
+def test_find_chat_pid_is_gone():
+    assert not hasattr(C, "find_chat_pid")
+
+
+def test_follower_idle_child_reports_up_after_up_after_s():
+    lines, states = [], []
+    f = C.JournalFollower([sys.executable, "-c", "import time; time.sleep(60)"], on_line=lines.append,
+                          on_state=states.append, backoff=(0.05,), up_after_s=0.3)
+    f.start()
+    deadline = time.time() + 5
+    while time.time() < deadline and True not in states:
+        time.sleep(0.05)
+    f.stop()
+    assert lines == [] and states and states[0] is True
+
+
+def test_follower_idle_child_not_up_before_up_after_s():
+    states = []
+    f = C.JournalFollower([sys.executable, "-c", "import time; time.sleep(60)"], on_line=lambda l: None,
+                          on_state=states.append, backoff=(0.05,), up_after_s=5.0)
+    f.start()
+    time.sleep(0.5)
+    snapshot = list(states)
+    f.stop()
+    assert True not in snapshot
+
+
+def test_follower_child_exiting_before_up_after_s_never_reports_up():
+    states = []
+    f = C.JournalFollower([sys.executable, "-c", "pass"], on_line=lambda l: None, on_state=states.append,
+                          backoff=(0.05,), up_after_s=0.3)
+    f.start()
+    time.sleep(1.0)
+    f.stop()
+    assert states and True not in states
+
+
+def test_follower_default_up_after_is_two_seconds():
+    f = C.JournalFollower(["x"], on_line=lambda l: None, on_state=lambda u: None)
+    assert f.up_after_s == 2.0
