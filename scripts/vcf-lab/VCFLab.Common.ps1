@@ -26,20 +26,23 @@ function Import-VCFLabConfig {
 function Assert-VCFLabConfig {
     param([Parameter(Mandatory)][hashtable]$Config)
     $problems = New-Object System.Collections.Generic.List[string]
-    if ($Config.ContainsKey('LlmWorkers') -and $Config.LlmWorkers) {
-        $hostShorts = @($Config.Hosts | ForEach-Object { $_.Short })
-        $seen = @{}
-        foreach ($w in @($Config.LlmWorkers)) {
+    # LlmWorkers and DevVms are both owned, host-pinned lists. One $seen across
+    # both: a VM in both lists would be started and stopped under two policies.
+    $hostShorts = @($Config.Hosts | ForEach-Object { $_.Short })
+    $seen = @{}
+    foreach ($key in 'LlmWorkers', 'DevVms') {
+        if (-not $Config.ContainsKey($key) -or -not $Config[$key]) { continue }
+        foreach ($w in @($Config[$key])) {
             if ($w -isnot [hashtable] -or -not $w.ContainsKey('VmName') -or -not $w.VmName -or
                 -not $w.ContainsKey('Host') -or -not $w.Host) {
-                $problems.Add("LlmWorkers: every entry needs VmName and Host"); continue
+                $problems.Add("${key}: every entry needs VmName and Host"); continue
             }
-            if ($seen.ContainsKey($w.VmName)) { $problems.Add("LlmWorkers: $($w.VmName) is listed twice") }
+            if ($seen.ContainsKey($w.VmName)) { $problems.Add("${key}: $($w.VmName) is listed twice") }
             $seen[$w.VmName] = $true
-            if ($hostShorts -notcontains $w.Host) { $problems.Add("LlmWorkers: $($w.VmName) names host '$($w.Host)', not one of $($hostShorts -join ', ')") }
-            # A worker that LOOKS like a VCF component would be counted as one by
+            if ($hostShorts -notcontains $w.Host) { $problems.Add("${key}: $($w.VmName) names host '$($w.Host)', not one of $($hostShorts -join ', ')") }
+            # A VM that LOOKS like a VCF component would be counted as one by
             # the "is the VCF stack down?" check, and Minimal would refuse forever.
-            if (Test-IsVcfName -Config $Config -Name $w.VmName) { $problems.Add("LlmWorkers: $($w.VmName) collides with a VCF component name or the VSP prefix") }
+            if (Test-IsVcfName -Config $Config -Name $w.VmName) { $problems.Add("${key}: $($w.VmName) collides with a VCF component name or the VSP prefix") }
         }
     }
     if ($Config.ContainsKey('LicenseWindow')) {
@@ -777,10 +780,25 @@ function Get-VspNodes {
 #>
 function Get-LlmWorkers {
     param([Parameter(Mandatory)][hashtable]$Config)
-    if (-not $Config.ContainsKey('LlmWorkers') -or -not $Config.LlmWorkers) { return @() }
-    foreach ($w in @($Config.LlmWorkers)) {
+    Get-OwnedHostVms -Config $Config -Key 'LlmWorkers'
+}
+
+<#
+    The developer VMs (devvm01-03), each resolved to its host. Like the
+    workers they sit on local datastores, so they are started and stopped
+    host-direct; unlike them they carry state, so they are never hard-stopped.
+#>
+function Get-DevVms {
+    param([Parameter(Mandatory)][hashtable]$Config)
+    Get-OwnedHostVms -Config $Config -Key 'DevVms'
+}
+
+function Get-OwnedHostVms {
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Key)
+    if (-not $Config.ContainsKey($Key) -or -not $Config[$Key]) { return @() }
+    foreach ($w in @($Config[$Key])) {
         $h = @($Config.Hosts | Where-Object { $_.Short -eq $w.Host })
-        if ($h.Count -ne 1) { throw "LlmWorkers: $($w.VmName) names host '$($w.Host)', which is not in Hosts" }
+        if ($h.Count -ne 1) { throw "${Key}: $($w.VmName) names host '$($w.Host)', which is not in Hosts" }
         [pscustomobject]@{ VmName = [string]$w.VmName; HostShort = [string]$h[0].Short; HostIp = [string]$h[0].Ip }
     }
 }
@@ -907,6 +925,10 @@ function Test-HostVmGuestUp {
     Guest shutdown via the host, hard stop after the grace period. Workers are
     stateless inference servers, so a hard stop after grace is acceptable here
     -- unlike vCenter, which is never hard-killed by default.
+
+    -NoHardStop (dev VMs: they carry work) never powers the VM off: no Tools,
+    or still running after the grace period, returns $false and leaves it up.
+    The caller's blocker check then refuses to power off its host.
 #>
 function Stop-HostVM {
     param(
@@ -914,6 +936,7 @@ function Stop-HostVM {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][pscredential]$EsxCredential,
         [int]$GraceSeconds = 120,
+        [switch]$NoHardStop,
         [switch]$WhatIfMode
     )
     $c = $null
@@ -938,13 +961,16 @@ function Stop-HostVM {
                 }
                 Start-Sleep -Seconds 5
             }
-            Write-Warn2 "$Name : still running after ${GraceSeconds}s -- hard power off"
+            if ($NoHardStop) { Write-Fail "$Name : still running after ${GraceSeconds}s -- NOT hard-stopping it (it carries work); left running" }
+            else { Write-Warn2 "$Name : still running after ${GraceSeconds}s -- hard power off" }
         } else {
-            Write-Warn2 "$Name : no VMware Tools -- hard power off"
+            if ($NoHardStop) { Write-Fail "$Name : no VMware Tools, so no graceful shutdown -- NOT hard-stopping it; shut it down yourself" }
+            else { Write-Warn2 "$Name : no VMware Tools -- hard power off" }
         }
         # It may have finished shutting down between the last poll and now.
         $now = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)
         if ($now.Count -eq 0 -or $now[0].PowerState -eq 'PoweredOff') { Write-Ok "$Name : off"; return $true }
+        if ($NoHardStop) { return $false }
         Stop-VM -VM $now[0] -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
         Start-Sleep -Seconds 5
         $after = @(Get-VM -Server $c -Name $Name -ErrorAction SilentlyContinue)

@@ -8,8 +8,9 @@ Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 .\Start-VCFLab.ps1 -Mode Minimal   # day to day: hosts + LLM workers only, VCF stack OFF
 .\Start-VCFLab.ps1 -Mode Minimal -WithVCenter   # ...plus vCenter for the UI
 .\Start-VCFLab.ps1 -SkipInventoryRepair   # report inventory drift, do not fix it
-.\Stop-VCFLab.ps1                  # shut down the VCF stack, leave hosts + LLM workers running
-.\Stop-VCFLab.ps1 -IncludeHosts    # also stop the LLM workers and power off the hosts
+.\Start-VCFLab.ps1 -SkipDevVms     # either mode, but leave the dev VMs off
+.\Stop-VCFLab.ps1                  # shut down the VCF stack, leave hosts, dev VMs + LLM workers running
+.\Stop-VCFLab.ps1 -IncludeHosts    # also shut down the dev VMs and LLM workers, then power off the hosts
 .\Stop-VCFLab.ps1 -WhatIf          # dry run
 ```
 
@@ -21,6 +22,7 @@ Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 | vSAN | required | forms, but not required (workers use local datastores) |
 | vCenter, NSX, SDDC Manager, Operations, VSP, License, Collector | started in order | **off** (`-WithVCenter` adds vCenter only) |
 | LLM workers (`LlmWorkers` in the config) | **must be off**: Full refuses, or stops them with `-StopLlmWorkers` | started host-direct |
+| Dev VMs (`DevVms` in the config) | started host-direct right after the hosts, not waited on | same |
 | RAM held by management VMs | ~167 GB across the cluster | none |
 
 **Full -> Minimal:** `.\Stop-VCFLab.ps1` (stops the VCF stack, leaves hosts and
@@ -56,18 +58,18 @@ future-dated (check the clock), or older than `LicenseWindow.RefuseDays` (150),
 and warns after `WarnDays` (30). `-IgnoreLicenseWindow` overrides it -- e.g.
 the first time, after confirming the license in VCF Operations by hand.
 The config is validated at load: `0 < WarnDays < RefuseDays < 180`, and every
-`LlmWorkers` entry needs a known host, a unique name, and a name that cannot be
-mistaken for a VCF component.
+`LlmWorkers` and `DevVms` entry needs a known host, a name unique across both
+lists, and a name that cannot be mistaken for a VCF component.
 
 Requires PowerCLI (`Install-Module VMware.PowerCLI -Scope CurrentUser`) and the
 credential file at `%USERPROFILE%\.vcflab\credentials.env`. Credentials are read
 into `PSCredential` objects and never printed, logged, or passed on a command
 line.
 
-## Scope: VCF components, plus the configured LLM workers
+## Scope: VCF components, plus the configured dev VMs and LLM workers
 
-These scripts power **only** VCF components and the `LlmWorkers` group. The
-managed set is computed at run time from the config:
+These scripts power **only** VCF components and the `DevVms` and `LlmWorkers`
+groups. The managed set is computed at run time from the config:
 
 - `VCenter.VmName`
 - every `Appliances.*.VmName` — SDDC Manager, NSX, Operations, License Server,
@@ -76,8 +78,16 @@ managed set is computed at run time from the config:
 - `LlmWorkers` — started only by `-Mode Minimal`, stopped only by
   `-IncludeHosts`; never treated as VCF components (vCenter's shutdown does not
   wait on them)
+- `DevVms` (devvm01-03, each on its host's local datastore) — started
+  host-direct by both modes right after the hosts leave maintenance mode, and
+  not waited on (`-SkipDevVms` leaves them off; one that fails to power on is
+  named at the end and makes the run exit 1, without holding up the VCF stack).
+  A default stop leaves them running; `-IncludeHosts` gives each a **guest
+  shutdown only** (`StopGraceSeconds.DevVm`, 300 s) and **never hard-stops
+  one**: a dev VM with no VMware Tools, or still up after the grace period, is
+  left running and named, and the hosts stay up.
 
-Anything else on the cluster — developer VMs, containers, appliances, one-off
+Anything else on the cluster — containers, appliances (truenas-backup), one-off
 workloads — is never started, never stopped, and never migrated. Both scripts
 print the managed set at the start and list everything else under **"left
 alone"**. There is deliberately no flag to widen the scope: if you want a

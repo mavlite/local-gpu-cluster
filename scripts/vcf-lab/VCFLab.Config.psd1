@@ -101,6 +101,21 @@
     #   @{ VmName = 'wf-runner-03'; Host = 'hyp03' }
     LlmWorkers = @()
 
+    # ------------------------------------------------------ developer VMs --
+    # The dev VMs (Cloudflare-tunnelled workstations, see docs/devvm-restore-
+    # record.md). Owned by these scripts: Start powers them on host-direct right
+    # after the hosts leave maintenance mode, in BOTH modes, without waiting for
+    # them (-SkipDevVms to leave them off). A default Stop leaves them running;
+    # -IncludeHosts gives each a guest shutdown (StopGraceSeconds.DevVm) before
+    # the hosts go down and NEVER hard-stops one: a dev VM that will not shut
+    # down is left running and named, and the hosts stay up.
+    # Each lives on its host's LOCAL datastore, so the pairing is fixed.
+    DevVms = @(
+        @{ VmName = 'devvm01'; Host = 'hyp01' }
+        @{ VmName = 'devvm02'; Host = 'hyp02' }
+        @{ VmName = 'devvm03'; Host = 'hyp03' }
+    )
+
     # VCF 9 licensing must be refreshed at least every 180 days (in connected
     # mode VCF Operations reports usage every 24 h); miss it and licenses are
     # treated as expired, hosts disconnect from vCenter and workloads cannot
@@ -112,10 +127,10 @@
     }
 
     # ---------------------------------------------------------------- scope --
-    # These scripts manage VCF components plus the LlmWorkers group above, and
-    # nothing else. Anything else on the cluster --
-    # developer VMs, containers, appliances, one-off workloads -- is never
-    # powered on or off, and never migrated. The managed set is:
+    # These scripts manage VCF components plus the LlmWorkers and DevVms groups
+    # above, and nothing else. Anything else on the cluster -- containers,
+    # appliances (truenas-backup), one-off workloads -- is never powered on or
+    # off, and never migrated. The managed VCF set is:
     #
     #   * VCenter.VmName
     #   * every Appliances.*.VmName
@@ -146,6 +161,9 @@
         VCenter      = 0
         VCenterForce = 900
         LlmWorker    = 120
+        # Guest shutdown only: past this a dev VM is left running and blocks
+        # the host power-off, it is never hard-stopped.
+        DevVm        = 300
     }
 
     GateTimeoutSeconds = @{

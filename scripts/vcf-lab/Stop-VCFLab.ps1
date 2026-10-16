@@ -25,16 +25,21 @@
     -DisableHaFirst to turn host monitoring off for the duration; the script
     restores it only if it changed it.
 
-    SCOPE: VCF components only -- vCenter, the VCF appliances, and VSP nodes.
-    Developer VMs, containers and any other workload are never stopped, and are
-    listed at the end as "left alone".
+    SCOPE: VCF components -- vCenter, the VCF appliances, and VSP nodes. The
+    configured DevVms and LlmWorkers are owned: a default stop leaves them
+    running; -IncludeHosts shuts them down host-direct before the hosts go
+    down. Dev VMs get a guest shutdown only, never a hard stop. Containers and
+    any other workload are never stopped, and are listed at the end as "left
+    alone".
 
 .PARAMETER IncludeHosts
     Also power off the ESX hosts after the VCF components are down.
 
-    This is opt-in, and it REFUSES if any non-VCF VM is still running: a host
-    cannot enter maintenance mode with a VM on it, and this script will not
-    stop something it does not own in order to get there. Stop those VMs
+    This is opt-in. The dev VMs (guest shutdown, DevVm grace period) and LLM
+    workers are shut down first. It then REFUSES if any other non-VCF VM is
+    still running, or a dev VM did not shut down cleanly: a host cannot enter
+    maintenance mode with a VM on it, and this script will not hard-stop a dev
+    VM or stop something it does not own to get there. Stop those VMs
     yourself, then re-run.
 
 .PARAMETER DisableHaFirst
@@ -81,6 +86,9 @@ if ($WhatIf) { Write-Warn2 "WHATIF mode: no power state will change" }
 $workers   = @(Get-LlmWorkers -Config $cfg)
 $workerSet = @($workers | ForEach-Object VmName)
 $workerGrace = if ($cfg.StopGraceSeconds.ContainsKey('LlmWorker')) { $cfg.StopGraceSeconds.LlmWorker } else { 120 }
+$devVms    = @(Get-DevVms -Config $cfg)
+$devSet    = @($devVms | ForEach-Object VmName)
+$devGrace  = if ($cfg.StopGraceSeconds.ContainsKey('DevVm')) { $cfg.StopGraceSeconds.DevVm } else { 300 }
 
 $vc = $null
 $vcDown = $false
@@ -96,8 +104,8 @@ catch {
     if (-not $IncludeHosts -and $vcf.Unreachable.Count -eq 0 -and $vcf.Running.Count -eq 0) {
         # Minimal mode: no VCF stack is running, so there is genuinely nothing
         # for a default Stop to do. That is success, not an error.
-        Write-Ok "No VCF component is running (Minimal mode) -- nothing to stop. Hosts and LLM workers left as they are."
-        Write-Info "To stop the LLM workers and power off the hosts, re-run with -IncludeHosts."
+        Write-Ok "No VCF component is running (Minimal mode) -- nothing to stop. Hosts, dev VMs and LLM workers left as they are."
+        Write-Info "To stop the dev VMs and LLM workers and power off the hosts, re-run with -IncludeHosts."
         exit 0
     }
     if ($vcf.Unreachable.Count -gt 0) {
@@ -150,7 +158,7 @@ $managed = Get-VcfManagedNames -Config $cfg
 Write-Step "Scope"
 Write-Info ("managing: " + ($managed -join ', '))
 $scope0 = Get-VmScope -Config $cfg -ManagedNames $managed
-$foreignOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -and $workerSet -notcontains $_.Name })
+$foreignOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -and $workerSet -notcontains $_.Name -and $devSet -notcontains $_.Name })
 if ($foreignOn.Count -gt 0) {
     Write-Info ("leaving alone (running, not VCF): " + (($foreignOn | ForEach-Object Name) -join ', '))
 }
@@ -158,6 +166,11 @@ $workersOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -a
 if ($workersOn.Count -gt 0) {
     $fate = if ($IncludeHosts) { 'stopped before the hosts go down' } else { 'left running (Minimal mode)' }
     Write-Info ("LLM workers, " + $fate + ": " + (($workersOn | ForEach-Object Name) -join ', '))
+}
+$devOn = @($scope0.Foreign | Where-Object { $_.PowerState -eq 'PoweredOn' -and $devSet -contains $_.Name })
+if ($devOn.Count -gt 0) {
+    $fate = if ($IncludeHosts) { 'shut down before the hosts go down' } else { 'left running' }
+    Write-Info ("Dev VMs, " + $fate + ": " + (($devOn | ForEach-Object Name) -join ', '))
 }
 
 # --- tail appliances ------------------------------------------------------------
@@ -276,6 +289,18 @@ if (-not $IncludeHosts) {
         foreach ($w in $workers) {
             if (-not (Stop-HostVM -HostIp $w.HostIp -Name $w.VmName -EsxCredential $esxCred -GraceSeconds $workerGrace)) {
                 $failed += $w.VmName
+            }
+        }
+    }
+
+    # The dev VMs are owned too, but carry work: guest shutdown only. One that
+    # does not go down in time is left running, and the blocker check below
+    # then refuses and names it instead of powering its host off under it.
+    if ($devVms.Count -gt 0) {
+        Write-Step "Developer VMs"
+        foreach ($d in $devVms) {
+            if (-not (Stop-HostVM -HostIp $d.HostIp -Name $d.VmName -EsxCredential $esxCred -GraceSeconds $devGrace -NoHardStop)) {
+                $failed += $d.VmName
             }
         }
     }

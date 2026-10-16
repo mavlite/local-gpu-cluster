@@ -16,11 +16,13 @@
     The ESX hosts have no BMC. This script cannot power them on -- it waits
     for them and tells you what to do.
 
-    SCOPE: VCF components only -- vCenter, the VCF appliances, and VSP nodes --
-    plus, in Minimal mode, the configured LlmWorkers. Developer VMs, containers
-    and any other workload are never touched, and are listed at the end as
-    "left alone". If you want one started, start it yourself, so the decision
-    is visible.
+    SCOPE: VCF components -- vCenter, the VCF appliances, and VSP nodes --
+    plus the configured DevVms in both modes and, in Minimal mode, the
+    configured LlmWorkers. The dev VMs are powered on host-direct right after
+    the hosts leave maintenance mode and are not waited on; one that fails to
+    power on is named at the end and makes the run exit 1, without holding up
+    the VCF stack. Containers and any other workload are never touched, and
+    are listed at the end as "left alone".
 
 .PARAMETER Mode
     Full (default): the whole VCF stack, as above. LLM workers are left alone --
@@ -46,6 +48,9 @@
     24 GB of DRAM, which pushes the management VMs onto the consumer tier
     drives -- the failure class behind the 2026-10-04 outage.
 
+.PARAMETER SkipDevVms
+    Leave the dev VMs (DevVms in VCFLab.Config.psd1) as they are: no power-on.
+
 .PARAMETER IgnoreLicenseWindow
     Minimal only: start even though the last Full start is past RefuseDays.
 
@@ -64,6 +69,7 @@ param(
     [ValidateSet('Full','Minimal')][string]$Mode = 'Full',
     [switch]$WithVCenter,
     [switch]$StopLlmWorkers,
+    [switch]$SkipDevVms,
     [switch]$IgnoreLicenseWindow,
     [switch]$WhatIf,
     [switch]$SkipInventoryRepair,
@@ -313,6 +319,35 @@ if ($stuck.Count -gt 0) {
     exit 1
 }
 
+# --- 1b. developer VMs, host-direct -------------------------------------------
+# Owned (DevVms in the config) and started in BOTH modes as soon as the hosts
+# can run VMs. They live on local datastores, so they need neither vCenter nor
+# the VCF stack. Not waited on: a dev VM never holds up the lab. A failed
+# power-on is named in the summary and makes the run exit 1, but only after
+# everything else has had its turn.
+$devVms       = @(Get-DevVms -Config $cfg)
+$devNames     = @($devVms | ForEach-Object VmName)
+$failedDevVms = @()
+if ($SkipDevVms) {
+    if ($devVms.Count -gt 0) { Write-Info "-SkipDevVms: dev VMs left as they are" }
+} elseif ($devVms.Count -gt 0) {
+    Write-Step "1b. Developer VMs"
+    foreach ($d in $devVms) {
+        if (-not (Start-HostVM -HostIp $d.HostIp -Name $d.VmName -EsxCredential $esxCred -WhatIfMode:$WhatIf)) {
+            $failedDevVms += $d.VmName
+        }
+    }
+}
+$devSummary = {
+    if ($SkipDevVms -or $devVms.Count -eq 0) { return }
+    Write-Step "Developer VMs"
+    foreach ($d in $devVms) {
+        $state = if ($failedDevVms -contains $d.VmName) { 'NOT UP' } else { 'up' }
+        Write-Host ('  {0,-16} on {1,-6} {2}' -f $d.VmName, $d.HostShort, $state)
+    }
+    if ($failedDevVms.Count -gt 0) { Write-Fail "Dev VMs not up: $($failedDevVms -join ', ')" }
+}
+
 # --- M. Minimal: LLM workers, host-direct -------------------------------------
 # Everything here talks to the hosts; vCenter is not required and usually not
 # running. The workers' disks are on local datastores and their port group uses
@@ -343,8 +378,10 @@ if ($minimal) {
             Write-Host ('  {0,-16} on {1,-6} {2}' -f $w.VmName, $w.HostShort, $state)
         }
         Write-Info "vCenter, NSX, SDDC Manager, Operations and VSP are intentionally OFF."
+        & $devSummary
         Write-Host "`nMinimal power-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
-        if ($failedWorkers.Count -gt 0) { Write-Fail "Workers not up: $($failedWorkers -join ', ')"; exit 1 }
+        if ($failedWorkers.Count -gt 0) { Write-Fail "Workers not up: $($failedWorkers -join ', ')" }
+        if ($failedWorkers.Count -gt 0 -or $failedDevVms.Count -gt 0) { exit 1 }
         exit 0
     }
 }
@@ -443,9 +480,10 @@ if ($minimal) {
     Write-Step "Summary -- Minimal with vCenter"
     Write-Ok "vCenter and the LLM workers are up; NSX, SDDC Manager, Operations and VSP are intentionally OFF."
     if ($failedWorkers.Count -gt 0) { Write-Fail "Workers not up: $($failedWorkers -join ', ')" }
+    & $devSummary
     Write-Host "`nMinimal power-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
     Disconnect-VIServer -Server $vc -Confirm:$false -ErrorAction SilentlyContinue
-    if ($failedWorkers.Count -gt 0) { exit 1 }
+    if ($failedWorkers.Count -gt 0 -or $failedDevVms.Count -gt 0) { exit 1 }
     exit 0
 }
 
@@ -454,8 +492,9 @@ $managed = Get-VcfManagedNames -Config $cfg
 Write-Step "Scope"
 Write-Info ("VCF components this script will manage: " + ($managed -join ', '))
 $scope = Get-VmScope -Config $cfg -ManagedNames $managed
-if ($scope.Foreign.Count -gt 0) {
-    Write-Info ("left alone (not VCF): " + (($scope.Foreign | ForEach-Object Name) -join ', '))
+$scopeForeign = @($scope.Foreign | Where-Object { $devNames -notcontains $_.Name })
+if ($scopeForeign.Count -gt 0) {
+    Write-Info ("left alone (not VCF): " + (($scopeForeign | ForEach-Object Name) -join ', '))
 }
 
 # --- 3. SDDC Manager ----------------------------------------------------------
@@ -535,9 +574,10 @@ Get-VM | Where-Object { $managed -contains $_.Name } | Sort-Object Name | ForEac
 } | Write-Host
 
 $after = Get-VmScope -Config $cfg -ManagedNames $managed
-if ($after.Foreign.Count -gt 0) {
+$afterForeign = @($after.Foreign | Where-Object { $devNames -notcontains $_.Name })
+if ($afterForeign.Count -gt 0) {
     Write-Step "Left alone -- not VCF components, untouched by this script"
-    $after.Foreign | Sort-Object Name | ForEach-Object {
+    $afterForeign | Sort-Object Name | ForEach-Object {
         '  {0,-42} {1}' -f $_.Name, $_.PowerState
     } | Write-Host
 }
@@ -553,6 +593,8 @@ if ($workersOn.Count -gt 0) {
 # the sync when it finds Operations has been up for 24 h.
 Write-Info "To refresh the VCF license window for Minimal mode, leave VCF Operations up for 24 h before Stop-VCFLab."
 
+& $devSummary
 Write-Host "`nPower-on finished in $([int]((Get-Date) - $started).TotalMinutes) min" -ForegroundColor White
 Write-Warn2 "If DRS is set to Manual, nothing will place or balance VMs. Check before relying on automation."
 Disconnect-VIServer -Server $vc -Confirm:$false -ErrorAction SilentlyContinue
+if ($failedDevVms.Count -gt 0) { exit 1 }

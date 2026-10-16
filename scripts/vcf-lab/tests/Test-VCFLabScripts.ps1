@@ -7,8 +7,9 @@
 
     Invariants asserted:
       1. shutdown stops the VSP control plane BEFORE its workers
-      2. neither script ever touches a non-VCF VM
-      3. -IncludeHosts REFUSES while a non-VCF VM is running
+      2. neither script ever touches a VM it does not own (VCF, DevVms, LlmWorkers)
+      3. -IncludeHosts REFUSES while an unowned VM, or a dev VM that would not
+         shut down cleanly, is running -- and never hard-stops a dev VM
       4. -IncludeHosts proceeds once only VCF VMs were running
 #>
 param([string]$ScriptDir = (Split-Path -Parent $PSScriptRoot))
@@ -46,7 +47,7 @@ OPERATIONS_ADMIN_PASS=stub
 $cfgPath = Join-Path $sandbox 'VCFLab.Config.psd1'
 $cfgText = Get-Content $cfgPath -Raw
 $cfgText = [regex]::Replace($cfgText,
-    '(?m)^(\s+(?:HostApi|VsanFormation|VCenterApi|SddcManager|Nsx|Operations|VspControl|VspWorker|Appliance|HostShutdown|LlmWorker)\s+=\s+)\d+',
+    '(?m)^(\s+(?:HostApi|VsanFormation|VCenterApi|SddcManager|Nsx|Operations|VspControl|VspWorker|Appliance|HostShutdown|LlmWorker|DevVm)\s+=\s+)\d+',
     '${1}5')
 
 # The owned host-pinned lists come from THIS harness, not from the live config:
@@ -62,6 +63,21 @@ LlmWorkers = @(
 "@
 if ($cfgText -notmatch 'LlmWorkers\s*=\s*@\([^)]*\)') { throw 'harness: LlmWorkers not found in the config copy' }
 $cfgText = [regex]::Replace($cfgText, 'LlmWorkers\s*=\s*@\([^)]*\)', $testWorkers.Replace('$', '$$'))
+# Developer VMs: owned, started in both modes, shut down before -IncludeHosts
+# powers the hosts off. Same pinning as the live lab (each on its host's local
+# datastore). Replaces a DevVms list if the config has one, else adds it.
+$testDevVms = @"
+DevVms = @(
+        @{ VmName = 'devvm01'; Host = 'hyp01' }
+        @{ VmName = 'devvm02'; Host = 'hyp02' }
+        @{ VmName = 'devvm03'; Host = 'hyp03' }
+    )
+"@
+if ($cfgText -match 'DevVms\s*=\s*@\([^)]*\)') {
+    $cfgText = [regex]::Replace($cfgText, 'DevVms\s*=\s*@\([^)]*\)', $testDevVms.Replace('$', '$$'))
+} else {
+    $cfgText = [regex]::Replace($cfgText, '(LlmWorkers\s*=\s*@\([^)]*\))', ('$1' + "`n`n    " + $testDevVms.Replace('$', '$$')))
+}
 Set-Content -Path $cfgPath -Value $cfgText -Encoding utf8
 
 
@@ -202,6 +218,7 @@ function Start-VM { param($VM,$Server,[switch]$Confirm,[string]$ErrorAction)
 function Stop-VM { param($VM,[switch]$Confirm,[string]$ErrorAction)
     Note "HARDSTOP $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOff' } }
 function Stop-VMGuest { param($VM,[switch]$Confirm,[string]$ErrorAction)
+    if ($global:IgnoreGuestStop -contains $VM.Name) { Note "GUESTSTOP-IGNORED $($VM.Name)"; return }
     Note "GUESTSTOP $($VM.Name)"; ($global:FakeVMs | Where-Object Name -eq $VM.Name) | ForEach-Object { $_.PowerState='PoweredOff' } }
 function Get-EsxCli {
     # .Invoke() must be a real METHOD, not a ScriptBlock property: a property
@@ -255,7 +272,13 @@ function Invoke-LabRest { param([Parameter(ValueFromRemainingArguments)]$a)
             [pscustomobject]@{ state='success' })
     } }
 
-$script:Foreign = @('devvm01','devvm02','devvm03','truenas-backup')
+# Truly foreign: never touched. The dev VMs are OWNED (DevVms in the config).
+$script:Foreign = @('truenas-backup')
+$script:DevVms = [ordered]@{
+    'devvm01' = 'hyp01.lab.knowledgeondemand.net'
+    'devvm02' = 'hyp02.lab.knowledgeondemand.net'
+    'devvm03' = 'hyp03.lab.knowledgeondemand.net'
+}
 # LLM worker VMs live on LOCAL datastores, so each is pinned to the host named
 # here -- the same pairing as LlmWorkers in VCFLab.Config.psd1.
 $script:Workers = [ordered]@{
@@ -271,7 +294,8 @@ function Set-Stamp { param([int]$DaysAgo)
     (Get-Date).ToUniversalTime().AddDays(-$DaysAgo).ToString('o') | Set-Content -Path $script:StampPath -Encoding utf8 }
 
 function Reset-Fleet {
-    param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn',[string]$WorkerPower='PoweredOff')
+    param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn',[string]$WorkerPower='PoweredOff',[string]$DevPower)
+    if (-not $DevPower) { $DevPower = $ForeignPower }
     $global:StubSessions = @()
     $f = 'vcf-management-services'
     $global:FakeVMs = @(
@@ -287,9 +311,9 @@ function Reset-Fleet {
         (New-FakeVM 'platform-pfnmx' $Power 10 '172.16.10.164' $f)
         (New-FakeVM 'platform-c5t7j' $Power 10 '172.16.10.167' $f)
         (New-FakeVM 'platform-8n62z' $Power 10 '172.16.10.163' $f)
-        (New-FakeVM 'devvm01'        $ForeignPower 8 '172.16.70.10')
-        (New-FakeVM 'devvm02'        $ForeignPower 8 '172.16.71.10')
-        (New-FakeVM 'devvm03'        $ForeignPower 8 '172.16.72.10')
+        (New-FakeVM 'devvm01'        $DevPower 8 '172.16.70.10' -VMHostName $script:DevVms['devvm01'])
+        (New-FakeVM 'devvm02'        $DevPower 8 '172.16.71.10' -VMHostName $script:DevVms['devvm02'])
+        (New-FakeVM 'devvm03'        $DevPower 8 '172.16.72.10' -VMHostName $script:DevVms['devvm03'])
         (New-FakeVM 'truenas-backup' $ForeignPower 2 '172.16.10.200')
     )
     $i = 205
@@ -303,6 +327,7 @@ function Reset-Fleet {
     $global:VCenterDown = $false
     $global:UnreachableHosts = @()
     $global:FailStart = @()
+    $global:IgnoreGuestStop = @()
     $global:Log.Clear()
 }
 function Get-Started { @($global:Log | Where-Object { $_ -like 'START *' } | ForEach-Object { $_ -replace '^START ','' }) }
@@ -365,7 +390,8 @@ catch { Write-Host "   SCRIPT ERROR: $($_.Exception.Message)" -ForegroundColor R
 $out | Select-Object -Last 8 | ForEach-Object { "   $_" } | Write-Host
 Check "refuses rather than stopping non-VCF VMs" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
 Check "no host powered off while foreign VMs run" (-not ($global:Log -contains 'HOSTOFF'))
-Check "names the blockers" (($out -join "`n") -match 'devvm01')
+Check "names the blockers" (($out -join "`n") -match 'truenas-backup')
+Check "owned dev VMs are shut down, not named as blockers" ((($out -join "`n") -notmatch 'running: devvm0') -and (@(Get-Stopped | Where-Object { $_ -like 'devvm0*' }).Count -eq 3))
 
 # --------------------------------------- Stop -IncludeHosts, VCF-only lab ---
 Write-Host "`n########## Stop-VCFLab.ps1 -IncludeHosts (nothing foreign running) ##########" -ForegroundColor Magenta
@@ -578,6 +604,104 @@ Check "  ...nothing stopped behind vCenter's back" ((Get-Stopped).Count -eq 0)
 Check "  ...the VCF VM is named on its own host only" ($out -match 'nsxa\s+on hyp01' -and $out -notmatch 'nsxa\s+on hyp0[23]')
 $global:VCenterDown = $false
 
+# =========================== Developer VMs (owned, both modes) ================
+# devvm01-03 live on their hosts' local datastores. Start powers them on
+# host-direct right after the hosts leave maintenance mode, in BOTH modes, and
+# does not wait for them. Stop leaves them running by default and shuts them
+# down (guest only, never a hard stop) before -IncludeHosts powers the hosts off.
+$devNames = @($script:DevVms.Keys)
+function Get-DevStarted { @(Get-Started | Where-Object { $devNames -contains $_ }) }
+function Get-DevStopped { @(Get-Stopped | Where-Object { $devNames -contains $_ }) }
+
+Write-Host "`n########## Start-VCFLab.ps1 (Full) starts the dev VMs ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$out = Invoke-Lab 'Start-VCFLab.ps1'
+$st = @(Get-Started)
+Check "full start with dev VMs exits 0" ($global:LastExit -eq 0)
+foreach ($d in $devNames) { Check "full start powers on $d (via its own host)" ($st -contains $d) }
+Check "  ...before vCenter (they need only their host)" ([array]::IndexOf($st,'devvm03') -ge 0 -and [array]::IndexOf($st,'devvm03') -lt [array]::IndexOf($st,'vcsa'))
+Check "  ...the VCF stack still comes up (opscollector last)" ($st -contains 'opscollector')
+Check "  ...truenas-backup still untouched" (@(Get-Touched | Where-Object { $script:Foreign -contains $_ }).Count -eq 0)
+Check "  ...dev VMs are not listed as 'left alone'" ($out -notmatch '(?m)^\s+devvm0\d\s+Powered')
+Check "  ...and are reported in the summary" ($out -match 'devvm02\s+on hyp02\s+up')
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipDevVms ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipDevVms = $true }
+Check "-SkipDevVms exits 0" ($global:LastExit -eq 0)
+Check "-SkipDevVms starts no dev VM" ((Get-DevStarted).Count -eq 0)
+Check "  ...but still starts vcsa" ((Get-Started) -contains 'vcsa')
+
+Write-Host "`n########## Start-VCFLab.ps1 -WhatIf with dev VMs off ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ WhatIf = $true }
+Check "-WhatIf powers on no dev VM" ((Get-DevStarted).Count -eq 0)
+
+Write-Host "`n########## Start-VCFLab.ps1 with dev VMs already running ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+$null = Invoke-Lab 'Start-VCFLab.ps1'
+Check "running dev VMs are not powered on again" ((Get-DevStarted).Count -eq 0 -and $global:LastExit -eq 0)
+
+Write-Host "`n########## Start-VCFLab.ps1, one dev VM fails to power on ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$global:FailStart = @('devvm02')
+$out = Invoke-Lab 'Start-VCFLab.ps1'
+Check "a failed dev VM makes the run exit 1" ($global:LastExit -eq 1)
+Check "  ...but never blocks the VCF stack (opscollector still started)" ((Get-Started) -contains 'opscollector')
+Check "  ...the other dev VMs still start" (((Get-DevStarted) -contains 'devvm01') -and ((Get-DevStarted) -contains 'devvm03'))
+Check "  ...and the failed one is named" ($out -match 'Dev VMs not up: .*devvm02')
+
+Write-Host "`n########## Start-VCFLab.ps1 -Mode Minimal starts dev VMs and workers ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+Set-Stamp -DaysAgo 1
+$null = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "minimal with dev VMs exits 0" ($global:LastExit -eq 0)
+Check "minimal powers on every dev VM" (@($devNames | Where-Object { (Get-DevStarted) -notcontains $_ }).Count -eq 0)
+Check "  ...and every worker" (@($workerNames | Where-Object { (Get-Started) -notcontains $_ }).Count -eq 0)
+
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$global:FailStart = @('devvm01')
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal' }
+Check "minimal: a failed dev VM exits 1 and is named" ($global:LastExit -eq 1 -and $out -match 'Dev VMs not up: .*devvm01')
+
+Write-Host "`n########## Stop-VCFLab.ps1 (default) leaves dev VMs running ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+$out = Invoke-Lab 'Stop-VCFLab.ps1'
+Check "default stop leaves every dev VM running" ((Get-DevStopped).Count -eq 0)
+Check "  ...still stops the VCF stack" ((Get-Stopped) -contains 'nsxa')
+Check "  ...and says the dev VMs were left running" ($out -match 'Dev VMs, left running')
+
+Write-Host "`n########## Stop-VCFLab.ps1 -IncludeHosts shuts dev VMs down first ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+$null = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "-IncludeHosts guest-stops every dev VM" (@($devNames | Where-Object { (Get-DevStopped) -notcontains $_ }).Count -eq 0)
+Check "  ...never by hard stop" (@($global:Log | Where-Object { $_ -match '^HARDSTOP devvm' }).Count -eq 0)
+Check "  ...then powers the hosts off" ($global:Log -contains 'HOSTOFF' -and $global:LastExit -eq 0)
+$devStopIdx = @(0..($global:Log.Count-1) | Where-Object { $global:Log[$_] -match '^GUESTSTOP devvm' })
+$hostOffIdx = [array]::IndexOf(@($global:Log), 'HOSTOFF')
+Check "  ...dev VMs are down before the first host goes off" ($devStopIdx.Count -eq 3 -and ($devStopIdx | Measure-Object -Maximum).Maximum -lt $hostOffIdx)
+
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+$global:VCenterDown = $true
+$null = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "vCenter down: dev VMs stopped via their hosts" (@($devNames | Where-Object { (Get-DevStopped) -notcontains $_ }).Count -eq 0)
+Check "  ...and the hosts powered off" ($global:Log -contains 'HOSTOFF')
+$global:VCenterDown = $false
+
+Write-Host "`n########## Stop-VCFLab.ps1 -IncludeHosts, a dev VM will not shut down ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+$global:IgnoreGuestStop = @('devvm02')
+$out = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "a dev VM that ignores shutdown is NOT hard-stopped" (@($global:Log | Where-Object { $_ -eq 'HARDSTOP devvm02' }).Count -eq 0)
+Check "  ...no host is powered off" (-not ($global:Log -contains 'HOSTOFF'))
+Check "  ...exit 1, naming it" ($global:LastExit -eq 1 -and $out -match 'devvm02')
+
+Reset-Fleet -Power 'PoweredOn' -ForeignPower 'PoweredOff' -DevPower 'PoweredOn'
+($global:FakeVMs | Where-Object Name -eq 'devvm03').Guest.ExtensionData.ToolsRunningStatus = 'guestToolsNotRunning'
+$out = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "a dev VM without VMware Tools is NOT hard-stopped" (@($global:Log | Where-Object { $_ -eq 'HARDSTOP devvm03' }).Count -eq 0)
+Check "  ...and no host is powered off" (-not ($global:Log -contains 'HOSTOFF') -and $global:LastExit -eq 1)
+
 Write-Host "`n########## config validation (fails at load, names the problem) ##########" -ForegroundColor Magenta
 $badCfg = Join-Path $sandbox 'bad.psd1'
 $t = (Get-Content $cfgPath -Raw) -replace "@\{ VmName = 'llmbench03'; Host = 'hyp03' \}", "@{ VmName = 'llmbench01'; Host = 'hyp03' }"
@@ -589,6 +713,14 @@ $t = (Get-Content $cfgPath -Raw) -replace 'RefuseDays\s*=\s*\d+', 'RefuseDays = 
 Set-Content -Path $badCfg -Value $t -Encoding utf8
 $out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; ConfigPath = $badCfg }
 Check "RefuseDays beyond 180 rejected at load" ($out -match 'RefuseDays < 180')
+$t = (Get-Content $cfgPath -Raw) -replace "@\{ VmName = 'devvm03'; Host = 'hyp03' \}", "@{ VmName = 'devvm03'; Host = 'hyp09' }"
+Set-Content -Path $badCfg -Value $t -Encoding utf8
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ ConfigPath = $badCfg }
+Check "dev VM on an unknown host rejected at load" ($out -match "DevVms: devvm03 names host 'hyp09'" -and (Get-Started).Count -eq 0)
+$t = (Get-Content $cfgPath -Raw) -replace "@\{ VmName = 'devvm03'; Host = 'hyp03' \}", "@{ VmName = 'llmbench03'; Host = 'hyp03' }"
+Set-Content -Path $badCfg -Value $t -Encoding utf8
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ ConfigPath = $badCfg }
+Check "a VM in both LlmWorkers and DevVms rejected at load" ($out -match 'llmbench03 is listed twice' -and (Get-Started).Count -eq 0)
 
 # --- 7. vCenter cannot power on: host fallback + vpxa repair -----------------
 Write-Host "`n########## Start-VCFLab.ps1 (vCenter power-on wedged) ##########" -ForegroundColor Magenta
