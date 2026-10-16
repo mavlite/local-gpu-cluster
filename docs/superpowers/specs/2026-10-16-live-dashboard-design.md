@@ -32,14 +32,14 @@ A replacement service on the Proxmox host on port `8888`, bound to the LAN addre
 
 | Module | Responsibility | Source | Cadence |
 |---|---|---|---|
-| `llama_live.py` | Slot states (idle, reading with progress, generating), prompt / processed / cache-reused tokens, `n_decoded`, queue (`requests_deferred`), cumulative counters → rates, MTP acceptance overall and per draft position | chat llama-server `GET /slots` and `GET /metrics` on `http://192.168.6.151:8080` | 1 s |
-| `llama_timings.py` | Exact per-request timings: prompt eval tokens and ms, eval tokens and ms, task id, slot id, draft acceptance | the chat unit's journal: one long-running `pct exec 151 -- journalctl -u llamacpp-chat -f -o cat`, parsed line by line | streaming |
-| `gpu.py` | Per V620: busy %, VRAM used/total, junction temperature, power average and cap, fan PWM %, PCIe link speed and width | host sysfs `/sys/class/drm/card*/device/` (gpu_busy_percent, mem_info_vram_*, hwmon temp/power/pwm, current_link_*), cards identified by PCI id | 1 s |
+| `llama_live.py` | Slot busy/idle and generating state, `n_decoded` (output so far), context in use, queue (`requests_deferred`), cumulative counters → rates, MTP acceptance overall and per draft position | chat llama-server `GET /slots` and `GET /metrics` on `http://192.168.6.151:8080` (Bearer key) | 1 s |
+| `llama_journal.py` | **Prefill progress** (the `prompt processing … progress=` lines), slot/task start (`launch_slot_`), exact per-request timings (prompt eval, eval, total), draft acceptance, cancels, release, and server restarts | the chat unit's journal: one long-running `pct exec 151 -- journalctl -u llamacpp-chat -f -o cat -n 0`, parsed line by line (it flushes per line) | streaming |
+| `gpu.py` | Per V620: busy %, VRAM used/total, junction temperature, power average and cap, PCIe link speed and width; GPU fan duty | host sysfs, cards found by PCI bus address (0000:03:00.0, 0000:07:00.0; card/hwmon numbers drift): `device/gpu_busy_percent`, `mem_info_vram_used/total` (bytes), `hwmon*/temp2_input` (junction, m°C), `power1_average`/`power1_cap` (µW), `current_link_speed/width`. Fans are on the motherboard controller: `pwm5`/`pwm6` (0-255) of the hwmon named `nct6798`. One read of both cards: 8-20 ms | 1 s |
 | `host.py` | CPU %, RAM, disk read/write MB/s, ZFS ARC size | `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/spl/kstat/zfs/arcstats` | 1 s |
-| `services.py` | Router health (chat/embed/rerank upstream), embed and rerank request rates, next scheduled chat restart | router `GET /healthz`; embed/rerank llama-server `/metrics`; `systemctl list-timers` in LXC 151 | 5 s |
+| `services.py` | Router health (chat/embed/rerank upstream), embed and rerank activity (`n_decode_total` rate), next possible chat restart | router `GET /healthz`; embed `:8082` and rerank `:8083` `/metrics`; restart timer in LXC 151 (`systemctl show llamacpp-chat-restart.timer -p NextElapseUSecRealtime` plus the stamp `/var/lib/llamacpp/last-proactive-restart`). The timer is hourly and idle-gated with a 12 h minimum, so the card shows "next possible restart" = max(stamp + 12 h, next timer fire) | 5 s (timer: 60 s) |
 | `escalation.py` | Claude month and day spend, caps, calls left, last call | router `GET /escalation/budget` with the owner key, read on demand from `/etc/router.env` in LXC 153 (as the old Tavily check did) | 30 s |
 | `history.py` | SQLite request store; 30-day prune; aggregates (speed by context band, by day) | file `/var/lib/live-dashboard/history.db` | on each finished request, nightly prune |
-| `tracker.py` | The request state machine joining `llama_live` and `llama_timings` by task id (§4) | — | — |
+| `tracker.py` | The request state machine joining `llama_journal` (lifecycle, prefill progress, timings) and `llama_live` (generating detail) by (server run, slot, task) (§4) | — | — |
 | `server.py` | HTTP: `/` (page), `/api/stream` (server-sent events, one snapshot per second), `/api/requests?limit=` and `/api/history?days=` (JSON), `/healthz` | — | — |
 | `static/index.html` | The page, matching the mock-up; vanilla JS plus inline SVG | — | — |
 
@@ -85,14 +85,16 @@ A replacement service on the Proxmox host on port `8888`, bound to the LAN addre
 
 The tracker keeps one in-memory record per slot.
 
-- **Request start:** a slot's `id_task` changes while `is_processing` is true. The tracker opens a row: state *reading*, with start time, `n_prompt_tokens` and `n_prompt_tokens_cache`.
-- **Reading → generating:** happens when `n_decoded > 0`, or when `n_prompt_tokens_processed` reaches the prompt total.
-- **While generating:** each poll updates the output count and live tok/s from `n_decoded` deltas.
-- **Finish:** a journal timing block for that task id arrives, or the slot goes idle.
-  - If the timing block arrives (prompt eval tokens and ms, eval tokens and ms), its numbers are authoritative, and the row is written to history.
-  - If the slot goes idle and no timing block arrives within 5 s, the row is written from the 1 s observations and flagged **approx**.
-- **Interrupted:** the chat unit stops or restarts mid-request (`/slots` becomes unreachable, or the journal shows a server start). The open row is written as **interrupted**.
-- **Short requests:** a request that both starts and finishes between two polls is still recorded from its journal timing block. The block carries the task and slot ids, so a missed live phase leaves no gap.
+The journal drives the lifecycle; `/slots` adds the generating detail. Verified on b11578 (2026-10-16): during prefill `/slots` does not show progress (`n_prompt_tokens_processed` stays 0 and `n_prompt_tokens` shows the batch size until prefill ends), so prefill progress must come from the journal.
+
+- **Request start:** a journal `launch_slot_: id N | task T` line. The tracker opens a row for (slot N, task T): state *reading*, start time.
+- **Reading progress:** each `prompt processing … n_tokens=…, progress=…` line for that slot updates the progress bar and the live prefill tok/s.
+- **Reading → generating:** at the first `/slots` poll with `n_decoded > 0` for that slot, or at the journal's prefill-complete line. While generating, each poll updates the output count and live tok/s from `n_decoded` deltas. Context in use comes from `n_prompt_tokens` on `/slots`.
+- **Finish:** the journal's timing block (prompt eval tokens and ms, eval tokens and ms, total), then `release: id | task | stop processing`. These numbers are authoritative, the row is written to history, and the draft-acceptance line is attached if present.
+- **Cancelled:** a `stop: cancel task` line with no timing block before `release`. The row is written as **cancelled**.
+- **Approx:** the journal stream is down and the slot is seen going idle on `/slots` (`is_processing` false). The row is written from the 1 s observations and flagged **approx**.
+- **Interrupted:** the journal shows a server start (`llama_server: initializing`), or `/slots` stays unreachable over 10 s, while a row is open. The open row is written as **interrupted**.
+- **Ids are per server run.** The journal's timestamp prefix (time since server start) and task ids reset at every restart. Rows are keyed by (server run, slot, task); the server run is the wall-clock time the tracker saw that server start.
 
 ## 5. Failure handling
 
@@ -100,7 +102,7 @@ The tracker keeps one in-memory record per slot.
   - The live snapshot carries per-source `ok` / `stale_since`.
   - The page greys out only that source's cards, with "unavailable since HH:MM:SS".
   - A source that stops updating is never shown as live.
-- **Chat restarts:** these happen at 04:00 and 16:00 UTC, on a profile swap, or on a crash. The slots panel shows "chat restarting". The key is re-read after a 401.
+- **Chat restarts:** these come from the idle-gated restart timer (at most every 12 h), a profile swap, or a crash. The slots panel shows "chat restarting". The key is re-read after a 401.
 - **Journal stream drops:** reconnect with exponential backoff (1 s → 30 s). Meanwhile rows are written as **approx**.
 - **Browser stream:** the page's `EventSource` reconnects on its own and shows "reconnecting". The server caps concurrent stream clients at 8; the next client gets HTTP 503 with a retry hint.
 - **History:**
