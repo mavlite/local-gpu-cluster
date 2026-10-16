@@ -1,6 +1,7 @@
 """Pure parsers for the live dashboard. Formats recorded on the live cluster 2026-10-16 (llama.cpp b11578 with
 --log-prefix; amdgpu sysfs; Linux /proc). No I/O here except the sysfs readers, which take a directory."""
 import glob
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -57,9 +58,11 @@ def parse_prometheus(text: str) -> dict:
             continue
         name, _, value = line.rpartition(" ")
         try:
-            out[name] = float(value)
+            v = float(value)
         except ValueError:
             continue
+        if math.isfinite(v):                 # NaN/inf would make the snapshot invalid JSON for the browser
+            out[name] = v
     return out
 
 
@@ -87,7 +90,7 @@ def find_gpu_dirs(drm_root: str, buses: list) -> dict:
             for line in _read(os.path.join(dev, "uevent")).splitlines():
                 if line.startswith("PCI_SLOT_NAME=") and line.split("=", 1)[1] in buses:
                     found[line.split("=", 1)[1]] = dev
-        except OSError:
+        except (OSError, ValueError):
             continue
     return found
 
