@@ -133,3 +133,86 @@ def test_source_gate_fails_closed_on_unexpected_snapshots():
         assert _run_source_gate(bad) != "SOURCES_OK", bad
     # bash side: only the explicit marker passes
     assert '[[ "$bad" != "SOURCES_OK" ]]' in _script()
+
+
+# ---- final fix wave: check_sources retries, cut-over enables the unit, unit restart limits
+def _bash():
+    import shutil
+    import subprocess
+    b = shutil.which("bash")
+    if not b:
+        return None
+    try:
+        r = subprocess.run([b, "-c", "echo ok"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return b if r.stdout.strip() == "ok" else None
+
+
+def _run_check_sources(responses):
+    """Source the script's own check_sources (and its python gate) with curl/sleep stubbed; `responses` are the
+    successive snapshots the stream returns. Returns (rc, curl calls, simulated seconds, stderr)."""
+    import subprocess
+    import pytest
+    b = _bash()
+    if not b:
+        pytest.skip("no working bash")
+    s = _script()
+    fn = re.search(r"^check_sources\(\) \{.*?^\}$", s, re.M | re.S)
+    gate = re.search(r"^SOURCES_CHECK_PY='.*?'$", s, re.M | re.S)
+    req = re.search(r"^REQUIRED_SOURCES=.*$", s, re.M)
+    assert fn and gate and req
+    lines = [f"RESP{i}={json.dumps('data: ' + r)!s}" for i, r in enumerate(responses)]
+    # curl runs in a command-substitution subshell, so its call counter lives in a file; sleep runs in the
+    # function's own shell and advances bash's SECONDS clock instead of waiting
+    harness = "\n".join([
+        "set -euo pipefail", "HOST_IP=127.0.0.1", f"PY='{sys.executable.replace(chr(92), '/')}'",
+        req.group(0), gate.group(0), *lines, f"NRESP={len(responses)}",
+        'CF="$(mktemp)"; echo 0 > "$CF"',
+        'curl() { local n; n=$(cat "$CF"); echo $((n + 1)) > "$CF"; '
+        'local v="RESP$(( n < NRESP ? n : NRESP - 1 ))"; printf "%s\\n" "${!v}"; }',
+        'sleep() { SECONDS=$((SECONDS + ${1%.*})); }',
+        fn.group(0),
+        "SECONDS=0", "rc=0; check_sources 8888 > /dev/null || rc=$?", "T=$SECONDS",
+        'echo "RC=$rc CALLS=$(cat "$CF") T=$T"; rm -f "$CF"',
+    ])
+    r = subprocess.run([b, "-c", harness], capture_output=True, text=True, timeout=60)
+    m = re.search(r"RC=(\d+) CALLS=(\d+) T=(\d+)", r.stdout)
+    assert m, r.stdout + r.stderr
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), r.stderr
+
+
+def _src(journal):
+    return json.dumps({"sources": {"slots": {"ok": True}, "journal": {"ok": journal}, "gpu": {"ok": True},
+                                   "host": {"ok": True}}})
+
+
+def test_check_sources_retries_until_sources_come_up():
+    rc, calls, t, _ = _run_check_sources([_src(False), _src(False), _src(True)])
+    assert rc == 0 and calls == 3 and t < 15
+
+
+def test_check_sources_gives_up_after_about_15_seconds():
+    rc, calls, t, err = _run_check_sources([_src(False)])
+    assert rc == 1 and calls >= 3 and 14 <= t <= 17
+    assert "sources not ok: journal" in err
+
+
+def test_cutover_enables_the_unit_so_8888_survives_a_reboot():
+    cut = _script().split("cutover)", 1)[1].split("rollback)", 1)[0]
+    assert "systemctl enable live-dashboard" in cut
+    assert cut.index("systemctl enable live-dashboard") < cut.index("systemctl restart live-dashboard")
+
+
+def test_unit_stops_on_bad_config_and_limits_restarts():
+    u = open(os.path.join(ROOT, "files", "live-dashboard.service"), encoding="utf-8").read()
+    unit, service = u.split("[Service]", 1)
+    assert "StartLimitIntervalSec=300" in unit and "StartLimitBurst=10" in unit      # [Unit] keys
+    assert "RestartPreventExitStatus=2" in service.split("[Install]", 1)[0]
+
+
+def test_deploy_script_is_executable_in_the_index():
+    import subprocess
+    r = subprocess.run(["git", "ls-files", "-s", "scripts/64-live-dashboard.sh"], cwd=os.path.join(ROOT, ".."),
+                       capture_output=True, text=True, timeout=30)
+    assert r.stdout.startswith("100755"), r.stdout

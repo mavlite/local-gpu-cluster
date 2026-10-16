@@ -64,22 +64,29 @@ wait_health() {
   return 1
 }
 
-# Read the first `data:` event of /api/stream (max 10 s) and require the REQUIRED_SOURCES to be ok.
-# Prints the sources that are not ok. Returns 0 only if all are ok.
+# Read the first `data:` event of /api/stream and require the REQUIRED_SOURCES to be ok. A just-restarted service
+# needs a few seconds to bring every source up (the journal stream counts as up after ~2 s alive), so poll for up
+# to ~15 s before giving up. Prints the sources still not ok. Returns 0 only if all are ok.
 check_sources() {
-  local port="$1" line bad
-  line="$(curl -sS -N --max-time 10 "http://$HOST_IP:$port/api/stream" 2>/dev/null | grep -a -m1 '^data: ' || true)"
-  if [[ -z "$line" ]]; then
-    echo "no snapshot received from :$port/api/stream within 10 s" >&2
-    return 1
-  fi
-  bad="$(printf '%s' "${line#data: }" | "$PY" -c "$SOURCES_CHECK_PY" "$REQUIRED_SOURCES")" || bad="check-failed"
-  # fail closed: only the explicit marker passes; empty or unknown output is "not ok"
-  if [[ "$bad" != "SOURCES_OK" ]]; then
-    echo "sources not ok: ${bad:-no-output}" >&2
-    return 1
-  fi
-  echo "sources ok: $REQUIRED_SOURCES"
+  local port="$1" line bad end=$((SECONDS + 15))
+  while :; do
+    line="$(curl -sS -N --max-time 5 "http://$HOST_IP:$port/api/stream" 2>/dev/null | grep -a -m1 '^data: ' || true)"
+    if [[ -z "$line" ]]; then
+      bad="no-snapshot-from-:$port/api/stream"
+    else
+      bad="$(printf '%s' "${line#data: }" | "$PY" -c "$SOURCES_CHECK_PY" "$REQUIRED_SOURCES")" || bad="check-failed"
+    fi
+    # fail closed: only the explicit marker passes; empty or unknown output is "not ok"
+    if [[ "$bad" != "SOURCES_OK" ]]; then
+      (( SECONDS < end )) || break
+      sleep 2
+      continue
+    fi
+    echo "sources ok: $REQUIRED_SOURCES"
+    return 0
+  done
+  echo "sources not ok: ${bad:-no-output}" >&2
+  return 1
 }
 
 install_files() {
@@ -158,6 +165,7 @@ case "${1:-}" in
     systemctl disable --now cluster-monitor
     write_cfg 8888
     # "bind_port": 8888 -- the dashboard takes over the monitor's port
+    systemctl enable live-dashboard          # :8888 must survive a reboot even without a prior side-by-side
     systemctl restart live-dashboard
     if ! wait_health 8888 || ! check_sources 8888; then
       echo "dashboard is not healthy on :8888; rolling back" >&2
