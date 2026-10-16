@@ -43,6 +43,7 @@
   .gauge{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
   .note{border-left:3px solid var(--violet);padding:6px 10px;background:#141a27;border-radius:6px;color:#cdd3e0;font-size:12.5px}
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin-bottom:2px}
   .stale{opacity:.45;filter:grayscale(1)}
   .banner{padding:6px 22px;background:var(--amber);color:#1a1200;font-size:13px;font-weight:600}
   .banner[hidden]{display:none}
@@ -95,7 +96,7 @@
   <!-- 2. Speed cards -->
   <section class="cards">
     <div class="card" id="card-gen"><div class="mut">Generation</div><div class="big"><span id="gen-now">—</span><span class="unit">tok/s</span></div>
-      <div class="mut">15-min avg <span id="gen-avg">—</span></div>
+      <div class="mut">15-min avg <span id="gen-avg">—</span> · bench 50.8</div>
       <svg class="spark" id="spark-gen" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
     <div class="card" id="card-prefill"><div class="mut">Prompt processing</div><div class="big"><span id="prefill-now">—</span><span class="unit">tok/s</span></div>
       <div class="mut">15-min avg <span id="prefill-avg">—</span></div>
@@ -162,12 +163,12 @@
       </div>
       </div>
       <h3 style="margin-top:18px">Speed vs context (last 7 days)</h3>
-      <svg viewBox="0 0 240 110" style="width:100%">
-        <line x1="25" y1="95" x2="235" y2="95" stroke="#232b3b"/><line x1="25" y1="5" x2="25" y2="95" stroke="#232b3b"/>
+      <div class="legend"><span style="color:var(--green)">&#9644; gen tok/s</span><span style="color:var(--blue)">&#9644; prefill tok/s</span><span class="mut">each line scaled to its own maximum</span></div>
+      <svg viewBox="0 0 240 68" style="width:100%">
+        <line x1="25" y1="54" x2="235" y2="54" stroke="#232b3b"/><line x1="25" y1="4" x2="25" y2="54" stroke="#232b3b"/>
         <g id="ctx-lines"></g>
-        <text x="30" y="106" font-size="6" fill="#8a93a6">0-8K</text><text x="75" y="106" font-size="6" fill="#8a93a6">8-32K</text>
-        <text x="120" y="106" font-size="6" fill="#8a93a6">32-64K</text><text x="165" y="106" font-size="6" fill="#8a93a6">64-96K</text><text x="205" y="106" font-size="6" fill="#8a93a6">96-128K</text>
-        <text x="30" y="14" font-size="7" fill="#22c55e">gen tok/s</text><text x="75" y="14" font-size="7" fill="#3b82f6">prefill tok/s</text>
+        <text x="30" y="64" font-size="6" fill="#8a93a6" text-anchor="middle">0-8K</text><text x="75" y="64" font-size="6" fill="#8a93a6" text-anchor="middle">8-32K</text>
+        <text x="120" y="64" font-size="6" fill="#8a93a6" text-anchor="middle">32-64K</text><text x="165" y="64" font-size="6" fill="#8a93a6" text-anchor="middle">64-96K</text><text x="210" y="64" font-size="6" fill="#8a93a6" text-anchor="middle">96-128K</text>
       </svg>
       <div class="note">From the 30-day request history (<span id="ctx-n">—</span> requests in the last 7 days): lets you see whether a change moved real-world speed, not just bench numbers.</div>
     </div>
@@ -197,7 +198,7 @@ function esc(v) {
   const map = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
   return String(v == null ? "—" : v).replace(/[&<>"']/g, c => map[c]);
 }
-const word = v => /^[a-z_]{1,20}$/.test(String(v)) ? String(v) : "";   // safe for a class name
+const word = v => typeof v === "string" && /^[a-z_]{1,20}$/.test(v) ? v : "";   // safe for a class name
 const clock = t => isNum(t) ? new Date(t * 1000).toLocaleTimeString() : "—";
 const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
 const SERIES = ["gen", "prefill", "cache", "mtp", "gpu0_load", "gpu1_load", "host_cpu"];
@@ -227,10 +228,10 @@ function staleMark(id, src) {
 const STATE_LABEL = {idle: "Idle", reading: "Reading prompt", generating: "Generating", restarting: "Restarting"};
 function slotCard(v) {
   v = obj(v);
-  if (!isNum(v.id) || v.id < 0 || v.id > 2) return;
+  if (!Number.isInteger(v.id) || v.id < 0 || v.id > 2) return;
   const p = `slot${v.id}`, st = word(v.state);
   const pct = st === "reading" && isNum(v.progress) ? Math.round(100 * v.progress) : null;
-  setText(`${p}-state`, STATE_LABEL[st] || "—");
+  setText(`${p}-state`, Object.hasOwn(STATE_LABEL, st) ? STATE_LABEL[st] : "—");
   $(`${p}-state`).dataset.state = st;
   const bar = $(`${p}-bar`);
   bar.dataset.state = st;
@@ -260,7 +261,17 @@ function pills(slots) {
     return `<span class="pill"><span class="dot ${st}"></span>slot ${esc(fmt(v.id))} ${esc(st || "—")}${esc(extra)}</span> `;
   }).join("");
 }
+let escShown = false;
 function renderEscalation(e) {
+  if (e === null) {
+    if (escShown) {
+      ["esc-month", "esc-monthcap", "esc-day", "esc-daycap", "esc-left", "esc-last"].forEach(id => setText(id, "—"));
+      $("esc-ring").setAttribute("stroke-dasharray", "0 100");
+      escShown = false;
+    }
+    return;
+  }
+  escShown = true;
   const m = obj(e.month), d = obj(e.day), left = obj(e.calls_left);
   setText("esc-month", isNum(m.spent_usd) ? "$" + fmt(m.spent_usd, 2) : "—");
   setText("esc-monthcap", isNum(m.cap_usd) ? "$" + fmt(m.cap_usd) : "—");
@@ -273,6 +284,11 @@ function renderEscalation(e) {
   const l = obj(last);
   setText("esc-last", last ? `last: ${l.alias == null ? "—" : l.alias} · ${fmt(l.input_tokens)} in / ${fmt(l.output_tokens)} out · ${isNum(l.cost_usd) ? "$" + fmt(l.cost_usd, 3) : "—"}` : "no calls yet");
 }
+let lastTs = null;
+function showAge() {
+  setText("updated", lastTs === null ? "connecting…" : `updated ${Math.max(0, Math.round(Date.now() / 1000 - lastTs))} s ago`);
+}
+setInterval(showAge, 1000);
 function render(s) {
   s = obj(s);
   const now = s.ts, src = obj(s.sources);
@@ -287,7 +303,7 @@ function render(s) {
   $("header-pills").innerHTML = pills(s.slots);
   const mo = obj(s.model);
   setText("model-pill", `${mo.profile || "—"} · ${fmt(mo.slot_count)} × ${isNum(mo.n_ctx) ? Math.round(mo.n_ctx / 1024) + "K" : "—"}`);
-  setText("updated", `updated ${clock(now)}`);
+  lastTs = isNum(now) ? now : lastTs; showAge();
   const sp = obj(s.speed);
   setText("gen-now", fmt(sp.gen_tok_s, 1)); setText("gen-avg", fmt(sp.gen_avg15, 1));
   setText("prefill-now", fmt(sp.prefill_tok_s)); setText("prefill-avg", fmt(sp.prefill_avg15));
@@ -312,14 +328,15 @@ function render(s) {
   $("svc-rerank-dot").className = dotOf(sv.rerank);
   const rs = obj(sv.restart);
   setText("svc-restart", (isNum(rs.next_possible) ? `next possible chat restart ≥ ${clock(rs.next_possible)} (idle only)` : "chat restart: —") + (rs.stale_since != null ? " (stale)" : ""));
-  if (s.escalation) renderEscalation(obj(s.escalation));
+  renderEscalation(s.escalation ? obj(s.escalation) : null);
   $("recent-body").innerHTML = arr(s.recent).map(row).join("");
   spark("spark-gen", series.gen, "#22c55e"); spark("spark-prefill", series.prefill, "#3b82f6");
   spark("spark-cache", series.cache, "#2dd4bf"); spark("spark-mtp", series.mtp, "#a78bfa");
   spark("spark-gpu0", series.gpu0_load, "#f59e0b"); spark("spark-gpu1", series.gpu1_load, "#f59e0b"); spark("spark-host", series.host_cpu, "#8a93a6");
 }
 async function getJson(url) {
-  const r = await fetch(url);
+  const opts = typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? {signal: AbortSignal.timeout(5000)} : {};
+  const r = await fetch(url, opts);
   if (!r.ok) throw new Error(`${url} HTTP ${r.status}`);
   return r.json();
 }
@@ -328,12 +345,14 @@ async function loadHistory() {
     const h = obj(await getJson("/api/history?days=7"));
     const bands = ["0-8K", "8-32K", "32-64K", "64-96K", "96-128K"], by = {};
     arr(h.bands).forEach(b => { by[obj(b).band] = obj(b); });
-    const line = (key, color) => {
+    const line = (key, color, dy) => {
       const vals = bands.map(b => by[b] && isNum(by[b][key]) ? by[b][key] : null), max = Math.max(1, ...vals.filter(v => v !== null));
-      const pts = vals.map((v, i) => v === null ? null : `${30 + i * 45},${(95 - 85 * v / max).toFixed(1)}`).filter(Boolean).join(" ");
-      return pts ? `<polyline fill="none" stroke="${color}" stroke-width="1.8" points="${pts}"/>` : "";
+      const pts = vals.map((v, i) => v === null ? null : [30 + i * 45, 50 - 34 * v / max, v]).filter(Boolean);
+      if (!pts.length) return "";
+      const labels = pts.map(([x, y, v]) => `<text x="${x}" y="${(y + dy).toFixed(1)}" font-size="6" text-anchor="middle" fill="${color}">${esc(fmt(v))}</text>`).join("");
+      return `<polyline fill="none" stroke="${color}" stroke-width="1.6" points="${pts.map(p => p[0] + "," + p[1].toFixed(1)).join(" ")}"/>${labels}`;
     };
-    $("ctx-lines").innerHTML = line("gen_tok_s", "#22c55e") + line("prefill_tok_s", "#3b82f6");
+    $("ctx-lines").innerHTML = line("gen_tok_s", "#22c55e", -3) + line("prefill_tok_s", "#3b82f6", 8);
     setText("ctx-n", fmt(arr(h.bands).reduce((a, b) => a + (isNum(obj(b).n) ? b.n : 0), 0)));
   } catch (e) { console.warn("history unavailable:", e.message); }   // the previous chart stays
 }
@@ -359,6 +378,7 @@ function connect() {
   mine.onerror = () => { if (es === mine) scheduleReconnect(); };
 }
 async function boot() {
+  connect();
   try {
     const sj = obj(await getJson("/api/series"));
     SERIES.forEach(k => { if (Array.isArray(sj[k])) series[k] = sj[k].filter(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1])); });
@@ -366,7 +386,6 @@ async function boot() {
   try { $("recent-body").innerHTML = arr(obj(await getJson("/api/requests?limit=20")).rows).map(row).join(""); }
   catch (e) { console.warn("recent rows unavailable:", e.message); }
   loadHistory(); setInterval(loadHistory, 60000);
-  connect();
 }
 boot();
 </script>

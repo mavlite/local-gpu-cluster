@@ -34,3 +34,17 @@ def test_reconnect_and_escaping_present():
     assert "function esc(" in p and "es.close()" in p and "30000" in p
     assert "(stale)" in p
     assert "Think" not in p
+
+
+def test_page_renders_hostile_and_null_snapshots():
+    import shutil
+    import subprocess
+
+    import pytest
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    harness = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ld_page_harness.js")
+    r = subprocess.run([node, harness, PAGE], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert r.stdout.strip() == "ok"

@@ -130,6 +130,8 @@ def make_server(hub, cfg, static_dir):
                 q = parse_qs(u.query, max_num_fields=20)
                 if u.path in ("/", "/index.html"):
                     return self._send(200, page, "text/html; charset=utf-8")
+                if u.path == "/favicon.ico":
+                    return self._send(204, b"", "image/x-icon")
                 if u.path == "/healthz":
                     return self._json(200, {"status": "ok"})
                 if u.path == "/api/series":

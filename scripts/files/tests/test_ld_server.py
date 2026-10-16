@@ -98,6 +98,15 @@ def test_routes(tmp_path):
         stop(srv)
 
 
+def test_favicon_is_204_without_body(tmp_path):
+    srv, _ = start(tmp_path)
+    try:
+        st, body, _ = get(srv, "/favicon.ico")
+        assert st == 204 and body == ""
+    finally:
+        stop(srv)
+
+
 def test_unknown_query_params_ignored(tmp_path):
     srv, hub = start(tmp_path)
     try:
