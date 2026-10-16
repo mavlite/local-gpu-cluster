@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V620 Cluster - Live</title>
+<style>
+  :root{--bg:#0b0e14;--panel:#121722;--panel2:#161c29;--line:#232b3b;--fg:#e6e9ef;--mut:#8a93a6;
+        --blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--violet:#a78bfa;--teal:#2dd4bf}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.35 system-ui,Segoe UI,sans-serif;overflow-x:hidden}
+  header{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;padding:14px 22px;border-bottom:1px solid var(--line)}
+  .brand{font-weight:700;font-size:18px} .pill{padding:5px 12px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);font-size:13px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px;background:var(--mut)}
+  .dot.reading{background:var(--blue)} .dot.generating{background:var(--green)} .dot.idle{background:var(--mut)}
+  .dot.restarting{background:var(--amber)} .dot.ok{background:var(--green)} .dot.bad{background:var(--red)} .dot.warn{background:var(--amber)}
+  .sp{flex:1} main{padding:18px 22px;display:grid;gap:16px}
+  main>*{min-width:0}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;min-width:0}
+  h3{margin:0 0 10px;font-size:15px} .mut{color:var(--mut);font-size:12px}
+  .slots{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .slot{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+  .tag{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+  .tag[data-state=reading],.tag.reading{color:var(--blue);border-color:#1e3a6e}
+  .tag[data-state=generating],.tag.generating{color:var(--green);border-color:#1d4d33}
+  .tag[data-state=restarting]{color:var(--amber);border-color:#5b4310}
+  .tag.slow{color:var(--amber);border-color:#5b4310}
+  .tag.cancelled,.tag.interrupted{color:var(--red);border-color:#5e2323}
+  .tag.approx{color:var(--mut)}
+  .bar{height:8px;background:#1e2533;border-radius:6px;overflow:hidden;margin:8px 0 4px} .bar>i{display:block;height:100%;width:0;background:var(--mut);transition:width .4s}
+  .bar>i[data-state=reading]{background:var(--blue)} .bar>i[data-state=generating]{background:var(--green)} .bar>i[data-state=restarting]{background:var(--amber)}
+  .row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+  .big{font-size:30px;font-weight:700;letter-spacing:-.5px} .unit{font-size:13px;color:var(--mut);margin-left:3px;font-weight:400}
+  svg.spark{width:100%;height:38px;margin-top:6px}
+  .two{display:grid;grid-template-columns:1.1fr 1.9fr;gap:16px}
+  .tablewrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px} th{color:var(--mut);font-weight:500;text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{text-align:right;padding:7px 8px;border-bottom:1px solid #1a2130;white-space:nowrap} th:first-child,td:first-child,th:nth-child(2),td:nth-child(2),th:nth-child(3),td:nth-child(3){text-align:left}
+  .gpu{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .mini .big{font-size:22px}
+  .svc{display:flex;gap:10px;flex-wrap:wrap} .svc .pill{font-size:12px}
+  .gauge{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .note{border-left:3px solid var(--violet);padding:6px 10px;background:#141a27;border-radius:6px;color:#cdd3e0;font-size:12.5px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .stale{opacity:.45;filter:grayscale(1)}
+  .banner{padding:6px 22px;background:var(--amber);color:#1a1200;font-size:13px;font-weight:600}
+  .banner[hidden]{display:none}
+  @media (max-width:1100px){.cards{grid-template-columns:repeat(2,1fr)} .grid3,.two{grid-template-columns:1fr}}
+  @media (max-width:720px){
+    header,.banner{padding-left:16px;padding-right:16px} main{padding:14px 16px}
+    .slots{grid-template-columns:1fr} .gpu{grid-template-columns:repeat(2,1fr)} .big{font-size:26px}
+  }
+  @media (max-width:420px){.cards{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">V620 Cluster <span class="mut" style="font-weight:400">· live</span></div>
+  <span id="header-pills"></span>
+  <div class="sp"></div>
+  <span class="pill" id="model-pill">—</span>
+  <span class="mut" id="updated">connecting…</span>
+</header>
+<div class="banner" id="conn" hidden>reconnecting…</div>
+<div class="banner" id="journal-banner" hidden>journal stream down — rows are approximate</div>
+<div class="banner" id="history-banner" hidden>history paused</div>
+
+<main>
+  <!-- 1. Slots -->
+  <section class="panel" id="panel-slots">
+    <div class="row"><h3>Chat slots</h3><span class="mut">queue: <b style="color:var(--fg)" id="queue">—</b> deferred · reserved user lane: slot 2</span></div>
+    <div class="slots">
+      <div class="slot">
+        <div class="row"><b>Slot 0</b><span class="tag" id="slot0-state">—</span></div>
+        <div class="bar"><i id="slot0-bar"></i></div>
+        <div class="row mut"><span id="slot0-line1">—</span><span id="slot0-tps">—</span></div>
+        <div class="row mut" style="margin-top:6px"><span id="slot0-line2"></span><span id="slot0-ctx"></span></div>
+      </div>
+      <div class="slot">
+        <div class="row"><b>Slot 1</b><span class="tag" id="slot1-state">—</span></div>
+        <div class="bar"><i id="slot1-bar"></i></div>
+        <div class="row mut"><span id="slot1-line1">—</span><span id="slot1-tps">—</span></div>
+        <div class="row mut" style="margin-top:6px"><span id="slot1-line2"></span><span id="slot1-ctx"></span></div>
+      </div>
+      <div class="slot">
+        <div class="row"><b>Slot 2</b><span class="tag" id="slot2-state">—</span></div>
+        <div class="bar"><i id="slot2-bar"></i></div>
+        <div class="row mut"><span id="slot2-line1">—</span><span id="slot2-tps">—</span></div>
+        <div class="row mut" style="margin-top:6px"><span id="slot2-line2"></span><span id="slot2-ctx"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. Speed cards -->
+  <section class="cards">
+    <div class="card" id="card-gen"><div class="mut">Generation</div><div class="big"><span id="gen-now">—</span><span class="unit">tok/s</span></div>
+      <div class="mut">15-min avg <span id="gen-avg">—</span></div>
+      <svg class="spark" id="spark-gen" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+    <div class="card" id="card-prefill"><div class="mut">Prompt processing</div><div class="big"><span id="prefill-now">—</span><span class="unit">tok/s</span></div>
+      <div class="mut">15-min avg <span id="prefill-avg">—</span></div>
+      <svg class="spark" id="spark-prefill" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+    <div class="card" id="card-cache"><div class="mut">Cache reuse (last 15 min)</div><div class="big"><span id="cache-now">—</span><span class="unit">%</span></div>
+      <div class="mut">share of prompt tokens served from cache</div>
+      <svg class="spark" id="spark-cache" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+    <div class="card" id="card-mtp"><div class="mut">MTP draft acceptance</div><div class="big"><span id="mtp-now">—</span><span class="unit">%</span></div>
+      <div class="mut" id="mtp-pos">—</div>
+      <svg class="spark" id="spark-mtp" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+  </section>
+
+  <!-- 3. GPUs + host -->
+  <section class="grid3">
+    <div class="panel mini" id="panel-gpu0"><div class="row"><h3>GPU 0 · V620</h3><span class="mut" id="gpu0-link">—</span></div>
+      <div class="gpu">
+        <div><div class="mut">Load</div><div class="big"><span id="gpu0-load">—</span><span class="unit">%</span></div></div>
+        <div><div class="mut">VRAM</div><div class="big"><span id="gpu0-vram">—</span><span class="unit">/<span id="gpu0-vramtot">—</span> GB</span></div></div>
+        <div><div class="mut">Junction</div><div class="big"><span id="gpu0-temp">—</span><span class="unit">°C</span></div></div>
+        <div><div class="mut">Power</div><div class="big"><span id="gpu0-power">—</span><span class="unit">/<span id="gpu0-cap">—</span> W</span></div></div>
+      </div>
+      <svg class="spark" id="spark-gpu0" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+      <div class="mut"><span id="fans">fans —</span> · chat (tensor-split) + embed</div></div>
+    <div class="panel mini" id="panel-gpu1"><div class="row"><h3>GPU 1 · V620</h3><span class="mut" id="gpu1-link">—</span></div>
+      <div class="gpu">
+        <div><div class="mut">Load</div><div class="big"><span id="gpu1-load">—</span><span class="unit">%</span></div></div>
+        <div><div class="mut">VRAM</div><div class="big"><span id="gpu1-vram">—</span><span class="unit">/<span id="gpu1-vramtot">—</span> GB</span></div></div>
+        <div><div class="mut">Junction</div><div class="big"><span id="gpu1-temp">—</span><span class="unit">°C</span></div></div>
+        <div><div class="mut">Power</div><div class="big"><span id="gpu1-power">—</span><span class="unit">/<span id="gpu1-cap">—</span> W</span></div></div>
+      </div>
+      <svg class="spark" id="spark-gpu1" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+      <div class="mut">chat (tensor-split) + rerank + vision projector</div></div>
+    <div class="panel mini" id="panel-host"><div class="row"><h3>Host · Ryzen 5 7600</h3></div>
+      <div class="gpu">
+        <div><div class="mut">CPU</div><div class="big"><span id="host-cpu">—</span><span class="unit">%</span></div></div>
+        <div><div class="mut">RAM</div><div class="big"><span id="host-ram">—</span><span class="unit">/<span id="host-ramtot">—</span> GB</span></div></div>
+        <div><div class="mut">Disk read</div><div class="big"><span id="host-disk">—</span><span class="unit">MB/s</span></div></div>
+        <div><div class="mut">ZFS ARC</div><div class="big"><span id="host-arc">—</span><span class="unit">GB</span></div></div>
+      </div>
+      <svg class="spark" id="spark-host" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+      <div class="svc" style="margin-top:6px" id="svc-row">
+        <span class="pill"><span class="dot" id="svc-router"></span>router</span>
+        <span class="pill"><span class="dot" id="svc-embed-dot"></span><span id="svc-embed">embed</span></span>
+        <span class="pill"><span class="dot" id="svc-rerank-dot"></span>rerank</span>
+        <span class="pill"><span class="dot warn"></span><span id="svc-restart">chat restart: —</span></span>
+      </div></div>
+  </section>
+
+  <!-- 4. Escalation + history + requests -->
+  <section class="two">
+    <div class="panel">
+      <div id="panel-escalation">
+      <h3>Claude escalation</h3>
+      <div class="gauge">
+        <svg width="110" height="110" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="#1e2533" stroke-width="3.2"/>
+          <circle id="esc-ring" cx="18" cy="18" r="15.9" fill="none" stroke="#a78bfa" stroke-width="3.2" stroke-dasharray="0 100" transform="rotate(-90 18 18)"/>
+          <text id="esc-month" x="18" y="17" text-anchor="middle" font-size="5.5" fill="#e6e9ef" font-weight="700">—</text>
+          <text x="18" y="23" text-anchor="middle" font-size="3" fill="#8a93a6">of <tspan id="esc-monthcap">—</tspan> / month</text></svg>
+        <div>
+          <div>Today <b id="esc-day">—</b> <span class="mut">of <span id="esc-daycap">—</span></span></div>
+          <div class="mut" style="margin-top:4px">calls left today: <span id="esc-left">—</span></div>
+          <div class="mut" style="margin-top:4px" id="esc-last">—</div>
+        </div>
+      </div>
+      </div>
+      <h3 style="margin-top:18px">Speed vs context (last 7 days)</h3>
+      <svg viewBox="0 0 240 110" style="width:100%">
+        <line x1="25" y1="95" x2="235" y2="95" stroke="#232b3b"/><line x1="25" y1="5" x2="25" y2="95" stroke="#232b3b"/>
+        <g id="ctx-lines"></g>
+        <text x="30" y="106" font-size="6" fill="#8a93a6">0-8K</text><text x="75" y="106" font-size="6" fill="#8a93a6">8-32K</text>
+        <text x="120" y="106" font-size="6" fill="#8a93a6">32-64K</text><text x="165" y="106" font-size="6" fill="#8a93a6">64-96K</text><text x="205" y="106" font-size="6" fill="#8a93a6">96-128K</text>
+        <text x="30" y="14" font-size="7" fill="#22c55e">gen tok/s</text><text x="75" y="14" font-size="7" fill="#3b82f6">prefill tok/s</text>
+      </svg>
+      <div class="note">From the 30-day request history (<span id="ctx-n">—</span> requests in the last 7 days): lets you see whether a change moved real-world speed, not just bench numbers.</div>
+    </div>
+
+    <div class="panel">
+      <div class="row"><h3>Recent requests</h3><span class="mut">kept 30 days · numbers only, never prompt text</span></div>
+      <div class="tablewrap">
+      <table>
+        <thead><tr><th>Time</th><th>Slot</th><th>Status</th><th>Prompt</th><th>Reused</th><th>Output</th><th>Prefill t/s</th><th>Gen t/s</th><th>Duration</th></tr></thead>
+        <tbody id="recent-body"></tbody>
+      </table>
+      </div>
+      <div class="note" style="margin-top:10px">"Reused" = prompt tokens served from the slot's cache; a low value on a big prompt is the expensive re-prefill the measurements found.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const obj = x => (x !== null && typeof x === "object" && !Array.isArray(x)) ? x : {};
+const arr = x => Array.isArray(x) ? x : [];
+const isNum = v => typeof v === "number" && Number.isFinite(v);
+const fmt = (v, d = 0) => isNum(v) ? v.toLocaleString(undefined, {maximumFractionDigits: d, minimumFractionDigits: d}) : "—";
+const GB = b => isNum(b) ? (b / 1e9).toFixed(1) : "—";
+function esc(v) {
+  const map = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
+  return String(v == null ? "—" : v).replace(/[&<>"']/g, c => map[c]);
+}
+const word = v => /^[a-z_]{1,20}$/.test(String(v)) ? String(v) : "";   // safe for a class name
+const clock = t => isNum(t) ? new Date(t * 1000).toLocaleTimeString() : "—";
+const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+const SERIES = ["gen", "prefill", "cache", "mtp", "gpu0_load", "gpu1_load", "host_cpu"];
+const series = Object.fromEntries(SERIES.map(k => [k, []]));
+const WINDOW_S = 900;
+
+function spark(svgId, pts, color) {
+  const svg = $(svgId); if (!svg) return;
+  const ok = pts.filter(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1]));
+  if (ok.length < 2) { svg.innerHTML = ""; return; }
+  const t0 = ok[0][0], dt = (ok[ok.length - 1][0] - t0) || 1, vs = ok.map(p => p[1]);
+  const lo = Math.min(...vs), span = (Math.max(...vs) - lo) || 1;
+  const xy = ok.map(([t, v]) => `${(100 * (t - t0) / dt).toFixed(2)},${(28 - 26 * (v - lo) / span).toFixed(2)}`).join(" ");
+  svg.innerHTML = `<polyline fill="none" stroke="${color}" stroke-width="1.6" points="${xy}"/>`;
+}
+function push(name, t, v) {
+  if (!isNum(v) || !isNum(t)) return;
+  const s = series[name]; s.push([t, v]);
+  while (s.length && s[0][0] < t - WINDOW_S) s.shift();
+}
+function staleMark(id, src) {
+  const el = $(id); if (!el) return;
+  const s = obj(src), bad = src != null && s.ok === false;
+  el.classList.toggle("stale", bad);
+  el.title = bad ? `unavailable since ${clock(s.stale_since)} — ${s.error || ""}` : "";
+}
+const STATE_LABEL = {idle: "Idle", reading: "Reading prompt", generating: "Generating", restarting: "Restarting"};
+function slotCard(v) {
+  v = obj(v);
+  if (!isNum(v.id) || v.id < 0 || v.id > 2) return;
+  const p = `slot${v.id}`, st = word(v.state);
+  const pct = st === "reading" && isNum(v.progress) ? Math.round(100 * v.progress) : null;
+  setText(`${p}-state`, STATE_LABEL[st] || "—");
+  $(`${p}-state`).dataset.state = st;
+  const bar = $(`${p}-bar`);
+  bar.dataset.state = st;
+  bar.style.width = (pct !== null ? pct : (st === "generating" ? 100 : 0)) + "%";
+  const ago = isNum(v.last_done) ? Math.max(0, Math.round(Date.now() / 1000 - v.last_done)) : null;
+  setText(`${p}-line1`, st === "reading" ? `${fmt(v.processed_tokens)} / ${fmt(v.prompt_tokens)} tokens · ${pct === null ? "—" : pct + "%"}`
+    : st === "generating" ? `${fmt(v.output_tokens)} tokens out`
+    : ago !== null ? `last: ${ago} s ago` : "—");
+  setText(`${p}-tps`, isNum(v.tok_s) ? `${fmt(v.tok_s, 1)} tok/s` : "—");
+  const reuse = isNum(v.cached_tokens) && isNum(v.prompt_tokens) && v.prompt_tokens > 0 ? ` (${Math.round(100 * v.cached_tokens / v.prompt_tokens)}%)` : "";
+  setText(`${p}-line2`, isNum(v.cached_tokens) ? `reused from cache: ${fmt(v.cached_tokens)}${reuse}` : "");
+  setText(`${p}-ctx`, isNum(v.ctx_used) && isNum(v.n_ctx) && v.n_ctx > 0 ? `ctx ${Math.round(v.ctx_used / 1024)}K / ${Math.round(v.n_ctx / 1024)}K` : "");
+}
+function row(r) {
+  r = obj(r);
+  const st = word(r.status), slow = r.slow === true && st === "done";
+  const shown = slow ? "slow" : (st || "—"), cls = slow ? "slow" : st;
+  return `<tr><td>${esc(clock(isNum(r.finished) ? r.finished : r.started))}</td><td>${esc(fmt(r.slot))}</td><td><span class="tag ${cls}">${esc(shown)}</span></td>
+    <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.cached_tokens)}</td><td>${fmt(r.output_tokens)}</td>
+    <td>${fmt(r.prefill_tok_s)}</td><td>${fmt(r.gen_tok_s, 1)}</td><td>${isNum(r.duration_s) ? fmt(r.duration_s, 1) + " s" : "—"}</td></tr>`;
+}
+function pills(slots) {
+  return arr(slots).map(raw => {
+    const v = obj(raw), st = word(v.state);
+    const extra = st === "reading" && isNum(v.progress) ? " · " + Math.round(100 * v.progress) + "%"
+      : isNum(v.tok_s) && st === "generating" ? " · " + fmt(v.tok_s, 1) + " tok/s" : "";
+    return `<span class="pill"><span class="dot ${st}"></span>slot ${esc(fmt(v.id))} ${esc(st || "—")}${esc(extra)}</span> `;
+  }).join("");
+}
+function renderEscalation(e) {
+  const m = obj(e.month), d = obj(e.day), left = obj(e.calls_left);
+  setText("esc-month", isNum(m.spent_usd) ? "$" + fmt(m.spent_usd, 2) : "—");
+  setText("esc-monthcap", isNum(m.cap_usd) ? "$" + fmt(m.cap_usd) : "—");
+  setText("esc-day", isNum(d.spent_usd) ? "$" + fmt(d.spent_usd, 2) : "—");
+  setText("esc-daycap", isNum(d.cap_usd) ? "$" + fmt(d.cap_usd, 2) : "—");
+  setText("esc-left", `ask ${fmt(left["claude-ask"])} · auto ${fmt(left["claude-auto"])} · hard ${fmt(left["claude-hard"])}`);
+  const frac = isNum(m.spent_usd) && isNum(m.cap_usd) && m.cap_usd > 0 ? Math.min(100, Math.max(0, 100 * m.spent_usd / m.cap_usd)) : 0;
+  $("esc-ring").setAttribute("stroke-dasharray", `${frac.toFixed(1)} 100`);
+  const last = arr(e.recent)[0];
+  const l = obj(last);
+  setText("esc-last", last ? `last: ${l.alias == null ? "—" : l.alias} · ${fmt(l.input_tokens)} in / ${fmt(l.output_tokens)} out · ${isNum(l.cost_usd) ? "$" + fmt(l.cost_usd, 3) : "—"}` : "no calls yet");
+}
+function render(s) {
+  s = obj(s);
+  const now = s.ts, src = obj(s.sources);
+  for (const [id, key] of [["panel-slots", "slots"], ["card-gen", "metrics"], ["card-prefill", "metrics"],
+                           ["card-cache", "metrics"], ["card-mtp", "metrics"], ["panel-gpu0", "gpu"], ["panel-gpu1", "gpu"],
+                           ["panel-host", "host"], ["panel-escalation", "escalation"], ["svc-row", "services"]])
+    staleMark(id, src[key]);
+  $("journal-banner").hidden = obj(src.journal).ok !== false;
+  $("history-banner").hidden = s.history_ok !== false;
+  arr(s.slots).forEach(slotCard);
+  setText("queue", fmt(obj(s.queue).deferred));
+  $("header-pills").innerHTML = pills(s.slots);
+  const mo = obj(s.model);
+  setText("model-pill", `${mo.profile || "—"} · ${fmt(mo.slot_count)} × ${isNum(mo.n_ctx) ? Math.round(mo.n_ctx / 1024) + "K" : "—"}`);
+  setText("updated", `updated ${clock(now)}`);
+  const sp = obj(s.speed);
+  setText("gen-now", fmt(sp.gen_tok_s, 1)); setText("gen-avg", fmt(sp.gen_avg15, 1));
+  setText("prefill-now", fmt(sp.prefill_tok_s)); setText("prefill-avg", fmt(sp.prefill_avg15));
+  setText("cache-now", fmt(sp.cache_reuse_pct15)); setText("mtp-now", isNum(sp.mtp_accept) ? fmt(100 * sp.mtp_accept) : "—");
+  setText("mtp-pos", [0, 1, 2].map(i => { const p = arr(sp.mtp_pos)[i]; return `pos ${i + 1}: ${isNum(p) ? fmt(100 * p) + "%" : "—"}`; }).join(" · "));
+  push("gen", now, sp.gen_tok_s); push("prefill", now, sp.prefill_tok_s); push("cache", now, sp.cache_reuse_pct15); push("mtp", now, sp.mtp_accept);
+  [0, 1].forEach(i => {
+    const g = obj(arr(s.gpus)[i]);
+    setText(`gpu${i}-load`, fmt(g.load_pct)); setText(`gpu${i}-vram`, GB(g.vram_used));
+    setText(`gpu${i}-vramtot`, GB(g.vram_total)); setText(`gpu${i}-temp`, fmt(g.junction_c));
+    setText(`gpu${i}-power`, fmt(g.power_w)); setText(`gpu${i}-cap`, fmt(g.power_cap_w));
+    setText(`gpu${i}-link`, g.link || "—"); push(`gpu${i}_load`, now, g.load_pct);
+  });
+  const fans = obj(s.fans);
+  setText("fans", `fans ${fmt(fans.pwm5_pct)}% / ${fmt(fans.pwm6_pct)}%`);
+  const h = obj(s.host);
+  setText("host-cpu", fmt(h.cpu_pct)); setText("host-ram", GB(h.mem_used)); setText("host-ramtot", GB(h.mem_total));
+  setText("host-disk", fmt(h.disk_read_mbs, 1)); setText("host-arc", GB(h.arc_bytes)); push("host_cpu", now, h.cpu_pct);
+  const sv = obj(s.services), dotOf = x => "dot " + (obj(x).ok === true ? "ok" : (obj(x).ok === false ? "bad" : ""));
+  $("svc-router").className = dotOf(sv.router);
+  setText("svc-embed", `embed · ${fmt(obj(sv.embed).activity_per_min)}/min`); $("svc-embed-dot").className = dotOf(sv.embed);
+  $("svc-rerank-dot").className = dotOf(sv.rerank);
+  const rs = obj(sv.restart);
+  setText("svc-restart", (isNum(rs.next_possible) ? `next possible chat restart ≥ ${clock(rs.next_possible)} (idle only)` : "chat restart: —") + (rs.stale_since != null ? " (stale)" : ""));
+  if (s.escalation) renderEscalation(obj(s.escalation));
+  $("recent-body").innerHTML = arr(s.recent).map(row).join("");
+  spark("spark-gen", series.gen, "#22c55e"); spark("spark-prefill", series.prefill, "#3b82f6");
+  spark("spark-cache", series.cache, "#2dd4bf"); spark("spark-mtp", series.mtp, "#a78bfa");
+  spark("spark-gpu0", series.gpu0_load, "#f59e0b"); spark("spark-gpu1", series.gpu1_load, "#f59e0b"); spark("spark-host", series.host_cpu, "#8a93a6");
+}
+async function getJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} HTTP ${r.status}`);
+  return r.json();
+}
+async function loadHistory() {
+  try {
+    const h = obj(await getJson("/api/history?days=7"));
+    const bands = ["0-8K", "8-32K", "32-64K", "64-96K", "96-128K"], by = {};
+    arr(h.bands).forEach(b => { by[obj(b).band] = obj(b); });
+    const line = (key, color) => {
+      const vals = bands.map(b => by[b] && isNum(by[b][key]) ? by[b][key] : null), max = Math.max(1, ...vals.filter(v => v !== null));
+      const pts = vals.map((v, i) => v === null ? null : `${30 + i * 45},${(95 - 85 * v / max).toFixed(1)}`).filter(Boolean).join(" ");
+      return pts ? `<polyline fill="none" stroke="${color}" stroke-width="1.8" points="${pts}"/>` : "";
+    };
+    $("ctx-lines").innerHTML = line("gen_tok_s", "#22c55e") + line("prefill_tok_s", "#3b82f6");
+    setText("ctx-n", fmt(arr(h.bands).reduce((a, b) => a + (isNum(obj(b).n) ? b.n : 0), 0)));
+  } catch (e) { console.warn("history unavailable:", e.message); }   // the previous chart stays
+}
+let es = null, retryTimer = null, watchdog = null, backoff = 3000;
+function scheduleReconnect() {
+  if (es) { es.close(); es = null; }
+  clearTimeout(watchdog);
+  $("conn").hidden = false;
+  if (retryTimer) return;
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, backoff);
+  backoff = Math.min(backoff * 2, 30000);
+}
+function connect() {
+  if (es) return;
+  const mine = es = new EventSource("/api/stream");
+  const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(() => { if (es === mine) scheduleReconnect(); }, 15000); };
+  arm();
+  mine.onmessage = m => {
+    if (es !== mine) return;
+    backoff = 3000; $("conn").hidden = true; arm();
+    try { render(JSON.parse(m.data)); } catch (e) { console.error("render failed:", e); }
+  };
+  mine.onerror = () => { if (es === mine) scheduleReconnect(); };
+}
+async function boot() {
+  try {
+    const sj = obj(await getJson("/api/series"));
+    SERIES.forEach(k => { if (Array.isArray(sj[k])) series[k] = sj[k].filter(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1])); });
+  } catch (e) { console.warn("series backfill unavailable:", e.message); }
+  try { $("recent-body").innerHTML = arr(obj(await getJson("/api/requests?limit=20")).rows).map(row).join(""); }
+  catch (e) { console.warn("recent rows unavailable:", e.message); }
+  loadHistory(); setInterval(loadHistory, 60000);
+  connect();
+}
+boot();
+</script>
+</body>
+</html>
