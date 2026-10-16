@@ -6,7 +6,6 @@ import json
 import logging
 import math
 import os
-import stat
 import subprocess
 import threading
 import time
@@ -54,7 +53,11 @@ def _in_ct(proc_root, pid, ct):
     except OSError:
         return False
     tag = f"/lxc/{ct}"
-    return any(tag + "/" in ln or ln.endswith(tag) for ln in lines)
+    for ln in lines:
+        parts = ln.split(":", 2)                      # hier:controllers:path -- anchor on the path's start
+        if len(parts) == 3 and (parts[2] == tag or parts[2].startswith(tag + "/")):
+            return True
+    return False
 
 
 def _is_llama(a, port):
@@ -98,24 +101,6 @@ def find_chat_pid(proc_root: str = "/proc", port="8080", ct=151):
         if _is_llama(_argv(proc_root, pid), port) and _in_ct(proc_root, pid, ct):
             return pid
     return None
-
-
-def read_stamp(path):
-    """Epoch seconds from a small regular file inside the (untrusted) container, or None on any problem. Never
-    follows a final symlink, never blocks on a FIFO, reads at most 64 bytes."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        return float(os.read(fd, 64).decode("ascii", errors="replace").strip())
-    except (OSError, ValueError):
-        return None
-    finally:
-        os.close(fd)
 
 
 def _finite(x):
@@ -312,6 +297,7 @@ class Hub:
         self._prev_metrics = None
         self._prev_host = None
         self._prev_embed = {}
+        self._journal_gen = 0           # bumped on every journal up/down report (guards stale /slots applies)
         self.gpu_dirs = {}
         self.state = {"slots_raw": None, "metrics": {}, "gpus": [], "fans": {"pwm5_pct": None, "pwm6_pct": None},
                       "host": {}, "speed": {}, "services": {"router": {"ok": False, "upstream": {}, "profile": None},
@@ -352,13 +338,16 @@ class Hub:
 
     # ---- fast sources
     def poll_fast(self, now):
+        gen = self._journal_gen
         fetched = {"slots": _try(lambda: self._llama("/slots")),
                    "metrics": _try(lambda: self._llama("/metrics")),
                    "gpu": _try(self._read_gpus),
                    "host": _try(self._read_host)}
         with self.lock:
-            self._apply("slots", fetched["slots"], self._apply_slots, now,
-                        on_err=lambda: self.tracker.on_slots(None, now))
+            if gen == self._journal_gen:
+                self._apply("slots", fetched["slots"], self._apply_slots, now,
+                            on_err=lambda: self.tracker.on_slots(None, now))
+            # else: the journal state flipped mid-fetch; this /slots reading is stale, the next poll is fresh
             self._apply("metrics", fetched["metrics"], self._apply_metrics, now)
             self._apply("gpu", fetched["gpu"], self._apply_gpu, now)
             self._apply("host", fetched["host"], self._apply_host, now)
@@ -516,12 +505,15 @@ class Hub:
             rc, out = self.run_cmd(["pct", "exec", str(self.cfg["chat_ct"]), "--", "systemctl", "show",
                                     "llamacpp-chat-restart.timer", "-p", "NextElapseUSecRealtime"])
             nxt = P.parse_next_elapse(out) if rc == 0 else None
+            # read through the container itself: a host-side /proc/<pid>/root path would follow the container's links
+            rc2, sout = self.run_cmd(["pct", "exec", str(self.cfg["chat_ct"]), "--", "cat",
+                                      "/var/lib/llamacpp/last-proactive-restart"])
             stamp = None
-            pid = find_chat_pid(proc_root=self.cfg["proc_root"], port=str(port_of(self.cfg["chat_url"])),
-                                ct=self.cfg["chat_ct"])
-            if pid:
-                stamp = read_stamp(os.path.join(self.cfg["proc_root"], pid, "root", "var", "lib", "llamacpp",
-                                                "last-proactive-restart"))
+            if rc2 == 0:
+                try:
+                    stamp = float((sout or "")[:64].strip())
+                except ValueError:
+                    stamp = None
             return nxt, stamp
         data, err = _try(fetch)
         with self.lock:
@@ -574,6 +566,7 @@ class Hub:
 
     def on_journal_state(self, up, now):
         with self.lock:
+            self._journal_gen += 1
             self.tracker.set_journal_up(up, now)
             if up:
                 self.src["journal"].mark_ok()

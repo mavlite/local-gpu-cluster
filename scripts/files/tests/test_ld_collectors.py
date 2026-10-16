@@ -338,26 +338,74 @@ def test_hub_derives_port_and_ct_from_cfg(tmp_path, monkeypatch):
     assert hub._find_llama_key() is None
 
 
-def test_read_stamp_regular_symlink_dir_and_size(tmp_path):
-    good = tmp_path / "stamp"
-    good.write_text("1700000000\n")
-    assert C.read_stamp(str(good)) == 1700000000.0
-    assert C.read_stamp(str(tmp_path / "missing")) is None
-    assert C.read_stamp(str(tmp_path)) is None            # not a regular file
-    link = tmp_path / "link"
-    try:
-        link.symlink_to(good)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks unavailable")
-    if not hasattr(os, "O_NOFOLLOW"):
-        pytest.skip("O_NOFOLLOW unavailable on this platform")
-    assert C.read_stamp(str(link)) is None
+def _timer_hub(tmp_path, monkeypatch, stamp_rc, stamp_out):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if "cat" in argv:
+            return stamp_rc, stamp_out
+        return 0, "NextElapseUSecRealtime=Fri 2026-10-16 03:02:27 UTC\n"
+    hub.run_cmd = run
+    return hub, calls
 
 
-def test_stamp_read_is_bounded_to_64_bytes(tmp_path):
-    big = tmp_path / "big"
-    big.write_text("9" * 200)
-    assert C.read_stamp(str(big)) == float("9" * 64)
+def test_restart_stamp_is_read_through_the_container(tmp_path, monkeypatch):
+    hub, calls = _timer_hub(tmp_path, monkeypatch, 0, "9999999999\n")
+    hub.poll_timer(1000.0)
+    assert ["pct", "exec", "151", "--", "cat", "/var/lib/llamacpp/last-proactive-restart"] in calls
+    assert hub.snapshot(1000.0)["services"]["restart"]["next_possible"] == 9999999999.0 + 43200
+
+
+@pytest.mark.parametrize("rc,out", [(1, "9999999999\n"), (0, "garbage"), (0, "")])
+def test_restart_stamp_unknown_on_failure_or_garbage(tmp_path, monkeypatch, rc, out):
+    hub, _ = _timer_hub(tmp_path, monkeypatch, rc, out)
+    hub.poll_timer(1000.0)
+    r = hub.snapshot(1000.0)["services"]["restart"]
+    assert r["next_possible"] is not None and r["next_possible"] < 9999999999.0      # only the timer fire time
+
+
+def test_restart_stamp_considers_only_64_chars(tmp_path, monkeypatch):
+    hub, _ = _timer_hub(tmp_path, monkeypatch, 0, "9" * 200)
+    hub.poll_timer(1000.0)
+    assert hub.snapshot(1000.0)["services"]["restart"]["next_possible"] == float("9" * 64) + 43200
+
+
+def test_cgroup_match_is_anchored_to_the_path_start(tmp_path):
+    base = ["/opt/llama.cpp/build/bin/llama-server", "--port", "8080", "--api-key"]
+    root = fake_proc(tmp_path, {
+        5: (base + ["SPOOF1"], {}, "0::/lxc/157/ns/lxc/151/fake\n"),
+        6: (base + ["SPOOF2"], {}, "0::/lxc/157/ns/evil/lxc/151\n"),
+        7: (base + ["REAL"], {}, "0::/lxc/151/ns/system.slice/llamacpp-chat.service\n"),
+        8: (["/usr/bin/python3", "/opt/venv/bin/uvicorn", "app:app"], {"ROUTER_API_KEY": "RSPOOF"},
+            "0::/lxc/157/ns/lxc/153/r\n"),
+    })
+    assert C.find_llama_key(root, port="8080", ct=151) == "REAL"
+    assert C.find_chat_pid(root, port="8080", ct=151) == "7"
+    assert C.find_router_key(root, ct=153) is None
+
+
+def test_stale_slots_not_applied_when_journal_flips_mid_fetch(tmp_path, monkeypatch):
+    w = World(tmp_path)
+    hub = make_hub(tmp_path, w, monkeypatch)
+    inner, gate, entered = w.http_get, threading.Event(), threading.Event()
+
+    def blocked(url, headers):
+        if url.endswith("/slots"):
+            entered.set()
+            gate.wait(5)
+        return inner(url, headers)
+    hub.http_get = blocked
+    t = threading.Thread(target=hub.poll_fast, args=(1000.0,))
+    t.start()
+    assert entered.wait(5)
+    hub.on_journal_state(False, 1000.5)
+    gate.set()
+    t.join()
+    assert hub.tracker.open_rows() == []
+    assert hub.snapshot(1001.0)["sources"]["slots"]["ok"] is False
 
 
 def test_healthz_non_dict_is_not_ok_and_never_stale_ok(tmp_path, monkeypatch):
