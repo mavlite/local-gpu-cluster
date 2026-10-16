@@ -1,0 +1,19 @@
+[Unit]
+Description=Live inference dashboard (replaces cluster-monitor)
+After=network-online.target pve-container@151.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/live-dashboard
+ExecStart=/usr/bin/python3 -m live_dashboard.main --config /etc/live-dashboard.json
+Restart=always
+RestartSec=5
+Nice=10
+# Runs as root: it needs `pct exec` and /proc/<pid>/{cmdline,environ} of other users' processes.
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
