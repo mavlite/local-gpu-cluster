@@ -28,13 +28,23 @@ def resolve_opencode():
         return explicit
     appdata = os.environ.get("APPDATA")
     if appdata:
-        exe = os.path.join(appdata, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
-        if os.path.isfile(exe):
-            return exe
+        for pkg in (("@opencode", "cli"), ("opencode-ai",)):       # v2 package, then v1
+            exe = os.path.join(appdata, "npm", "node_modules", *pkg, "bin", "opencode.exe")
+            if os.path.isfile(exe):
+                return exe
     found = shutil.which("opencode")
     if not found:
         raise FileNotFoundError("opencode not found; set GATE_OPENCODE")
     return found
+
+
+def opencode_run_argv(message, agent="coordinator"):
+    """`opencode run` for one isolated run; the caller passes cwd=<workspace>.
+
+    v2 dropped `--pure` and `--dir`: `--standalone` starts a private server (never the user's background
+    service, which carries the user's config), and the workspace is the child's working directory.
+    """
+    return [resolve_opencode(), "run", "--standalone", "--agent", agent, "--format", "json", message]
 
 
 def probe_once(router_url, alias, key, timeout=600):
@@ -88,12 +98,13 @@ def parse_events(text):
         except ValueError:
             continue
         part = ev.get("part") or {}
-        if ev.get("type") != "tool_use" or part.get("tool") != "task":
+        if ev.get("type") != "tool_use" or part.get("tool") not in ("task", "subagent"):   # v1, v2
             continue
         st = part.get("state") or {}
         tm = st.get("time") or {}
-        meta = st.get("metadata") or {}
-        calls.append({"agent": (st.get("input") or {}).get("subagent_type"),
+        meta = st.get("metadata") or {}                       # v2 carries no provider for the child
+        inp = st.get("input") or {}
+        calls.append({"agent": inp.get("subagent_type") or inp.get("agent"),
                       "provider": (meta.get("model") or {}).get("providerID"),
                       "status": st.get("status"),
                       "start_ms": tm.get("start"), "end_ms": tm.get("end")})
@@ -149,8 +160,7 @@ def run_capacity(arm, out_dir, task_root, router_url, worker_urls=(), timeout_s=
     with open(os.path.join(out_dir, "events.jsonl"), "w", encoding="utf-8") as ev, \
             open(os.path.join(out_dir, "opencode.stderr"), "w", encoding="utf-8") as er:
         try:
-            rc = subprocess.run([resolve_opencode(), "run", "--pure", "--agent", "coordinator",
-                                 "--dir", ws, "--format", "json", KICKOFF],
+            rc = subprocess.run(opencode_run_argv(KICKOFF), cwd=ws,
                                 env=profiles.opencode_env(base_env, home), stdin=subprocess.DEVNULL,
                                 stdout=ev, stderr=er, timeout=timeout_s).returncode
         except subprocess.TimeoutExpired:

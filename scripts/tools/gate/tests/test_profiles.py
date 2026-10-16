@@ -73,3 +73,24 @@ def test_loop_guards_step_limits_and_doom_loop(tmp_path):
     for i in (1, 2, 3):
         w = read_agent(tmp_path, f"worker-{i}")
         assert "steps: 30" in w and 'doom_loop: "deny"' in w
+
+
+# ---- opencode v2 (2.0.31, 2026-10-16): new tools are gated by permission keys named after the tool, and a
+# built-in hosted provider is the fallback when an agent's model is not applied
+def test_v2_tools_denied(tmp_path):
+    profiles.install("B", str(tmp_path), ROUTER, WORKERS)
+    coord = read_agent(tmp_path, "coordinator")
+    for key in ("execute", "websearch", "question"):
+        assert f'{key}: "deny"' in coord
+    assert "subagent:" not in coord                    # the coordinator's one job is dispatching subagents
+    for i in (1, 2, 3):
+        w = read_agent(tmp_path, f"worker-{i}")
+        for key in ("execute", "websearch", "question", "subagent"):
+            assert f'{key}: "deny"' in w
+
+
+def test_hosted_fallback_disabled_and_default_model_local(tmp_path):
+    profiles.install("B", str(tmp_path), ROUTER, WORKERS)
+    cfg = json.load(open(tmp_path / "opencode.json"))
+    assert cfg["disabled_providers"] == ["opencode"]
+    assert cfg["model"] == "router/qwen3.8-nothink"

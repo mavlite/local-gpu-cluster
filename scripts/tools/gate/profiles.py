@@ -25,10 +25,14 @@ then edit the Python module in that folder so it satisfies every rule in TASK.md
 Edit only files inside that folder. You cannot run commands. Finish with a line starting
 with SUMMARY: that says what you implemented."""
 
+# opencode v2 adds tools gated by permission keys of the same name: execute (Code Mode JS with fetch),
+# websearch, question, subagent. The coordinator keeps subagent, its one job.
+_V2_DENY = {"execute": "deny", "websearch": "deny", "question": "deny"}
 _DENY_ALL = {"edit": "deny", "bash": {"*": "deny"}, "webfetch": "deny",
-             "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny"}
+             "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny", **_V2_DENY}
 _WORKER_PERMS = {"edit": "allow", "bash": {"*": "deny"}, "webfetch": "deny",
-                 "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny"}
+                 "external_directory": "deny", "skill": {"*": "deny"}, "doom_loop": "deny",
+                 **_V2_DENY, "subagent": "deny"}
 # Loop guards (v2). `steps` is honoured by opencode 1.18.34 but is advisory: at the limit it asks the
 # model for text only and still offers tools, so the presence penalty is the primary fix.
 WORKER_STEPS = 30
@@ -58,7 +62,11 @@ def build_config(arm, router_url, worker_urls=()):
                 "options": {"baseURL": url, "apiKey": "{env:GATE_WORKER_KEY}",
                             "timeout": 1800000, "chunkTimeout": 600000},
                 "models": _model_entry(WORKER_MODEL, 65536 - 8192, 8192)}
+    # opencode v2 ships a built-in "opencode" provider of hosted free models and falls back to it when an
+    # agent's model is not applied (seen 2026-10-16 on 2.0.31: the coordinator ran on opencode/ll-alpha-free).
+    # Disabling it makes a fallback fail loudly instead of sending the run to an external service.
     return {"$schema": "https://opencode.ai/config.json", "provider": providers,
+            "model": f"router/{ROUTER_MODEL}", "disabled_providers": ["opencode"],
             "mcp": {}, "permission": _DENY_ALL}
 
 

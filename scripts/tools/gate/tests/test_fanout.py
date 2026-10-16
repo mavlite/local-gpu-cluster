@@ -23,6 +23,27 @@ def test_parse_events_extracts_task_calls_only():
                                           "start_ms": 1791224594200, "end_ms": 1791224598525}]
 
 
+# One subagent event from `opencode run --format json` (2.0.31) against stub_llm, 2026-10-16, metadata trimmed.
+EVENT_V2 = ('{"type":"tool_use","timestamp":1792162187832,"sessionID":"ses_a","part":{"type":"tool",'
+            '"id":"call_0","tool":"subagent","state":{"status":"completed","input":{"description":'
+            '"implement T1","agent":"worker-1","prompt":"x"},"output":"<subagent sessionID=\\"ses_b\\" '
+            'state=\\"completed\\">SUMMARY: ok</subagent>","title":"subagent","metadata":{"metadata":'
+            '{"sessionID":"ses_b","status":"completed","truncated":false}},"time":{"start":1792162183642,'
+            '"end":1792162187832}}}}')
+
+
+def test_parse_events_reads_v2_subagent_calls():
+    # v2 reports no provider for the child session; the probe checks routing from the stub's own log
+    assert fanout.parse_events(EVENT_V2) == [{"agent": "worker-1", "provider": None, "status": "completed",
+                                             "start_ms": 1792162183642, "end_ms": 1792162187832}]
+
+
+def test_run_argv_is_isolated_v2():
+    argv = fanout.opencode_run_argv("go")
+    assert argv[1:] == ["run", "--standalone", "--agent", "coordinator", "--format", "json", "go"]
+    assert "--pure" not in argv and "--dir" not in argv
+
+
 def test_max_overlap():
     c = lambda s, e: {"start_ms": s, "end_ms": e}  # noqa: E731
     assert fanout.max_overlap([c(0, 10), c(1, 9), c(2, 8)]) == 3
@@ -84,7 +105,21 @@ def _has_opencode():
         return False
 
 
+def _opencode_major():
+    import re
+    import subprocess
+    try:
+        out = subprocess.run([fanout.resolve_opencode(), "--version"], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=30).stdout
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"(\d+)\.\d+\.\d+", out)
+    return int(m.group(1)) if m else None
+
+
 @pytest.mark.skipif(not _has_opencode(), reason="opencode not installed")
+@pytest.mark.skipif((_opencode_major() or 0) >= 2,
+                    reason="capacity harness retired with the CPU agent tier (2026-10-15); not ported to opencode v2")
 def test_end_to_end_against_stub(tmp_path):
     import probe
     import stub_llm
@@ -121,7 +156,7 @@ def test_mechanism_probe_parallel_and_contained():
     import probe
     out = probe.mechanism_probe(worker_sleep=3.0)
     assert out["verdict"] == "parallel", out
-    assert "bash" not in out["worker_tools"] and "webfetch" not in out["worker_tools"]
-    assert "task" not in out["worker_tools"]
-    assert not {"bash", "edit", "write", "webfetch"} & set(out["coordinator_tools"])
+    assert out["worker_calls"] == 3, out               # every worker reached its own stub port
+    assert not {"bash", "webfetch", "task", "subagent", "execute", "websearch", "question"} & set(out["worker_tools"])
+    assert not {"bash", "edit", "write", "webfetch", "execute", "websearch", "question"} & set(out["coordinator_tools"])
     assert out["escaped"] is False

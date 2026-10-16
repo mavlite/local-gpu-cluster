@@ -42,9 +42,8 @@ def mechanism_probe(worker_sleep=4.0, task_ids=("T1", "T2", "T3"), timeout_s=300
         profiles.install("B", ws, f"http://127.0.0.1:{ports[0]}/v1",
                          [f"http://127.0.0.1:{p}/v1" for p in ports[1:]])
         env = profiles.opencode_env(dict(os.environ, GATE_ROUTER_KEY="probe", GATE_WORKER_KEY="probe"), home)
-        r = subprocess.run([fanout.resolve_opencode(), "run", "--pure", "--agent", "coordinator",
-                            "--dir", ws, "--format", "json", "Dispatch every task under tasks/."],
-                           env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        r = subprocess.run(fanout.opencode_run_argv("Dispatch every task under tasks/."),
+                           cwd=ws, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=timeout_s)
     finally:
         for s in servers:

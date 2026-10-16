@@ -37,8 +37,10 @@ class Script:
             return {"text": "gate run"}                        # title / summary requests
         if any(m.get("role") == "tool" for m in msgs):
             return {"text": "DONE"}
-        calls = [{"name": "task", "arguments": {
-            "description": f"implement {tid}", "subagent_type": f"worker-{i}",
+        # opencode v2 names the tool `subagent` with an `agent` argument; v1 named it `task` / `subagent_type`
+        v2 = "subagent" in _tool_names(body)
+        calls = [{"name": "subagent" if v2 else "task", "arguments": {
+            "description": f"implement {tid}", ("agent" if v2 else "subagent_type"): f"worker-{i}",
             "prompt": f"Implement the task in tasks/{tid}. Read tasks/{tid}/TASK.md."}}
             for i, tid in enumerate(self.task_ids, start=1)]
         return {"tool_calls": calls}
