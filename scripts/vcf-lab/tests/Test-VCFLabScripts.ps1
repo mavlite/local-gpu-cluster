@@ -48,6 +48,20 @@ $cfgText = Get-Content $cfgPath -Raw
 $cfgText = [regex]::Replace($cfgText,
     '(?m)^(\s+(?:HostApi|VsanFormation|VCenterApi|SddcManager|Nsx|Operations|VspControl|VspWorker|Appliance|HostShutdown|LlmWorker)\s+=\s+)\d+',
     '${1}5')
+
+# The owned host-pinned lists come from THIS harness, not from the live config:
+# the live LlmWorkers list was emptied when the CPU tier was retired (2026-10-15),
+# and every worker test then ran against no workers. The pairings match
+# $script:Workers below.
+$testWorkers = @"
+LlmWorkers = @(
+        @{ VmName = 'llmbench01'; Host = 'hyp02' }
+        @{ VmName = 'llmbench02'; Host = 'hyp01' }
+        @{ VmName = 'llmbench03'; Host = 'hyp03' }
+    )
+"@
+if ($cfgText -notmatch 'LlmWorkers\s*=\s*@\([^)]*\)') { throw 'harness: LlmWorkers not found in the config copy' }
+$cfgText = [regex]::Replace($cfgText, 'LlmWorkers\s*=\s*@\([^)]*\)', $testWorkers.Replace('$', '$$'))
 Set-Content -Path $cfgPath -Value $cfgText -Encoding utf8
 
 
