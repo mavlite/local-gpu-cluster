@@ -20,6 +20,16 @@ QWEN38_NOTHINK_SAMPLING = {
     "presence_penalty": 1.5,
 }
 
+# OBLITERATUS/Qwen3.8-27B-OBLITERATED V3 model card (fetched 2026-10-17):
+# repetition_penalty 1.15 is "Essential", agentic temperature 0.1-0.3
+# (0.2 = mid-range), top_p/top_k/min_p "Not needed" — greedy + rep-pen is
+# the card's recipe, so no other sampling keys are injected. The card gives
+# no per-mode split, so both thinking modes share this dict.
+OBLITERATED_SAMPLING = {
+    "temperature": 0.2,
+    "repetition_penalty": 1.15,
+}
+
 
 def apply_alias_defaults(body: dict, alias_info: dict) -> dict:
     """Return a copy of body with the alias's backend, template kwargs and

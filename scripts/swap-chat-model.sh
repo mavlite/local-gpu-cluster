@@ -248,24 +248,33 @@ get_profile() {
       echo "unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
       ;;
     qwen3.8-redteam)
-      # Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — the SAME base model as the
-      # qwen3.8 profile with refusal behaviour removed (abliterated). For
-      # AUTHORISED penetration testing of the operator's own lab environments:
-      # a censored model refuses to write exploit code even against your own
-      # boxes, which makes it useless as a red-team assistant.
+      # OBLITERATUS Qwen3.8-27B-OBLITERATED V3, Q6_K — the SAME base model as
+      # the qwen3.8 profile with refusal behaviour removed by weight surgery
+      # (abliteration). For AUTHORISED penetration testing of the operator's
+      # own lab environments: a censored model refuses to write exploit code
+      # even against your own boxes, which makes it useless as a red-team
+      # assistant.
       #
-      # Architecture is identical to qwen3.8 (dense 27B, hybrid Gated DeltaNet +
-      # Attention), and the model card states "MTP has not been modified" — so
-      # the entire tuned qwen3.8 config carries over UNCHANGED: tensor split,
-      # draft-mtp n-max 3, q8_0 KV, 262K ctx. Expect the same ~43-49 t/s and the
-      # same VRAM (24.8 GB quant vs 24.0 GB, negligible). No re-tuning needed.
+      # Replaces huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF (UD-Q6_K_XL)
+      # 2026-10-17. V3 restores the stock MTP head and vision projector
+      # ("Restore MTP + vision from stock with correct tensor naming",
+      # -2.1pp MMLU vs stock) — so the entire tuned qwen3.8 config carries
+      # over UNCHANGED: tensor split, draft-mtp n-max 3, q8_0 KV, 393216 ctx,
+      # 3 slots.
+      #
+      # Q6_K (22.4 GB) is 1.6 GB LIGHTER than qwen3.8's UD-Q6_K_XL (24.0 GB).
+      # The card calls Q6_K "Great balance"; Q8_0 (29.0 GB) would leave only
+      # ~0.8 GB free on GPU 0 — under the ~3 GB free guideline this file
+      # targets. The card's sampling guidance (rep-pen 1.15, temp 0.1-0.3
+      # agentic, no system prompt, thinking OFF recommended, top_p/k/min_p not
+      # needed) lives in the OpenCode red-team model options, not here.
       #
       # DISTINCT ALIAS on purpose. This must NOT silently serve normal traffic:
       # you swap to it deliberately for pentest work and swap back. Because the
       # chat slot is single-tenant, whatever profile is loaded answers every
       # chat request — so check /healthz active_chat_profile before assuming
       # which model is live (the profile-swap vs client-pinning hazard).
-      echo "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF UD-Q6_K_XL qwen3.8-redteam 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
+      echo "OBLITERATUS/Qwen3.8-27B-OBLITERATED Q6_K qwen3.8-redteam 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
       ;;
     *)
       return 1
@@ -285,7 +294,7 @@ get_profile_description() {
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
     qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
-    qwen3.8-redteam) echo "Huihui-Qwen3.8-27B-abliterated UD-Q6_K_XL — uncensored; AUTHORISED pentest of own lab only (same config/perf as qwen3.8)" ;;
+    qwen3.8-redteam) echo "Qwen3.8-27B-OBLITERATED V3 (OBLITERATUS) Q6_K — uncensored abliteration; AUTHORISED pentest of own lab only (same config/perf as qwen3.8)" ;;
     *)               echo "" ;;
   esac
 }
@@ -301,7 +310,7 @@ get_profile_vram_estimate() {
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
-    qwen3.8-redteam) echo "predicted same as qwen3.8 (identical arch, near-identical quant 24.8 vs 24.0 GB); idle ~89% / ~62%. RE-MEASURE on first swap and update this string." ;;
+    qwen3.8-redteam) echo "measured 2026-10-17 first load, idle, embed+rerank co-resident: GPU0 28.3 GB (87%) / GPU1 24.8 GB (77%); free 3.9 / 7.4 GB — above the ~3 GB guideline. GPU1 sits well above the weight-delta prediction (3 x 128K per-slot KV, kv_unified=false + mmproj on GPU1). Peak under heavy prefill not yet measured — stability pass after a deliberate swap." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
