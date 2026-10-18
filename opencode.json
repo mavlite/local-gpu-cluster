@@ -5,6 +5,11 @@
       "type": "remote",
       "url": "http://192.168.6.223:3005/mcp?space=local-gpu-cluster",
       "enabled": true
+    },
+    "vcfspec": {
+      "type": "local",
+      "command": ["C:\\Python314\\python.exe", "-m", "vcfspec.mcp_server"],
+      "enabled": true
     }
   }
 }
