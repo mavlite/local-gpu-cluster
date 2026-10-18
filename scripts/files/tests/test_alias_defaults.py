@@ -28,6 +28,16 @@ def _alias_map_nodes():
     raise AssertionError("ALIAS_MAP not found in router-app.py")
 
 
+def _ann_assign_str_dict(name):
+    """Return {key: value} for a module-level str->str AnnAssign (e.g.
+    BACKEND_TO_PROFILE) in router-app.py."""
+    tree = ast.parse(open(ROUTER_SRC, encoding="utf-8").read())
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == name:
+            return {k.value: v.value for k, v in zip(node.value.keys, node.value.values)}
+    raise AssertionError(f"{name} not found in router-app.py")
+
+
 NOTHINK = {"backend": "qwen3.8", "enable_thinking": False, "strip_thinking": True,
            "sampling": ad.QWEN38_NOTHINK_SAMPLING}
 THINK = {"backend": "qwen3.8", "enable_thinking": True, "strip_thinking": False,
@@ -113,6 +123,22 @@ class TestAliasMap(unittest.TestCase):
                         else "QWEN38_NOTHINK_SAMPLING")
                 self.assertIn("sampling", entry)
                 self.assertEqual(ast.unparse(entry["sampling"]), f"alias_defaults.{want}")
+
+    def test_redteam_aliases_use_distinct_backend_and_profile_mapping(self):
+        # OBLITERATED V3 (2026-10-17): the redteam aliases must resolve to
+        # their own backend (not "qwen3.8") so the profile-match guard fires
+        # the auto-swap instead of silently serving the stock model, and the
+        # backend must map to a swap profile for trigger_swap_and_wait().
+        for alias, thinking in (("qwen3.8-redteam", False),
+                                ("qwen3.8-redteam-think", True)):
+            with self.subTest(alias=alias):
+                entry = self.aliases[alias]
+                self.assertEqual(ast.literal_eval(entry["backend"]), "qwen3.8-redteam")
+                self.assertIs(ast.literal_eval(entry["enable_thinking"]), thinking)
+                self.assertEqual(ast.unparse(entry["sampling"]),
+                                 "alias_defaults.OBLITERATED_SAMPLING")
+        self.assertEqual(_ann_assign_str_dict("BACKEND_TO_PROFILE").get(
+            "qwen3.8-redteam"), "qwen3.8-redteam")
 
 
 if __name__ == "__main__":

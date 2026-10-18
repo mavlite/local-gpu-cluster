@@ -82,6 +82,17 @@ def test_image_token_cap_must_be_a_positive_integer(bad):
     assert r.returncode != 0 and "LLAMA_IMAGE_MAX_TOKENS" in r.stderr
 
 
+def test_no_template_lines_when_unset():
+    r = render("chat_template_lines")
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_template_line_renders_the_file_flag():
+    r = render("chat_template_lines", LLAMA_CHAT_TEMPLATE="/opt/models/chat-templates/qwen3.8.jinja")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "    --chat-template-file /opt/models/chat-templates/qwen3.8.jinja \\\n"
+
+
 # ---- the real unit template in 51-lxc-amd.sh, rendered with the library's blocks -----------------------------
 
 SCRIPT51 = os.path.join(os.path.dirname(__file__), "..", "..", "51-lxc-amd.sh")
@@ -99,6 +110,7 @@ def render_unit(**env):
     script = (f'source "{LIB}" || exit 97; '
               'DRAFT_LINES="$(chat_spec_lines; printf x)"; DRAFT_LINES="${DRAFT_LINES%x}"; '
               'MMPROJ_LINES="$(chat_mmproj_lines; printf x)"; MMPROJ_LINES="${MMPROJ_LINES%x}"; '
+              'TEMPLATE_LINES="$(chat_template_lines; printf x)"; TEMPLATE_LINES="${TEMPLATE_LINES%x}"; '
               f'cat <<EOF\n{body}\nEOF\n')
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=full)
     assert r.returncode == 0, r.stderr
@@ -132,3 +144,16 @@ def test_vision_unit_carries_the_projector_flags_and_stays_contiguous():
                  "--image-max-tokens 1280", "--spec-draft-sampling probabilistic", "--flash-attn", "--metrics"):
         assert flag in joined, flag
     assert "--no-mmproj" not in joined
+
+
+def test_template_override_unit_carries_the_file_flag_and_stays_contiguous():
+    es = exec_start(render_unit(LLAMA_CHAT_TEMPLATE="/opt/models/chat-templates/qwen3.8.jinja"))
+    assert all(l.strip() for l in es)
+    joined = " ".join(es)
+    assert "--chat-template-file /opt/models/chat-templates/qwen3.8.jinja" in joined
+    assert "--flash-attn" in joined and "--metrics" in joined
+
+
+def test_default_unit_has_no_template_flag():
+    joined = " ".join(exec_start(render_unit()))
+    assert "--chat-template-file" not in joined

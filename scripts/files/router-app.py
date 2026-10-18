@@ -416,6 +416,7 @@ BACKEND_TO_PROFILE: dict[str, str] = {
     "devstral":         "devstral",
     "devstral-large":   "devstral-large",
     "qwen3.8":          "qwen3.8",
+    "qwen3.8-redteam":  "qwen3.8-redteam",
 }
 
 # Serializes concurrent auto-swap requests. Only one swap runs at a time.
@@ -583,6 +584,22 @@ ALIAS_MAP: dict[str, dict] = {
     "qwen3.8-xhigh":   {"backend": "qwen3.8", "enable_thinking": True,  "strip_thinking": False,
                         "reasoning_effort": "xhigh",
                         "sampling": alias_defaults.QWEN38_THINK_SAMPLING},
+    # OBLITERATUS Qwen3.8-27B-OBLITERATED V3 Q6_K — the abliterated
+    # (uncensored) build of the same base model; AUTHORISED pentest of the
+    # operator's own lab only (swap-chat-model.sh profile "qwen3.8-redteam").
+    #
+    # backend is "qwen3.8-redteam" (the unit's --alias under the redteam
+    # profile), NOT "qwen3.8": while the stock profile is loaded the
+    # profile-match guard must see a mismatch so the auto-swap fires, and a
+    # redteam request must never be silently served by the stock model.
+    # Sampling per the OBLITERATED V3 card (alias_defaults.OBLITERATED_
+    # SAMPLING); the card recommends thinking OFF, -think is the explicit
+    # opt-in variant.
+    "qwen3.8-redteam":       {"backend": "qwen3.8-redteam", "enable_thinking": False, "strip_thinking": True,
+                              "sampling": alias_defaults.OBLITERATED_SAMPLING},
+    "qwen3.8-redteam-think": {"backend": "qwen3.8-redteam", "enable_thinking": True,  "strip_thinking": False,
+                              "reasoning_effort": "medium",
+                              "sampling": alias_defaults.OBLITERATED_SAMPLING},
 }
 
 

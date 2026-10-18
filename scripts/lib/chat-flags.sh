@@ -57,6 +57,17 @@ chat_mmproj_lines() {
   fi
 }
 
+# chat_template_lines -- override the chat template embedded in the GGUF.
+#   LLAMA_CHAT_TEMPLATE   path to a jinja template file; empty/unset = use the GGUF's embedded template (old behaviour)
+# Needed for qwen3.8-redteam: the OBLITERATED GGUF ships a stripped template with no tools section, so
+# llama-server silently drops the request's tools array and the model improvises tool calls in prose.
+# The stock Qwen3.8's full official template (byte copy, same tokenizer/architecture) restores them.
+chat_template_lines() {
+  if [[ -n "${LLAMA_CHAT_TEMPLATE:-}" ]]; then
+    printf '    --chat-template-file %s \\\n' "$LLAMA_CHAT_TEMPLATE"
+  fi
+}
+
 # chat_check_slot_ctx -- refuse a layout that gives one slot more context than the model's native window.
 #   LLAMA_CTX / LLAMA_PARALLEL   total context and slot count (llama.cpp gives each slot CTX / PARALLEL)
 #   LLAMA_MAX_SLOT_CTX           native window, default 262144 (Qwen3.6/3.8); above it needs YaRN, which we do not set
