@@ -374,13 +374,36 @@ identify_profile() {
 
 # Rewrite the six LLAMA_* keys in config.env atomically. Uses Python so
 # special characters in values can never corrupt the file via shell quoting.
+# Only the qwen3.8 aliases are multimodal and use the qwen3.8 vision projector.
+# Every other model has a different embedding dim, so leaving the projector set
+# while swapping to e.g. qwen3.6 makes llama-server abort on load
+# ("mismatch between text model and mmproj") -> restart crash loop. The swap
+# must therefore set the projector for qwen3.8 and CLEAR it for everything else.
+VISION_MMPROJ="/opt/models/qwen38-mmproj/mmproj-F16.gguf"
+VISION_MMPROJ_DEVICE="ROCm1"
+
 write_config_env() {
   local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6" kv_type="$7"
   local split_mode="$8" spec_type="$9" spec_nmax="${10}" parallel="${11:-1}"
-  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" "$split_mode" "$spec_type" "$spec_nmax" "$parallel" <<'PY'
+  local mmproj="" mmproj_dev="" vision="0"
+  if [[ "$alias" == "qwen3.8" || "$alias" == "qwen3.8-redteam" ]]; then
+    mmproj="$VISION_MMPROJ"; mmproj_dev="$VISION_MMPROJ_DEVICE"; vision="1"
+  fi
+  local chat_template=""
+  # The OBLITERATED GGUF ships a stripped chat template with no tools section -> llama-server
+  # silently drops the request's tools array and the model improvises tool calls in prose
+  # (diagnosed 2026-10-18: probe returned finish_reason "stop" + fabricated tool results).
+  # Override with the stock Qwen3.8's full official template (byte copy, same tokenizer and
+  # architecture), staged at /opt/models/chat-templates/ on LXC 151. Every other profile keeps
+  # its GGUF's embedded template.
+  if [[ "$alias" == "qwen3.8-redteam" ]]; then
+    chat_template="/opt/models/chat-templates/qwen3.8.jinja"
+  fi
+  python3 - "$CONFIG_ENV" "$repo" "$quant" "$alias" "$tensor_split" "$ctx" "$cache_reuse" "$kv_type" "$split_mode" "$spec_type" "$spec_nmax" "$parallel" "$mmproj" "$mmproj_dev" "$vision" "$chat_template" <<'PY'
 import os, sys, tempfile
 
-path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type, split_mode, spec_type, spec_nmax, parallel = sys.argv[1:13]
+(path, repo, quant, alias, tensor_split, ctx, cache_reuse, kv_type, split_mode, spec_type, spec_nmax, parallel,
+ mmproj, mmproj_dev, vision, chat_template) = sys.argv[1:17]
 targets = {
     "LLAMA_HF_REPO": repo,
     "LLAMA_HF_QUANT": quant,
@@ -393,6 +416,13 @@ targets = {
     "LLAMA_SPLIT_MODE": split_mode,
     "LLAMA_SPEC_TYPE": spec_type,
     "LLAMA_SPEC_NMAX": spec_nmax,
+    # Vision projector: set for qwen3.8, cleared (empty -> --no-mmproj) otherwise.
+    "LLAMA_MMPROJ": mmproj,
+    "LLAMA_MMPROJ_DEVICE": mmproj_dev,
+    "ROUTER_VISION_ENABLED": vision,
+    # Chat-template override: set only for qwen3.8-redteam (its GGUF's embedded template
+    # has no tools section); empty otherwise = use the GGUF's embedded template.
+    "LLAMA_CHAT_TEMPLATE": chat_template,
 }
 
 try:

@@ -174,6 +174,8 @@ LLAMA_SPEC_SAMPLING="${LLAMA_SPEC_SAMPLING:-}"     # greedy | probabilistic (--s
 LLAMA_MMPROJ="${LLAMA_MMPROJ:-}"                   # vision projector GGUF path; empty = --no-mmproj (text only)
 LLAMA_MMPROJ_DEVICE="${LLAMA_MMPROJ_DEVICE:-}"     # e.g. ROCm1 (GPU0 has the least headroom under tensor split)
 LLAMA_IMAGE_MAX_TOKENS="${LLAMA_IMAGE_MAX_TOKENS:-}"  # cap per image; HIP issue #28608 crashes the vision encoder at 2048 px
+LLAMA_CHAT_TEMPLATE="${LLAMA_CHAT_TEMPLATE:-}"     # jinja chat-template file overriding the GGUF's embedded template;
+                                                   # empty = use the embedded template (all profiles except qwen3.8-redteam)
 
 # ---------- Embedder unit (V620 #1) ----------
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
@@ -483,11 +485,13 @@ phase_5_11_3_chat_unit() {
   # Rendered by lib/chat-flags.sh (tested in scripts/files/tests/test_chat_flags.py). printf x keeps the
   # trailing newline that $( ) strips, so each block ends in a continuation and never in a blank line.
   LLAMA_CTX="$LLAMA_CTX" LLAMA_PARALLEL="$LLAMA_PARALLEL" chat_check_slot_ctx || die "chat slot layout rejected"
-  local draft_lines mmproj_lines
+  local draft_lines mmproj_lines template_lines
   draft_lines="$(chat_spec_lines; rc=$?; printf x; exit $rc)" || die "chat_spec_lines failed"
   draft_lines="${draft_lines%x}"
   mmproj_lines="$(chat_mmproj_lines; rc=$?; printf x; exit $rc)" || die "chat_mmproj_lines failed"
   mmproj_lines="${mmproj_lines%x}"
+  template_lines="$(chat_template_lines; rc=$?; printf x; exit $rc)" || die "chat_template_lines failed"
+  template_lines="${template_lines%x}"
 
   pct exec "$AMD_VMID" -- env \
     "LLAMA_HF_REPO=$LLAMA_HF_REPO" \
@@ -504,6 +508,7 @@ phase_5_11_3_chat_unit() {
     "LLAMA_FLASH_ATTN=$LLAMA_FLASH_ATTN" \
     "DRAFT_LINES=$draft_lines" \
     "MMPROJ_LINES=$mmproj_lines" \
+    "TEMPLATE_LINES=$template_lines" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
     # Remove the pre-pivot unit name if present (clean migration)
@@ -546,7 +551,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --parallel "${LLAMA_PARALLEL}" \\
     --cache-reuse "${LLAMA_CACHE_REUSE}" \\
     --cache-ram "${LLAMA_CACHE_RAM_MB}" \\
-${DRAFT_LINES}${MMPROJ_LINES}    --flash-attn "${LLAMA_FLASH_ATTN}" \\
+${DRAFT_LINES}${MMPROJ_LINES}${TEMPLATE_LINES}    --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
     --load-mode mlock \\
