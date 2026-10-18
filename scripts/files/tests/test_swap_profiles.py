@@ -69,6 +69,35 @@ def test_write_config_env_defaults_parallel_to_one_for_ten_field_profiles(tmp_pa
     assert "LLAMA_PARALLEL=1" in cfg.read_text()
 
 
+def test_swap_to_qwen38_sets_the_vision_projector(tmp_path):
+    cfg = tmp_path / "config.env"
+    cfg.write_text("LLAMA_MMPROJ=\nROUTER_VISION_ENABLED=0\n")
+    r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
+             'write_config_env unsloth/Qwen3.8-27B-GGUF UD-Q6_K_XL qwen3.8 1,1 393216 0 q8_0 tensor draft-mtp 3 3')
+    assert r.returncode == 0, r.stderr
+    text = cfg.read_text()
+    # suffix match: Git Bash on Windows rewrites a leading /opt/... arg (MSYS path
+    # conversion); the Linux host keeps it absolute. The suffix is stable on both.
+    assert "qwen38-mmproj/mmproj-F16.gguf" in text
+    assert "LLAMA_MMPROJ_DEVICE=ROCm1" in text
+    assert "ROUTER_VISION_ENABLED=1" in text
+
+
+def test_swap_away_from_qwen38_clears_the_vision_projector(tmp_path):
+    # Regression: swapping qwen3.8 -> qwen3.6 left the qwen3.8 mmproj attached,
+    # so qwen3.6 aborted on load (n_embd mismatch) and crash-looped.
+    cfg = tmp_path / "config.env"
+    cfg.write_text("LLAMA_MMPROJ=/opt/models/qwen38-mmproj/mmproj-F16.gguf\n"
+                   "LLAMA_MMPROJ_DEVICE=ROCm1\nROUTER_VISION_ENABLED=1\n")
+    r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
+             'write_config_env unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0 layer none 0')
+    assert r.returncode == 0, r.stderr
+    text = cfg.read_text()
+    assert "LLAMA_MMPROJ=\n" in text and "mmproj-F16.gguf" not in text
+    assert "LLAMA_MMPROJ_DEVICE=\n" in text
+    assert "ROUTER_VISION_ENABLED=0" in text
+
+
 @pytest.mark.parametrize("ctx,par,ok", [("393216", "3", True), ("262144", "1", True), ("393216", "1", False),
                                         ("262144", "0", False), ("abc", "1", False), ("262144", "x", False)])
 def test_slot_guard(ctx, par, ok):
