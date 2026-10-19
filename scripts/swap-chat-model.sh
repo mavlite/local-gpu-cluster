@@ -257,17 +257,17 @@ get_profile() {
       # it 3rd. Do not expect qwen3.8-level general/coding ability from it.
       #
       # Architecture is identical to qwen3.8 (dense 27.78B, hybrid Gated
-      # DeltaNet + Attention, 262K), so the entire tuned qwen3.8 config
-      # carries over UNCHANGED: tensor split 1,1, draft-mtp n-max 3, q8_0 KV,
-      # 262K ctx. ~23.9 GB weights vs qwen3.8's 24.0 GB (UD-Q6_K_XL) —
-      # negligible VRAM difference. Expect the same ~43-49 t/s. No re-tuning.
+      # DeltaNet + Attention, 262K), so the tuned qwen3.8 config carries over:
+      # tensor split 1,1, q8_0 KV, 262K ctx. ~23.9 GB weights.
       #
-      # ONE UNVERIFIED ASSUMPTION: that the fine-tune preserved the
-      # blk.*.nextn.* MTP heads. If it did not, loading with --spec-type
-      # draft-mtp fails or degrades — change the last two fields to
-      # "none 0" (cost: ~27 t/s tensor-only instead of ~49), re-measure, and
-      # update this block + the VRAM estimate below.
-      echo "bartowski/Altworld_Hemmingway-1-GGUF Q6_K hemmingway 1,1 262144 1024 q8_0 tensor draft-mtp 3"
+      # MTP VERIFIED 2026-10-19: the bartowski GGUF DOES carry the nextn/MTP
+      # heads, so --spec-type draft-mtp works (vs ~23.5 t/s tensor-only). But
+      # n-max 2 (NOT 3) is best here: this is a pure prose/writing model, so
+      # draft acceptance is lower and more variable than qwen3.6's code work.
+      # Measured over 3 writing prompts: n2 = ~44.5 t/s at 0.67-0.76 acceptance
+      # (steady); n3 = ~43 t/s at 0.35-0.70 (erratic, dips to 33 t/s). Lower
+      # acceptance favours the shorter draft, as Unsloth's n2 default expects.
+      echo "bartowski/Altworld_Hemmingway-1-GGUF Q6_K hemmingway 1,1 262144 1024 q8_0 tensor draft-mtp 2"
       ;;
     qwen3.8-redteam)
       # OBLITERATUS Qwen3.8-27B-OBLITERATED V3, Q6_K — the SAME base model as
@@ -333,7 +333,7 @@ get_profile_vram_estimate() {
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
-    hemmingway)      echo "predicted same as qwen3.8 (identical arch, near-identical quant 23.9 vs 24.0 GB); idle ~89% / ~62%. RE-MEASURE on first swap and update this string." ;;
+    hemmingway)      echo "~40.5 GB at 256K + MTP n2 (GPU0 22.4 / GPU1 18.1, measured 2026-10-19); ~10 GB headroom/card, ~44 t/s writing gen, 0.72 draft acceptance" ;;
     qwen3.8-redteam) echo "measured 2026-10-17 first load, idle, embed+rerank co-resident: GPU0 28.3 GB (87%) / GPU1 24.8 GB (77%); free 3.9 / 7.4 GB — above the ~3 GB guideline. GPU1 sits well above the weight-delta prediction (3 x 128K per-slot KV, kv_unified=false + mmproj on GPU1). Peak under heavy prefill not yet measured — stability pass after a deliberate swap." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
