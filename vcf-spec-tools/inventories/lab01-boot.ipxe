@@ -1,0 +1,43 @@
+#!ipxe
+
+# Stage 2 of the ESX network install for the VCF lab.
+# Reached from snponly.efi, which the CRS309 hands out over TFTP.
+#
+# The BD795i SE firmware has no UEFI HTTP Boot, so the loader must arrive
+# over TFTP. But mboot resolves prefix= using the transport IT was loaded
+# over, so an http:// prefix only works if the loader itself came over HTTP.
+# iPXE is the bridge: tiny file over TFTP, then bootx64.efi and ~130 modules
+# over HTTP from the depot. BOOTX64.EFI *is* the multiboot loader; there is
+# no mboot.efi on the ISO despite the docs naming it that.
+#
+# PRESENCE OF 01-<mac>/boot.cfg IS THE INSTALL SWITCH. A host installs only
+# while its directory exists; remove it and this script exits, handing back
+# to firmware, which falls through to the local disk. That is what stops a
+# kickstart ending in `reboot` from reinstalling forever with the NIC still
+# first in boot order, and it is why %firstboot gets a chance to run.
+
+set base http://172.16.10.50:8080/esx
+set cfg ${base}/01-${net0/mac:hexhyp}/boot.cfg
+
+echo
+echo === VCF lab - ESX 9.1.1.0 network install ===
+echo   MAC    : ${net0/mac}
+echo   Config : ${cfg}
+echo
+
+# Probe for the per-MAC config BEFORE chaining. `chain` succeeds the moment
+# bootx64.efi loads, so a missing -c config is NOT caught by || -- mboot
+# takes control and dies with "Fatal error: 15 (Not found)" with iPXE long
+# gone and no way back to the firmware. Probing first is the only thing that
+# makes the fall-through work. Learned the hard way on hyp01, 2026-09-24.
+imgfetch --name cfgprobe ${cfg} || goto nopending
+imgfree cfgprobe
+
+chain ${base}/bootx64.efi -c ${cfg} || goto nopending
+
+:nopending
+echo
+echo No install pending for ${net0/mac}.
+echo Handing back to firmware - it should boot the local disk next.
+sleep 3
+exit

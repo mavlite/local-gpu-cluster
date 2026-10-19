@@ -84,6 +84,15 @@ chkconfig SSH on
 # attack surface with no operator benefit here.
 esxcli system settings advanced set -o /UserVars/SuppressShellWarning -i 1
 esxcli system ntp set --enabled=yes {ntp_opts}
+# The line above configures the server and starts the daemon; it does NOT set
+# the service's startup POLICY, and VCF validates the policy. Without this a
+# bring-up validation reports, on every host:
+#   service ntpd policy is not configured to "Start and stop with host"
+# Note this is a DIFFERENT property from the one `chkconfig ntpd on` writes:
+# after chkconfig alone the vSphere API still reports policy "off", which is
+# what VCF reads -- measured on all three hosts 2026-09-26, where chkconfig
+# said "on" and the warning persisted until setpolicy was used.
+vim-cmd hostsvc/service/setpolicy ntpd on
 
 # Rename the local VMFS datastore. Every ESX install names it "datastore1", so
 # three hosts arrive at vCenter with three datastores of the same name and
@@ -187,9 +196,28 @@ echo 'cpuid.brandstring = "{brand}"' >> /etc/vmware/config
 # NVMe memory tiering cannot power on VMs on AMD Ryzen without this. Needs a
 # reboot, served by the one below.
 echo 'monitor_control.disable_apichv ="TRUE"' >> /etc/vmware/config
-# Zen 4/5 entropy collection is slow; widen the kernel's entropy source
-# count. Needs a reboot, served by the one below.
+# Zen 4/5 entropy. entropySources is a BITMASK, not a count, and 2 NARROWS
+# the VMkernel to RDRAND only -- it does not widen anything. The host's own
+# help states it: "0=defaults, otherwise bitmask values: 1=interrupts,
+# 2=RDRAND, 4=RDSEED, 8=entropyd". 2 is the right value for a PHYSICAL host;
+# 1 (interrupt jitter) is the value for a NESTED one, and several third-party
+# summaries quote 1 indiscriminately. Zen4/5 executes RDSEED ~50x slower than
+# Zen3 with a high failure rate, so the default path -- which prefers RDSEED
+# -- burns CPU. Needs a reboot, served by the one below.
+#
+# This deliberately REDUCES entropy quality and will fail the DISA STIG
+# entropy check (ESXI-80-000245). Acceptable in a lab; do not copy into
+# anything audited.
 esxcli system settings kernel set -s entropySources -v 2
+# The host-side setting above does nothing for GUESTS: it only changes what
+# the VMkernel itself consumes. Guest userspace (OpenSSL 3.x, JVMs, anything
+# in FIPS mode) spins on RDSEED directly, which is where the NSX and VCFA
+# high-CPU reports come from. Masking CPUID leaf 7, EBX bit 18 hides RDSEED
+# from guests so they fall back to something that is not pathologically slow.
+# The 32 characters are bits 31..0 left to right; the 0 sits at index 13, so
+# 31-13 = bit 18 = RDSEED. Reboot required, served by the one below.
+# https://williamlam.com/2026/09/vcf-9-1-1-reducing-cpu-utilization-on-amd-ryzen-zen4-zen5-by-masking-the-rdseed-instruction.html
+echo 'cpuid.7.ebx = "-------------0------------------"' >> /etc/vmware/config
 # vSAN's default compression (Zstd) costs more CPU on this hardware than
 # LZ4. No reboot needed.
 esxcli system settings advanced set -o /VSAN/Vsan2ZdomCompZstd -i 0
@@ -209,13 +237,29 @@ esxcli system hostname set --fqdn={fqdn}
 # commission a host that is in it, nothing below needs it, and a host that
 # reboots while still in maintenance mode comes back still in it.
 esxcli system maintenanceMode set -e false
-esxcli system shutdown reboot -d 10 -r "hostname and certificate regenerated"
+
+# `reboot`, NOT `esxcli system shutdown reboot`. Its own help says "The host
+# must be in maintenance mode", and the line above has just left maintenance
+# mode -- so the esxcli form fails silently and the host never restarts. Both
+# decisions above are individually right and together they cancelled out.
+#
+# The consequence is not a missing reboot, it is a WRONG CERTIFICATE. ESX
+# generates a cert at boot, generate-certificates above makes a second one
+# seconds later, and hostd keeps serving the first through its API while
+# rhttpproxy presents the second on the wire. The vCSA CLI installer asks the
+# API, pins that thumbprint, connects, and gets the other one:
+#   Failed to obtain vc thumbprint ... Fingerprints did not match.
+#   Expected "5e9d5b51...", got "ff1e247e..."
+# That killed a 9.1.1 bring-up at Datacenter Creation twice on 2026-09-26,
+# with two certs 18 seconds apart and a host whose uptime proved it had never
+# rebooted. Verified against esxcli's own help text on a live 9.1.1 host.
+reboot
 """
 
 # Real host CPU models never appear here: the brand string exists to fool a
 # DPDK vendor check, not to describe the hardware. Used when hardware.cpuModel
 # is absent for a host that requested the consumer-amd workaround.
-_GENERIC_EPYC_BRAND = "AMD EPYC 9124"
+_GENERIC_EPYC_BRAND = "AMD EPYC Ryzen 9"
 
 
 def workarounds_block(host_workarounds: list[str], cpu_model: str | None) -> str:
@@ -227,7 +271,7 @@ def workarounds_block(host_workarounds: list[str], cpu_model: str | None) -> str
     """
     if "consumer-amd" not in host_workarounds:
         return ""
-    brand = f"AMD EPYC {cpu_model}" if cpu_model else _GENERIC_EPYC_BRAND
+    brand = f"AMD EPYC Ryzen 9 {cpu_model}" if cpu_model else _GENERIC_EPYC_BRAND
     return _CONSUMER_AMD_WORKAROUNDS.format(brand=brand)
 
 

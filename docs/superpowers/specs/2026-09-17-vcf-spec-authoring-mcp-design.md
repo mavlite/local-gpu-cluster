@@ -33,7 +33,22 @@ maintenance window has started.
 - Sizing an environment from workload requirements.
 - Submitting the spec or running bring-up — stage 4.
 - Any live VCF API mutation. Stage 3 is read-only.
-- Bare-metal provisioning (stages 1-2).
+- ~~Bare-metal provisioning (stages 1-2).~~ **Superseded 2026-09-21.** This
+  bullet scoped *this document's tool surface*, not the package layout, and
+  it was read as the latter often enough to be worth correcting here. The
+  stage-1 design (`2026-09-21-esx-provisioning-design.md`) decided the
+  opposite deliberately, four days later, and says so in its own header
+  (**Code:** `vcf-spec-tools/`): one inventory renders both the SddcSpec and
+  the artifacts that get ESX onto bare metal, *"so the operator describes the
+  lab once and the two outputs cannot drift"*.
+  That coupling is real and runs through shared data, not through imports:
+  `hardware.memoryTieringGb` is read by the kickstart renderer *and* by the
+  N-1 capacity rule, and `VCF-CAP-TIERING-NEEDS-WORKAROUND` is a stage-3
+  capacity finding whose fix text names a stage-1 `%firstboot` line. Reviewed
+  again 2026-09-24 against the commit history — `provision.py` co-changes with
+  the inventory schema, the catalogue and the golden example, never with
+  `render.py` — and the packaging was left as it is. What was actually missing
+  was the command: see `vcfspec provision`.
 - **Supplemental NFS datastores.** The Installer configures *principal* storage
   only; adding supplemental NFS is a day-2 SDDC Manager action (natively
   supported from 9.1.1). The lab's NFS is therefore post-bring-up and out of
@@ -356,9 +371,18 @@ Live validation and submission use the Installer API: authenticate at
 
 ## Open questions
 
-1. **Does memory tiering deliver the assumed 1:1 ratio on this hardware?** The
-   capacity maths above depends on it for the N-1 case. Confirm the supported
-   ratio and the resulting effective RAM once a host is running ESX 9.1.1.
+1. ~~**Does memory tiering deliver the assumed 1:1 ratio on this hardware?**~~
+   **ANSWERED 2026-09-24, measured on all three hosts.** `esxcli memtier status
+   get` reports `ENABLED`, `93.71GiBs (100 percent of DRAM)` on each host's own
+   Samsung MZVLB512HAJQ — so 1:1 holds and the N-1 capacity maths stands. Two
+   corrections fall out of the measurement: the licence permits **4× DRAM**
+   (`Licensed for 4.00 times of DRAM`), so ~469 GB/host is available if ever
+   needed; and the 9.1 command is `esxcli memtier enable -d <dev> -r <pct>`,
+   not the 9.0-era `Mem.TierNVMePct` plus `esxcli system tierdevice create`.
+   Tiering is no longer load-bearing for N-1 either: the right-sized 9.1.1 stack
+   is 139.25 GB against 180 GB of N-1 DRAM, so it clears unaided. See
+   `2026-09-24-vcf-bringup-execution-design.md` and the capacity table in
+   `vcfspec/rules/tables.py`.
 2. **Does `fipsEnabled` still exist in the 9.1 schema?** It is Cloud Builder-era;
    confirm against the vendored spec before exposing it as an operator input.
 3. **Which sections the Installer treats as mandatory** for this shape — resolved

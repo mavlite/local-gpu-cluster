@@ -28,21 +28,30 @@ import re
 from dataclasses import dataclass
 
 from .findings import Finding, Result
-from .firstboot import (MAX_TIER_RATIO_PCT, MIN_TIER_RATIO_PCT,
-                        memory_tiering_block, render_firstboot,
+from .firstboot import (memory_tiering_block, render_firstboot,
                         workarounds_block)
 from .render import InsecureCredentialError
 from .inventory import REFERENCE_RE
 from .rules import finding_for
 from .rules.coerce import as_sequence as _sequence
+# One definition of what a safe device identifier is, shared with the rules
+# layer. These used to live here, where `vcfspec validate` could not reach
+# them -- so an inventory naming an unstable boot disk validated clean while
+# the renderer would have refused it. Importing rather than duplicating is
+# what stops the validator and the renderer disagreeing about the same fact.
+from .rules.devices import DISK_PATH_PREFIX as _DISK_PATH_PREFIX
+from .rules.devices import RUNTIME_DISK_RE as _RUNTIME_DISK_RE
+from .rules.devices import STABLE_DISK_RE as _STABLE_DISK_RE
+from .rules.devices import boot_disk_finding as _boot_disk_finding
+from .rules.devices import collision_finding as _collision_finding
+from .rules.devices import device_key as _device_key
+from .rules.devices import device_path as _device_path
+from .rules.devices import plain as _plain
+from .rules.devices import tier_ratio_pct as _tier_ratio_pct
+from .rules.devices import tiering_findings as _tiering_findings
 
 DEFAULT_ESX_VERSION = "9.1.1.0"
 
-# Where ESX exposes block devices, and the form `esxcli memtier enable -d`
-# wants. bootDisk is passed to `install --disk=` uninterpreted because the
-# installer accepts either spelling; the memtier device is normalised, because
-# that command takes a path and not a device name.
-_DISK_PATH_PREFIX = "/vmfs/devices/disks/"
 
 # A SHA-512 crypt hash, which is what `rootpw --iscrypted` wants. Deliberately
 # strict about the `$6$` prefix: `$1$` (MD5) and `$5$` (SHA-256) are accepted by
@@ -50,15 +59,6 @@ _DISK_PATH_PREFIX = "/vmfs/devices/disks/"
 # starts with `$` is almost always someone's password with a `$` in it.
 _SHA512_CRYPT_RE = re.compile(r"^\$6\$[^$:\s]+\$[./A-Za-z0-9]{86}$")
 
-# A stable device identifier: the only boot-disk form this tool will emit.
-# t10./eui./naa. are the device's own identity, reported by the device, and do
-# not move when enumeration order does.
-_STABLE_DISK_RE = re.compile(
-    r"^(?:/vmfs/devices/disks/)?(?:t10\.|eui\.|naa\.)[^\s]+$")
-# Runtime names: assigned at boot, in discovery order, by the host.
-_RUNTIME_DISK_RE = re.compile(
-    r"^(?:/vmfs/devices/disks/)?(?:mpx\.)?vmhba\d+:C\d+:T\d+:L\d+$"
-    r"|^(?:/vmfs/devices/disks/)?mpx\.", re.IGNORECASE)
 
 # An OpenSSH public key, as it appears in a .pub file: type, base64 blob, and
 # an optional comment. Deliberately strict -- this value is written verbatim
@@ -217,109 +217,48 @@ def _ssh_public_key(prov: dict) -> str:
     return text
 
 
-def _tier_ratio_pct(tier_gb: float, ram_gb: float) -> int:
-    """The `-r` percentage for `esxcli memtier enable`.
-
-    Derived rather than pinned at Lam's flat 100, because the device is
-    normally larger than the tier the inventory asks for and this is what
-    decides how much of it gets used. A non-positive ramGb yields 0, which the
-    caller's range guard rejects with a message naming both numbers -- better
-    than a ZeroDivisionError from a pure renderer.
-    """
-    if ram_gb <= 0:
-        return 0
-    return int(round(tier_gb / ram_gb * 100))
-
-
-def _device_key(selector: str) -> str:
-    """`t10.X` and `/vmfs/devices/disks/t10.X` are one device, not two."""
-    return selector[len(_DISK_PATH_PREFIX):] if selector.startswith(
-        _DISK_PATH_PREFIX) else selector
-
-
-def _device_path(selector: str) -> str:
-    """The `/vmfs/devices/disks/…` form `esxcli memtier enable -d` wants."""
-    return selector if selector.startswith(_DISK_PATH_PREFIX) else (
-        _DISK_PATH_PREFIX + selector)
-
-
-def _collision_finding(roles: list[tuple[str, str]], path: str,
-                       host: str) -> Finding | None:
-    """None when every declared device role names a different device.
-
-    `roles` is (field name, selector) for each of bootDisk, vsanDevice and
-    memoryTieringDevice that the host actually declares. Any two naming one
-    device is the expensive mistake this whole area circles: the install
-    overwrites the device it is given, vSAN ESA claims the device it is given,
-    and `esxcli memtier enable` consumes the device it is given. None of the
-    three asks whether something else is already there.
-    """
-    seen: dict[str, str] = {}
-    for field, selector in roles:
-        key = _device_key(selector)
-        if key in seen:
-            return finding_for("VCF-PROV-DEVICE-COLLISION", path, host=host,
-                               device=selector, first=seen[key], second=field)
-        seen[key] = field
-    return None
-
-
-def _boot_disk_finding(selector: str, path: str, host: str) -> Finding | None:
-    """None when `selector` is a stable device identifier, else why not."""
-    if selector.startswith("--firstdisk"):
-        return finding_for("VCF-PROV-BOOT-DISK-FIRSTDISK", path,
-                           host=host, selector=selector)
-    if _RUNTIME_DISK_RE.match(selector):
-        return finding_for("VCF-PROV-BOOT-DISK-RUNTIME-NAME", path,
-                           host=host, selector=selector)
-    if not _STABLE_DISK_RE.match(selector):
-        return finding_for("VCF-PROV-BOOT-DISK-NOT-STABLE", path,
-                           host=host, selector=selector)
-    return None
 
 
 def _tiering(hardware: dict, hw_path: str, host: str) -> tuple[str, list[Finding]]:
     """The memory-tiering %firstboot block, or "" plus the reason it is absent.
 
     The gap that motivated the port: the inventory has declared
-    hardware.memoryTieringGb since the capacity rules were written, the lab's
-    N-1 headroom depends on it (192 GB available against a 219 GB mandatory
-    stack), and nothing ever turned tiering on. A host declares the size here
-    and the device it comes from, and both have to be there.
+    hardware.memoryTieringGb since the capacity rules were written, and
+    nothing ever turned tiering on. A host declares the size here and the
+    device it comes from, and both have to be there.
+
+    Tiering used to be load-bearing for N-1 and no longer is. Against the
+    219 GB stack this module was written for, N-1 offered 180 GB and did
+    not fit; the 2026-09-24 design in rules/tables.py is 139.25 GB, which
+    N-1 clears on DRAM alone. What tiering buys now is headroom -- and it
+    is what makes VCF Automation's +96 GB affordable if it is ever added,
+    so this stays on.
 
     Never fatal to the host's artifacts: a host with no tiering still installs
     and still commissions, it simply has less memory than the plan assumed.
     That is a finding to read, not a reason to withhold a kickstart. A device
     *collision* is different, and is handled by the caller.
+
+    Why this delegates rather than deciding for itself: the same questions are
+    asked by `vcfspec validate` through rules/devices.py, and two copies of
+    "is this device safe" is precisely how a validator comes to bless an
+    inventory the renderer would refuse. `tiering_findings` owns the answers;
+    this function owns only what to emit once they come back empty.
     """
+    reasons = _tiering_findings(hardware, hw_path, host)
+    if reasons:
+        return "", reasons
+
     tier = hardware.get("memoryTieringGb")
     tier = float(tier) if isinstance(tier, (int, float)) else 0.0
-    if tier <= 0:
+    if tier <= 0:                       # declared nothing: nothing to emit
         return "", []
     device = str(hardware.get("memoryTieringDevice") or "")
-    if not device:
-        return "", [finding_for("VCF-PROV-NO-TIERING-DEVICE", hw_path,
-                                host=host, tier=_plain(tier))]
-    # One check, not the boot disk's three: --firstdisk is not a thing
-    # `esxcli memtier enable -d` accepts, and a runtime name fails the stable
-    # pattern anyway, so a second branch for it would be unreachable.
-    if not _STABLE_DISK_RE.match(device):
-        return "", [finding_for("VCF-PROV-TIERING-DEVICE-NOT-STABLE",
-                                f"{hw_path}/memoryTieringDevice",
-                                host=host, selector=device)]
     ram = hardware.get("ramGb")
     ram = float(ram) if isinstance(ram, (int, float)) else 0.0
     ratio = _tier_ratio_pct(tier, ram)
-    if not MIN_TIER_RATIO_PCT <= ratio <= MAX_TIER_RATIO_PCT:
-        return "", [finding_for("VCF-PROV-TIERING-RATIO-UNSUPPORTED",
-                                f"{hw_path}/memoryTieringGb", host=host,
-                                ratio=ratio, tier=_plain(tier), ram=_plain(ram))]
     return memory_tiering_block(_device_path(device), ratio, tier, ram), []
 
-
-def _plain(value: float) -> str:
-    """96.0 -> "96", so a finding message reads like the inventory does."""
-    return str(int(value)) if float(value).is_integer() else str(value)
 
 
 def _rewrite_boot_cfg(iso_boot_cfg: str, prefix: str, kernelopt: str) -> str:
@@ -556,32 +495,77 @@ def _manifest(boot_url: str, payload_url: str, esx_version: str,
         "# The loader ships as EFI/BOOT/BOOTX64.EFI -- there is no file named",
         "# mboot.efi on the ISO, though the docs call it that. BOOTX64.EFI is",
         "# the multiboot loader they mean. MBOOT.C32 is the BIOS/syslinux",
-        "# variant and is NOT it. Serve BOOTX64.EFI under whatever name you",
-        "# like as long as DHCP option 67 below points at the same name.",
+        "# variant and is NOT it.",
+        f"# Publish it as {boot_url}/bootx64.efi -- the HTTP script's `chain`",
+        "# line below must name that same path.",
         "#",
-        "# DHCP (required -- native UEFI HTTP boot still gets its URL from DHCP):",
-        f"#   option 67 (bootfile-name): {boot_url}/bootx64.efi",
-        "#   option 60 (vendor-class-identifier): HTTPClient",
-        "#   The client sends a vendor class beginning 'HTTPClient'; the server",
-        "#   must echo 'HTTPClient' in option 60 of its offer or the firmware",
-        "#   ignores it and falls back to PXE, which is not configured here.",
+        "# THE BOOT CHAIN IS PXE -> iPXE -> HTTP. Not UEFI HTTP Boot: this",
+        "# firmware class does not have it. On the Minisforum BD795i SE the",
+        "# HTTP Boot setup items are compiled into the image but their IFR is",
+        "# `suppressif <uint64 constant 1>`, so they are unconditionally hidden",
+        "# and only IPv4/IPv6 PXE remain. Look at Advanced > Network Stack",
+        "# Configuration before assuming your board differs.",
+        "#",
+        "# TFTP then creates a second problem, because mboot resolves prefix=",
+        "# using the transport IT was loaded over -- an http:// prefix is only",
+        "# legal if the loader itself arrived over HTTP. Chainloading iPXE is",
+        "# what reconciles the two: a small file over TFTP, everything else",
+        "# over HTTP.",
+        "#",
+        "#   DHCP:  next-server    = a TFTP server on the client's OWN subnet",
+        "#          boot-file-name = snponly.efi",
+        "#   TFTP:  serve iPXE's snponly.efi. Debian's `ipxe` package ships it",
+        "#          prebuilt at ~278 KiB (boot.ipxe.org no longer serves",
+        "#          binaries). snponly binds the firmware's own SNP rather",
+        "#          than needing a native iPXE driver for your NIC.",
+        "#   iPXE:  build with EMBED= a script that only chains to a script on",
+        "#          THIS server, so changing boot logic never means rebuilding",
+        "#          and reflashing the binary.",
+        "#",
+        "# That HTTP script must PROBE for the per-MAC boot.cfg before chaining:",
+        "#     imgfetch --name probe <cfg> || goto nopending",
+        "#     imgfree probe",
+        "#     chain <loader> -c <cfg> || goto nopending",
+        "# `chain` reports success the moment the binary loads, so a missing -c",
+        "# config is NOT caught by `||`. mboot takes control, iPXE is already",
+        "# gone, and the host dies with 'Fatal error: 15 (Not found)' with",
+        "# nothing left able to hand back to the firmware. The probe is the",
+        "# only reason the fall-through below works.",
+        "#",
+        "# VLANs: PXE firmware sends UNTAGGED frames. If management is a tagged",
+        "# VLAN -- it usually is -- the firmware's DHCP lands in whatever the",
+        "# switch port's PVID is and never reaches your server, while the",
+        "# installed ESX works fine on the same cable because ESX tags. Give the",
+        "# host ports a dedicated untagged PROVISIONING VLAN as their PVID and",
+        "# leave management tagged on those same ports. boot.cfg's kernelopt",
+        "# vlanid=/ip= then moves the INSTALLER onto the tagged management VLAN",
+        "# in time to fetch the kickstart, so management never goes native.",
         "#",
         "# BIOS pass, once per chassis, before the install:",
         "#   - UEFI mode (not legacy/CSM)",
-        "#   - UEFI HTTP boot enabled",
+        "#   - Network stack + IPv4 PXE enabled (HTTP Boot will not be there)",
         "#   - Secure Boot OFF  <-- load-bearing: %firstboot is silently",
         "#     skipped when Secure Boot is on. SSH, NTP and the certificate",
         "#     regeneration below simply do not run, kickstart.log records the",
         "#     skip, and the host looks installed but fails commissioning.",
-        "#   - NIC ahead of disk in boot order",
+        "#   - NIC ahead of disk in boot order -- and LEAVE it there, see below",
         "#   - AC recovery = always on",
         "#",
-        "# AFTER each host installs, before it reboots into the installer again:",
-        f"#   - Remove {boot_url}/01-<mac>/ for that host, or put the disk back",
-        "#     ahead of the NIC in boot order. The kickstart ends in `reboot`",
-        "#     and the NIC is still first, so leaving both in place reinstalls",
-        "#     the host forever.",
-        "#   - Turn Secure Boot back ON.",
+        "# AFTER each host installs, while the installer is still running:",
+        f"#   - Remove {boot_url}/01-<mac>/ for that host. That directory IS the",
+        "#     install switch: present means install, absent means the HTTP",
+        "#     stage exits and the firmware falls through to the local disk.",
+        "#     The kickstart ends in `reboot` and the NIC is still first, so",
+        "#     leaving it in place reinstalls the host forever and %firstboot",
+        "#     never gets to run. Remove it once the kickstart has been fetched",
+        "#     -- the running install does not need it any more.",
+        "#   - Do NOT reorder the boot devices instead. Leaving the NIC first is",
+        "#     what keeps a later rebuild a mkdir on this server rather than a",
+        "#     trip to a chassis that has no BMC.",
+        "#   - Secure Boot stays OFF unless your platform's TPM is FIFO/TIS.",
+        "#     The Minisforum fTPM is CRB-only, which ESX does not support, so",
+        "#     turning it back on buys no attestation and re-arms the",
+        "#     %firstboot skip for the next rebuild.",
         "",
     ]
     for name in sorted(boot_configs):

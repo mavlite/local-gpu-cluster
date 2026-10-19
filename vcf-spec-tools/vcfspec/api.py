@@ -37,6 +37,7 @@ from .documents import DocumentKind, detect_kind, load_document
 from .findings import Result, Severity
 from .inventory import validate_inventory
 from .redact import redact
+from .provision import render_provisioning
 from .render import InsecureCredentialError, render
 from .rules import finding_for
 from .rules.network import check_networks
@@ -376,6 +377,87 @@ def render_document(text: str, version: str = DEFAULT_VERSION,
 
     envelope = _envelope(combined, layers_run, {})
     envelope["spec"] = redact(spec)
+    return envelope
+
+
+def provision_document(text: str, esx_boot_cfg: str | None = None,
+                       input_kind: str | None = None) -> dict:
+    """Render the stage-1 artifacts that get ESX onto bare metal.
+
+    The layer this package was missing. `render_provisioning()` has been
+    tested since 2026-09-21 and had no caller outside the test suite: not
+    cli.py, not here, not any MCP tool. The kickstarts that installed three
+    physical hosts on 2026-09-24 were produced by a hand-written scratchpad
+    script, which is the definition of an unsupported path.
+
+    `esx_boot_cfg` is the ISO's own boot.cfg, passed in as *text* rather than
+    read from a path, because the renderer is pure and this function must not
+    be the thing that breaks that. The caller does the file I/O. Without it
+    the kickstarts still render -- they are independently useful -- and the
+    boot configs do not, because a synthesised boot.cfg has no module list
+    and cannot boot.
+
+    Artifacts are returned even when findings are present, matching
+    render_document: `valid` carries the verdict and the CLI's exit code
+    follows it. The renderer already withholds per *host* -- a host with an
+    unsafe bootDisk yields no files while its siblings still do -- and
+    collapsing that into all-or-nothing would lose the distinction between
+    "this host is not ready" and "this inventory is not ready".
+    """
+    try:
+        doc = load_document(text)
+    except Exception as exc:
+        return _unreadable_envelope(exc, {"provision": "document unreadable"})
+
+    kind, result = detect_kind(doc, input_kind)
+    if kind is not DocumentKind.INVENTORY:
+        if kind is not DocumentKind.UNKNOWN:
+            result = result.merge(Result((finding_for(
+                "VCF-PROV-WRONG-KIND", "/", kind=str(kind)),)))
+        return _envelope(result, ["detect"],
+                         {"provision": "input is not an inventory"})
+
+    schema_result = validate_inventory(doc)
+    rules_result = check_networks(doc).merge(check_platform(doc))
+    combined = result.merge(schema_result).merge(rules_result)
+    layers_run = ["detect", "schema", "rules"]
+
+    # Same discipline as render_document: no exception from the renderer
+    # reaches the caller, and no exception *text* reaches a finding. An
+    # exception raised by arbitrary code operating on operator data could
+    # carry anything, including an inventory value verbatim, and redact()
+    # only masks shapes it recognises. Only the class name is reported.
+    try:
+        artifacts = render_provisioning(doc, esx_boot_cfg)
+    except InsecureCredentialError:
+        combined = combined.merge(Result((finding_for(
+            "VCF-PROV-INSECURE-CREDENTIAL", "/credentials"),)))
+        return _envelope(combined, layers_run,
+                         {"provision": "refused an insecure credential"})
+    except Exception as exc:
+        combined = combined.merge(Result((finding_for(
+            "VCF-PROV-FAILED", "/", exc_type=type(exc).__name__),)))
+        return _envelope(combined, layers_run,
+                         {"provision": "render_provisioning() raised an "
+                                       "unexpected exception"})
+
+    combined = combined.merge(Result(artifacts.findings))
+    layers_run.append("provision")
+
+    # No verify layer, and saying so rather than implying one. render() is
+    # checked against a vendored VMware schema two ways before its output is
+    # handed back; there is no vendored grammar for a kickstart, so there is
+    # nothing here that could play that role. The honest report is that the
+    # layer does not exist, not a silent absence a reader might mistake for
+    # a pass.
+    envelope = _envelope(combined, layers_run,
+                         {"verify": "no vendored grammar exists for these "
+                                    "artifacts"})
+    envelope["artifacts"] = redact({
+        "kickstarts": dict(artifacts.kickstarts),
+        "boot_configs": dict(artifacts.boot_configs),
+        "manifest": artifacts.manifest,
+    })
     return envelope
 
 
