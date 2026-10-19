@@ -109,24 +109,26 @@ ROUTER_VMID="${ROUTER_VMID:-153}"
 get_profile() {
   case "$1" in
     qwen3.6)
-      # Default profile, pivoted to UD-Q6_K on 2026-05-27. ~29 GB weights
-      # (vs ~22 GB at Q4) — captures ~99% of Q8 precision quality, costs
-      # ~3.5 GB of additional weight per card at a 1,1 tensor-split.
+      # Default profile. Uses the MTP GGUF (unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+      # UD-Q6_K_XL) with in-GGUF multi-token prediction: --spec-type draft-mtp
+      # --spec-draft-n-max 3. On the 2x V620 this is ~113 t/s generation vs
+      # ~65 t/s for the plain UD-Q6_K build (measured 2026-10-19; 0.78 draft
+      # acceptance), confirming the 2026-10-12 MTP sweep. The MTP head is
+      # bundled in the GGUF, so no separate --model-draft is needed.
       #
-      # Tensor-split: 1,1.5 (not 1,1).
-      #   At 1,1 the asymmetry from ~10 GB non-split tensor mass on
-      #   --main-gpu 0 plus +3.5 GB extra weight share would push GPU 0
-      #   peak to ~95% under heavy prefill (Q4_K_M at 1,1 already hit
-      #   84% peak / ~5 GB free; +3.5 GB makes it 1.5 GB free — too close
-      #   to OOM). 1,1.5 mirrors the empirical tuning the now-retired
-      #   qwen3.6-hi profile arrived at for Q5_K_M, which has the same
-      #   asymmetry character.
+      # Context 131072 (128K), single slot. At 128K + MTP the whole thing is
+      # ~40 GB (GPU0 21.6 / GPU1 18.0), ~24 GB headroom — it actually uses less
+      # VRAM than the old UD-Q6_K at 256K. draft-mtp n-max 3 beat n2 marginally
+      # on our hardware; drop to n2 only if short-reply tool-call latency ever
+      # matters more than throughput.
       #
-      # The numbers above are predicted. Run scripts/tools/stability-
-      # test-coder.sh (or equivalent prefill stress) and update the
-      # measurements in day-2-ops.md § 4.4 + get_profile_vram_estimate()
-      # below after the first redeploy of this profile.
-      echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0 layer none 0"
+      # Tensor-split: 1,1 (not 1,1.5). The MTP sweep ran at 1,1 and GPU0 sits
+      # at ~21.6 GB with room to spare, so the old 1,1.5 anti-OOM skew (tuned
+      # for the non-MTP UD-Q6_K at 256K) is no longer needed.
+      #
+      # The Q4_K_XL MTP build crashes on gfx1030 ("ROCm illegal memory access"),
+      # so Q6_K_XL is the only working MTP quant here (see qwen36-mtp memory).
+      echo "unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1 131072 1024 q8_0 layer draft-mtp 3"
       ;;
     qwen3.6-fast)
       # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
@@ -288,7 +290,7 @@ PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 qwen3.
 # Kept separate from get_profile so the operational config stays terse.
 get_profile_description() {
   case "$1" in
-    qwen3.6)      echo "Qwen3.6-35B-A3B UD-Q6_K — RAG / general (default; near-lossless precision)" ;;
+    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 128K, ~113 t/s)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
@@ -304,7 +306,7 @@ get_profile_description() {
 # when day-2-ops.md § 4.4 table is updated.
 get_profile_vram_estimate() {
   case "$1" in
-    qwen3.6)      echo "(Q6_K pivot 2026-05-27; predicted idle ~76% / ~63%, peak ~85% / ~73% at 1,1.5 — RE-MEASURE after first deploy and update this string + day-2-ops § 4.4)" ;;
+    qwen3.6)      echo "~40 GB at 128K + MTP (GPU0 21.6 / GPU1 18.0, measured 2026-10-19); ~24 GB headroom, 113 t/s gen, 0.78 draft acceptance" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
