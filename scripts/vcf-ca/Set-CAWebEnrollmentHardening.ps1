@@ -1,0 +1,732 @@
+<#
+.SYNOPSIS
+    Hardens the CA's web enrolment endpoint before it becomes reachable.
+
+.DESCRIPTION
+    This script configures the /CertSrv web enrolment site to defend against ESC8
+    (NTLM relay to /certsrv) by:
+    - Requiring SSL on /CertSrv so Basic auth is never offered over cleartext
+    - Enabling Basic authentication (SDDC Manager cannot speak Negotiate)
+    - DISABLING Windows (Negotiate/NTLM) authentication
+    - Setting Extended Protection to Require on windowsAuthentication as
+      defence in depth, in case anyone ever re-enables it
+    - Scoping inbound HTTPS to VCF Operations, SDDC Manager and an optional
+      admin IP. Operations is the component that connects to /certsrv in
+      VCF 9.x; scoping to SDDC Manager alone locks it out.
+    - Leaving /CertEnroll ANONYMOUS on port 80, and allowing port 80 from the
+      lab subnet, so CDP and AIA are actually reachable
+
+    TWO VIRTUAL DIRECTORIES, OPPOSITE TREATMENTS -- and this script used to get
+    the second one backwards. /CertSrv authenticates, so it is the ESC8 surface
+    and gets locked down. /CertEnroll does NOT authenticate: it is a static
+    directory holding the CRL and the CA certificate, both signed objects, and
+    there is no authentication there to relay. An earlier version of this
+    script enabled Basic auth on /CertEnroll and removed the port 80 binding
+    outright. Neither hardened anything, and together they broke revocation
+    checking for the whole lab: a CRL fetch answers 401, and no consumer sends
+    credentials when fetching a CRL.
+
+    CDP AND AIA ARE PLAIN HTTP BY DESIGN, not by oversight. Serving them over
+    HTTPS is circular -- validating the HTTPS certificate requires fetching a
+    CRL, which would require validating an HTTPS certificate. The objects are
+    signed, so the transport does not need to supply integrity.
+
+    WHAT ACTUALLY CLOSES ESC8 HERE IS DISABLING NEGOTIATE. ESC8 is an NTLM
+    relay against the web-enrolment endpoint; with Windows authentication off
+    the endpoint never accepts NTLM, so there is no authentication to relay.
+    Extended Protection for Authentication (EPA) is a CHANNEL-BINDING control
+    for integrated auth -- it is meaningful only while Negotiate/NTLM is
+    accepted. It is set here so that re-enabling windowsAuthentication later
+    does not silently reopen the relay path, not because it is the control
+    doing the work. EPA is NOT a property of basicAuthentication: the IIS
+    basicAuthentication schema carries enabled/realm/defaultLogonDomain/
+    logonMethod and nothing else, so writing extendedProtection there either
+    throws or produces a 500.19 on /CertSrv.
+
+    CRITICAL: Require-SSL on /CertSrv happens FIRST, before enabling Basic auth,
+    to prevent a cleartext window. Basic auth over cleartext exposes credentials
+    on the wire. IIS evaluates the SSL requirement BEFORE issuing an auth
+    challenge, so an HTTP request to /CertSrv answers 403.4 and never sees a
+    Basic prompt -- the same protection the old port-80 removal gave, without
+    taking /CertEnroll down with it.
+
+    RECOVERY: if any authentication step fails part-way, the script re-asserts
+    windowsAuthentication enabled=$false on both virtual directories and still
+    applies the firewall scoping before exiting non-zero. A half-applied run
+    must never leave Negotiate enabled on an unscoped endpoint.
+
+    Dry run by default; pass -Apply to perform the hardening.
+
+.PARAMETER SddcManagerIp
+    IP address of the SDDC Manager host (default: 172.16.10.133).
+    The firewall rule will allow HTTPS connections from this address.
+
+.PARAMETER AdminIp
+    Optional IP address of an admin workstation.
+    If provided, the firewall rule will also allow HTTPS from this address.
+
+.PARAMETER CrlConsumerSubnet
+    Subnet permitted to reach /CertEnroll on port 80 (default: 172.16.10.0/24).
+    Deliberately broader than the 443 scope: every host that validates a
+    certificate from this CA must fetch the CRL, not just SDDC Manager.
+
+.PARAMETER DisableBroadRules
+    Disable the pre-existing inbound Allow rules that explicitly permit TCP 443
+    from any address. Without this switch the script only REPORTS them; it
+    never disables a firewall rule on a domain controller unasked.
+
+.PARAMETER Apply
+    Actually apply the hardening. Without -Apply, the script only previews the
+    changes and exits without modifying anything.
+
+.REQUIRES -RunAsAdministrator
+
+.EXAMPLE
+    .\Set-CAWebEnrollmentHardening.ps1
+    Dry run: shows what would be changed and exits without making changes.
+
+.EXAMPLE
+    .\Set-CAWebEnrollmentHardening.ps1 -AdminIp 192.168.1.100 -Apply
+    Hardens the web enrolment with admin access and applies all changes.
+
+.EXAMPLE
+    .\Set-CAWebEnrollmentHardening.ps1 -Apply -DisableBroadRules
+    As above, and also disables the reported broad TCP 443 rules.
+#>
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+    [string]$SddcManagerIp = '172.16.10.133',
+    # VCF 9.x registers the CA in VCF OPERATIONS (Manage > Fleet Management >
+    # Certificates > Configure CA for Fleet), so Operations -- not SDDC
+    # Manager -- is the component that connects to https://<ca>/certsrv. An
+    # earlier version scoped 443 to SDDC Manager alone and firewalled
+    # Operations out entirely.
+    [string]$OperationsIp = '172.16.10.122',
+    # ...and Operations is STILL not the whole story. Registration is done by
+    # Operations, but ISSUANCE is driven by the fleet UCM workflow
+    # (ucmreplacecertificateworkflow), which runs on the VCF services runtime /
+    # VSP plane -- platform, fleet, lab01, idb and the platform-* worker nodes.
+    # Scoping 443 to SddcManagerIp + OperationsIp therefore lets the CA be
+    # REGISTERED and silently prevents it from ever ISSUING: -RemoteAddress
+    # drops non-matching traffic without a reset, so the submitter sees a
+    # timeout, the CA logs nothing at all, and VCF reports no error.
+    #
+    # Measured 2026-10-01: two separate rotations (License Server, then the
+    # Identity broker) were accepted as ucmreplacecertificateworkflow, ran
+    # ~15 minutes each, changed nothing, and left the CA's request table
+    # holding only its own three rows.
+    #
+    # A subnet, not a host list: the lab config notes the supervisor destroys
+    # and recreates VSP workers, so their addresses are not stable enough to
+    # pin. The ESC8 controls that actually matter -- Require-SSL and Windows
+    # auth disabled on /CertSrv, so there is no NTLM to relay -- are unaffected
+    # by this scope, and the subnet still excludes the admin VPN and anything
+    # off-lab.
+    [string]$EnrolmentConsumerSubnet = '172.16.10.0/24',
+    [string]$AdminIp,
+    # Every consumer that validates a certificate issued by this CA has to
+    # fetch the CRL and the CA certificate from /CertEnroll over HTTP --
+    # vCenter, NSX, the ESXi hosts, Operations, SDDC Manager. That is the lab
+    # subnet, not one host, so the port 80 rule is deliberately broader than
+    # the 443 one.
+    [string]$CrlConsumerSubnet = '172.16.10.0/24',
+    [switch]$DisableBroadRules,
+    [switch]$Apply
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# ------------------------------------------------------------------ helpers --
+function Write-Step { param([string]$m) Write-Host "`n=== $m" -ForegroundColor Cyan }
+function Write-Ok   { param([string]$m) Write-Host "  [OK] $m" -ForegroundColor Green }
+function Write-Info { param([string]$m) Write-Host "  [..] $m" -ForegroundColor Gray }
+function Write-Warn { param([string]$m) Write-Host "  [!] $m" -ForegroundColor Yellow }
+function Write-Fail { param([string]$m) Write-Host "  [X] $m" -ForegroundColor Red }
+
+# IIS, and the WebAdministration module with it, arrives as part of
+# ADCS-Web-Enrollment. Running this script before the CA is installed is an
+# ordering mistake, not a broken script -- so say which, instead of dying on an
+# unhandled Modules_ModuleNotFound exception. Measured on dns01 before install:
+# the bare Import-Module threw a four-line stack trace naming neither the cause
+# nor the fix.
+# Basic auth cannot work without its module, and enabling it in configuration
+# without the feature silently does nothing -- see Install-LabCA.ps1. Guard
+# here too, because this script is what disables the other providers: doing
+# that while Basic is non-functional leaves /certsrv with no way to
+# authenticate at all (401 2 5).
+$basicFeature = Get-WindowsFeature Web-Basic-Auth -ErrorAction SilentlyContinue
+if ($basicFeature -and $basicFeature.InstallState -ne 'Installed') {
+    Write-Fail "The Web-Basic-Auth IIS feature is NOT installed."
+    Write-Fail "Enabling basicAuthentication without it is accepted and does nothing, and"
+    Write-Fail "this script disables anonymous and Windows auth -- leaving /certsrv with no"
+    Write-Fail "working authentication provider (HTTP 401.2)."
+    Write-Info  "Install it first:  Install-WindowsFeature Web-Basic-Auth"
+    Write-Info  "This is VMware's documented step: Web Server (IIS) > Web Server > Security"
+    Write-Info  "> Basic Authentication."
+    exit 1
+}
+
+if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+    Write-Fail "The WebAdministration module is not present, so IIS is not installed."
+    Write-Info "/CertSrv and /CertEnroll are created by the ADCS-Web-Enrollment role service."
+    Write-Info "Run Install-LabCA.ps1 -Apply first, then re-run this script."
+    exit 1
+}
+Import-Module WebAdministration
+
+# Best-effort re-assertion of the one setting that must never be left on after a
+# partial failure: Negotiate/NTLM enabled on the enrolment endpoint.
+function Reset-WindowsAuthDisabled {
+    foreach ($loc in @('Default Web Site/CertSrv', 'Default Web Site/CertEnroll')) {
+        try {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/windowsAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' -Location $loc -ErrorAction Stop
+            Write-Ok "recovery: windowsAuthentication disabled on $loc"
+        } catch {
+            Write-Fail "recovery: could NOT disable windowsAuthentication on $loc -- $($_.Exception.Message)"
+            Write-Fail "recovery: DO NOT leave this host reachable on 443 until that is fixed by hand"
+        }
+    }
+}
+
+# ---------------------------------------------- IIS authentication hardening --
+Write-Step "Hardening /CertSrv and /CertEnroll authentication"
+Write-Info "Disabling Windows auth -- THIS is what closes ESC8 (no NTLM, nothing to relay)"
+Write-Info "Enabling Basic auth because SDDC Manager cannot speak Negotiate"
+Write-Info "Setting EPA on windowsAuthentication as defence in depth only"
+Write-Host ""
+
+# CRITICAL ORDERING: Require-SSL on /CertSrv goes FIRST, before Basic auth is
+# enabled there. Port 80 now stays bound (for /CertEnroll), so without this
+# ordering there would be a window where Basic is enabled and reachable over
+# cleartext. With it, an http request to /CertSrv is refused by the access
+# check before any WWW-Authenticate challenge is emitted.
+#
+# Do NOT "restore" a port-80 removal here. It was removed from this script
+# deliberately: it took /CertEnroll down with it, and /CertEnroll is where
+# every consumer in the lab fetches the CRL and the CA certificate.
+# /CertEnroll may legitimately be absent (Web Enrolment not installed). That is
+# the ONE error worth tolerating on these steps. Everything else -- a config
+# lock, an access denial -- must reach the normal failure path. An earlier
+# version of this script ENABLED Basic auth on /CertEnroll, so a silent failure
+# to turn it off again leaves revocation checking broken for the whole lab
+# while the script reports success. Presence is therefore established ONCE,
+# here, and the steps below carry no catch of their own.
+$certEnrollPresent = $false
+try {
+    $certEnrollPresent = [bool](Get-WebVirtualDirectory -Site 'Default Web Site' `
+                                    -Name 'CertEnroll' -ErrorAction Stop)
+} catch { $certEnrollPresent = $false }
+if ($certEnrollPresent) {
+    Write-Ok "/CertEnroll virtual directory found"
+} else {
+    Write-Warn "/CertEnroll virtual directory NOT found -- its steps will be skipped."
+    Write-Warn "Without it there is no publication point, so CDP and AIA cannot work."
+}
+
+$actions = @(
+    @{
+        what = 'Require SSL on /CertSrv -- this is the cleartext control'
+        do   = {
+            # IIS evaluates the SSL requirement BEFORE issuing an authentication
+            # challenge, so a plain HTTP request to /CertSrv gets 403.4 and never
+            # sees a Basic prompt. Removing the port 80 binding also achieves
+            # that -- which is what this script used to do -- but it takes
+            # /CertEnroll down with it, and /CertEnroll is where every consumer
+            # in the lab fetches the CRL and the CA certificate. Scope the
+            # control to the vdir that actually needs it.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/access `
+                -Name sslFlags -Value 'Ssl' `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    @{
+        what = 'Enable Basic auth on /CertSrv (SDDC Manager cannot speak Negotiate)'
+        do   = {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/basicAuthentication `
+                -Name enabled -Value $true `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    @{
+        what = 'Set Extended Protection = Require on /CertSrv windowsAuthentication (defence in depth)'
+        do   = {
+            # extendedProtection belongs to windowsAuthentication, NOT
+            # basicAuthentication. Setting it here means that if anyone ever
+            # re-enables Windows auth on this vdir, channel binding is already
+            # required and the ESC8 relay does not come back with it.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/windowsAuthentication `
+                -Name extendedProtection.tokenChecking -Value 'Require' `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    @{
+        what = 'Disable anonymous auth on /CertSrv (completes the auth end state)'
+        do   = {
+            # The installer disables this already. Asserted anyway so the
+            # script's end state is fully specified rather than inherited:
+            # anonymous plus Basic would serve enrolment requests as IUSR,
+            # which fails enrolment rather than leaking anything, but leaving
+            # it unstated means a future change cannot be reasoned about.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/anonymousAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    @{
+        what = 'Disable Windows auth on /CertSrv (the actual ESC8 control)'
+        do   = {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/windowsAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertSrv'
+        }
+    }
+    # ----------------------------------------------------------- /CertEnroll --
+    # /CertEnroll is NOT an ESC8 surface. ESC8 relays NTLM to an endpoint that
+    # AUTHENTICATES; /CertEnroll is a static directory of signed objects (the
+    # CRL and the CA certificate) and accepts no credentials, so there is
+    # nothing to relay to it. An earlier version of this script enabled Basic
+    # auth here. That is not hardening -- it makes every CRL fetch answer 401,
+    # and no consumer sends credentials when fetching a CRL, so it breaks
+    # revocation checking for the entire lab.
+    @{
+        what = '/CertEnroll: anonymous auth ON (CRL and AIA fetches carry no credentials)'
+        skipUnlessCertEnroll = $true
+        do   = {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/anonymousAuthentication `
+                -Name enabled -Value $true `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
+        }
+    }
+    @{
+        what = '/CertEnroll: Basic auth OFF (a 401 on a CRL fetch breaks revocation checking)'
+        skipUnlessCertEnroll = $true
+        do   = {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/basicAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
+        }
+    }
+    @{
+        what = '/CertEnroll: Windows auth OFF'
+        skipUnlessCertEnroll = $true
+        do   = {
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/authentication/windowsAuthentication `
+                -Name enabled -Value $false `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
+        }
+    }
+    @{
+        what = '/CertEnroll: do NOT require SSL -- CDP and AIA are plain HTTP by design'
+        skipUnlessCertEnroll = $true
+        do   = {
+            # Serving CDP/AIA over HTTPS is circular: validating the HTTPS
+            # certificate requires fetching a CRL, which would require
+            # validating an HTTPS certificate. CRLs and CA certificates are
+            # signed, so the transport does not need to provide integrity.
+            Set-WebConfigurationProperty `
+                -Filter /system.webServer/security/access `
+                -Name sslFlags -Value '' `
+                -PSPath 'IIS:\' `
+                -Location 'Default Web Site/CertEnroll'
+        }
+    }
+    @{
+        what = '/CertEnroll: remove the legacy Netscape revocation ASP page'
+        skipUnlessCertEnroll = $true
+        do   = {
+            # AD CS drops nsrev_<CA>.asp into CertEnroll at install. It is a
+            # Netscape-era revocation endpoint that takes a serial number from
+            # the query string and instantiates the CertificateAuthority.Admin
+            # COM object:
+            #
+            #   stat = Admin.IsValidCertificate("<host>\<CA>", serialnumber)
+            #
+            # Once port 80 is open to the lab subnet that is an anonymous
+            # endpoint invoking a CA administration interface on a domain
+            # controller. Nothing in VCF -- or in any current client -- uses
+            # Netscape revocation checking, so the page has no consumer and is
+            # removed. Verified present on this CA after install.
+            $asp = @(Get-ChildItem 'C:\Windows\System32\CertSrv\CertEnroll\nsrev_*.asp' -ErrorAction SilentlyContinue)
+            if (-not $asp) { Write-Ok "no nsrev_*.asp present"; return }
+            foreach ($a in $asp) {
+                Remove-Item -LiteralPath $a.FullName -Force -ErrorAction Stop
+                Write-Ok "removed $($a.Name)"
+            }
+        }
+    }
+    @{
+        what = '/CertEnroll: refuse to execute ASP at all (defence in depth)'
+        skipUnlessCertEnroll = $true
+        do   = {
+            # The ASP feature must stay installed -- /CertSrv's web enrolment
+            # pages ARE .asp -- so removing the one file above is not a durable
+            # control: a repair, reinstall or role re-add puts it back. Clearing
+            # the handler mapping on THIS vdir means an .asp there is served as
+            # bytes rather than executed, whatever reappears.
+            #
+            # /CertEnroll only ever serves .crl and .crt files, so it has no
+            # legitimate need for a script handler.
+            $loc = 'Default Web Site/CertEnroll'
+            $handlers = @(Get-WebConfiguration -Filter /system.webServer/handlers/add -PSPath 'IIS:\' -Location $loc -ErrorAction SilentlyContinue |
+                          Where-Object { $_.path -match '\.asp$' })
+            if (-not $handlers) {
+                # Nothing inherited to remove is fine; add the explicit deny below anyway.
+                Write-Info "no inherited .asp handler found at $loc"
+            }
+            foreach ($hd in $handlers) {
+                Remove-WebConfigurationProperty -Filter /system.webServer/handlers -PSPath 'IIS:\' `
+                    -Location $loc -Name '.' -AtElement @{ name = $hd.name } -ErrorAction SilentlyContinue
+                Write-Ok "removed handler '$($hd.name)' from $loc"
+            }
+            # Belt and braces: deny the .asp extension outright via request filtering.
+            #
+            # This MUST check before adding. A duplicate collection entry is a
+            # TERMINATING error from the underlying configuration API, so
+            # -ErrorAction SilentlyContinue does NOT suppress it. Re-running this
+            # script failed here with
+            #   "Cannot add duplicate collection entry of type 'add' with unique
+            #    key attribute 'fileExtension' set to '.asp'"
+            # which aborted the step list and reported the whole hardening run
+            # INCOMPLETE even though the end state was already correct.
+            $aspFilter = "/system.webServer/security/requestFiltering/fileExtensions"
+            $aspDeny = @(Get-WebConfigurationProperty -Filter $aspFilter `
+                            -PSPath 'IIS:\' -Location $loc -Name 'Collection' -ErrorAction SilentlyContinue |
+                         Where-Object { "$($_.fileExtension)" -eq '.asp' })
+            if ($aspDeny.Count -gt 0) {
+                # Present is not the same as denied: an entry that ALLOWS .asp is
+                # worse than no entry at all, so correct it rather than report OK.
+                $permissive = @($aspDeny | Where-Object { "$($_.allowed)" -notmatch '^(?i:false|0)$' })
+                if ($permissive.Count -gt 0) {
+                    Set-WebConfigurationProperty -Filter "$aspFilter/add[@fileExtension='.asp']" `
+                        -PSPath 'IIS:\' -Location $loc -Name 'allowed' -Value 'false' -ErrorAction Stop
+                    Write-Ok "request filtering: flipped an existing PERMISSIVE .asp entry to deny under /CertEnroll"
+                } else {
+                    Write-Ok "request filtering already denies .asp under /CertEnroll"
+                }
+            } else {
+                Add-WebConfigurationProperty -Filter $aspFilter `
+                    -PSPath 'IIS:\' -Location $loc -Name '.' `
+                    -Value @{ fileExtension = '.asp'; allowed = 'false' } -ErrorAction Stop
+                Write-Ok "request filtering denies .asp under /CertEnroll"
+            }
+        }
+    }
+    @{
+        what = 'Ensure the port 80 binding EXISTS -- CDP and AIA depend on it'
+        do   = {
+            $b = Get-WebBinding -Name 'Default Web Site' -Protocol http |
+                 Where-Object { $_.bindingInformation -like '*:80:*' }
+            if (-not $b) {
+                New-WebBinding -Name 'Default Web Site' -Protocol http -Port 80 -IPAddress '*'
+                Write-Ok "port 80 binding restored"
+            } else {
+                Write-Ok "port 80 binding already present"
+            }
+        }
+    }
+)
+
+$authFailed = $false
+foreach ($a in $actions) {
+    if ($a.ContainsKey('skipUnlessCertEnroll') -and $a.skipUnlessCertEnroll -and -not $certEnrollPresent) {
+        Write-Host ("  SKIP   {0}  (/CertEnroll absent)" -f $a.what) -ForegroundColor Yellow
+        continue
+    }
+    Write-Host ("  {0} {1}" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }), $a.what)
+    if ($Apply -and -not $authFailed) {
+        try {
+            & $a.do
+        } catch {
+            Write-Fail "Failed to apply: $($a.what)"
+            Write-Fail "  Error: $($_.Exception.Message)"
+            $authFailed = $true
+        }
+    }
+}
+
+if ($authFailed) {
+    Write-Step "Authentication hardening failed part-way -- recovering"
+    Write-Warn "Re-asserting windowsAuthentication = disabled, then still scoping the firewall."
+    Write-Warn "A half-applied run must not leave Negotiate enabled on an unscoped endpoint."
+    Reset-WindowsAuthDisabled
+}
+
+# ------------------------------------------------- firewall rule hardening --
+Write-Step "Configuring firewall rules"
+
+# Audit for pre-existing broad Allow rules that would bypass scoping.
+# Windows Firewall evaluates all matching Allow rules with OR semantics; a scoped Allow
+# does not narrow a broader pre-existing Allow. Task 1 commonly enables
+# "World Wide Web Services (HTTP/HTTPS Traffic-In)" which allows 443 from anywhere.
+#
+# SCOPE OF THIS AUDIT, deliberately narrow: only ENABLED inbound TCP Allow rules
+# whose LocalPort EXPLICITLY contains 443. LocalPort='Any' is NOT included --
+# that matched 38 rules on a real DC (Remote Assistance, Connected Devices, VS
+# Code, node.exe and other program-scoped rules), none of which have anything to
+# do with 443, and disabling them would cost remote management of this domain
+# controller. Nothing here is ever disabled without -DisableBroadRules, and
+# action is taken on rule Name (unique), never DisplayName (not unique).
+# LocalPort is not always a single number: it can be a comma list or a RANGE
+# such as "400-500" or "1-1024". A plain -contains comparison therefore misses
+# every range that COVERS the port, so a pre-existing rule allowing 1-1024 from
+# anywhere would never be reported and the scoped rules below would narrow
+# nothing. 'Any' stays deliberately excluded -- see the note above.
+function Test-PortCovered {
+    param([string[]]$LocalPorts, [int]$Port)
+    foreach ($p in $LocalPorts) {
+        if ($p -eq 'Any') { continue }
+        if ($p -match '^\d+$') {
+            if ([int]$p -eq $Port) { return $true }
+            continue
+        }
+        if ($p -match '^(\d+)\s*-\s*(\d+)$') {
+            if ($Port -ge [int]$Matches[1] -and $Port -le [int]$Matches[2]) { return $true }
+        }
+    }
+    return $false
+}
+
+Write-Info "Auditing for ENABLED inbound Allow rules that permit TCP 443 or TCP 80 from anywhere"
+$broadRules = @()
+try {
+    $allInboundRules = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction Stop
+    foreach ($rule in $allInboundRules) {
+        $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+        if (-not $port) { continue }
+        # Gate on protocol: only TCP rules can legitimately listen on port 443.
+        if ($port.Protocol -ne 'TCP') { continue }
+        $localPorts = @($port.LocalPort | ForEach-Object { [string]$_ })
+        $covered = @()
+        foreach ($candidate in 443, 80) {
+            if (Test-PortCovered -LocalPorts $localPorts -Port $candidate) { $covered += $candidate }
+        }
+        if ($covered.Count -eq 0) { continue }
+        $addr = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+        if (-not $addr) { continue }
+        $remotes = @($addr.RemoteAddress | ForEach-Object { [string]$_ })
+        if (($remotes -contains 'Any') -or ($remotes -contains '0.0.0.0/0') -or ($remotes -contains '::/0')) {
+            $app = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+            $svc = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue
+            $program = 'Any'
+            if ($app -and $app.Program) { $program = [string]$app.Program }
+            $service = 'Any'
+            if ($svc -and $svc.Service) { $service = [string]$svc.Service }
+            $broadRules += [pscustomobject]@{
+                Name        = $rule.Name
+                DisplayName = $rule.DisplayName
+                Program     = $program
+                Service     = $service
+                Profile     = [string]$rule.Profile
+                Ports       = ($covered -join ',')
+                # Only a broad 443 rule defeats a control. Everything on port
+                # 80 is public by design (a static directory of signed
+                # objects), and the one sensitive vdir there is protected at
+                # the IIS layer by Require-SSL -- so an over-broad 80 rule is
+                # reported for awareness and does NOT gate the exit code.
+                Blocking    = ($covered -contains 443)
+            }
+        }
+    }
+} catch {
+    Write-Fail "FATAL: Could not audit firewall rules"
+    Write-Fail "  Error: $($_.Exception.Message)"
+    exit 1
+}
+
+$broadRemain = $false
+
+# Only a broad 443 rule defeats a control here. Everything reachable on port 80
+# is public by design -- a static directory of signed objects -- and the one
+# sensitive vdir on that port answers 403 because it requires SSL. So an
+# over-broad 80 rule is reported for awareness and does NOT gate this script,
+# while an over-broad 443 rule still does.
+$blockingRules = @($broadRules | Where-Object { $_.Blocking })
+$infoRules     = @($broadRules | Where-Object { -not $_.Blocking })
+
+if ($infoRules.Count -gt 0) {
+    Write-Info "FYI -- these ENABLED rules allow TCP 80 from any address (not gating):"
+    foreach ($r in $infoRules) {
+        Write-Host ("      {0}  ({1})  ports={2}" -f $r.Name, $r.DisplayName, $r.Ports) -ForegroundColor DarkGray
+    }
+}
+
+$broadRules = $blockingRules
+if ($broadRules.Count -eq 0) {
+    Write-Ok "No pre-existing rule allows TCP 443 from anywhere"
+} else {
+    Write-Warn "These ENABLED rules allow TCP 443 from any address and bypass the scoping below:"
+    foreach ($r in $broadRules) {
+        Write-Host ""
+        Write-Host "      Name        : $($r.Name)"        -ForegroundColor Yellow
+        Write-Host "      DisplayName : $($r.DisplayName)" -ForegroundColor Yellow
+        Write-Host "      Program     : $($r.Program)"     -ForegroundColor Yellow
+        Write-Host "      Service     : $($r.Service)"     -ForegroundColor Yellow
+        Write-Host "      Profile     : $($r.Profile)"     -ForegroundColor Yellow
+    }
+    Write-Host ""
+    if ($Apply -and $DisableBroadRules) {
+        Write-Info "Disabling them by Name (-DisableBroadRules was passed):"
+        foreach ($r in $broadRules) {
+            try {
+                Disable-NetFirewallRule -Name $r.Name -ErrorAction Stop
+                Write-Ok "Disabled: $($r.Name) ($($r.DisplayName))"
+            } catch {
+                Write-Fail "Could not disable $($r.Name): $($_.Exception.Message)"
+                $broadRemain = $true
+            }
+        }
+    } else {
+        $broadRemain = $true
+        Write-Warn "NOT disabling anything. This script never disables a firewall rule on a"
+        Write-Warn "domain controller unasked. Review the list above, then either re-run with"
+        Write-Warn "-DisableBroadRules or disable the ones you agree with by hand:"
+        foreach ($r in $broadRules) {
+            Write-Host "      Disable-NetFirewallRule -Name '$($r.Name)'" -ForegroundColor DarkGray
+        }
+    }
+}
+
+$allow = @($SddcManagerIp)
+if ($OperationsIp) { $allow += $OperationsIp }
+# The fleet UCM plane submits the CSR; without it the CA registers but never issues.
+if ($EnrolmentConsumerSubnet) { $allow += $EnrolmentConsumerSubnet }
+if ($AdminIp) {
+    $allow += $AdminIp
+}
+
+# Remove the old scoped rule if it exists (idempotency). Looked up by DisplayName
+# but removed via the pipeline object, so the actual rule identity is preserved.
+Write-Info "Checking for existing scoped rule to remove (idempotency)"
+$existingRule = @(Get-NetFirewallRule -DisplayName 'CertSrv HTTPS (scoped)' -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Direction -eq 'Inbound' })
+if ($existingRule) {
+    Write-Host ("  {0} remove stale scoped rule (re-running with new -AdminIp?)" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }))
+    if ($Apply) {
+        try {
+            $existingRule | Remove-NetFirewallRule -ErrorAction Stop
+            Write-Ok "Stale scoped rule removed"
+        } catch {
+            Write-Fail "FATAL: Could not remove stale firewall rule"
+            Write-Fail "  Error: $($_.Exception.Message)"
+            exit 1
+        }
+    }
+}
+
+Write-Host ("  {0} scope inbound 443 to: {1}" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }), ($allow -join ', '))
+if ($Apply) {
+    try {
+        New-NetFirewallRule `
+            -DisplayName 'CertSrv HTTPS (scoped)' `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 443 `
+            -RemoteAddress $allow `
+            -Action Allow `
+            -ErrorAction Stop | Out-Null
+        Write-Ok "Firewall rule created"
+    } catch {
+        Write-Fail "FATAL: Could not create firewall rule"
+        Write-Fail "  Error: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
+# --------------------------------------- port 80 for CDP/AIA (/CertEnroll) --
+# What this exposes is a static directory of SIGNED objects. /CertSrv on the
+# same port answers 403 because it requires SSL, so widening 80 does not widen
+# the enrolment surface. Without this rule every certificate this CA issues
+# carries a revocation URL nothing in the lab can reach, and strict validators
+# -- VCF LCM among them -- hard-fail on a CRL they cannot retrieve.
+$crlRuleName = 'CertEnroll HTTP CDP-AIA (lab subnet)'
+Write-Info "Checking for existing CDP/AIA rule to remove (idempotency)"
+$existingCrlRule = @(Get-NetFirewallRule -DisplayName $crlRuleName -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Direction -eq 'Inbound' })
+if ($existingCrlRule) {
+    Write-Host ("  {0} remove stale CDP/AIA rule" -f $(if($Apply) { 'APPLY ' } else { 'WOULD ' }))
+    if ($Apply) {
+        try {
+            $existingCrlRule | Remove-NetFirewallRule -ErrorAction Stop
+            Write-Ok "Stale CDP/AIA rule removed"
+        } catch {
+            Write-Fail "FATAL: Could not remove stale CDP/AIA firewall rule"
+            Write-Fail "  Error: $($_.Exception.Message)"
+            exit 1
+        }
+    }
+}
+
+Write-Host ("  {0} allow inbound 80 from: {1}  (/CertEnroll only; /CertSrv requires SSL)" -f `
+            $(if($Apply) { 'APPLY ' } else { 'WOULD ' }), $CrlConsumerSubnet)
+if ($Apply) {
+    try {
+        New-NetFirewallRule `
+            -DisplayName $crlRuleName `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 80 `
+            -RemoteAddress $CrlConsumerSubnet `
+            -Action Allow `
+            -ErrorAction Stop | Out-Null
+        Write-Ok "CDP/AIA firewall rule created"
+    } catch {
+        Write-Fail "FATAL: Could not create the CDP/AIA firewall rule"
+        Write-Fail "  Error: $($_.Exception.Message)"
+        Write-Fail "Without it, every certificate this CA issues has an unreachable CRL."
+        exit 1
+    }
+}
+
+# ------------------------------------------------- completion message --
+if (-not $Apply) {
+    Write-Warn "DRY RUN -- pass -Apply to apply hardening"
+    Write-Host ""
+    exit 0
+}
+
+if ($authFailed) {
+    Write-Step "Web enrolment hardening INCOMPLETE"
+    Write-Fail "Authentication hardening failed part-way; recovery ran and the firewall was scoped."
+    Write-Fail "Fix the error above and re-run before exposing /certsrv."
+    Write-Host ""
+    exit 1
+}
+
+if ($broadRemain) {
+    Write-Step "Web enrolment hardening applied, but scoping is NOT yet effective"
+    Write-Fail "Broad TCP 443 rules listed above still allow 443 from any address."
+    Write-Fail "Until they are disabled, the 'CertSrv HTTPS (scoped)' rule narrows nothing."
+    Write-Host ""
+    exit 1
+}
+
+Write-Step "Web enrolment hardening complete"
+Write-Ok "All hardening steps applied successfully"
+Write-Warn "IMPORTANT: /certsrv is unreachable until YOU bind a certificate to IIS on 443."
+Write-Warn "NO SCRIPT DOES THIS. It is a manual step -- README step 5, 'Bind the DC's"
+Write-Warn "certificate to IIS on 443', which also depends on the DC having autoenrolled"
+Write-Warn "first (~90-120 min GPO cycle, or force it with certutil -pulse)."
+Write-Info "That is expected. No consumer of /certsrv exists until Register-VcfCA.ps1."
+Write-Host ""
+exit 0

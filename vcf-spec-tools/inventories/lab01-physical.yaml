@@ -1,0 +1,169 @@
+# VCF 9.1.1 physical lab -- 3x Minisforum 795S7 on the MikroTik CRS309.
+#
+# This is the REAL lab, not the bundled example. vcfspec/examples/lab-3-host.yaml
+# stays as it is: it mirrors the nested Proxmox lab on 10.50.10.0/24, which is
+# still live and is what the probe tests validate against.
+#
+# Addressing discovered 2026-09-24, not assumed:
+#   - CRS309-1G-8S+ (RouterOS 7.20, id IBEV-J3RM) at 192.168.6.11 routes six
+#     lab VLANs and announced them over MNDP: 10 Mgmt, 20 vMotion, 30 vSAN,
+#     40 TEP, 50 T0-uplink, 60 VM-Mgmt. All six gateways answer.
+#   - dns01 (172.16.10.150) is a Windows DC -- 53, 88, 389, 445, 3268 -- and
+#     also serves NTP on 123/udp. It is authoritative for knowledgeondemand.net
+#     and 10.16.172.in-addr.arpa.
+#   - hyp01/02/03 resolve to .145/.143/.141 with matching PTRs.
+#
+# UNVERIFIED, marked so they are not mistaken for measurements:
+#   - Appliance short names are NOT our convention: they are the names the
+#     previous VCF already holds in DNS (vcsa .129, operations .130, nsx .131,
+#     nsxa .132, sddc-manager .133, installer .135), reused so the existing
+#     address allocation carries over. Their IPs come from DNS, not from this
+#     file, so the A/PTR pairs must exist before bring-up.
+#   - MTU is now read off the CRS309: every VLAN is mtu=9000 l2mtu=9196.
+#     Management stays at 1500 here deliberately. The switch figure is a
+#     ceiling, not a requirement, and management is the one VCF network whose
+#     traffic leaves the fabric -- it is reached from 192.168.6.0/24 across the
+#     CRS309 uplink, and the home side is 1500. vMotion, vSAN and TEP never
+#     leave the lab, so they take the 9000 the fabric offers.
+#   - All nine device identifiers were read off the live hosts 2026-09-24 and
+#     are distinct; every t10. string embeds that drive's own serial, so the
+#     three chassis cannot share one however identical they look.
+#   - The vMotion/vSAN/TEP pool ranges are chosen from unoccupied space, not
+#     read from a DHCP reservation list.
+#   - provisioningMac is the MAC now answering on each host's management
+#     address, read from the CRS309's ARP table. If a chassis is set to HTTP
+#     boot from a different physical port, the per-MAC boot.cfg for that host
+#     is never requested and it silently falls back to a default.
+apiVersion: vcfspec/v1
+kind: LabInventory
+instance:
+  name: lab01
+  sddcId: lab01
+  vcfVersion: 9.1.1.0
+dns:
+  subdomain: lab.knowledgeondemand.net
+  nameservers: [172.16.10.150]
+ntp:
+  servers: [172.16.10.150]
+networks:
+  management: {vlan: 10, subnet: 172.16.10.0/24, gateway: 172.16.10.1, mtu: 1500}
+  vmotion:    {vlan: 20, subnet: 172.16.20.0/24, gateway: 172.16.20.1, mtu: 9000,
+               pool: {start: 172.16.20.20, end: 172.16.20.30}}
+  vsan:       {vlan: 30, subnet: 172.16.30.0/24, gateway: 172.16.30.1, mtu: 9000,
+               pool: {start: 172.16.30.20, end: 172.16.30.30}}
+nsx:
+  vipFqdn: nsx.lab.knowledgeondemand.net          # existing .131
+  managers: [nsxa]                               # existing .132
+  size: medium
+  transportVlanId: 40
+  fabricMtu: 9000
+  tepPool:
+    name: lab01-tep
+    cidr: 172.16.40.0/24
+    gateway: 172.16.40.1
+    ranges:
+      - {start: 172.16.40.20, end: 172.16.40.60}
+storage:
+  type: VSAN_ESA
+  datastoreName: vsan-lab01
+  failuresToTolerate: 1
+  # The CT4000P310 is consumer NVMe and is not on the vSAN ESA HCL;
+  # bring-up fails VSAN_ESA_HOST_HCL_COMPATIBLE_ERROR without this.
+  # Native in 9.1.1 - no mock VIB, no domainmanager property edits.
+  skipHclAutoDiskClaim: true
+appliances:
+  vcenter: {hostname: vcsa, size: small, ssoDomain: vsphere.local}   # existing .129
+  sddcManager: {hostname: sddc-manager}           # existing .133
+  vsp:
+    platformFqdn: platform.lab.knowledgeondemand.net   # .120
+    instanceFqdn: lab01.lab.knowledgeondemand.net      # .121
+    # Fleet-level services: fleet lifecycle, Salt RaaS, software depot. Its
+    # absence is what killed the 2026-09-25 bring-up -- the spec validated
+    # clean and then failed at "Deploy Lifecycle Components".
+    fleetFqdn: fleet.lab.knowledgeondemand.net         # .116
+    # Moved off .100-.115: that range is polluted by supervisor nodes from the
+    # failed attempt, and the resume pre-validation refuses any pool holding an
+    # in-use address. .160-.189 is 30 addresses, verified 2026-09-26 to have no
+    # live host and no PTR -- and 30 is the documented recommendation (12 min).
+    poolStart: 172.16.10.160
+    poolEnd: 172.16.10.189
+    internalCidr: 198.18.0.0/15
+  # Required for a new VCF fleet; hostname is the SHORT name, the Installer
+  # prefixes the subdomain. Forward and reverse DNS verified 2026-09-26.
+  # VCF Automation is deliberately absent: it wants 24 of this cluster's 48
+  # cores and is deployable later through the deferred-components path.
+  operations: {hostname: ops, size: xsmall}            # .122
+  operationsCollector: {hostname: opscollector, size: small}   # .123
+  identityBroker: {hostname: idb}                      # .124
+  licenseServer: {hostname: licsrv}                    # .134
+provisioning:
+  # The DC runs no HTTP. TrueNAS already serves the offline depot on the
+  # management VLAN, its webroot is the share's PROD/, and an extra PROD/esx
+  # is outside every path the depot catalogue reads -- so the boot server is
+  # that nginx rather than a second service to keep alive. Verified 200.
+  # Kickstarts land in PROD/esx/; the unpacked ISO in PROD/esx/esx-9.1.1.0/,
+  # which is where the default installerPayloadUrl points.
+  bootServerUrl: http://172.16.10.50:8080/esx
+  esxVersion: 9.1.1.0
+  # Ryzen 9 7945HX is a consumer AMD part: NSX Edge's DPDK vendor check and
+  # NVMe memory tiering both need the /etc/vmware/config lines this emits.
+  hostWorkarounds: [consumer-amd]
+hosts:
+  - name: hyp01
+    provisioningMac: "98:b7:85:22:54:a4"
+    # Read from the live host 2026-09-24 (esxcli storage core device list).
+    # Boot moves to the 1 TB Crucial. The host boots today from a 59 GB USB
+    # stick at mpx.vmhba32:C0:T0:L0 -- an mpx name is assigned in discovery
+    # order at boot, so it names a different device after a reshuffle, and
+    # VMware has deprecated USB/SD as a boot medium besides.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________483D124F0175A000
+    mgmtIp: 172.16.10.145
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________9BF6F24E0175A000
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________478202718C382500
+      cpuModel: 7945HX
+  - name: hyp02
+    provisioningMac: "98:b7:85:22:65:3e"
+    # Read from the live host 2026-09-24. Boots today from the same 59 GB USB
+    # stick as the others; boot moves to the 1 TB Crucial.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________25A8154F0175A000
+    mgmtIp: 172.16.10.143
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________C0B2F24E0175A000
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________97BBB38187382500
+      cpuModel: 7945HX
+  - name: hyp03
+    provisioningMac: "98:b7:85:23:a4:ce"
+    # Read from the live host 2026-09-24. Boots today from the same 59 GB USB
+    # stick as the others; boot moves to the 1 TB Crucial.
+    bootDisk: /vmfs/devices/disks/t10.NVMe____CT1000P310SSD2__________________________1EA609500175A000
+    mgmtIp: 172.16.10.141
+    vmnics: [vmnic0, vmnic1]
+    hardware:
+      cores: 16
+      ramGb: 96
+      vsanDeviceTb: 4
+      vsanDevice: /vmfs/devices/disks/t10.NVMe____CT4000P310SSD8__________________________5995F74E0175A000
+      memoryTieringGb: 96
+      memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________3341B78187382500
+      cpuModel: 7945HX
+credentials:
+  esxRoot: ${esx_root}
+  esxRootHash: ${esx_root_hash}
+  vcenterRoot: ${vcenter_root}
+  ssoAdmin: ${sso_admin}
+  nsxAdmin: ${nsx_admin}
+  sddcManagerRoot: ${sddc_root}
+  operationsAdmin: ${operations_admin}
+  operationsRoot: ${operations_root}
+  operationsCollectorRoot: ${operations_collector_root}

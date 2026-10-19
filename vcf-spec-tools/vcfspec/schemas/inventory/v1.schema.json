@@ -208,6 +208,10 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 3
+        },
+        "skipHclAutoDiskClaim": {
+          "type": "boolean",
+          "description": "Set true to let VCF claim vSAN ESA disks that are not on the vSAN ESA HCL. Renders as datastoreSpec.vsanSpec.esaConfig.skipHclAutoDiskClaim. Native in 9.1.1; the 9.0-era mock VIB and domainmanager property edits are obsolete. Only meaningful when type is VSAN_ESA."
         }
       }
     },
@@ -216,7 +220,11 @@
       "required": [
         "vcenter",
         "sddcManager",
-        "vsp"
+        "vsp",
+        "operations",
+        "operationsCollector",
+        "identityBroker",
+        "licenseServer"
       ],
       "additionalProperties": false,
       "properties": {
@@ -265,6 +273,7 @@
           "required": [
             "platformFqdn",
             "instanceFqdn",
+            "fleetFqdn",
             "poolStart",
             "poolEnd"
           ],
@@ -290,6 +299,79 @@
                 "240.0.0.0/15",
                 "250.0.0.0/15"
               ]
+            },
+            "fleetFqdn": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "operations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hostname",
+            "size"
+          ],
+          "properties": {
+            "hostname": {
+              "type": "string",
+              "minLength": 1
+            },
+            "size": {
+              "enum": [
+                "xsmall",
+                "small",
+                "medium",
+                "large",
+                "xlarge"
+              ]
+            }
+          }
+        },
+        "operationsCollector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hostname",
+            "size"
+          ],
+          "properties": {
+            "hostname": {
+              "type": "string",
+              "minLength": 1
+            },
+            "size": {
+              "enum": [
+                "small",
+                "standard"
+              ]
+            }
+          }
+        },
+        "identityBroker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hostname"
+          ],
+          "properties": {
+            "hostname": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "licenseServer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hostname"
+          ],
+          "properties": {
+            "hostname": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }

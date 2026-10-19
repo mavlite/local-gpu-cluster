@@ -14,15 +14,36 @@ def test_reference_lab_reports_evaluation_licensing(inventory):
     assert "VCF-LIC-EVALUATION" in check_platform(inventory).codes
 
 
-def test_memory_tiering_clears_the_n1_shortfall(inventory):
+def test_reference_lab_clears_n1_on_dram_alone(inventory):
+    """The 2026-09-24 design fits N-1 without tiering. It did not used to.
+
+    Against the 219 GB stack these rules were written for, N-1 offered
+    180 GB and fell short, so tiering was load-bearing and the pair of
+    tests here asserted exactly that. The design now in rules/tables.py is
+    139.25 GB, which 180 GB of DRAM clears.
+
+    Zeroing tiering rather than asserting on the reference inventory as it
+    stands: with tiering counted the assertion would hold whether or not
+    the DRAM alone were sufficient, so it would no longer test its name.
+    """
+    for host in inventory["hosts"]:
+        host["hardware"]["memoryTieringGb"] = 0
     assert "VCF-CAP-N1-SHORTFALL" not in check_platform(inventory).codes
 
 
-def test_without_tiering_the_n1_shortfall_is_reported(inventory):
+def test_n1_shortfall_is_reported_when_n1_really_is_short(inventory):
+    """72 GB hosts: 198 GB total clears the stack, 132 GB at N-1 does not.
+
+    Sized so only the N-1 rule can fire. A deeper cut would also trip
+    VCF-CAP-RAM-SHORTFALL, and a test that cannot tell the two apart is
+    not testing either.
+    """
     for host in inventory["hosts"]:
+        host["hardware"]["ramGb"] = 72
         host["hardware"]["memoryTieringGb"] = 0
     result = check_platform(inventory)
     assert "VCF-CAP-N1-SHORTFALL" in result.codes
+    assert "VCF-CAP-RAM-SHORTFALL" not in result.codes
     assert result.valid is True          # a warning, not an error
 
 
@@ -233,7 +254,7 @@ def test_suppression_comparison_is_case_and_trailing_dot_robust(make_inventory):
 
 
 def test_vsp_pool_smaller_than_twelve_is_an_error(make_inventory):
-    doc = make_inventory(**{"appliances.vsp.poolEnd": "10.50.10.107"})
+    doc = make_inventory(**{"appliances.vsp.poolEnd": "10.50.10.167"})
     assert "VCF-VSP-POOL-TOO-SMALL" in check_platform(doc).codes
 
 
@@ -315,3 +336,62 @@ def test_a_wrong_typed_use_existing_flag_is_not_treated_as_true(make_inventory):
     for value in ("yes", 1, "true", {}, []):
         doc = make_inventory(**{"appliances.sddcManager.useExistingDeployment": value})
         assert "VCF-SDDCM-EXISTING-NEEDS-CREDENTIALS" not in check_platform(doc).codes
+
+
+# --- Provisioning device checks reachable from validate ---------------------
+#
+# These 7 codes existed only inside render_provisioning(), which no shipped
+# entry point calls. Measured 2026-09-24: `vcfspec validate` on the real
+# three-host lab inventory ran [detect, schema, rules] and emitted exactly
+# one finding, VCF-LIC-EVALUATION -- not a single VCF-PROV-* rule. So an
+# inventory naming an unstable boot disk validated clean, which is the
+# precise failure VCF-PROV-BOOT-DISK-NOT-STABLE was written to prevent after
+# a defect that "would have cost a drive to the rack".
+#
+# They are facts about the inventory, not about rendering, so they belong in
+# the rules layer. The pure helpers moved to rules/devices.py; provision.py
+# imports the same ones, so there is one definition and no drift.
+
+def test_validate_rejects_a_runtime_boot_disk_name(inventory):
+    """mpx./vmhbaN names are assigned in discovery order at boot, so the
+    device reached today is not the device reached after a reshuffle."""
+    inventory["hosts"][0]["bootDisk"] = "/vmfs/devices/disks/mpx.vmhba32:C0:T0:L0"
+    assert "VCF-PROV-BOOT-DISK-RUNTIME-NAME" in check_platform(inventory).codes
+
+
+def test_validate_rejects_firstdisk(inventory):
+    """--firstdisk can repartition the 4 TB vSAN device unwatched."""
+    inventory["hosts"][0]["bootDisk"] = "--firstdisk=local"
+    assert "VCF-PROV-BOOT-DISK-FIRSTDISK" in check_platform(inventory).codes
+
+
+def test_validate_catches_a_device_serving_two_roles(inventory):
+    """The install overwrites its device, vSAN claims its device, and memtier
+    consumes its device. None of the three asks what is already there."""
+    host = inventory["hosts"][0]
+    host["hardware"]["vsanDevice"] = host["bootDisk"]
+    assert "VCF-PROV-DEVICE-COLLISION" in check_platform(inventory).codes
+
+
+def test_validate_catches_an_unstable_tiering_device(inventory):
+    inventory["hosts"][0]["hardware"]["memoryTieringDevice"] = "mpx.vmhba1:C0:T0:L0"
+    assert "VCF-PROV-TIERING-DEVICE-NOT-STABLE" in check_platform(inventory).codes
+
+
+def test_validate_catches_tiering_declared_with_no_device(inventory):
+    """memoryTieringGb without a device means every capacity figure that
+    counted tiered memory is counting RAM the host will not have."""
+    inventory["hosts"][0]["hardware"].pop("memoryTieringDevice", None)
+    assert "VCF-PROV-NO-TIERING-DEVICE" in check_platform(inventory).codes
+
+
+def test_validate_catches_a_missing_boot_disk(inventory):
+    inventory["hosts"][0].pop("bootDisk", None)
+    assert "VCF-PROV-NO-BOOT-DISK" in check_platform(inventory).codes
+
+
+def test_the_reference_inventory_emits_no_device_findings(inventory):
+    """The negative case matters as much: a correct inventory must stay
+    quiet, or the rules become noise an operator learns to skip past."""
+    codes = [c for c in check_platform(inventory).codes if c.startswith("VCF-PROV")]
+    assert codes == [], codes

@@ -1,4 +1,4 @@
-"""Command line: vcfspec validate|render <file>.
+"""Command line: vcfspec validate|render|provision <file>.
 
 stdout carries the JSON result only, and nothing else -- so
 `vcfspec validate x.yaml | jq` works. Everything human-oriented (usage
@@ -51,7 +51,7 @@ import json
 import sys
 from pathlib import Path
 
-from .api import render_document, validate_document
+from .api import provision_document, render_document, validate_document
 from .schema import DEFAULT_VERSION
 from .validate.probes import ProbeConfig
 
@@ -102,6 +102,21 @@ def _build_parser() -> argparse.ArgumentParser:
              "render only ever accepts an inventory, so forcing "
              "sddc_spec here is only useful to get an explicit "
              "VCF-RENDER-WRONG-KIND rather than a misdetection.")
+
+    provision = sub.add_parser(
+        "provision",
+        help="Render the ESX kickstarts and per-MAC boot configs from an "
+             "inventory.")
+    provision.add_argument("path", type=Path)
+    provision.add_argument(
+        "--esx-boot-cfg", type=Path, default=None, metavar="FILE",
+        help="The boot.cfg from the ESX installer ISO. Without it the "
+             "kickstarts still render but the per-MAC boot configs do not: "
+             "a synthesised boot.cfg carries no module list and cannot "
+             "boot, so the tool declines to invent one.")
+    provision.add_argument(
+        "--input-kind", choices=("inventory", "sddc_spec"), default=None,
+        help="Force the document kind instead of auto-detecting it.")
 
     return parser
 
@@ -196,6 +211,20 @@ def main(argv: list[str] | None = None) -> int:
             result = validate_document(text, input_kind=args.input_kind,
                                        probe_config=probe_config,
                                        version=args.version)
+        elif args.command == "provision":
+            # The ISO's boot.cfg is read here, not in the library: the
+            # renderer is pure by construction and this command is the
+            # actuator. A missing --esx-boot-cfg is not an error -- the
+            # kickstarts are independently useful and the envelope says
+            # what was skipped -- but an unreadable *given* path is a
+            # usage error (2), like any other path this CLI is handed.
+            boot_cfg = None
+            if args.esx_boot_cfg is not None:
+                boot_cfg, error_code = _read_document(args.esx_boot_cfg)
+                if error_code is not None:
+                    return error_code
+            result = provision_document(text, esx_boot_cfg=boot_cfg,
+                                        input_kind=args.input_kind)
         else:
             result = render_document(text, version=args.version,
                                      input_kind=args.input_kind)
