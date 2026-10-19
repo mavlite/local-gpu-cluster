@@ -643,6 +643,19 @@ def resolve_alias(model: str) -> dict:
             "reasoning_effort": None}
 
 
+def is_swap_exempt(model: str) -> bool:
+    """Mechanical/small-tier aliases (the rag-* family) must NOT force a chat-slot
+    swap. They are used for titles, summaries/compaction and RAG synthesis --
+    low-stakes work any loaded model handles well. On this single-slot cluster,
+    opencode fires its small_model (rag-qwen3.8) and auto-compaction in the
+    BACKGROUND while the user's main model is something else; swapping the slot
+    to serve a title would restart the chat unit and kill the user's live
+    session (the "dropping out" thrash, investigated 2026-10-19). So a rag-*
+    request is served on whatever is loaded instead of triggering a swap.
+    Interactive mains (qwen3.6-think, qwen3.8, hemmingway, ...) still swap."""
+    return model.startswith("rag-")
+
+
 # Short-TTL cache of the backend the chat unit is currently serving, so the
 # per-request profile-match guard doesn't pay an upstream round-trip every call.
 _active_backend_cache: dict = {"value": None, "expires": 0.0}
@@ -1779,8 +1792,10 @@ async def chat(
         # Profile-match guard: a KNOWN alias whose backend != the loaded profile
         # gets a fast 409 (before the chat slot) instead of being silently served
         # by the wrong model. Unknown models pass through; fails open if the chat
-        # unit is unreachable.
-        if STRICT_PROFILE_MATCH and model in ALIAS_MAP:
+        # unit is unreachable. The mechanical rag-* tier is EXEMPT (is_swap_exempt):
+        # it skips the guard entirely and is served on whatever is loaded, so
+        # background titles/summaries never swap the user's main model out.
+        if STRICT_PROFILE_MATCH and model in ALIAS_MAP and not is_swap_exempt(model):
             active = await get_active_backend(client)
             if active is not None and alias_info["backend"] != active:
                 wanted = alias_info["backend"]

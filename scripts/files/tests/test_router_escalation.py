@@ -49,7 +49,7 @@ def env(tmp_path_factory):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     client = TestClient(mod.app)
-    yield {"client": client, "up": up, "ant": ant, "log": tmp / "access.log"}
+    yield {"client": client, "up": up, "ant": ant, "log": tmp / "access.log", "mod": mod}
     client.close()
     up.server.shutdown()
     ant.close()
@@ -169,3 +169,15 @@ def test_identical_brief_resent_through_the_router_is_a_400_duplicate(env):
     assert r.status_code == 400 and r.json()["error"]["code"] == "duplicate"
     _clean_non_retryable(r)
     assert len(env["ant"].requests) == n
+
+
+def test_rag_aliases_are_swap_exempt_but_interactive_mains_are_not(env):
+    # The "dropping out" fix (2026-10-19): background rag-* requests must NOT
+    # force a chat-slot swap (they are served on whatever is loaded), while
+    # interactive mains still swap.
+    mod = env["mod"]
+    assert mod.is_swap_exempt("rag-qwen3.8") is True
+    assert mod.is_swap_exempt("rag-qwen3.6") is True
+    assert mod.is_swap_exempt("rag-qwen3.6-fast") is True
+    for m in ("qwen3.8", "qwen3.8-think", "qwen3.6-think", "hemmingway", "qwen3.8-redteam", "coder"):
+        assert mod.is_swap_exempt(m) is False, m
