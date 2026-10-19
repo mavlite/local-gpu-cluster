@@ -116,19 +116,19 @@ get_profile() {
       # acceptance), confirming the 2026-10-12 MTP sweep. The MTP head is
       # bundled in the GGUF, so no separate --model-draft is needed.
       #
-      # Context 131072 (128K), single slot. At 128K + MTP the whole thing is
-      # ~40 GB (GPU0 21.6 / GPU1 18.0), ~24 GB headroom — it actually uses less
-      # VRAM than the old UD-Q6_K at 256K. draft-mtp n-max 3 beat n2 marginally
-      # on our hardware; drop to n2 only if short-reply tool-call latency ever
-      # matters more than throughput.
+      # Context 262144 (256K), single slot. Qwen3.6's hybrid Gated-DeltaNet MoE
+      # has a compact KV state, so 256K only adds ~3.6 GB over 128K: measured
+      # 2026-10-19 at ~43 GB total (GPU0 21.3 / GPU1 21.9 at split 1,1.3), ~10 GB
+      # headroom per card. draft-mtp n-max 3 is validated best (the 2026-10-19
+      # lever sweep confirmed n4 ties on code and loses on prose; keep n3).
       #
-      # Tensor-split: 1,1 (not 1,1.5). The MTP sweep ran at 1,1 and GPU0 sits
-      # at ~21.6 GB with room to spare, so the old 1,1.5 anti-OOM skew (tuned
-      # for the non-MTP UD-Q6_K at 256K) is no longer needed.
+      # Tensor-split: 1,1.3. At a flat 1,1 split GPU0 carries the non-split
+      # tensor mass and lands ~1.8 GB heavier than GPU1 (23.0 vs 20.2 at 256K);
+      # 1,1.3 shifts weight to GPU1 and balances the pair (~21.3 / 21.9).
       #
       # The Q4_K_XL MTP build crashes on gfx1030 ("ROCm illegal memory access"),
       # so Q6_K_XL is the only working MTP quant here (see qwen36-mtp memory).
-      echo "unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1 131072 1024 q8_0 layer draft-mtp 3"
+      echo "unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1.3 262144 1024 q8_0 layer draft-mtp 3"
       ;;
     qwen3.6-fast)
       # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
@@ -290,7 +290,7 @@ PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 qwen3.
 # Kept separate from get_profile so the operational config stays terse.
 get_profile_description() {
   case "$1" in
-    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 128K, ~113 t/s)" ;;
+    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 256K, ~113 t/s)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
@@ -306,7 +306,7 @@ get_profile_description() {
 # when day-2-ops.md § 4.4 table is updated.
 get_profile_vram_estimate() {
   case "$1" in
-    qwen3.6)      echo "~40 GB at 128K + MTP (GPU0 21.6 / GPU1 18.0, measured 2026-10-19); ~24 GB headroom, 113 t/s gen, 0.78 draft acceptance" ;;
+    qwen3.6)      echo "~43 GB at 256K + MTP (GPU0 21.3 / GPU1 21.9 at 1,1.3, measured 2026-10-19); ~10 GB headroom per card, 113 t/s gen, 0.78 draft acceptance" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;

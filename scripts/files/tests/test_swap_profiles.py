@@ -49,14 +49,14 @@ def test_other_profiles_stay_single_slot():
         assert profile(name)["PARALLEL"] == "1", name
 
 
-def test_qwen36_uses_mtp_q6kxl_at_128k():
-    # Optimization 2026-10-19: qwen3.6 moved from plain UD-Q6_K (no MTP, ~65 t/s)
-    # to the MTP GGUF + draft-mtp n3 (~113 t/s) at 128K, layer split 1,1.
+def test_qwen36_uses_mtp_q6kxl_at_256k():
+    # 2026-10-19: qwen3.6 = MTP GGUF + draft-mtp n3 (~113 t/s vs ~65 non-MTP),
+    # 256K context (fits in ~43 GB on this compact-KV MoE), balanced split 1,1.3.
     p = profile("qwen3.6")
     assert p["REPO"] == "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
     assert p["QUANT"] == "UD-Q6_K_XL"
     assert (p["SPEC_TYPE"], p["SPEC_NMAX"]) == ("draft-mtp", "3")
-    assert (p["CTX"], p["SPLIT"], p["SPLIT_MODE"]) == ("131072", "1,1", "layer")
+    assert (p["CTX"], p["SPLIT"], p["SPLIT_MODE"]) == ("262144", "1,1.3", "layer")
 
 
 def test_write_config_env_writes_parallel_and_ctx_together(tmp_path):
