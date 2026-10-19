@@ -68,6 +68,27 @@ chat_template_lines() {
   fi
 }
 
+# chat_offline_lines -- force llama.cpp offline (cache-only, no network) when the target model
+# is ALREADY in the local cache, so a cached swap never makes a HuggingFace revalidation call.
+# That call hangs the entire load when HF or a CDN node stalls: incident 2026-10-19, swapping to
+# hemmingway sat ~150s in futex on a stuck :443 socket despite a complete 23.9 GB cached blob,
+# and the router's swap timeout then 503'd. A first-ever swap to an UNcached model finds nothing
+# here, emits nothing, and downloads normally (--offline requires b11578+, env LLAMA_ARG_OFFLINE).
+#   $1 repo   $2 quant   $3 output of `llama-server --cache-list`
+# llama.cpp normalizes the unsloth "UD-" quant prefix out of the cache key (profile UD-Q6_K_XL is
+# listed as :Q6_K_XL), so the UD-stripped quant is matched too. Matching is exact on purpose: a
+# false positive would add --offline to an uncached model and the load would FAIL, so the
+# repo:quant token is anchored (whitespace/EOL either side) and dots in the repo are escaped; a
+# false negative merely falls back to the (networked) status quo.
+chat_offline_lines() {
+  local repo="$1" quant="$2" cache_list="$3"
+  local norm="${quant#UD-}"
+  local repo_re="${repo//./\\.}" quant_re="${quant//./\\.}" norm_re="${norm//./\\.}"
+  if grep -Eq -- "(^|[[:space:]])${repo_re}:(${quant_re}|${norm_re})([[:space:]]|\$)" <<<"$cache_list"; then
+    printf '    --offline \\\n'
+  fi
+}
+
 # chat_check_slot_ctx -- refuse a layout that gives one slot more context than the model's native window.
 #   LLAMA_CTX / LLAMA_PARALLEL   total context and slot count (llama.cpp gives each slot CTX / PARALLEL)
 #   LLAMA_MAX_SLOT_CTX           native window, default 262144 (Qwen3.6/3.8); above it needs YaRN, which we do not set
