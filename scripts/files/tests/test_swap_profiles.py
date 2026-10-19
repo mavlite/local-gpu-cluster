@@ -11,7 +11,7 @@ import pytest
 HERE = os.path.dirname(__file__)
 SWAP = os.path.join(HERE, "..", "..", "swap-chat-model.sh")
 LIB = os.path.join(HERE, "..", "..", "lib", "chat-flags.sh")
-PROFILES = ["qwen3.6", "qwen3.6-fast", "coder", "devstral", "devstral-large", "qwen3.8", "qwen3.8-redteam"]
+PROFILES = ["qwen3.6", "qwen3.6-fast", "coder", "devstral", "devstral-large", "qwen3.8", "hemmingway", "qwen3.8-redteam"]
 FIELDS = "REPO QUANT ALIAS SPLIT CTX CACHE_REUSE KV SPLIT_MODE SPEC_TYPE SPEC_NMAX PARALLEL".split()
 
 
@@ -47,6 +47,15 @@ def test_qwen38_profiles_are_three_slots_of_128k(name):
 def test_other_profiles_stay_single_slot():
     for name in PROFILES[:5]:
         assert profile(name)["PARALLEL"] == "1", name
+
+
+def test_hemmingway_uses_mtp_n2_for_prose():
+    # 2026-10-19: hemmingway MTP heads verified present; n-max 2 (not 3) is best
+    # for this pure-writing model (0.72 vs erratic 0.55 draft acceptance on prose).
+    p = profile("hemmingway")
+    assert p["REPO"] == "bartowski/Altworld_Hemmingway-1-GGUF"
+    assert (p["SPEC_TYPE"], p["SPEC_NMAX"]) == ("draft-mtp", "2")
+    assert (p["CTX"], p["SPLIT_MODE"]) == ("262144", "tensor")
 
 
 def test_qwen36_uses_mtp_q6kxl_at_256k():
