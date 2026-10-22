@@ -64,7 +64,29 @@ def _discover_profiles(script_path: str) -> set:
     return set(_FALLBACK_PROFILES)
 
 
-VALID_PROFILES = _discover_profiles(SWAP_SCRIPT) | _FALLBACK_PROFILES
+# The allowlist is re-read from swap-chat-model.sh whenever that file changes on
+# disk -- NOT frozen at import. Freezing it (a one-shot module-level read) meant a
+# profile added by a later git-pull returned 400 "unknown_profile" until the
+# webhook was restarted: hemmingway hit exactly this on 2026-10-19, because the
+# service had been up since before the profile was merged. That is the same
+# staleness the old hardcoded list caused, reintroduced through a different door.
+# mtime-gated so the hot path is a single stat(), not a re-parse on every request.
+_profiles_lock = threading.Lock()
+_profiles_cache: dict = {"key": None, "profiles": set(_FALLBACK_PROFILES)}
+
+
+def current_valid_profiles(script_path: str = SWAP_SCRIPT) -> set:
+    """Allowlist for the current swap-chat-model.sh, refreshed on its mtime."""
+    try:
+        mtime = os.stat(script_path).st_mtime
+    except OSError:
+        return set(_FALLBACK_PROFILES)
+    key = (script_path, mtime)
+    with _profiles_lock:
+        if key != _profiles_cache["key"]:
+            _profiles_cache["profiles"] = _discover_profiles(script_path) | _FALLBACK_PROFILES
+            _profiles_cache["key"] = key
+        return set(_profiles_cache["profiles"])  # a copy: callers sort/send it
 
 # ---------- Logging (systemd captures stdout) ----------
 
@@ -131,11 +153,12 @@ class SwapHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         profile_list = params.get("profile", [])
         profile = profile_list[0].strip() if profile_list else ""
-        if profile not in VALID_PROFILES:
+        valid = current_valid_profiles()
+        if profile not in valid:
             self._send_json(400, {
                 "error": "unknown_profile",
                 "profile": profile,
-                "valid": sorted(VALID_PROFILES),
+                "valid": sorted(valid),
             })
             return
 

@@ -105,12 +105,13 @@ def render_unit(**env):
     base = {"LLAMA_HF_REPO": "r", "LLAMA_HF_QUANT": "q", "LLAMA_ALIAS": "a", "LLAMA_CTX": "393216", "LLAMA_KV_TYPE": "q8_0",
             "LLAMA_PARALLEL": "3", "LLAMA_CACHE_REUSE": "0", "LLAMA_CACHE_RAM_MB": "16384", "LLAMA_TENSOR_SPLIT": "1,1",
             "LLAMA_SPLIT_MODE": "tensor", "LLAMA_THREADS": "8", "LLAMA_FLASH_ATTN": "auto",
-            "LLAMA_SPEC_TYPE": "draft-mtp", "LLAMA_SPEC_NMAX": "3", "LLAMA_SPEC_PMIN": "0"}
+            "LLAMA_SPEC_TYPE": "draft-mtp", "LLAMA_SPEC_NMAX": "3", "LLAMA_SPEC_PMIN": "0", "CHAT_CACHE_LIST": ""}
     full = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **base, **{k: str(v) for k, v in env.items()}}
     script = (f'source "{LIB}" || exit 97; '
               'DRAFT_LINES="$(chat_spec_lines; printf x)"; DRAFT_LINES="${DRAFT_LINES%x}"; '
               'MMPROJ_LINES="$(chat_mmproj_lines; printf x)"; MMPROJ_LINES="${MMPROJ_LINES%x}"; '
               'TEMPLATE_LINES="$(chat_template_lines; printf x)"; TEMPLATE_LINES="${TEMPLATE_LINES%x}"; '
+              'OFFLINE_LINES="$(chat_offline_lines "$LLAMA_HF_REPO" "$LLAMA_HF_QUANT" "$CHAT_CACHE_LIST"; printf x)"; OFFLINE_LINES="${OFFLINE_LINES%x}"; '
               f'cat <<EOF\n{body}\nEOF\n')
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=full)
     assert r.returncode == 0, r.stderr
@@ -157,3 +158,82 @@ def test_template_override_unit_carries_the_file_flag_and_stays_contiguous():
 def test_default_unit_has_no_template_flag():
     joined = " ".join(exec_start(render_unit()))
     assert "--chat-template-file" not in joined
+
+
+# ---- chat_offline_lines: force llama.cpp offline when the model is already cached -------------------------------
+# Incident 2026-10-19: swapping to hemmingway hung llama-server ~150s in futex on a stalled
+# HuggingFace :443 socket during the --hf-repo revalidation, despite a complete 23.9 GB cached
+# blob; the router's swap timeout then 503'd. --offline (b11578+) forces cache use and skips the
+# network. We only add it when `llama-server --cache-list` already lists the target, so a
+# first-ever swap to an uncached model still downloads normally.
+
+# Real `llama-server --cache-list` output shape: "  N. <repo>:<quant>", one per line.
+# Note llama.cpp strips the unsloth "UD-" prefix from the cache key: profile UD-Q6_K_XL is
+# listed as :Q6_K_XL, UD-IQ4_XS as :IQ4_XS, etc. Non-UD quants (Q6_K, Q8_0) list verbatim.
+CACHE_LIST = (
+    "number of models in cache: 4\n"
+    "   1. unsloth/Qwen3.8-27B-GGUF:Q6_K_XL\n"
+    "   2. bartowski/Altworld_Hemmingway-1-GGUF:Q6_K\n"
+    "   3. unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M\n"
+    "   4. unsloth/Qwen3-Coder-Next-GGUF:IQ4_XS\n"
+)
+
+
+def render_offline(repo, quant, cache_list):
+    script = (f'source "{LIB}" || exit 97; declare -F chat_offline_lines >/dev/null || exit 98; '
+              'out="$(chat_offline_lines "$1" "$2" "$3"; rc=$?; printf x; exit $rc)" || exit $?; printf "%s" "${out%x}"')
+    return subprocess.run(["bash", "-c", script, "bash", repo, quant, cache_list],
+                          capture_output=True, text=True,
+                          env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+
+
+def test_offline_line_when_exact_quant_cached():
+    r = render_offline("bartowski/Altworld_Hemmingway-1-GGUF", "Q6_K", CACHE_LIST)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "    --offline \\\n"
+
+
+def test_offline_line_when_ud_prefixed_quant_cached():
+    # Profile quant carries the UD- prefix; the cache key does not. Must still match.
+    r = render_offline("unsloth/Qwen3.8-27B-GGUF", "UD-Q6_K_XL", CACHE_LIST)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "    --offline \\\n"
+    r2 = render_offline("unsloth/Qwen3-Coder-Next-GGUF", "UD-IQ4_XS", CACHE_LIST)
+    assert r2.stdout == "    --offline \\\n"
+
+
+def test_no_offline_when_that_quant_not_cached():
+    # qwen3.6 repo is cached, but only at Q4_K_M -- a swap to Q6_K_XL must still hit the network.
+    r = render_offline("unsloth/Qwen3.6-35B-A3B-GGUF", "UD-Q6_K_XL", CACHE_LIST)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""
+
+
+def test_no_offline_on_quant_prefix_partial_match():
+    # Profile wants Q6_K; cache has only :Q6_K_XL for that repo. The :Q6_K token must NOT
+    # partial-match :Q6_K_XL, or we would --offline a model that is not actually cached.
+    r = render_offline("unsloth/Qwen3.8-27B-GGUF", "Q6_K", CACHE_LIST)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == ""
+
+
+def test_no_offline_on_repo_mismatch():
+    r = render_offline("someone/Other-Model-GGUF", "Q6_K", CACHE_LIST)
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_no_offline_on_empty_cache_list():
+    r = render_offline("bartowski/Altworld_Hemmingway-1-GGUF", "Q6_K", "")
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_cached_model_unit_carries_offline_and_stays_contiguous():
+    es = exec_start(render_unit(LLAMA_HF_REPO="r", LLAMA_HF_QUANT="q", CHAT_CACHE_LIST="   1. r:q\n"))
+    assert all(l.strip() for l in es), "blank line inside ExecStart ends the command early"
+    joined = " ".join(es)
+    assert "--offline" in joined and "--flash-attn" in joined and "--metrics" in joined
+
+
+def test_default_unit_has_no_offline_flag():
+    # Empty cache-list (the render_unit default) -> model treated as not cached -> network path.
+    assert "--offline" not in " ".join(exec_start(render_unit()))

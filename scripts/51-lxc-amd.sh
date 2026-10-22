@@ -493,6 +493,17 @@ phase_5_11_3_chat_unit() {
   template_lines="$(chat_template_lines; rc=$?; printf x; exit $rc)" || die "chat_template_lines failed"
   template_lines="${template_lines%x}"
 
+  # Offline-when-cached: if the target model is already in llama.cpp's cache, add --offline so
+  # the load never makes a HuggingFace revalidation call (that call hung the swap on 2026-10-19).
+  # Query the cache INSIDE the LXC (where the binary + cache live); an uncached model or any
+  # error yields no line, so a first-ever swap still downloads. See lib/chat-flags.sh.
+  local chat_cache_list offline_lines
+  chat_cache_list="$(pct exec "$AMD_VMID" -- env LLAMA_CACHE=/opt/models/.cache \
+    /opt/llama.cpp/build/bin/llama-server --cache-list 2>/dev/null || true)"
+  offline_lines="$(chat_offline_lines "$LLAMA_HF_REPO" "$LLAMA_HF_QUANT" "$chat_cache_list"; rc=$?; printf x; exit $rc)" \
+    || die "chat_offline_lines failed"
+  offline_lines="${offline_lines%x}"
+
   pct exec "$AMD_VMID" -- env \
     "LLAMA_HF_REPO=$LLAMA_HF_REPO" \
     "LLAMA_HF_QUANT=$LLAMA_HF_QUANT" \
@@ -509,6 +520,7 @@ phase_5_11_3_chat_unit() {
     "DRAFT_LINES=$draft_lines" \
     "MMPROJ_LINES=$mmproj_lines" \
     "TEMPLATE_LINES=$template_lines" \
+    "OFFLINE_LINES=$offline_lines" \
     bash -se <<'GUEST'
     set -Eeuo pipefail
     # Remove the pre-pivot unit name if present (clean migration)
@@ -551,7 +563,7 @@ ExecStart=/opt/llama.cpp/build/bin/llama-server \\
     --parallel "${LLAMA_PARALLEL}" \\
     --cache-reuse "${LLAMA_CACHE_REUSE}" \\
     --cache-ram "${LLAMA_CACHE_RAM_MB}" \\
-${DRAFT_LINES}${MMPROJ_LINES}${TEMPLATE_LINES}    --flash-attn "${LLAMA_FLASH_ATTN}" \\
+${DRAFT_LINES}${MMPROJ_LINES}${TEMPLATE_LINES}${OFFLINE_LINES}    --flash-attn "${LLAMA_FLASH_ATTN}" \\
     --reasoning-format deepseek \\
     --jinja \\
     --load-mode mlock \\
