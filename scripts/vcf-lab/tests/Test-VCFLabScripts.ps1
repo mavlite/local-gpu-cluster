@@ -144,6 +144,7 @@ function Connect-VIServer {
     if ($global:VCenterDown -and $Server -eq '172.16.10.129') {
         throw "Could not resolve the requested VC server. (stub: vCenter is down)"
     }
+    Note "CONNECT $Server"
     if ($global:UnreachableHosts -contains $Server) { throw "stub: host $Server unreachable" }
     $global:StubSessions += $Server
     [pscustomobject]@{ Name = $Server; IsConnected = $true }
@@ -226,7 +227,7 @@ function Get-EsxCli {
     # which silently fails the vSAN gate and spins it to its full timeout.
     param([Parameter(ValueFromRemainingArguments)]$a)
     $get = New-Object psobject
-    $get | Add-Member -MemberType ScriptMethod -Name Invoke -Value { [pscustomobject]@{ SubClusterMemberCount = 3 } }
+    $get | Add-Member -MemberType ScriptMethod -Name Invoke -Value { [pscustomobject]@{ SubClusterMemberCount = $global:VsanMembers } }
     [pscustomobject]@{ vsan = [pscustomobject]@{ cluster = [pscustomobject]@{ get = $get } } }
 }
 function Get-Cluster { param([Parameter(ValueFromRemainingArguments)]$a)
@@ -326,6 +327,7 @@ function Reset-Fleet {
     $global:HostState = @{}
     $global:VCenterDown = $false
     $global:UnreachableHosts = @()
+    $global:VsanMembers = 3
     $global:FailStart = @()
     $global:IgnoreGuestStop = @()
     $global:Log.Clear()
@@ -721,6 +723,67 @@ $t = (Get-Content $cfgPath -Raw) -replace "@\{ VmName = 'devvm03'; Host = 'hyp03
 Set-Content -Path $badCfg -Value $t -Encoding utf8
 $out = Invoke-Lab 'Start-VCFLab.ps1' @{ ConfigPath = $badCfg }
 Check "a VM in both LlmWorkers and DevVms rejected at load" ($out -match 'llmbench03 is listed twice' -and (Get-Started).Count -eq 0)
+
+# =========================== -SkipHost (a host that cannot come up) ===========
+# hyp02 lost its boot device on 2026-10-24 and the whole start aborted waiting
+# for it. -SkipHost brings the rest of the lab up without it: the skipped host
+# is never contacted, vSAN is gated on the remaining members, and the owned VMs
+# pinned to it are reported, not started. It refuses a typo and refuses to
+# skip a vSAN majority (2 of 3).
+$hyp02Ip = '172.16.10.143'
+function Get-Connected { @($global:Log | Where-Object { $_ -like 'CONNECT *' } | ForEach-Object { $_ -replace '^CONNECT ','' }) }
+
+Write-Host "`n########## Start-VCFLab.ps1 with hyp02 dead, no -SkipHost ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$global:UnreachableHosts = @($hyp02Ip); $global:VsanMembers = 2
+$out = Invoke-Lab 'Start-VCFLab.ps1'
+Check "dead host without -SkipHost: exit 1, nothing started" ($global:LastExit -eq 1 -and (Get-Started).Count -eq 0)
+Check "  ...and the failure says how to skip it" ($out -match '-SkipHost hyp02')
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipHost hyp02 (Full) ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$global:UnreachableHosts = @($hyp02Ip); $global:VsanMembers = 2
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp02') }
+Check "-SkipHost hyp02: full start exits 0" ($global:LastExit -eq 0)
+Check "  ...never connects to hyp02" ((Get-Connected) -notcontains $hyp02Ip)
+Check "  ...brings the VCF stack up (opscollector last)" ((Get-Started) -contains 'vcsa' -and (Get-Started) -contains 'opscollector')
+Check "  ...starts the dev VMs on the other hosts" (((Get-DevStarted) -contains 'devvm01') -and ((Get-DevStarted) -contains 'devvm03'))
+Check "  ...does not start devvm02 (it lives on hyp02)" ((Get-DevStarted) -notcontains 'devvm02')
+Check "  ...says hyp02 was skipped" ($out -match 'skipping: hyp02')
+Check "  ...and names the VM it left behind" ($out -match 'devvm02')
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipHost hyp02, vSAN still sees 3 ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$global:VsanMembers = 3
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp02') }
+Check "skipped host still a vSAN member: not fatal, exit 0" ($global:LastExit -eq 0 -and (Get-Started) -contains 'vcsa')
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipHost hyp02 -Mode Minimal ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+Set-Stamp -DaysAgo 1
+$global:UnreachableHosts = @($hyp02Ip); $global:VsanMembers = 2
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; SkipHost = @('hyp02') }
+Check "minimal -SkipHost hyp02 exits 0" ($global:LastExit -eq 0)
+Check "  ...starts the workers on hyp01 and hyp03" (((Get-Started) -contains 'llmbench02') -and ((Get-Started) -contains 'llmbench03'))
+Check "  ...not llmbench01 (on hyp02)" ((Get-Started) -notcontains 'llmbench01')
+Check "  ...never connects to hyp02" ((Get-Connected) -notcontains $hyp02Ip)
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipHost refusals ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp09') }
+Check "unknown -SkipHost name: exit 1, nothing started, names the real hosts" ($global:LastExit -eq 1 -and (Get-Started).Count -eq 0 -and $out -match 'hyp01, hyp02, hyp03')
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp01','hyp02') }
+Check "skipping a vSAN majority: exit 1, nothing started" ($global:LastExit -eq 1 -and (Get-Started).Count -eq 0 -and $out -match 'quorum')
+Check "  ...and no host contacted" ((Get-Connected).Count -eq 0)
+
+Write-Host "`n########## Start-VCFLab.ps1 -SkipHost hyp02, vcsa registered on hyp02 ##########" -ForegroundColor Magenta
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
+($global:FakeVMs | Where-Object Name -eq 'vcsa').VMHost.Name = 'hyp02.lab.knowledgeondemand.net'
+$global:UnreachableHosts = @($hyp02Ip); $global:VsanMembers = 2
+$out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp02') }
+Check "vcsa stranded on the skipped host: exit 1" ($global:LastExit -eq 1 -and (Get-Started) -notcontains 'vcsa')
+Check "  ...and the failure points at re-registering it" ($out -match 'skipped host' -and $out -match 'vsanDatastore')
 
 # --- 7. vCenter cannot power on: host fallback + vpxa repair -----------------
 Write-Host "`n########## Start-VCFLab.ps1 (vCenter power-on wedged) ##########" -ForegroundColor Magenta

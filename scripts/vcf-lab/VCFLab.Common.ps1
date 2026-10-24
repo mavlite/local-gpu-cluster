@@ -793,6 +793,41 @@ function Get-DevVms {
     Get-OwnedHostVms -Config $Config -Key 'DevVms'
 }
 
+<#
+    -SkipHost: the hosts a run leaves alone -- a host that cannot come up (no
+    BMC, so it cannot be fixed remotely) must not abort the whole lab.
+
+    Returns a NEW config whose Hosts, LlmWorkers and DevVms omit the skipped
+    hosts, so every helper that iterates $Config.Hosts simply never contacts
+    them. The input is not modified. Throws on an unknown name (a typo must
+    not silently skip nothing) and when the remaining hosts would not be a vSAN
+    majority: with 2 of 3 gone the vSAN datastore is unavailable and nothing
+    the script starts afterwards can work.
+#>
+function Select-VCFLabHosts {
+    param([Parameter(Mandatory)][hashtable]$Config, [string[]]$Skip = @())
+    $all  = @($Config.Hosts | ForEach-Object { [string]$_.Short })
+    $skip = @($Skip | Where-Object { $_ } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Select-Object -Unique)
+    $unknown = @($skip | Where-Object { $all -notcontains $_ })
+    if ($unknown.Count -gt 0) {
+        throw "-SkipHost: unknown host '$($unknown -join "', '")'. The hosts are $($all -join ', ')."
+    }
+    $keep = @($Config.Hosts | Where-Object { $skip -notcontains $_.Short })
+    if ($skip.Count -gt 0 -and $keep.Count -le ($all.Count / 2)) {
+        throw ("-SkipHost: skipping $($skip -join ', ') leaves $($keep.Count) of $($all.Count) hosts, " +
+               "which is not a vSAN quorum (a majority must be up). Refusing to start.")
+    }
+    $run = $Config.Clone()
+    $run.Hosts = $keep
+    $left = @()
+    foreach ($key in 'LlmWorkers', 'DevVms') {
+        if (-not $Config.ContainsKey($key) -or -not $Config[$key]) { continue }
+        $left += @($Config[$key] | Where-Object { $skip -contains $_.Host } | ForEach-Object { [string]$_.VmName })
+        $run[$key] = @($Config[$key] | Where-Object { $skip -notcontains $_.Host })
+    }
+    [pscustomobject]@{ Config = $run; Skipped = $skip; LeftBehind = $left }
+}
+
 function Get-OwnedHostVms {
     param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$Key)
     if (-not $Config.ContainsKey($Key) -or -not $Config[$Key]) { return @() }

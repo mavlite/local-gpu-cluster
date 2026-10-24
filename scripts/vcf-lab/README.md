@@ -9,6 +9,7 @@ Controlled power-on and power-off for the three-host VCF 9.1.1 lab.
 .\Start-VCFLab.ps1 -Mode Minimal -WithVCenter   # ...plus vCenter for the UI
 .\Start-VCFLab.ps1 -SkipInventoryRepair   # report inventory drift, do not fix it
 .\Start-VCFLab.ps1 -SkipDevVms     # either mode, but leave the dev VMs off
+.\Start-VCFLab.ps1 -SkipHost hyp02 # either mode, without a host that cannot boot (max 1 of 3: vSAN quorum)
 .\Stop-VCFLab.ps1                  # shut down the VCF stack, leave hosts, dev VMs + LLM workers running
 .\Stop-VCFLab.ps1 -IncludeHosts    # also shut down the dev VMs and LLM workers, then power off the hosts
 .\Stop-VCFLab.ps1 -WhatIf          # dry run
