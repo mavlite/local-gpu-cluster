@@ -114,9 +114,20 @@ use Save/Load Profile to copy settings across the three nodes.
   by `numbers=`; `/ping interface=` gives false negatives. Trust
   `/interface bridge host print`, the DHCP lease list and the TFTP hit counter.
 
+**`snponly.efi` must live in `flash/`.** On the CRS309 everything outside `flash/` is
+RAM. The September binary sat at the root, so the 2026-10-23 power loss deleted it while
+the saved config (TFTP entry included) survived: hosts then got a VLAN 99 lease and failed
+at the TFTP fetch. Rebuilt 2026-10-24 and stored at `flash/snponly.efi`
+(`/ip tftp` `real-filename="flash/snponly.efi"`), 289,792 bytes, SHA-256
+`a347e28b48427d32009ee94d316d64a2b92567d7bfa8af00989cfffcaa47cf9e`. Recipe (Debian 12):
+`apt install build-essential git liblzma-dev`, `git clone https://github.com/ipxe/ipxe`,
+`git checkout v2.0.0` (`12798ec29aa8`), then in `src/`
+`make bin-x86_64-efi/snponly.efi EMBED=<vcf-spec-tools/inventories/lab01-ipxe-embed.ipxe> NO_WERROR=1`.
+Copies of the binary and embed script: TrueNAS `PROD/esx/_ipxe/`. Upload to the switch
+over SFTP as `flash/snponly.efi` and verify with `/file print`.
+
 **Not in the repo:** a RouterOS export of the VLAN/bridge/DHCP/TFTP/firewall
-configuration, and the iPXE EMBED script source. Export the CRS309 config into the repo
-when convenient.
+configuration. Export the CRS309 config into the repo when convenient.
 
 ## Stage 2 — Host imaging
 
