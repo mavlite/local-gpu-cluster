@@ -150,6 +150,21 @@ three are currently disarmed. **To reimage a host:** re-render, publish its
 kickstart, rename `_disarmed-01-<mac>` back to `01-<mac>` (or publish a fresh one),
 power-cycle, then disarm again.
 
+**To rebuild a host and keep its `hypNN-local` datastore** (e.g. OSDATA corrupted by a
+power loss; Broadcom KB 370038 says reinstall, and VOMA repair of OSDATA is not
+supported): set `hardware.bootDiskVmfs: preserve` for that host and re-render. The
+kickstart then carries `paranoid` + `install --disk=<boot t10 id> --preservevmfs`. Read
+from the 9.1.1 installer itself: EFI, both bootbanks and OSDATA are rewritten, the VMFS
+partition is re-created at its old sectors with its old label, and no other disk is
+written. Without `paranoid`, a VMFS the installer cannot see is only a warning and it
+formats a new datastore over it; with it, the install stops at the console instead.
+Before reinstalling, capture evidence from the installer shell (Alt+F1) — the
+reinstall destroys it: `esxcli nvme device log smart get -A <boot vmhba>`,
+`partedUtil getptbl <boot disk>`, and `voma -m vmfs -f check -d <boot disk>:<vmfs part>`
+for the datastore being kept. After the install: reconnect the host in vCenter (new
+thumbprint), confirm the vSAN ESA disk rejoins and objects resync, and check
+`esxcli memtier status get`.
+
 ### Kickstart structure
 
 Head (from `provision.py`), per host:

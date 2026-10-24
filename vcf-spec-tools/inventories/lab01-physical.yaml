@@ -142,6 +142,9 @@ hosts:
       memoryTieringGb: 96
       memoryTieringDevice: /vmfs/devices/disks/t10.NVMe____SAMSUNG_MZVLB512HAJQ2D000L7______________97BBB38187382500
       cpuModel: 7945HX
+      # 2026-10-24 rebuild after power loss corrupted OSDATA: keep hyp02-local
+      # (llmbench01's disks) -- --preservevmfs + paranoid.
+      bootDiskVmfs: preserve
   - name: hyp03
     provisioningMac: "98:b7:85:23:a4:ce"
     # Read from the live host 2026-09-24. Boots today from the same 59 GB USB

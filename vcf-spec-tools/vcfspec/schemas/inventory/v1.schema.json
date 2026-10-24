@@ -448,6 +448,12 @@
                 "description": "Whether bootDisk is *currently* a claimed vSAN ESA member -- true only when this is a rebuild of a host whose boot disk a previous install gave to vSAN. Controls whether the kickstart's `install` line carries `--overwritevsan`. The tool cannot infer this: it never reads the disk, so the operator must say so. Get it wrong either way and the install fails, not just misconfigures -- both are real, verified against ESX 9.1.1: with the flag on a disk vSAN never claimed, the installer aborts with '--overwritevsan specified but disk <id> is not claimed by vSAN'; without it on a disk vSAN did claim, the install aborts because the existing vSAN partition blocks it. Defaults to false because a fresh disk -- the common case, and the one this inventory's example hosts describe -- is the greenfield install, not a rebuild.",
                 "type": "boolean",
                 "default": false
+              },
+              "bootDiskVmfs": {
+                "description": "What the install does to a VMFS datastore already on bootDisk. 'overwrite' (default) emits --overwritevmfs and wipes it. 'preserve' emits --preservevmfs plus `paranoid`: per the ESX 9.1.1 installer, EFI, bootbanks and OSDATA are rewritten and the VMFS partition is kept at its old sectors and label; if the installer cannot find the VMFS it aborts instead of formatting over it. Use 'preserve' to rebuild a host whose hostNN-local datastore holds VM disks. Cannot be combined with bootDiskClaimedByVsan: true.",
+                "type": "string",
+                "enum": ["overwrite", "preserve"],
+                "default": "overwrite"
               }
             }
           },

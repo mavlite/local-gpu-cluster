@@ -401,6 +401,12 @@ VCF-PROV-TIERING-RATIO-UNSUPPORTED:
   source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-1/vsphere-resource-management/memory-tiering-over-nvme/memory-tiering-configuration.html
   summary: "Host {host} would need a memory tier ratio of {ratio}% ({tier} GB tier against {ram} GB DRAM), and ESX accepts 1-400%. No tiering was configured."
   fix: "Bring hardware.memoryTieringGb and hardware.ramGb into a ratio ESX supports: the tier can be at most four times DRAM. A ratio of 0 usually means hardware.ramGb is missing or zero."
+VCF-PROV-BOOT-VMFS-MODE:
+  severity: error
+  source: docs
+  source_url: https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/9-0/esxi-installation-and-setup.html
+  summary: "Host {host} has hardware.bootDiskVmfs '{value}', which is not usable here, so no artifacts were generated for this host."
+  fix: "Use 'overwrite' (default: the install wipes the local VMFS datastore on the boot disk) or 'preserve' (--preservevmfs plus paranoid: the install keeps it, or aborts). 'preserve' cannot be combined with hardware.bootDiskClaimedByVsan: true -- a vSAN-claimed boot disk has no VMFS to keep."
 VCF-PROV-DEVICE-COLLISION:
   severity: error
   source: docs
