@@ -731,7 +731,8 @@ Check "a VM in both LlmWorkers and DevVms rejected at load" ($out -match 'llmben
 # pinned to it are reported, not started. It refuses a typo and refuses to
 # skip a vSAN majority (2 of 3).
 $hyp02Ip = '172.16.10.143'
-function Get-Connected { @($global:Log | Where-Object { $_ -like 'CONNECT *' } | ForEach-Object { $_ -replace '^CONNECT ','' }) }
+# Every host contact the stubs can see: PowerCLI sessions AND TCP probes.
+function Get-Connected { @($global:Log | Where-Object { $_ -like 'CONNECT *' -or $_ -like 'TCP *' } | ForEach-Object { $_ -replace '^(CONNECT|TCP) ','' }) }
 
 Write-Host "`n########## Start-VCFLab.ps1 with hyp02 dead, no -SkipHost ##########" -ForegroundColor Magenta
 Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
@@ -745,7 +746,7 @@ Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff
 $global:UnreachableHosts = @($hyp02Ip); $global:VsanMembers = 2
 $out = Invoke-Lab 'Start-VCFLab.ps1' @{ SkipHost = @('hyp02') }
 Check "-SkipHost hyp02: full start exits 0" ($global:LastExit -eq 0)
-Check "  ...never connects to hyp02" ((Get-Connected) -notcontains $hyp02Ip)
+Check "  ...never connects to or probes hyp02" ((Get-Connected) -notcontains $hyp02Ip)
 Check "  ...brings the VCF stack up (opscollector last)" ((Get-Started) -contains 'vcsa' -and (Get-Started) -contains 'opscollector')
 Check "  ...starts the dev VMs on the other hosts" (((Get-DevStarted) -contains 'devvm01') -and ((Get-DevStarted) -contains 'devvm03'))
 Check "  ...does not start devvm02 (it lives on hyp02)" ((Get-DevStarted) -notcontains 'devvm02')
@@ -766,7 +767,7 @@ $out = Invoke-Lab 'Start-VCFLab.ps1' @{ Mode = 'Minimal'; SkipHost = @('hyp02') 
 Check "minimal -SkipHost hyp02 exits 0" ($global:LastExit -eq 0)
 Check "  ...starts the workers on hyp01 and hyp03" (((Get-Started) -contains 'llmbench02') -and ((Get-Started) -contains 'llmbench03'))
 Check "  ...not llmbench01 (on hyp02)" ((Get-Started) -notcontains 'llmbench01')
-Check "  ...never connects to hyp02" ((Get-Connected) -notcontains $hyp02Ip)
+Check "  ...never connects to or probes hyp02" ((Get-Connected) -notcontains $hyp02Ip)
 
 Write-Host "`n########## Start-VCFLab.ps1 -SkipHost refusals ##########" -ForegroundColor Magenta
 Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -DevPower 'PoweredOff'
