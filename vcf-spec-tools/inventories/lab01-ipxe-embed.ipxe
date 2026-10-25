@@ -1,0 +1,10 @@
+#!ipxe
+# Embedded in the CRS309's TFTP snponly.efi. RouterOS DHCP cannot send iPXE a
+# different filename than the firmware, so this script is what breaks the loop:
+# take an address on the booting NIC, then hand over to the HTTP stage-2 script.
+dhcp || dhcp || goto failed
+chain http://172.16.10.50:8080/esx/boot.ipxe || goto failed
+:failed
+echo iPXE: could not chain boot.ipxe -- returning to firmware (local disk boots next)
+sleep 5
+exit

@@ -94,15 +94,7 @@ esxcli system ntp set --enabled=yes {ntp_opts}
 # said "on" and the warning persisted until setpolicy was used.
 vim-cmd hostsvc/service/setpolicy ntpd on
 
-# Rename the local VMFS datastore. Every ESX install names it "datastore1", so
-# three hosts arrive at vCenter with three datastores of the same name and
-# vCenter disambiguates them by appending (1)/(2) in registration order --
-# which is not stable, so the suffix a host gets is not either. Named from the
-# host, not from storage.datastoreName: that field names the vSAN datastore
-# this cluster is about to build, and reusing it here would collide with it.
-vim-cmd hostsvc/datastore/rename datastore1 {local_datastore}
-
-# A coredump target. Without one a PSOD leaves nothing to read afterwards, and
+{datastore_rename}# A coredump target. Without one a PSOD leaves nothing to read afterwards, and
 # with no BMC the screen it painted is the only other copy -- which means a
 # photograph, if anyone happened to be in the room. -s picks the best existing
 # dump file rather than assuming a path the installer may not have used.
@@ -283,6 +275,33 @@ def memory_tiering_block(device: str, ratio: int, tier_gb: float,
         tier_gb=_number(tier_gb), ram_gb=_number(ram_gb))
 
 
+_DATASTORE_RENAME = """\
+# Rename the local VMFS datastore. Every ESX install names it "datastore1", so
+# three hosts arrive at vCenter with three datastores of the same name and
+# vCenter disambiguates them by appending (1)/(2) in registration order --
+# which is not stable, so the suffix a host gets is not either. Named from the
+# host, not from storage.datastoreName: that field names the vSAN datastore
+# this cluster is about to build, and reusing it here would collide with it.
+vim-cmd hostsvc/datastore/rename datastore1 {local_datastore}
+
+"""
+
+# hardware.bootDiskVmfs: preserve. The installer re-creates the kept VMFS
+# partition with its old label, so there is no datastore1 to rename.
+_DATASTORE_PRESERVED = """\
+# The local VMFS datastore was preserved by the install (--preservevmfs) and
+# keeps its existing label, so it is not renamed.
+
+"""
+
+
+def datastore_rename_block(local_datastore: str, preserved: bool) -> str:
+    """The datastore1 rename, or a note that the datastore was preserved."""
+    if preserved:
+        return _DATASTORE_PRESERVED
+    return _DATASTORE_RENAME.format(local_datastore=local_datastore)
+
+
 def ssh_key_block(public_key: str) -> str:
     """authorized_keys for root, or "" when no key was declared."""
     return _SSH_KEY.format(ssh_public_key=public_key) if public_key else ""
@@ -295,7 +314,8 @@ def _number(value: float) -> str:
 
 def render_firstboot(*, fqdn: str, ntp_opts: str, mtu: int,
                      local_datastore: str, ssh_public_key: str,
-                     tiering: str, workarounds: str) -> str:
+                     tiering: str, workarounds: str,
+                     preserve_local_vmfs: bool = False) -> str:
     """Assemble the whole `%firstboot` section.
 
     `tiering` and `workarounds` arrive pre-rendered (or empty) because only
@@ -305,7 +325,8 @@ def render_firstboot(*, fqdn: str, ntp_opts: str, mtu: int,
     return (
         _PREAMBLE
         + _SERVICES.format(ntp_opts=ntp_opts, mtu=mtu,
-                           local_datastore=local_datastore)
+                           datastore_rename=datastore_rename_block(
+                               local_datastore, preserve_local_vmfs))
         + ssh_key_block(ssh_public_key)
         + tiering
         + workarounds
