@@ -10,7 +10,9 @@
 # Everything that would touch the network or sleep is replaced. Nothing in a
 # stub run may reach the live lab.
 # ============================================================================
-function Test-TcpPort { param([Parameter(ValueFromRemainingArguments)]$a) $true }
+# Logged, so -SkipHost tests can prove a skipped host is never even probed.
+function Test-TcpPort { param([string]$ComputerName, [int]$Port, [int]$TimeoutMs)
+    if ($global:Log) { $global:Log.Add("TCP $ComputerName") }; $true }
 function Start-Sleep  { param([Parameter(ValueFromRemainingArguments)]$a) }
 function Invoke-LabRest { param([Parameter(ValueFromRemainingArguments)]$a)
     throw 'stub run attempted real REST I/O' }

@@ -54,6 +54,15 @@
 .PARAMETER IgnoreLicenseWindow
     Minimal only: start even though the last Full start is past RefuseDays.
 
+.PARAMETER SkipHost
+    Short names of ESX hosts to leave out of this run, e.g. -SkipHost hyp02 for
+    a host that cannot boot. A skipped host is never contacted; vSAN is gated
+    on the remaining hosts; owned VMs pinned to it (DevVms, LlmWorkers) are
+    named and left alone. Refuses an unknown name, and refuses to skip so many
+    hosts that the rest are not a vSAN majority (at most 1 of 3). VCF
+    appliances registered on a skipped host cannot power on until they are
+    registered on a running host from the vsanDatastore.
+
 .PARAMETER WhatIf
     Report what would happen without changing power state.
 
@@ -61,6 +70,8 @@
     .\Start-VCFLab.ps1
 .EXAMPLE
     .\Start-VCFLab.ps1 -Mode Minimal
+.EXAMPLE
+    .\Start-VCFLab.ps1 -SkipHost hyp02
 #>
 [CmdletBinding()]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword','CredentialPath',
@@ -73,6 +84,7 @@ param(
     [switch]$IgnoreLicenseWindow,
     [switch]$WhatIf,
     [switch]$SkipInventoryRepair,
+    [string[]]$SkipHost = @(),
     [string]$ConfigPath,
     [string]$CredentialPath
 )
@@ -82,6 +94,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VCFLab.Common.ps1')
 
 $cfg  = if ($ConfigPath) { Import-VCFLabConfig -Path $ConfigPath } else { Import-VCFLabConfig }
+# -SkipHost: from here on $cfg holds only the hosts this run may touch, so no
+# step below can contact a skipped host. Refusals happen before anything else.
+try { $selection = Select-VCFLabHosts -Config $cfg -Skip $SkipHost }
+catch { Write-Fail $_.Exception.Message; exit 1 }
+$cfg = $selection.Config
+$skipped = @($selection.Skipped)
 $cred = Import-VCFLabCredential -Path $(if ($CredentialPath) { $CredentialPath } else { $cfg.CredentialFile })
 Disable-CertificateValidation
 Initialize-PowerCLI
@@ -95,6 +113,14 @@ $started = Get-Date
 Write-Host "VCF lab power-on ($Mode)  ::  $started" -ForegroundColor White
 $minimal = ($Mode -eq 'Minimal')
 if ($WithVCenter -and -not $minimal) { Write-Warn2 "-WithVCenter only applies to -Mode Minimal; Full starts vCenter anyway" }
+if ($skipped.Count -gt 0) {
+    Write-Warn2 ("skipping: " + ($skipped -join ', ') + " -- not contacted this run")
+    Write-Warn2 "vSAN objects run without that host's copies (degraded) until it is back."
+    if ($selection.LeftBehind.Count -gt 0) {
+        Write-Warn2 ("owned VMs on the skipped host, left alone: " + ($selection.LeftBehind -join ', '))
+    }
+    Write-Info "VCF appliances registered on a skipped host cannot power on until registered on a running host."
+}
 
 # --- license window (Minimal) ----------------------------------------------------
 # Minimal keeps VCF Operations down, and VCF 9 licenses lapse after 180 days
@@ -169,7 +195,11 @@ foreach ($h in $cfg.Hosts) {
             $true
         } catch { $false }
     }
-    if (-not $ok) { Write-Fail "Aborting: $($h.Short) never came up. Power it on at the chassis."; exit 1 }
+    if (-not $ok) {
+        Write-Fail "Aborting: $($h.Short) never came up. Power it on at the chassis."
+        Write-Info "To bring the rest of the lab up without it: .\Start-VCFLab.ps1 -SkipHost $($h.Short)"
+        exit 1
+    }
 }
 
 # --- 1. vSAN ------------------------------------------------------------------
@@ -179,14 +209,18 @@ Write-Step "1. vSAN quorum"
 # Minimal without vCenter does not need vSAN (the workers are on local
 # datastores), so it only takes a short look rather than the full wait.
 $vsanTimeout = if ($minimal -and -not $WithVCenter) { [math]::Min(120, $cfg.GateTimeoutSeconds.VsanFormation) } else { $cfg.GateTimeoutSeconds.VsanFormation }
-$ok = Wait-Gate -Name "vSAN reports 3 members on every host" -TimeoutSeconds $vsanTimeout -Test {
+# With -SkipHost the skipped host may or may not still be a member (it may be
+# half-booted), so the gate is "at least the hosts we run on", not "exactly".
+$ok = Wait-Gate -Name "vSAN reports $($cfg.Hosts.Count) members on every host" -TimeoutSeconds $vsanTimeout -Test {
     foreach ($h in $cfg.Hosts) {
         try {
             $c = Connect-VIServer -Server $h.Ip -Credential $esxCred -Force -ErrorAction Stop
             $esxcli = Get-EsxCli -VMHost (Get-VMHost -Server $c) -V2 -ErrorAction Stop
             $st = $esxcli.vsan.cluster.get.Invoke()
             Disconnect-VIServer -Server $c -Confirm:$false -ErrorAction SilentlyContinue
-            if ([int]$st.SubClusterMemberCount -ne $cfg.Hosts.Count) { return $false }
+            $members = [int]$st.SubClusterMemberCount
+            if ($members -lt $cfg.Hosts.Count) { return $false }
+            if ($skipped.Count -eq 0 -and $members -ne $cfg.Hosts.Count) { return $false }
         } catch { return $false }
     }
     $true
@@ -440,6 +474,10 @@ if (-not $vcHost) {
     Write-Info "If the VM is listed above under a different name, VCenter.VmName in"
     Write-Info "VCFLab.Config.psd1 does not match the inventory. If a host errored,"
     Write-Info "that error is the real cause -- it used to be discarded silently."
+    if ($skipped.Count -gt 0) {
+        Write-Warn2 "It may be registered on a skipped host ($($skipped -join ', ')). Register it on a running"
+        Write-Warn2 "host from the vsanDatastore (Host Client > Register VM > vsanDatastore > its folder > .vmx), then re-run."
+    }
     exit 1
 }
 
