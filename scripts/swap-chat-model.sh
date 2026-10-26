@@ -34,13 +34,6 @@
 #                  the new default makes Q5 a strictly-dominated middle
 #                  ground; Q4 survives as the genuine speed alternative.
 #
-#   coder          Qwen3-Coder-Next UD-IQ4_XS → alias qwen3-coder
-#                  Coding-specific. 80B / 3B-A MoE; native tool use.
-#                  First use downloads ~38 GB (pre-fetch with download-coder.sh).
-#                  Architecture: hybrid Gated DeltaNet + MoE (same class as
-#                  Qwen3.6-35B-A3B — b9547 fix covers the seq_rm abort).
-#                  ROCm note: cache-reuse=0 disables prompt-cache (bug #19908
-#                  causes GPU stall on cached-prompt replay with hybrid models).
 #
 #   devstral       Devstral Small 2 24B Q8_0  -> alias devstral
 #                  Mistral-architecture code model, ~25 GB. Requires q4_0 KV
@@ -64,9 +57,9 @@
 #
 # Usage:
 #   ./swap-chat-model.sh qwen3.6        # switch to RAG/general model
-#   ./swap-chat-model.sh coder          # switch to coding model
+#   ./swap-chat-model.sh qwen3.8        # switch to the dense coding/agent model
 #   ./swap-chat-model.sh --status       # show what's currently loaded
-#   ./swap-chat-model.sh --force coder  # re-run even if already on coder
+#   ./swap-chat-model.sh --force qwen3.6  # re-run even if already on qwen3.6
 #
 # Run from the Proxmox host as root. Idempotent — re-running with the
 # already-loaded profile is a no-op unless --force is passed.
@@ -146,24 +139,6 @@ get_profile() {
       # supported by this context, it will be disabled" at load (Q*_K_M
       # + q8_0 KV behavior). Effective is CACHE_REUSE=0. Harmless.
       echo "unsloth/Qwen3.6-35B-A3B-GGUF UD-Q4_K_M rag-qwen3.6-fast 1,1 262144 1024 q8_0 layer none 0"
-      ;;
-    coder)
-      # Qwen3-Coder-Next UD-IQ4_XS — 80B total / 3B active MoE.
-      # UD-IQ4_XS (~38 GB) is the right quant for this hardware: Q4_K_M
-      # (~48.5 GB) would push GPU1 to ~97% idle at the 1,1.5 split (OOM
-      # under prefill). IQ4_XS is minimal loss for a pure agentic workflow.
-      #
-      # KV_TYPE=q8_0: at 128K ctx, q8_0 KV costs ~4-5 GB — well within
-      # the ~4.9 GB idle headroom. Do NOT use q4_0 here (unlike devstral).
-      # If LLAMA_KV_TYPE is q4_0 in config.env from a prior devstral run,
-      # this profile overwrites it back to q8_0.
-      #
-      # CACHE_REUSE=1024: originally set to 0 as workaround for llama.cpp
-      # #19908 (ROCm GPU stall on cached DeltaNet prompt replay). Confirmed
-      # safe on b9584 — stability test 2026-06-09 showed T3b (99K repeat)
-      # completing in 61s vs 157s first-pass (2.56× speedup, sim=1.000,
-      # f_keep=0.984). The b9582 regression that caused the stall is fixed.
-      echo "unsloth/Qwen3-Coder-Next-GGUF UD-IQ4_XS qwen3-coder 1,1.5 131072 1024 q8_0 layer none 0"
       ;;
     devstral)
       # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
@@ -304,7 +279,7 @@ get_profile() {
   esac
 }
 
-PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 hemmingway qwen3.8-redteam)
+PROFILE_NAMES=(qwen3.6 qwen3.6-fast devstral devstral-large qwen3.8 hemmingway qwen3.8-redteam)
 
 # Profile metadata for human display (--status, --help, swap header).
 # Kept separate from get_profile so the operational config stays terse.
@@ -312,7 +287,6 @@ get_profile_description() {
   case "$1" in
     qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 256K, ~113 t/s, vision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
-    coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
     qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
@@ -329,7 +303,6 @@ get_profile_vram_estimate() {
   case "$1" in
     qwen3.6)      echo "with vision (mmproj F16 on ROCm0), embed+rerank co-resident: GPU0 24.0 / GPU1 23.6 GB used, ~8 GB free per card (measured 2026-10-26); 117 t/s gen, 0.82 draft acceptance — MTP unaffected by the projector" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF). WITH VISION (mmproj on ROCm0, 2026-10-26): idle 20.6 / 14.4 GB, 66 t/s; peak under heavy prefill not re-measured" ;;
-    coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured). WITH VISION (mmproj on ROCm0, 2026-10-26): idle 23.8 / 24.2 GB, ~8 GB free per card, 15 t/s" ;;
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
@@ -348,7 +321,6 @@ Usage: $(basename "$0") [--force] [--follow] {${PROFILE_NAMES[*]/ /|}|--status}
 Profiles:
   qwen3.6       — Qwen3.6-35B-A3B UD-Q6_K (RAG / general — default; near-lossless precision)
   qwen3.6-fast  — Qwen3.6-35B-A3B UD-Q4_K_M (throughput-prioritized alternative)
-  coder         — Qwen3-Coder-Next UD-IQ4_XS (coding-specific)
   devstral        — Devstral Small 2 24B Q8_0 (Mistral-architecture code model)
   devstral-large  — Devstral 2 123B UD-IQ2_M (full-size, 64K ctx)
 
@@ -411,8 +383,8 @@ identify_profile() {
 #                                 (unsloth/Qwen3.6-35B-A3B-GGUF) on ROCm0
 #   devstral (Small 2 24B)    -> Devstral projector (mmproj-F16, 0.88 GB) on ROCm0,
 #                                 the lighter card at split 1,1.5
-# qwen3-coder (Qwen3-Coder-Next) and devstral-large (Devstral-2-123B) are text-only
-# models with no vision tower, so no projector exists for them.
+# devstral-large (Devstral-2-123B) is a text-only
+# model with no vision tower, so no projector exists for them.
 VISION_MMPROJ="/opt/models/qwen38-mmproj/mmproj-F16.gguf"
 VISION_MMPROJ_DEVICE="ROCm1"
 QWEN36_MMPROJ="/opt/models/qwen36-mmproj/mmproj-F16.gguf"
@@ -699,23 +671,6 @@ echo "  curl -sf -H \"Authorization: Bearer \$ROUTER_KEY\" http://192.168.6.${RO
 
 # Profile-specific post-swap guidance
 case "$TARGET" in
-  coder)
-    echo
-    echo "OpenCode config for this profile (~/.opencode/config.json or provider settings):"
-    echo "  \"model\":        \"router/qwen3-coder\""
-    echo "  \"small_model\":  \"router/qwen3-coder\""
-    echo "  \"context\":      131072"
-    echo "  \"max_tokens\":   32768"
-    echo
-    echo "Validated VRAM (2026-06-09, b9584): idle 83%/77%, zero drift at 99K ctx + 1600 tok gen."
-    echo "  decode: 56 t/s@short / 25 t/s@99K  |  prefill: ~1600 t/s  |  cache-reuse: 2.56x speedup"
-    echo
-    echo "Architecture notes:"
-    echo "  - No thinking mode (enable_thinking=None in router ALIAS_MAP). Commit-first behavior."
-    echo "  - cache-reuse=1024 (confirmed safe on b9584 — ROCm bug #19908 resolved)."
-    echo "  - If you hit 'hipErrorInvalidDeviceFunction' in logs, the ROCm kernel wasn't compiled"
-    echo "    for gfx908. Workaround: rebuild llama.cpp (51-lxc-amd.sh) or switch to Vulkan backend."
-    ;;
   devstral)
     echo
     echo "OpenCode config for this profile:"
