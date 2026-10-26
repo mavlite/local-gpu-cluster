@@ -513,9 +513,12 @@ STRIP_CONTEXT_MARKERS = os.environ.get("STRIP_CONTEXT_MARKERS", "true").lower() 
 #                             top_p, top_k, min_p, presence_penalty) injected
 #                             with setdefault; see alias_defaults.py.
 ALIAS_MAP: dict[str, dict] = {
-    "rag-qwen3.6":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True},
-    "qwen3.6-think": {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
-    "qwen3.6":       {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False},
+    "rag-qwen3.6":   {"backend": "rag-qwen3.6", "enable_thinking": False, "strip_thinking": True,
+                      "sampling": alias_defaults.QWEN36_NOTHINK_SAMPLING},
+    "qwen3.6-think": {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False,
+                      "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
+    "qwen3.6":       {"backend": "rag-qwen3.6", "enable_thinking": True,  "strip_thinking": False,
+                      "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
     # Throughput-prioritized UD-Q4_K_M variant of qwen3.6 (swap-chat-model.sh
     # profile "qwen3.6-fast"; LLAMA_ALIAS=rag-qwen3.6-fast). Same template and
     # thinking semantics as the default Q6_K profile, just smaller weights for
@@ -523,9 +526,12 @@ ALIAS_MAP: dict[str, dict] = {
     # the default — Q4 is now the *fast* alternative, not a "high-precision"
     # variant. Aliases only resolve when the chat unit is actually serving
     # this backend.
-    "rag-qwen3.6-fast":   {"backend": "rag-qwen3.6-fast", "enable_thinking": False, "strip_thinking": True},
-    "qwen3.6-fast-think": {"backend": "rag-qwen3.6-fast", "enable_thinking": True,  "strip_thinking": False},
-    "qwen3.6-fast":       {"backend": "rag-qwen3.6-fast", "enable_thinking": True,  "strip_thinking": False},
+    "rag-qwen3.6-fast":   {"backend": "rag-qwen3.6-fast", "enable_thinking": False, "strip_thinking": True,
+                           "sampling": alias_defaults.QWEN36_NOTHINK_SAMPLING},
+    "qwen3.6-fast-think": {"backend": "rag-qwen3.6-fast", "enable_thinking": True,  "strip_thinking": False,
+                           "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
+    "qwen3.6-fast":       {"backend": "rag-qwen3.6-fast", "enable_thinking": True,  "strip_thinking": False,
+                           "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
     # Qwen3-Coder-Next aliases. These resolve only when the chat unit is
     # actually serving the Coder-Next backend (config.env LLAMA_ALIAS=qwen3-coder).
     # If Qwen3.6 is still loaded, requests to these aliases get rewritten to

@@ -20,6 +20,19 @@ QWEN38_NOTHINK_SAMPLING = {
     "presence_penalty": 1.5,
 }
 
+# Qwen/Qwen3.6-35B-A3B model card (fetched 2026-10-26). The card lists a
+# third recipe for precise coding (temp 0.6, presence_penalty 0.0); coding
+# clients such as opencode send that themselves, so the router injects the
+# general thinking recipe. Applies to the -fast (Q4) profile too: same model.
+QWEN36_THINK_SAMPLING = {
+    "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+    "presence_penalty": 1.5,
+}
+QWEN36_NOTHINK_SAMPLING = {
+    "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+    "presence_penalty": 1.5,
+}
+
 # OBLITERATUS/Qwen3.8-27B-OBLITERATED V3 model card (fetched 2026-10-17):
 # repetition_penalty 1.15 is "Essential", agentic temperature 0.1-0.3
 # (0.2 = mid-range), top_p/top_k/min_p "Not needed" — greedy + rep-pen is
