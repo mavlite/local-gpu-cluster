@@ -11,7 +11,8 @@ import pytest
 HERE = os.path.dirname(__file__)
 SWAP = os.path.join(HERE, "..", "..", "swap-chat-model.sh")
 LIB = os.path.join(HERE, "..", "..", "lib", "chat-flags.sh")
-PROFILES = ["qwen3.6", "qwen3.6-fast", "coder", "devstral", "devstral-large", "qwen3.8", "hemmingway", "qwen3.8-redteam"]
+PROFILES = ["qwen3.6", "qwen3.6-fast", "devstral", "devstral-large", "qwen3.8", "hemmingway", "qwen3.8-redteam"]
+SINGLE_SLOT = ["qwen3.6", "qwen3.6-fast", "devstral", "devstral-large"]
 FIELDS = "REPO QUANT ALIAS SPLIT CTX CACHE_REUSE KV SPLIT_MODE SPEC_TYPE SPEC_NMAX PARALLEL".split()
 
 
@@ -45,8 +46,16 @@ def test_qwen38_profiles_are_three_slots_of_128k(name):
 
 
 def test_other_profiles_stay_single_slot():
-    for name in PROFILES[:5]:
+    for name in SINGLE_SLOT:
         assert profile(name)["PARALLEL"] == "1", name
+
+
+def test_coder_profile_is_removed():
+    # 2026-10-26: Qwen3-Coder-Next retired (qwen3.8-think is the coding default).
+    r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; '
+             'printf "%s\\n" "${PROFILE_NAMES[@]}"; get_profile coder')
+    assert "coder" not in r.stdout.split()
+    assert r.returncode != 0
 
 
 def test_hemmingway_uses_mtp_n2_for_prose():
@@ -143,9 +152,9 @@ def test_every_vision_capable_profile_gets_its_own_projector(tmp_path, alias, pr
         assert "qwen38-mmproj" not in text
 
 
-@pytest.mark.parametrize("alias", ["qwen3-coder", "devstral-large"])
+@pytest.mark.parametrize("alias", ["devstral-large"])
 def test_swap_to_a_text_only_model_clears_the_vision_projector(tmp_path, alias):
-    # Qwen3-Coder-Next and Devstral-2-123B have no vision tower at all.
+    # Devstral-2-123B has no vision tower at all.
     cfg = tmp_path / "config.env"
     cfg.write_text(QWEN38_ON)
     r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '

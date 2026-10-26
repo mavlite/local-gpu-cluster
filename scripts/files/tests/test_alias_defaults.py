@@ -165,6 +165,13 @@ class TestAliasMap(unittest.TestCase):
         self.assertEqual(_ann_assign_str_dict("BACKEND_TO_PROFILE").get(
             "qwen3.8-redteam"), "qwen3.8-redteam")
 
+    def test_coder_aliases_are_removed(self):
+        # 2026-10-26: the coder swap profile was retired; its aliases must not
+        # trigger a swap to a profile that no longer exists.
+        for alias in ("qwen3-coder", "qwen3-coder-next"):
+            self.assertNotIn(alias, self.aliases)
+        self.assertNotIn("qwen3-coder", _ann_assign_str_dict("BACKEND_TO_PROFILE"))
+
 
 if __name__ == "__main__":
     unittest.main()
