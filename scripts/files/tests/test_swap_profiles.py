@@ -102,14 +102,31 @@ def test_swap_to_qwen38_sets_the_vision_projector(tmp_path):
     assert "ROUTER_VISION_ENABLED=1" in text
 
 
-def test_swap_away_from_qwen38_clears_the_vision_projector(tmp_path):
-    # Regression: swapping qwen3.8 -> qwen3.6 left the qwen3.8 mmproj attached,
-    # so qwen3.6 aborted on load (n_embd mismatch) and crash-looped.
+QWEN38_ON = ("LLAMA_MMPROJ=/opt/models/qwen38-mmproj/mmproj-F16.gguf\n"
+             "LLAMA_MMPROJ_DEVICE=ROCm1\nROUTER_VISION_ENABLED=1\n")
+
+
+def test_swap_qwen38_to_qwen36_swaps_in_qwen36s_own_projector(tmp_path):
+    # Regression: swapping qwen3.8 -> qwen3.6 once left the qwen3.8 mmproj attached,
+    # so qwen3.6 aborted on load (n_embd mismatch) and crash-looped. qwen3.6 now has
+    # its own projector; the qwen3.8 one must never survive the swap.
     cfg = tmp_path / "config.env"
-    cfg.write_text("LLAMA_MMPROJ=/opt/models/qwen38-mmproj/mmproj-F16.gguf\n"
-                   "LLAMA_MMPROJ_DEVICE=ROCm1\nROUTER_VISION_ENABLED=1\n")
+    cfg.write_text(QWEN38_ON)
     r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
-             'write_config_env unsloth/Qwen3.6-35B-A3B-GGUF UD-Q6_K rag-qwen3.6 1,1.5 262144 1024 q8_0 layer none 0')
+             'write_config_env unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1.3 262144 1024 q8_0 layer draft-mtp 3')
+    assert r.returncode == 0, r.stderr
+    text = cfg.read_text()
+    assert "qwen38-mmproj" not in text
+    assert "qwen36-mmproj/mmproj-F16.gguf" in text
+    assert "LLAMA_MMPROJ_DEVICE=ROCm0" in text
+    assert "ROUTER_VISION_ENABLED=1" in text
+
+
+def test_swap_to_a_text_only_model_clears_the_vision_projector(tmp_path):
+    cfg = tmp_path / "config.env"
+    cfg.write_text(QWEN38_ON)
+    r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
+             'write_config_env mistralai/Devstral-Small Q8_0 devstral 1,1.5 262144 0 q4_0 layer none 0')
     assert r.returncode == 0, r.stderr
     text = cfg.read_text()
     assert "LLAMA_MMPROJ=\n" in text and "mmproj-F16.gguf" not in text
