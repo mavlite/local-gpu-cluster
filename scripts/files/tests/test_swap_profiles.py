@@ -122,11 +122,34 @@ def test_swap_qwen38_to_qwen36_swaps_in_qwen36s_own_projector(tmp_path):
     assert "ROUTER_VISION_ENABLED=1" in text
 
 
-def test_swap_to_a_text_only_model_clears_the_vision_projector(tmp_path):
+@pytest.mark.parametrize("alias,projector,device", [
+    ("rag-qwen3.6-fast", "qwen36-fast-mmproj/mmproj-F16.gguf", "ROCm0"),
+    ("devstral",         "devstral-mmproj/mmproj-F16.gguf",    "ROCm0"),
+    # Hemmingway is a Qwen3.8-27B fine-tune exported text-only; same n_embd, so
+    # the stock qwen3.8 projector loads and is placed where qwen3.8 puts it.
+    ("hemmingway",       "qwen38-mmproj/mmproj-F16.gguf",      "ROCm1"),
+])
+def test_every_vision_capable_profile_gets_its_own_projector(tmp_path, alias, projector, device):
+    cfg = tmp_path / "config.env"
+    cfg.write_text(QWEN38_ON if alias != "hemmingway" else "LLAMA_MMPROJ=\nROUTER_VISION_ENABLED=0\n")
+    r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
+             f'write_config_env some/repo Q8_0 {alias} 1,1.5 262144 0 q8_0 layer none 0')
+    assert r.returncode == 0, r.stderr
+    text = cfg.read_text()
+    assert projector in text
+    assert f"LLAMA_MMPROJ_DEVICE={device}" in text
+    assert "ROUTER_VISION_ENABLED=1" in text
+    if alias != "hemmingway":
+        assert "qwen38-mmproj" not in text
+
+
+@pytest.mark.parametrize("alias", ["qwen3-coder", "devstral-large"])
+def test_swap_to_a_text_only_model_clears_the_vision_projector(tmp_path, alias):
+    # Qwen3-Coder-Next and Devstral-2-123B have no vision tower at all.
     cfg = tmp_path / "config.env"
     cfg.write_text(QWEN38_ON)
     r = bash(f'SWAP_CHAT_MODEL_LIB_ONLY=1 source "{SWAP}" || exit 97; CONFIG_ENV="{cfg.as_posix()}"; '
-             'write_config_env mistralai/Devstral-Small Q8_0 devstral 1,1.5 262144 0 q4_0 layer none 0')
+             f'write_config_env some/repo Q4 {alias} 1,1.5 131072 0 q8_0 layer none 0')
     assert r.returncode == 0, r.stderr
     text = cfg.read_text()
     assert "LLAMA_MMPROJ=\n" in text and "mmproj-F16.gguf" not in text
