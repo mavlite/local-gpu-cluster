@@ -310,7 +310,7 @@ PROFILE_NAMES=(qwen3.6 qwen3.6-fast coder devstral devstral-large qwen3.8 hemmin
 # Kept separate from get_profile so the operational config stays terse.
 get_profile_description() {
   case "$1" in
-    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 256K, ~113 t/s)" ;;
+    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 256K, ~113 t/s, vision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     coder)        echo "Qwen3-Coder-Next 80B/3B-A UD-IQ4_XS — coding-specific (agentic, no thinking mode)" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
@@ -327,7 +327,7 @@ get_profile_description() {
 # when day-2-ops.md § 4.4 table is updated.
 get_profile_vram_estimate() {
   case "$1" in
-    qwen3.6)      echo "~43 GB at 256K + MTP (GPU0 21.3 / GPU1 21.9 at 1,1.3, measured 2026-10-19); ~10 GB headroom per card, 113 t/s gen, 0.78 draft acceptance" ;;
+    qwen3.6)      echo "with vision (mmproj F16 on ROCm0), embed+rerank co-resident: GPU0 24.0 / GPU1 23.6 GB used, ~8 GB free per card (measured 2026-10-26); 117 t/s gen, 0.82 draft acceptance — MTP unaffected by the projector" ;;
     qwen3.6-fast) echo "idle 75% / 44%; peak 84% / 52% under 90K prefill; ~5.1 GB free GPU 0 at peak; bounded across repeated heavy prefills (validated 2026-05-26 as Q4_K_M default; carries over since profile is the same GGUF)" ;;
     coder)        echo "idle 83% / 77%; peak 83% / 77% (zero drift at 99K ctx + 1600 tok gen — validated 2026-06-09 on b9584; decode 56 t/s@short / 25 t/s@99K; prefill ~1600 t/s; cache-reuse 2.56× speedup on repeat)" ;;
     devstral)        echo "idle 83% / 75%; ~5.1 GB free GPU 0, ~7.4 GB free GPU 1 (256K ctx, q4_0 KV, 1,1.5 split — validated 2026-06-08; peak under heavy prefill not yet measured)" ;;
