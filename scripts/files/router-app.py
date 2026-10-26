@@ -412,7 +412,6 @@ embed_sem = asyncio.Semaphore(EMBED_CONCURRENCY)
 BACKEND_TO_PROFILE: dict[str, str] = {
     "rag-qwen3.6":      "qwen3.6",
     "rag-qwen3.6-fast": "qwen3.6-fast",
-    "qwen3-coder":      "coder",
     "devstral":         "devstral",
     "devstral-large":   "devstral-large",
     "qwen3.8":          "qwen3.8",
@@ -532,18 +531,6 @@ ALIAS_MAP: dict[str, dict] = {
                            "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
     "qwen3.6-fast":       {"backend": "rag-qwen3.6-fast", "enable_thinking": True,  "strip_thinking": False,
                            "sampling": alias_defaults.QWEN36_THINK_SAMPLING},
-    # Qwen3-Coder-Next aliases. These resolve only when the chat unit is
-    # actually serving the Coder-Next backend (config.env LLAMA_ALIAS=qwen3-coder).
-    # If Qwen3.6 is still loaded, requests to these aliases get rewritten to
-    # backend="qwen3-coder" but llama-server serves whatever model is loaded
-    # regardless of the requested name — useful for one-line A/B testing but
-    # something to be aware of.
-    #
-    # Coder-Next doesn't use Qwen3.6's thinking-mode template, so leave
-    # enable_thinking=None (don't inject) and strip_thinking=False (don't
-    # regex-strip — Coder typically doesn't emit <think> blocks).
-    "qwen3-coder":      {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
-    "qwen3-coder-next": {"backend": "qwen3-coder", "enable_thinking": None, "strip_thinking": False},
     # Devstral Small 2 24B Q8_0 — Mistral-architecture code model.
     # No thinking mode (Mistral architecture); enable_thinking=None (no injection),
     # strip_thinking=False (model never emits <think> blocks).
