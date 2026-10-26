@@ -56,6 +56,16 @@ class TestSamplingConstants(unittest.TestCase):
             "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
             "presence_penalty": 0.0})
 
+    def test_qwen36_nothink_matches_model_card(self):
+        self.assertEqual(ad.QWEN36_NOTHINK_SAMPLING, {
+            "temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+            "presence_penalty": 1.5})
+
+    def test_qwen36_think_matches_model_card_general(self):
+        self.assertEqual(ad.QWEN36_THINK_SAMPLING, {
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+            "presence_penalty": 1.5})
+
 
 class TestApplyAliasDefaults(unittest.TestCase):
     def test_rewrites_model_to_backend(self):
@@ -123,6 +133,21 @@ class TestAliasMap(unittest.TestCase):
                         else "QWEN38_NOTHINK_SAMPLING")
                 self.assertIn("sampling", entry)
                 self.assertEqual(ast.unparse(entry["sampling"]), f"alias_defaults.{want}")
+
+    def test_every_qwen36_alias_sets_mode_matched_sampling(self):
+        # Without these, clients that send no sampling got llama-server's
+        # generic defaults (temp 0.8, top_k 40, min_p 0.05) on Qwen3.6.
+        seen = 0
+        for alias, entry in self.aliases.items():
+            if ast.literal_eval(entry["backend"]) not in ("rag-qwen3.6", "rag-qwen3.6-fast"):
+                continue
+            seen += 1
+            with self.subTest(alias=alias):
+                want = ("QWEN36_THINK_SAMPLING" if ast.literal_eval(entry["enable_thinking"])
+                        else "QWEN36_NOTHINK_SAMPLING")
+                self.assertIn("sampling", entry)
+                self.assertEqual(ast.unparse(entry["sampling"]), f"alias_defaults.{want}")
+        self.assertEqual(seen, 6)
 
     def test_redteam_aliases_use_distinct_backend_and_profile_mapping(self):
         # OBLITERATED V3 (2026-10-17): the redteam aliases must resolve to
