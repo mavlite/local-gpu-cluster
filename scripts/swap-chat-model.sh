@@ -403,20 +403,33 @@ identify_profile() {
 # and mmproj") -> restart crash loop. The swap therefore sets each multimodal
 # profile's OWN projector and CLEARS it for every other profile.
 #   qwen3.8 / qwen3.8-redteam -> qwen3.8 projector on ROCm1
+#   hemmingway                -> qwen3.8 projector on ROCm1 (Qwen3.8-27B fine-tune
+#                                 exported text-only; same n_embd, so the stock one loads)
 #   rag-qwen3.6 (Q6_K_XL MTP) -> qwen3.6 projector (unsloth MTP repo mmproj-F16,
 #                                 0.9 GB) on ROCm0, the less-loaded card at split 1,1.3
+#   rag-qwen3.6-fast (Q4_K_M) -> qwen3.6 projector from its own repo
+#                                 (unsloth/Qwen3.6-35B-A3B-GGUF) on ROCm0
+#   devstral (Small 2 24B)    -> Devstral projector (mmproj-F16, 0.88 GB) on ROCm0,
+#                                 the lighter card at split 1,1.5
+# qwen3-coder (Qwen3-Coder-Next) and devstral-large (Devstral-2-123B) are text-only
+# models with no vision tower, so no projector exists for them.
 VISION_MMPROJ="/opt/models/qwen38-mmproj/mmproj-F16.gguf"
 VISION_MMPROJ_DEVICE="ROCm1"
 QWEN36_MMPROJ="/opt/models/qwen36-mmproj/mmproj-F16.gguf"
 QWEN36_MMPROJ_DEVICE="ROCm0"
+QWEN36_FAST_MMPROJ="/opt/models/qwen36-fast-mmproj/mmproj-F16.gguf"
+DEVSTRAL_MMPROJ="/opt/models/devstral-mmproj/mmproj-F16.gguf"
 
 write_config_env() {
   local repo="$1" quant="$2" alias="$3" tensor_split="$4" ctx="$5" cache_reuse="$6" kv_type="$7"
   local split_mode="$8" spec_type="$9" spec_nmax="${10}" parallel="${11:-1}"
   local mmproj="" mmproj_dev="" vision="0"
   case "$alias" in
-    qwen3.8|qwen3.8-redteam) mmproj="$VISION_MMPROJ"; mmproj_dev="$VISION_MMPROJ_DEVICE"; vision="1" ;;
+    qwen3.8|qwen3.8-redteam|hemmingway)
+                             mmproj="$VISION_MMPROJ"; mmproj_dev="$VISION_MMPROJ_DEVICE"; vision="1" ;;
     rag-qwen3.6)             mmproj="$QWEN36_MMPROJ"; mmproj_dev="$QWEN36_MMPROJ_DEVICE"; vision="1" ;;
+    rag-qwen3.6-fast)        mmproj="$QWEN36_FAST_MMPROJ"; mmproj_dev="ROCm0"; vision="1" ;;
+    devstral)                mmproj="$DEVSTRAL_MMPROJ"; mmproj_dev="ROCm0"; vision="1" ;;
   esac
   local chat_template=""
   # The OBLITERATED GGUF ships a stripped chat template with no tools section -> llama-server
