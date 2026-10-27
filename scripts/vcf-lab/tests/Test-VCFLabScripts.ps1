@@ -147,8 +147,12 @@ function Connect-VIServer {
     Note "CONNECT $Server"
     if ($global:UnreachableHosts -contains $Server) { throw "stub: host $Server unreachable" }
     $global:StubSessions += $Server
-    [pscustomobject]@{ Name = $Server; IsConnected = $true }
+    $session = [pscustomobject]@{ Name = $Server; IsConnected = $true }
+    # Faithful to PowerCLI: every connection lands in $global:DefaultVIServers (an array).
+    $global:DefaultVIServers = @(@($global:DefaultVIServers | Where-Object { $_ }) + $session)
+    $session
 }
+$global:DefaultVIServers = @()
 $global:UnreachableHosts = @()
 $global:FailStart = @()
 # Faithful to PowerCLI: "-Server *" with no open session fails while BINDING parameters
@@ -162,9 +166,18 @@ function Disconnect-VIServer {
             throw "Could not find any of the servers specified by name. (stub: no open session)"
         }
         $global:StubSessions = @()
+        $global:DefaultVIServers = @()
         return
     }
-    foreach ($s in @($Server)) { $global:StubSessions = @($global:StubSessions | Where-Object { $_ -ne $s.Name }) }
+    # Faithful to PowerCLI: -Server binds VIServer[]; an element that is itself an array fails
+    # while binding ("Cannot convert 'VIServer[]' to the type 'VIServer'"), seen live 2026-10-27.
+    foreach ($s in @($Server)) {
+        if ($s -is [array]) { throw "Cannot convert 'VMware.VimAutomation.ViCore.Types.V1.VIServer[]' to the type 'VMware.VimAutomation.ViCore.Types.V1.VIServer' required by parameter 'Server'. (stub)" }
+    }
+    foreach ($s in @($Server)) {
+        $global:StubSessions = @($global:StubSessions | Where-Object { $_ -ne $s.Name })
+        $global:DefaultVIServers = @($global:DefaultVIServers | Where-Object { $_ -and $_.Name -ne $s.Name })
+    }
 }
 function Get-VMHost {
     param($VM,[string]$Name,$Server,[Parameter(ValueFromRemainingArguments)]$a)
@@ -298,6 +311,7 @@ function Reset-Fleet {
     param([string]$Power='PoweredOff',[string]$ForeignPower='PoweredOn',[string]$WorkerPower='PoweredOff',[string]$DevPower)
     if (-not $DevPower) { $DevPower = $ForeignPower }
     $global:StubSessions = @()
+    $global:DefaultVIServers = @()
     $f = 'vcf-management-services'
     $global:FakeVMs = @(
         (New-FakeVM 'vcsa'           $Power 4  '172.16.10.129' $f)
@@ -595,6 +609,19 @@ $global:VCenterDown = $true
 $null = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
 Check "vCenter down: workers stopped via their hosts" (@($workerNames | Where-Object { (Get-Stopped) -notcontains $_ }).Count -eq 0)
 Check "vCenter down: hosts still powered off" ($global:Log -contains 'HOSTOFF')
+
+# Regression (live 2026-10-27, Minimal -IncludeHosts): with a PowerCLI session still in
+# $DefaultVIServers when the host phase starts, Get-Variable -ValueOnly handed the whole
+# VIServer[] over as ONE item, so Disconnect-VIServer -Server got an array inside an array
+# and failed while binding ("Cannot convert VIServer[] to VIServer") before any host went down.
+Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOff'
+$global:VCenterDown = $true
+# A dead vCenter session: not a host address, so no host connect/disconnect removes it by name.
+$global:DefaultVIServers = @([pscustomobject]@{ Name = '172.16.10.129'; IsConnected = $true; Leftover = $true })
+$out = Invoke-Lab 'Stop-VCFLab.ps1' @{ IncludeHosts = $true }
+Check "vCenter down + a leftover PowerCLI session: no binding error" ($out -notmatch 'Cannot convert')
+Check "  ...hosts still powered off" ($global:Log -contains 'HOSTOFF')
+Check "  ...the leftover session was disconnected" (@($global:DefaultVIServers | Where-Object { $_ -and $_.PSObject.Properties['Leftover'] }).Count -eq 0)
 
 Reset-Fleet -Power 'PoweredOff' -ForeignPower 'PoweredOff' -WorkerPower 'PoweredOn'
 ($global:FakeVMs | Where-Object Name -eq 'nsxa').PowerState = 'PoweredOn'
