@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-27: the VM this script builds/operates was destroyed (see docs/wf-sandbox-runbook.md). Do not run.
 # 75-vm-wf-sandbox-firewall.sh build|locked — install the workforce sandbox's PVE firewall policy.
 #
 #   build   provisioning: internet only, no private space (files/wf-sandbox-policy.sh)

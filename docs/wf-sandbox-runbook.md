@@ -1,5 +1,11 @@
 # Workforce sandbox VM — operator runbook
 
+> **RETIRED 2026-10-27.** VM 176 `wf-sandbox` and VM 177 `wf-runner-build` were destroyed, and bridge
+> `vmbrwf` (10.79.0.0/24), `wf-sandbox-net.service` and the 192.168.6.79 egress address were removed
+> from the Proxmox host. Headless agent work now runs on VM 178 `agent-runner` (bridge `vmbrar`
+> 10.81.0.0/24, egress 192.168.6.78), which uses a scoped router key through the workforce lane.
+> This runbook is kept for history only; nothing below describes the live host.
+
 VM 176 is the machine every workforce agent action runs in (workforce spec §5.1). The harness
 (`scripts/tools/workforce`) runs there as root; agents run as `wf-impl-1..3` and `wf-lead` in systemd
 scopes. There is **no SSH and no inbound port**: everything goes through the QEMU guest agent
