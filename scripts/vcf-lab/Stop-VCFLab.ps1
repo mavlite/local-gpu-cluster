@@ -277,8 +277,13 @@ if (-not $IncludeHosts) {
     # was never reached) fails while binding its parameters; -ErrorAction cannot suppress
     # that, and under $ErrorActionPreference='Stop' it ended the script before any worker
     # or host was stopped (seen live 2026-10-05).
-    $open = @(Get-Variable -Name DefaultVIServers -Scope Global -ValueOnly -ErrorAction SilentlyContinue |
-              Where-Object { $_ })
+    #
+    # Read .Value off the variable object, as Disconnect-AllViServers does: Get-Variable
+    # -ValueOnly emits the whole VIServer[] as ONE pipeline item, so $open became an array
+    # inside an array and -Server failed to bind ("Cannot convert VIServer[] to VIServer")
+    # whenever any session was still open (seen live 2026-10-27).
+    $viVar = Get-Variable -Name DefaultVIServers -Scope Global -ErrorAction SilentlyContinue
+    $open = @(if ($viVar) { @($viVar.Value) | Where-Object { $_ } })
     if ($open.Count -gt 0) { Disconnect-VIServer -Server $open -Confirm:$false -ErrorAction SilentlyContinue }
 
     # The LLM workers are owned by these scripts, so they are stopped here --
