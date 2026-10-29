@@ -109,10 +109,13 @@ get_profile() {
       # acceptance), confirming the 2026-10-12 MTP sweep. The MTP head is
       # bundled in the GGUF, so no separate --model-draft is needed.
       #
-      # Context 262144 (256K), single slot. Qwen3.6's hybrid Gated-DeltaNet MoE
-      # has a compact KV state, so 256K only adds ~3.6 GB over 128K: measured
-      # 2026-10-19 at ~43 GB total (GPU0 21.3 / GPU1 21.9 at split 1,1.3), ~10 GB
-      # headroom per card. draft-mtp n-max 3 is validated best (the 2026-10-19
+      # Context 262144 split into 2 slots of 128K (2026-10-29; was 1 x 256K). The
+      # second slot exists for the router's workforce lane: scoped keys (the
+      # agent-runner VM) get `slots - RESERVED_SLOTS` = 1 slot while the owner
+      # keeps one; on 1 slot the lane is closed and scoped keys get 503. Same
+      # total KV as 1 x 256K. Qwen3.6's hybrid Gated-DeltaNet MoE has a compact
+      # KV state (256K total was measured 2026-10-19 at ~43 GB, GPU0 21.3 / GPU1
+      # 21.9 at split 1,1.3). draft-mtp n-max 3 is validated best (the 2026-10-19
       # lever sweep confirmed n4 ties on code and loses on prose; keep n3).
       #
       # Tensor-split: 1,1.3. At a flat 1,1 split GPU0 carries the non-split
@@ -121,7 +124,7 @@ get_profile() {
       #
       # The Q4_K_XL MTP build crashes on gfx1030 ("ROCm illegal memory access"),
       # so Q6_K_XL is the only working MTP quant here (see qwen36-mtp memory).
-      echo "unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1.3 262144 1024 q8_0 layer draft-mtp 3"
+      echo "unsloth/Qwen3.6-35B-A3B-MTP-GGUF UD-Q6_K_XL rag-qwen3.6 1,1.3 262144 1024 q8_0 layer draft-mtp 3 2"
       ;;
     qwen3.6-fast)
       # Throughput-prioritized alternative — UD-Q4_K_M, ~22 GB weights.
@@ -285,7 +288,7 @@ PROFILE_NAMES=(qwen3.6 qwen3.6-fast devstral devstral-large qwen3.8 hemmingway q
 # Kept separate from get_profile so the operational config stays terse.
 get_profile_description() {
   case "$1" in
-    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 256K, ~113 t/s, vision)" ;;
+    qwen3.6)      echo "Qwen3.6-35B-A3B-MTP UD-Q6_K_XL — RAG / general (default; draft-mtp n3, 2 x 128K slots, ~113 t/s, vision)" ;;
     qwen3.6-fast) echo "Qwen3.6-35B-A3B UD-Q4_K_M — throughput-prioritized alternative" ;;
     devstral)        echo "Devstral Small 2 24B Q8_0 — Mistral-architecture code model (~25 GB)" ;;
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
@@ -697,7 +700,8 @@ case "$TARGET" in
     echo "OpenCode config for this profile:"
     echo "  \"model\":        \"router/qwen3.6\""
     echo "  \"small_model\":  \"router/qwen3.6\""
-    echo "  \"context\":      262144"
+    # opencode's context limit must match ONE slot: qwen3.6 is 2 x 128K, qwen3.6-fast 1 x 256K.
+    echo "  \"context\":      $(( TARGET_CTX / TARGET_PARALLEL ))"
     echo "  \"max_tokens\":   32768"
     ;;
 esac
