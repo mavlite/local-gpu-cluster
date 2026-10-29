@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-27: the VM this script builds/operates was destroyed (see docs/wf-sandbox-runbook.md). Do not run.
 # 79-vm-wf-runner-image.sh -- build the runner image for the Minisforum nodes (coding engine phase 2,
 # docs/superpowers/plans/2026-10-13-coding-engine-phase2-runners.md). Runs on the Proxmox host as root.
 #

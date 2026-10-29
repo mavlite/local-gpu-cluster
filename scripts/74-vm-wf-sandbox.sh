@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-27: the VM this script builds/operates was destroyed (see docs/wf-sandbox-runbook.md). Do not run.
 # 74-vm-wf-sandbox.sh — create the workforce sandbox VM (Debian 13, VMID 176) and its network.
 #
 # WHAT IT IS: the machine every workforce agent action executes in (workforce spec §5.1, decision F).

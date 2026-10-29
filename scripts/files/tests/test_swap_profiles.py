@@ -12,7 +12,7 @@ HERE = os.path.dirname(__file__)
 SWAP = os.path.join(HERE, "..", "..", "swap-chat-model.sh")
 LIB = os.path.join(HERE, "..", "..", "lib", "chat-flags.sh")
 PROFILES = ["qwen3.6", "qwen3.6-fast", "devstral", "devstral-large", "qwen3.8", "hemmingway", "qwen3.8-redteam"]
-SINGLE_SLOT = ["qwen3.6", "qwen3.6-fast", "devstral", "devstral-large"]
+SINGLE_SLOT = ["qwen3.6-fast", "devstral", "devstral-large"]
 FIELDS = "REPO QUANT ALIAS SPLIT CTX CACHE_REUSE KV SPLIT_MODE SPEC_TYPE SPEC_NMAX PARALLEL".split()
 
 
@@ -75,6 +75,14 @@ def test_qwen36_uses_mtp_q6kxl_at_256k():
     assert p["QUANT"] == "UD-Q6_K_XL"
     assert (p["SPEC_TYPE"], p["SPEC_NMAX"]) == ("draft-mtp", "3")
     assert (p["CTX"], p["SPLIT"], p["SPLIT_MODE"]) == ("262144", "1,1.3", "layer")
+
+
+def test_qwen36_is_two_slots_of_128k():
+    # 2026-10-29: 2 x 128K so the router's workforce lane (slots - RESERVED_SLOTS) has one
+    # slot for scoped keys (agent-runner) while the owner keeps one. Same total KV as 1 x 256K.
+    p = profile("qwen3.6")
+    assert p["PARALLEL"] == "2"
+    assert int(p["CTX"]) // int(p["PARALLEL"]) == 131072
 
 
 def test_write_config_env_writes_parallel_and_ctx_together(tmp_path):

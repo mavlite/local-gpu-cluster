@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-27: the VM this script builds/operates was destroyed (see docs/wf-sandbox-runbook.md). Do not run.
 # 76-vm-wf-sandbox.sh provision|proof|validate|status — operate the workforce sandbox VM through its guest
 # agent (no SSH exists). Files cross as base64 on stdin (`qm guest exec --pass-stdin`), chunked
 # under its 1 MiB limit and size-checked in the guest.
