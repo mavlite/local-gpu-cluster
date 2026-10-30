@@ -119,8 +119,10 @@ def test_literal_secret_values_are_redacted(env, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "leak")
     env.add_issue(7)
     env.run()
-    everything = json.dumps(env.issue(7)["comments"])
-    assert env.secret not in everything and "<redacted>" in everything
+    i = env.issue(7)
+    rep = reports(i)
+    assert len(rep) == 1 and "note: <redacted>" in rep[0]
+    assert env.secret not in json.dumps(i["comments"])
 
 
 def test_headerless_report_is_accepted_and_posted_with_heading(env, monkeypatch):
