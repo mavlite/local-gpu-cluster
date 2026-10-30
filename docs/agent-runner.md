@@ -99,6 +99,14 @@ Not managed by the script:
     the zip, checks the zip's sha256 and the binary's sha256, then pushes it. No egress change.
   - **Verified** inside the SDG-ARMA3 sandbox as `agent-arma`: `sqfvm -a -i file.sqf` evaluates, with no
     missing libraries. Without `-a`, sqfvm drops into its REPL and hangs until the timeout.
+  - **`python3-paramiko`** (+ `python3-nacl`) for SDG-RUST `tools/lab/ptero.py` (Wings SFTP). `dpkg -i`
+    resolves nothing, so `VM_DEBS` lists every dependency the VM lacks. Verified in the SDG-RUST sandbox:
+    `tools/lab/on-server.sh 156 rlogmark.sh` prints `@oxide_<date>.txt:<bytes>` (read-only on the server).
+- **SDG-RUST plugin cache** (`.cache/umod/<sha1>.cs`, gitignored; `tools/build.py` checks each file against
+  `plugins.lock`). The sandbox mounts the clone read-only, so the cache is seeded from a workstation:
+  copy `raidable-bases-sdg/.cache/umod/` to the host, then run `78 seed-umod DIR`. It refuses any file that
+  doesn't hash to its own name or that no `plugins.lock` on origin lists. `78 diff` checks that every plugin
+  in origin/main's lock is there. Re-seed it when `plugins.lock` gains a plugin.
 - **Locked profile** (`agent-runner-opencode.json`, installed at `/etc/agent-runner-agent/opencode.json`,
   outside the directory the sandbox hides):
   - only agent `lab-runner` is enabled (general and explore are disabled), with an 80-step cap;
