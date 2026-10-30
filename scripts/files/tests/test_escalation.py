@@ -69,18 +69,23 @@ def test_valid_brief_passes():
     assert escalation.validate_brief(GOOD, "claude-ask") is None
 
 
+def head(r):
+    """(status, code, first line of the message): the first line is the rejection itself, guidance follows."""
+    return r and (r[0], r[1], r[2].splitlines()[0])
+
+
 def test_missing_or_empty_section_is_422():
     r = escalation.validate_brief(GOOD.replace("## Reproduce", "## Repro"), "claude-ask")
-    assert r == (422, "brief_section", "brief: missing or empty section Reproduce")
+    assert head(r) == (422, "brief_section", "brief: missing or empty section Reproduce")
     empty_code = GOOD.replace("parse.py:1-20\ndef parse(s): ...\n", "")
-    assert escalation.validate_brief(empty_code, "claude-ask")[2] == "brief: missing or empty section Code"
+    assert head(escalation.validate_brief(empty_code, "claude-ask"))[2] == "brief: missing or empty section Code"
 
 
 def test_na_allowed_except_goal_error_question():
     assert escalation.validate_brief(GOOD.replace("Python 3.12, no third-party deps.", "n/a: trivial"), "claude-ask") is None
     na_err = GOOD.replace("Traceback (most recent call last):\n  File \"parse.py\", line 12, in parse\nValueError: unexpected ','",
                           "n/a: no error")
-    assert escalation.validate_brief(na_err, "claude-ask")[2] == "brief: missing or empty section Exact error"
+    assert head(escalation.validate_brief(na_err, "claude-ask"))[2] == "brief: missing or empty section Exact error"
 
 
 def test_oversized_brief_is_413_with_numbers():
@@ -112,8 +117,8 @@ def test_helper_heading_inside_code_is_content():
 def test_reproduce_heading_inside_fence_does_not_count():
     no_repro = GOOD.replace("## Reproduce\npython -m pytest tests/test_parse.py -q -> 1 failed\n", "")
     fenced = no_repro.replace("parse.py:1-20\n", "parse.py:1-20\n```\n## Reproduce\nrun it\n```\n")
-    assert escalation.validate_brief(fenced, "claude-ask") == (422, "brief_section",
-                                                                "brief: missing or empty section Reproduce")
+    assert head(escalation.validate_brief(fenced, "claude-ask")) == (422, "brief_section",
+                                                                      "brief: missing or empty section Reproduce")
 
 
 def test_unknown_heading_mid_code_stays_in_code():
@@ -126,10 +131,10 @@ def test_unknown_heading_mid_code_stays_in_code():
 
 def test_na_is_strict_about_its_form():
     exact_error = "Traceback (most recent call last):\n  File \"parse.py\", line 12, in parse\nValueError: unexpected ','"
-    assert escalation.validate_brief(GOOD.replace(exact_error, "N/A: none"), "claude-ask") == (
+    assert head(escalation.validate_brief(GOOD.replace(exact_error, "N/A: none"), "claude-ask")) == (
         422, "brief_section", "brief: missing or empty section Exact error")
-    assert escalation.validate_brief(GOOD.replace("Make the parser accept trailing commas.", "**n/a**"),
-                                     "claude-ask") == (422, "brief_section", "brief: missing or empty section Goal")
+    assert head(escalation.validate_brief(GOOD.replace("Make the parser accept trailing commas.", "**n/a**"),
+                                          "claude-ask")) == (422, "brief_section", "brief: missing or empty section Goal")
     assert escalation.validate_brief(GOOD.replace("Make the parser accept trailing commas.",
                                                   "N/A values crash the parser"), "claude-ask") is None
 
@@ -1069,3 +1074,74 @@ def test_config_accepts_valid_tz_models_and_zero_retry_delay():
 def test_ledger_docstring_does_not_overclaim_restarts():
     doc = escalation.Ledger.__doc__
     assert "loses nothing" not in doc and "unrecorded" in doc
+
+
+# --- teaching rejections, the rejection-loop breaker, dollar caps instead of call counts (2026-10-30) ---
+
+def test_rejection_names_every_missing_section_at_once():
+    text = GOOD.replace("## Reproduce", "## Repro").replace("parse.py:1-20\ndef parse(s): ...\n", "")
+    assert head(escalation.validate_brief(text, "claude-ask"))[2] == \
+        "brief: missing or empty sections Reproduce, Code"
+
+
+@pytest.mark.parametrize("bad", ["### Reproduce", "## Reproduce:", "**Reproduce**", "Reproduce:", "## reproduce"])
+def test_rejection_points_at_a_near_miss_heading(bad):
+    msg = escalation.validate_brief(GOOD.replace("## Reproduce", bad), "claude-ask")[2]
+    assert f"found '{bad}' -- write the heading exactly as '## Reproduce'" in msg
+
+
+def test_rejection_carries_the_template_in_order():
+    msg = escalation.validate_brief(GOOD.replace("## Reproduce", "## Repro"), "claude-ask")[2]
+    lines = [ln for ln in msg.splitlines() if ln.startswith("## ")]
+    assert lines == [f"## {n}" for n in escalation.SECTIONS]
+    assert "Goal, Exact error and Question may not be n/a" in msg
+
+
+def test_call_count_limits_default_to_none_and_dollars_still_cap(tmp_path):
+    c = escalation.load_config({"ESCALATION_PRICES": PRICES})
+    assert c.hard_daily_calls is None and c.shared_daily_calls is None and c.auto_daily_calls == 5
+    u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 99, "claude-auto": 0, "claude-hard": 99}}
+    assert escalation.check_budget(c, u, "claude-hard", 0.5) is None
+    assert escalation.check_budget(c, u, "claude-ask", 0.5) is None
+    assert escalation.check_budget(c, dict(u, day_cost=6.9), "claude-hard", 0.5) == "daily cap reached ($7.00)"
+    u2 = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 0, "claude-auto": 5, "claude-hard": 0}}
+    assert escalation.check_budget(c, u2, "claude-auto", 0.01) == "automatic calls for today used (5)"
+    assert escalation._calls_left(c, u2) == {"claude-ask": None, "claude-auto": 0, "claude-hard": None}
+
+
+def test_a_numeric_limit_still_applies_and_zero_still_means_zero(tmp_path):
+    c = cfg(tmp_path, ESCALATION_HARD_DAILY_CALLS="0", ESCALATION_DAILY_CALLS="15")
+    u = {"day_cost": 0.0, "month_cost": 0.0, "calls": {"claude-ask": 15, "claude-auto": 0, "claude-hard": 0}}
+    assert escalation.check_budget(c, u, "claude-hard", 0.01) == "Opus calls for today used (0)"
+    assert escalation.check_budget(c, u, "claude-ask", 0.01) == "daily calls used (15)"
+    with pytest.raises(ValueError):
+        cfg(tmp_path, ESCALATION_HARD_DAILY_CALLS="lots")
+
+
+BAD = GOOD.replace("## Reproduce", "## Repro")
+
+
+def test_three_rejections_in_a_row_turn_into_a_stop(broker):
+    stub, c, tmp = broker
+    t0 = ts(2026, 10, 15, 9)
+    codes = [run(ask(brief=BAD), c, t0 + 60 * i)[1]["error"] for i in range(3)]
+    assert [e["code"] for e in codes] == ["brief_section", "brief_section", "brief_loop"]
+    assert codes[2]["message"].startswith("STOP: 3 briefs rejected in a row")
+    assert "missing or empty section Reproduce" in codes[2]["message"]     # the reason is still there
+
+
+def test_a_valid_brief_still_goes_through_after_the_stop_and_resets_the_streak(broker):
+    stub, c, tmp = broker
+    t0 = ts(2026, 10, 15, 9)
+    for i in range(3):
+        run(ask(brief=BAD), c, t0 + 60 * i)
+    assert run(ask(), c, t0 + 200)[0] == 200                             # the stub answers 200 by default
+    assert run(ask(brief=BAD + "x"), c, t0 + 260)[1]["error"]["code"] == "brief_section"
+
+
+def test_rejections_older_than_the_window_do_not_count(broker):
+    stub, c, tmp = broker
+    t0 = ts(2026, 10, 15, 9)
+    run(ask(brief=BAD), c, t0)
+    run(ask(brief=BAD), c, t0 + 60)
+    assert run(ask(brief=BAD), c, t0 + 60 + 601)[1]["error"]["code"] == "brief_section"
