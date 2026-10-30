@@ -46,3 +46,13 @@ scripts/80-agent-runner-dispatcher.sh status
 ```
 
 To pause the queue, run `disable`. A task that is already running finishes; nothing new is claimed.
+
+GitHub's label filter (`gh issue list -l runner:ready`) can lag a few seconds behind a label edit. A
+`run-once` right after relabelling may find nothing; the next tick picks the issue up.
+
+The agent writes its report to `runner-report-<N>.md` in the clone. The file is untracked, and the
+dirty-tree check ignores untracked files, so it never blocks the next task.
+
+**Self-test, 2026-10-30:** `DraconisCluster/SDG-ARMA3#2` (`kind:check`, `git log -1`) gave PASS in about
+70 s on qwen3.6. The first attempt exposed a headerless report (fixed: headerless is accepted, and the
+preamble insists on the heading).
