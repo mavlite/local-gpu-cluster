@@ -417,3 +417,28 @@ def test_exit_76_after_claim_puts_the_task_back(env, monkeypatch):
     i = env.issue(7)
     assert set(i["labels"]) == {"runner:ready", "kind:check", "tier:a"}
     assert any("not ready" in c["body"] for c in i["comments"]) and not reports(i)
+
+
+# ---- selftest through the real unit, and the unit itself (2026-10-30: NoNewPrivileges broke every sudo) -------
+def test_selftest_runs_the_preflight_for_every_repo_and_claims_nothing(env, monkeypatch):
+    monkeypatch.setenv("DISPATCH_SELFTEST", "1")
+    env.add_issue(7)
+    assert env.run() == 0
+    i = env.issue(7)
+    assert i["labels"] == ["runner:ready", "kind:check", "tier:a"] and i["comments"] == []
+
+
+def test_selftest_fails_when_any_repo_is_not_ready(env, monkeypatch):
+    monkeypatch.setenv("DISPATCH_SELFTEST", "1")
+    monkeypatch.setenv("FAKE_PREFLIGHT_FAIL", "SDG-RUST")
+    env.add_issue(7)
+    assert env.run() == 1
+    assert env.issue(7)["comments"] == []
+
+
+def test_dispatch_unit_allows_sudo_and_orders_after_the_egress_table():
+    unit = open(os.path.join(HERE, "..", "agent-runner-dispatch.service")).read()
+    live = [l.strip() for l in unit.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    assert not any(l.startswith("NoNewPrivileges") for l in live)
+    after = next(l for l in live if l.startswith("After="))
+    assert "agent-runner-egress.service" in after
