@@ -65,7 +65,13 @@
         "webfetch": "deny",
         "websearch": "deny",
         "task": "deny",
-        "external_directory": "deny",
+        "external_directory": {
+          "*": "deny",
+          "/results": "allow",
+          "/results/*": "allow",
+          "/tmp": "allow",
+          "/tmp/*": "allow"
+        },
         "skill": {
           "*": "deny"
         },

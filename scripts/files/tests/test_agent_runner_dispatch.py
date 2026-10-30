@@ -64,6 +64,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_GH", gh_cmd)
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("DISPATCH_RETRY_SLEEP_S", "0")
+    monkeypatch.setenv("DISPATCH_MIRROR_BRANCHES", "SDG-ARMA3:upstream")
+    monkeypatch.delenv("FAKE_GH_EDIT_FAIL", raising=False)
     secret = tmp_path / "router.key"
     secret.write_text("rk_live_" + "Q" * 30 + "\n")        # not hex, not a gh token: only a literal match catches it
     monkeypatch.setenv("FAKE_SECRET_FILE", str(secret))
@@ -442,3 +445,78 @@ def test_dispatch_unit_allows_sudo_and_orders_after_the_egress_table():
     assert not any(l.startswith("NoNewPrivileges") for l in live)
     after = next(l for l in live if l.startswith("After="))
     assert "agent-runner-egress.service" in after
+
+
+def test_partial_label_edit_failure_is_retried_and_ends_runner_done(env, monkeypatch):
+    # SDG-ARMA3#1, 2026-10-30: GitHub removed runner:running, then failed before adding runner:done; the
+    # dispatcher crashed and left the issue with no runner:* label at all.
+    env.add_issue(7)
+    # the claim succeeds; the finishing edit then fails once, after applying its removal
+    real = d.relabel
+    calls = {"n": 0}
+
+    def flaky(c, repo, num, remove=(), add=()):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "1")
+        return real(c, repo, num, remove=remove, add=add)
+    monkeypatch.setattr(d, "relabel", flaky)
+    assert env.run() == 0
+    labels = env.issue(7)["labels"]
+    assert "runner:done" in labels and "runner:running" not in labels
+    assert len(reports(env.issue(7))) == 1
+
+
+def test_label_edit_that_keeps_failing_still_raises(env, monkeypatch):
+    env.add_issue(7)
+    c = d.cfg()
+    monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "99")
+    with pytest.raises(RuntimeError):
+        d.relabel(c, REPO, 7, remove=["runner:ready"], add=["runner:running"])
+    edits = [a for a in json.loads(env.state.read_text())["calls"] if a[:2] == ["issue", "edit"]]
+    assert len(edits) == d.RELABEL_TRIES
+
+
+def test_relabel_retry_sends_only_what_is_still_missing(env, monkeypatch):
+    env.add_issue(7, labels=("runner:running", "kind:check", "tier:a"))
+    monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "1")
+    d.relabel(d.cfg(), REPO, 7, remove=["runner:running"], add=["runner:done"])
+    assert env.issue(7)["labels"] == ["kind:check", "tier:a", "runner:done"]
+    edits = [a for a in json.loads(env.state.read_text())["calls"] if a[:2] == ["issue", "edit"]]
+    assert "--remove-label" not in edits[-1] and edits[-1][-2:] == ["--add-label", "runner:done"]
+
+
+def _commit(cwd, msg):
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg, cwd=cwd)
+
+
+def test_mirror_branch_is_created_and_fast_forwarded_from_origin(env, monkeypatch):
+    # SDG-RUST#1: tools/build.py reads `upstream:plugin/...`, a LOCAL branch the clone never had; the dispatcher
+    # keeps it equal to origin/upstream on every run.
+    git("branch", "upstream", cwd=env.origin)
+    env.add_issue(7)
+    env.run()
+    clone = env.work / "SDG-ARMA3"
+    assert git("rev-parse", "upstream", cwd=clone) == git("rev-parse", "upstream", cwd=env.origin)
+    git("switch", "-q", "upstream", cwd=env.origin)
+    _commit(env.origin, "upstream moves")
+    git("switch", "-q", "main", cwd=env.origin)
+    env.add_issue(8)
+    monkeypatch.setenv("FAKE_TASK", "8")      # the fake agent reports for this task number
+    env.run()
+    assert git("rev-parse", "upstream", cwd=clone) == git("rev-parse", "upstream", cwd=env.origin)
+    assert "runner:done" in env.issue(8)["labels"]
+
+
+def test_mirror_branch_missing_on_origin_does_not_block(env):
+    env.add_issue(7)                       # origin has no `upstream` branch at all
+    env.run()
+    assert "runner:done" in env.issue(7)["labels"]
+
+
+def test_task_on_the_mirror_branch_itself_still_runs(env):
+    git("branch", "upstream", cwd=env.origin)
+    env.add_issue(7, b=body(ref="upstream"))
+    env.run()
+    i = env.issue(7)
+    assert "runner:done" in i["labels"], reports(i)

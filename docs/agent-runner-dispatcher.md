@@ -30,6 +30,10 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
 5. Checks out the first line of **Branch / commit** (`branch` or `branch@sha`, backticks allowed):
    `fetch --prune`, `switch`, `pull --ff-only`, then verifies the sha. It refuses (BLOCKED) if tracked
    files are dirty, the ref is unreadable, or the sha does not match. It never discards local work.
+   It also fast-forwards the repo's **mirror branches** to origin's, creating them if they're missing. That's
+   `DISPATCH_MIRROR_BRANCHES`, default `SDG-RUST:upstream`, because `tools/build.py` reads `upstream:plugin/…`
+   from a local branch. A mirror that can't fast-forward BLOCKs the task. One that origin doesn't have is
+   skipped.
 6. Runs `agent-run ~/work/<repo> "<preamble + issue body>"` with `AGENT_RESULTS_DIR` set to
    `/var/lib/agent-results/<repo>-<issue>-<UTC>`. The agent runs in the sandbox described in
    [agent-runner.md](agent-runner.md#sandbox-hardening-2026-10-30): checkout read-only, that dir writable at
@@ -45,7 +49,9 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
    - **No valid block** (none at all, no valid verdict, or a timeout): it posts a BLOCKED report with the
      redacted last 50 event-log lines instead.
    - **Labels:** `runner:done`, or `runner:blocked` for BLOCKED. It also adds `needs-claude` unless the
-     verdict is PASS, the deviations are `none`, and agent-run exited 0.
+     verdict is PASS, the deviations are `none`, and agent-run exited 0. A label edit that fails is retried
+     up to 4 times. GitHub can apply half of one: on SDG-ARMA3#1 it removed `runner:running` and then errored.
+     So each retry re-reads the labels and sends only what is still missing.
 
 Only the dispatcher posts comments and edits labels; the agent has no GitHub access at all. Everything the
 dispatcher posts goes through `redact()`, which removes:

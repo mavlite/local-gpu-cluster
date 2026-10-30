@@ -55,6 +55,15 @@ PREFLIGHT_TIMEOUT_S = 60
 TAIL_LINES, TAIL_LINE_CHARS, COMMENT_MAX = 50, 300, 60000
 
 
+def parse_mirrors(spec):
+    """'SDG-RUST:upstream,SDG-X:a' -> {'SDG-RUST': ['upstream'], 'SDG-X': ['a']}"""
+    out = {}
+    for item in filter(None, (x.strip() for x in spec.split(","))):
+        repo, _, branch = item.partition(":")
+        out.setdefault(repo, []).append(branch)
+    return out
+
+
 def cfg():
     home = os.path.expanduser("~")
     return {
@@ -67,6 +76,9 @@ def cfg():
         "agent": shlex.split(os.environ.get("DISPATCH_AGENT_RUN", "agent-run")),
         "max_timeout_s": int(os.environ.get("DISPATCH_MAX_TIMEOUT_S", str(MAX_TIMEOUT_MIN * 60))),
         "results_root": os.environ.get("DISPATCH_RESULTS_ROOT", "/var/lib/agent-results"),
+        "retry_sleep_s": float(os.environ.get("DISPATCH_RETRY_SLEEP_S", "5")),
+        # repo name -> local branches kept equal to origin's (SDG-RUST tools/build.py reads `upstream:...`)
+        "mirror_branches": parse_mirrors(os.environ.get("DISPATCH_MIRROR_BRANCHES", "SDG-RUST:upstream")),
         "secret_files": [p for p in os.environ.get(
             "DISPATCH_SECRET_FILES",
             "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env").split(",") if p],
@@ -255,13 +267,38 @@ def comment(c, repo, num, text):
     gh(c, "issue", "comment", str(num), "-R", repo, "--body", redact(text)[:COMMENT_MAX])
 
 
+RELABEL_TRIES = 4
+
+
 def relabel(c, repo, num, remove=(), add=()):
-    args = ["issue", "edit", str(num), "-R", repo]
-    if remove:
-        args += ["--remove-label", ",".join(remove)]
-    if add:
-        args += ["--add-label", ",".join(add)]
-    gh(c, *args)
+    """GitHub can apply part of a label edit and then fail (GraphQL "Something went wrong": SDG-ARMA3#1 lost
+    runner:running but never got runner:done, 2026-10-30). Retry with backoff; before each retry read the labels
+    back and send only what is still missing. Raises if the last try fails."""
+    remove, add = list(remove), list(add)
+    for attempt in range(1, RELABEL_TRIES + 1):
+        args = ["issue", "edit", str(num), "-R", repo]
+        if remove:
+            args += ["--remove-label", ",".join(remove)]
+        if add:
+            args += ["--add-label", ",".join(add)]
+        try:
+            gh(c, *args)
+            return
+        except RuntimeError as e:
+            if attempt == RELABEL_TRIES:
+                raise
+            log(f"{repo}#{num}: label edit failed (try {attempt}/{RELABEL_TRIES}), retrying: {e}")
+        time.sleep(c["retry_sleep_s"] * attempt)
+        try:
+            view = json.loads(gh(c, "issue", "view", str(num), "-R", repo, "--json", "labels"))
+            have = {lab["name"] for lab in view["labels"]}
+        except (RuntimeError, ValueError, KeyError) as e:
+            log(f"{repo}#{num}: could not read labels back ({e}); resending the whole edit")
+            continue
+        remove = [lab for lab in remove if lab in have]
+        add = [lab for lab in add if lab not in have]
+        if not remove and not add:
+            return
 
 
 def lane_model(c):
@@ -386,7 +423,19 @@ def git(cwd, *args):
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
 
 
-def prepare_checkout(path, branch, sha):
+def update_mirrors(path, branch, mirrors):
+    """Fast-forward each local mirror branch to origin's (creating it if missing). Skips the checked-out task
+    branch (pull --ff-only already did it) and branches origin doesn't have. Returns an error string or None."""
+    for m in mirrors:
+        if m == branch or git(path, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{m}").returncode != 0:
+            continue
+        r = git(path, "fetch", "origin", f"refs/heads/{m}:refs/heads/{m}")      # no '+': fast-forward only
+        if r.returncode != 0:
+            return f"cannot fast-forward local branch {m} to origin/{m}: {(r.stderr or r.stdout).strip()[:400]}"
+    return None
+
+
+def prepare_checkout(path, branch, sha, mirrors=()):
     """Returns (ref_string, error). Never discards local work: a dirty tree is an error."""
     if not os.path.isdir(os.path.join(path, ".git")):
         return None, f"no clone at {path}"
@@ -397,6 +446,9 @@ def prepare_checkout(path, branch, sha):
         r = git(path, *step)
         if r.returncode != 0:
             return None, f"git {' '.join(step)} failed: {(r.stderr or r.stdout).strip()[:800]}"
+    err = update_mirrors(path, branch, mirrors)
+    if err:
+        return None, err
     head = git(path, "rev-parse", "HEAD").stdout.strip()
     if sha and not head.lower().startswith(sha.lower()):
         return None, f"HEAD {head} does not match the requested {sha} on {branch}"
@@ -497,7 +549,8 @@ def dispatch(c, repo, issue, model):
     except ValueError as e:
         return finish(c, repo, num, None, blocked_report(num, None, started, model,
                                                          f"Branch / commit: {e}", None))
-    ref, err = prepare_checkout(os.path.join(c["work"], name), branch, sha)
+    ref, err = prepare_checkout(os.path.join(c["work"], name), branch, sha,
+                                c["mirror_branches"].get(name, ()))
     if err:
         return finish(c, repo, num, None, blocked_report(num, None, started, model, err, None))
 
