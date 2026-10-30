@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent runner sandbox egress (nftables table inet agent_egress, per repo user + IP + port)
+Documentation=https://github.com/mavlite/local-gpu-cluster/blob/main/docs/agent-runner.md
+# After nftables.service: if it is ever enabled, its `flush ruleset` must not wipe this table.
+After=network-pre.target nftables.service
+Before=agent-runner-dispatch.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/python3 /usr/local/lib/agent-runner/agent_runner_egress.py render-nft | /usr/sbin/nft -f -'
+ExecStop=/usr/sbin/nft delete table inet agent_egress
+
+[Install]
+WantedBy=multi-user.target

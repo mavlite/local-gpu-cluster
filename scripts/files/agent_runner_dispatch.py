@@ -37,6 +37,13 @@ import urllib.request
 LANE_MODELS = {"rag-qwen3.6": "qwen3.6", "qwen3.8": "qwen3.8-nothink"}   # mirrors agent-run
 LABEL_READY, LABEL_RUNNING = "runner:ready", "runner:running"
 LABEL_DONE, LABEL_BLOCKED, LABEL_CLAUDE = "runner:done", "runner:blocked", "needs-claude"
+# Tiers (owner decision 2026-10-30): tier:a = no servers, tier:b = staff test servers, tier:c = never auto-run.
+# Exactly one tier label is required. An open issue labelled runner:halt (the pinned "Runner control" issue)
+# halts that repo's tier:b tasks; tier:a still runs.
+TIER_A, TIER_B, TIER_C = "tier:a", "tier:b", "tier:c"
+TIERS = (TIER_A, TIER_B, TIER_C)
+LABEL_HALT = "runner:halt"
+HALTED_PREFIX = "runner: halted"
 VERDICTS = ("PASS", "FAIL", "INDETERMINATE", "BLOCKED")
 DEFAULT_TIMEOUT_MIN, MAX_TIMEOUT_MIN = 60, 720
 LOG_KEEP_DAYS = 30
@@ -134,14 +141,45 @@ def field(secs, *names):
 _REF = re.compile(r"^([A-Za-z0-9._/-]+?)(?:@([0-9a-fA-F]{7,40}))?$")
 
 
+_SWITCH = re.compile(r"\bgit\s+(?:switch|checkout)\s+([A-Za-z0-9._/][A-Za-z0-9._/-]*)")
+_SHA_EXPECT = re.compile(r"(?i)\b(?:expect(?:ed)?|sha)\b\s*[:=]?\s*([0-9a-f]{7,40})\b")
+_SHA_BARE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
 def parse_ref(text):
-    """'branch' or 'branch@sha' (backticks allowed) from the first line of the Branch / commit field."""
-    first = next((l.strip() for l in (text or "").splitlines() if l.strip()), "")
-    first = first.strip("`").strip()
-    m = _REF.match(first)
-    if not m or first.startswith("-") or ".." in first:
-        raise ValueError(f"cannot read a ref from {first!r}; write `branch` or `branch@sha` on the first line")
-    return m.group(1), m.group(2)
+    """(branch, sha-or-None) from the Branch / commit field. Accepts, anywhere in the field (code fences ignored):
+    `branch`, `branch@sha`, the spec's `git switch <branch> && git pull --ff-only` (or `git checkout <branch>`),
+    and the sha to verify as `# expect: <sha>` or a bare 40-hex line. Exactly one branch must be named.
+    SDG-RUST#3 (2026-10-30) used a ```shell fence and the first-line parser took `shell` as the branch."""
+    branches, shas = [], []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("```"):
+            continue
+        bare = line.strip("`").strip()
+        if _SHA_BARE.match(bare):
+            shas.append(bare.lower())
+            continue
+        m = _SHA_EXPECT.search(line)
+        if m:
+            shas.append(m.group(1).lower())
+            continue
+        found = _SWITCH.findall(line)
+        if found:
+            branches += found
+            continue
+        m = _REF.match(bare)
+        if m:
+            branches.append(m.group(1))
+            if m.group(2):
+                shas.append(m.group(2).lower())
+    distinct = sorted(set(branches))
+    if len(distinct) != 1 or distinct[0].startswith("-") or ".." in distinct[0]:
+        what = "no branch" if not distinct else f"branches {', '.join(distinct)}"
+        raise ValueError(f"found {what}; name exactly one: `branch`, `branch@sha` or `git switch <branch>`")
+    if len(set(shas)) > 1:
+        raise ValueError(f"more than one sha to verify: {', '.join(sorted(set(shas)))}")
+    return distinct[0], (shas[0] if shas else None)
 
 
 def parse_timeout_minutes(text):
@@ -256,6 +294,66 @@ def ready_issues(c, only):
                 continue
             found.append((i["createdAt"], order, repo, i))
     return [(repo, i) for _, _, repo, i in sorted(found, key=lambda t: (t[0], t[1], t[3]["number"]))]
+
+
+def halted(c, repo):
+    """True while any OPEN issue in the repo carries runner:halt (the pinned "Runner control" issue). Keyed on the
+    label alone, so a renamed or unpinned control issue still halts: the safe direction."""
+    rows = json.loads(gh(c, "issue", "list", "-R", repo, "-l", LABEL_HALT, "--state", "open",
+                         "--json", "number", "--limit", "5") or "[]")
+    return bool(rows)
+
+
+def tier_of(issue):
+    names = [l["name"] for l in issue.get("labels", [])]
+    tiers = [n for n in names if n in TIERS]
+    return tiers[0] if len(tiers) == 1 else None
+
+
+def refuse_tier(c, repo, issue):
+    names = [l["name"] for l in issue.get("labels", [])]
+    tiers = [n for n in names if n in TIERS]
+    if not tiers:
+        why = "it has no tier label"
+    elif len(tiers) > 1:
+        why = f"it has more than one tier label ({', '.join(tiers)})"
+    else:
+        why = "tier:c tasks are never auto-run"
+    comment(c, repo, issue["number"],
+            f"runner: refused -- {why}. The runner only runs runner:ready issues with exactly one of tier:a "
+            "(no servers) or tier:b (staff test servers). Fix the labels and set runner:ready again.")
+    relabel(c, repo, issue["number"], remove=[LABEL_READY], add=[LABEL_BLOCKED])
+    log(f"{repo}#{issue['number']}: refused ({why})")
+
+
+def note_halted(c, repo, issue):
+    """Leave a tier:b task runner:ready under a halt; comment once, not every 5 minutes."""
+    view = json.loads(gh(c, "issue", "view", str(issue["number"]), "-R", repo, "--json", "comments"))
+    last = (view.get("comments") or [{}])[-1].get("body", "") if view.get("comments") else ""
+    if not last.startswith(HALTED_PREFIX):
+        comment(c, repo, issue["number"],
+                f"{HALTED_PREFIX} -- {repo} has an open runner:halt issue (Runner control), so tier:b tasks wait. "
+                "This stays runner:ready and runs once the halt label is removed.")
+    log(f"{repo}#{issue['number']}: tier:b held by runner:halt")
+
+
+def pick(c, queue):
+    """Apply tier and halt rules in queue order: refuse what may never run, hold tier:b under a halt, and return
+    the first runnable (repo, issue) or None. Refusals do not use up the cycle."""
+    halt = {}
+    for repo, issue in queue:
+        tier = tier_of(issue)
+        if tier is None or tier == TIER_C:
+            refuse_tier(c, repo, issue)
+            continue
+        if tier == TIER_B:
+            if repo not in halt:
+                halt[repo] = halted(c, repo)
+            if halt[repo]:
+                note_halted(c, repo, issue)
+                continue
+        return repo, issue
+    return None
 
 
 def git(cwd, *args):
@@ -441,10 +539,10 @@ def main(argv=None):
         if model is None:
             log("router lane closed for scoped keys; nothing claimed")
             return 0
-        queue = ready_issues(c, only)
-        if not queue:
+        chosen = pick(c, ready_issues(c, only))
+        if chosen is None:
             return 0
-        repo, issue = queue[0]
+        repo, issue = chosen
         return dispatch(c, repo, issue, model)
 
 

@@ -78,10 +78,11 @@ def env(tmp_path, monkeypatch):
     e.secret = secret.read_text().strip()
     e.results = tmp_path / "results"
 
-    def add_issue(num, repo=REPO, labels=("runner:ready", "kind:check"), created="2026-10-30T10:00:00Z", **kw):
+    def add_issue(num, repo=REPO, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T10:00:00Z", **kw):
         st = json.loads(state.read_text())
-        st["issues"][f"{repo}#{num}"] = {"number": num, "title": f"task {num}", "body": kw.get("b", body()),
-                                         "createdAt": created, "labels": list(labels), "comments": []}
+        st["issues"][f"{repo}#{num}"] = {"number": num, "title": kw.get("title", f"task {num}"),
+                                         "body": kw.get("b", body()), "createdAt": created,
+                                         "labels": list(labels), "comments": [], "state": kw.get("state", "OPEN")}
         state.write_text(json.dumps(st))
     e.add_issue = add_issue
     e.issue = lambda num, repo=REPO: json.loads(state.read_text())["issues"][f"{repo}#{num}"]
@@ -97,7 +98,7 @@ def test_pass_report_marks_done_without_needs_claude(env):
     env.add_issue(7)
     assert env.run() == 0
     i = env.issue(7)
-    assert set(i["labels"]) == {"runner:done", "kind:check"}
+    assert set(i["labels"]) == {"runner:done", "kind:check", "tier:a"}
     assert any("claimed" in c["body"] for c in i["comments"])
     assert len(reports(i)) == 1
     logs = list(env.logs.glob("SDG-ARMA3-7-*.jsonl"))
@@ -152,7 +153,7 @@ def test_headerless_report_is_accepted_and_posted_with_heading(env, monkeypatch)
     env.add_issue(7)
     env.run()
     i = env.issue(7)
-    assert set(i["labels"]) == {"runner:done", "kind:check"}
+    assert set(i["labels"]) == {"runner:done", "kind:check", "tier:a"}
     rep = reports(i)
     assert len(rep) == 1 and "```yaml\ntask: 7" in rep[0] and "verdict: BLOCKED" not in rep[0]
 
@@ -175,7 +176,7 @@ def test_fail_report_marks_done_and_needs_claude(env, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "fail")
     env.add_issue(7)
     env.run()
-    assert set(env.issue(7)["labels"]) == {"runner:done", "needs-claude", "kind:check"}
+    assert set(env.issue(7)["labels"]) == {"runner:done", "needs-claude", "kind:check", "tier:a"}
 
 
 def test_missing_report_posts_redacted_blocked_report(env, monkeypatch):
@@ -183,7 +184,7 @@ def test_missing_report_posts_redacted_blocked_report(env, monkeypatch):
     env.add_issue(7)
     env.run()
     i = env.issue(7)
-    assert set(i["labels"]) == {"runner:blocked", "needs-claude", "kind:check"}
+    assert set(i["labels"]) == {"runner:blocked", "needs-claude", "kind:check", "tier:a"}
     rep = reports(i)
     assert len(rep) == 1 and "verdict: BLOCKED" in rep[0] and "I forgot the report" in rep[0]
     everything = json.dumps(i["comments"])
@@ -195,7 +196,7 @@ def test_closed_lane_claims_nothing(env):
     env.add_issue(7)
     assert env.run() == 0
     i = env.issue(7)
-    assert i["labels"] == ["runner:ready", "kind:check"] and i["comments"] == []
+    assert i["labels"] == ["runner:ready", "kind:check", "tier:a"] and i["comments"] == []
 
 
 def test_exit_75_puts_the_task_back(env, monkeypatch):
@@ -203,7 +204,7 @@ def test_exit_75_puts_the_task_back(env, monkeypatch):
     env.add_issue(7)
     env.run()
     i = env.issue(7)
-    assert set(i["labels"]) == {"runner:ready", "kind:check"}
+    assert set(i["labels"]) == {"runner:ready", "kind:check", "tier:a"}
     assert any("lane closed" in c["body"] for c in i["comments"]) and not reports(i)
 
 
@@ -238,14 +239,14 @@ def test_one_task_per_run_oldest_first_across_repos(env):
     env.add_issue(3, repo=OTHER, created="2026-10-30T11:00:00Z")
     env.run()
     assert "runner:done" in env.issue(7)["labels"]
-    assert env.issue(3, repo=OTHER)["labels"] == ["runner:ready", "kind:check"]
+    assert env.issue(3, repo=OTHER)["labels"] == ["runner:ready", "kind:check", "tier:a"]
 
 
 def test_issue_with_two_runner_labels_is_left_alone(env):
-    env.add_issue(7, labels=("runner:ready", "runner:running", "kind:check"))
+    env.add_issue(7, labels=("runner:ready", "runner:running", "kind:check", "tier:a"))
     env.run()
     i = env.issue(7)
-    assert i["labels"] == ["runner:ready", "runner:running", "kind:check"] and i["comments"] == []
+    assert i["labels"] == ["runner:ready", "runner:running", "kind:check", "tier:a"] and i["comments"] == []
 
 
 def test_held_lock_exits_without_touching_anything(env):
@@ -254,14 +255,14 @@ def test_held_lock_exits_without_touching_anything(env):
     with open(env.logs / ".dispatch.lock", "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert env.run() == 0
-    assert env.issue(7)["labels"] == ["runner:ready", "kind:check"]
+    assert env.issue(7)["labels"] == ["runner:ready", "kind:check", "tier:a"]
 
 
 def test_nonzero_exit_after_pass_still_needs_claude(env, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "crash-after-pass")
     env.add_issue(7)
     env.run()
-    assert set(env.issue(7)["labels"]) == {"runner:done", "needs-claude", "kind:check"}
+    assert set(env.issue(7)["labels"]) == {"runner:done", "needs-claude", "kind:check", "tier:a"}
 
 
 def test_only_flag_restricts_to_one_issue(env):
@@ -269,7 +270,7 @@ def test_only_flag_restricts_to_one_issue(env):
     env.add_issue(8, created="2026-10-30T08:00:00Z")
     env.run("--only", f"{REPO}#7")
     assert "runner:done" in env.issue(7)["labels"]
-    assert env.issue(8)["labels"] == ["runner:ready", "kind:check"]
+    assert env.issue(8)["labels"] == ["runner:ready", "kind:check", "tier:a"]
 
 
 def test_old_logs_are_rotated(env):
@@ -286,7 +287,17 @@ def test_old_logs_are_rotated(env):
     ("main", ("main", None)),
     ("`feat/perception-plan2`", ("feat/perception-plan2", None)),
     ("feat/v26@abc1234", ("feat/v26", "abc1234")),
-    ("git switch feat/v26 && git pull --ff-only", None),
+    # the spec's own form (section 4): the switch command, then the sha to verify
+    ("git switch feat/v26 && git pull --ff-only", ("feat/v26", None)),
+    # SDG-RUST#3 verbatim (2026-10-30): a fenced block -- the dispatcher read the fence's "shell" as the branch
+    ("```shell\ngit switch feat/v26 && git pull --ff-only\ngit log -1 --format=%H\n"
+     "# expect: 22fb1c04d16ba94f956d128cb72e5d839f03f4c8\n```\nThe dispatcher does the switch and pull.",
+     ("feat/v26", "22fb1c04d16ba94f956d128cb72e5d839f03f4c8")),
+    ("git checkout main\n22fb1c04d16ba94f956d128cb72e5d839f03f4c8", ("main", "22fb1c04d16ba94f956d128cb72e5d839f03f4c8")),
+    ("```\nfeat/x\n```", ("feat/x", None)),
+    ("git switch a && git switch b", None),               # two different branches: ambiguous, refuse
+    ("```shell\n```", None),
+    ("please test whatever is newest", None),
     ("", None),
 ])
 def test_parse_ref(text, expected):
@@ -303,3 +314,74 @@ def test_parse_ref(text, expected):
 ])
 def test_parse_timeout_minutes(text, minutes):
     assert d.parse_timeout_minutes(text) == minutes
+
+
+# ---- tiers and the per-repo halt flag (owner decision 2026-10-30) ------------------------------------------
+def halt(env, repo=REPO, num=99, state="OPEN"):
+    env.add_issue(num, repo=repo, labels=("runner:halt",), title="Runner control", state=state)
+
+
+def ran(env, num, repo=REPO):
+    return "runner:done" in env.issue(num, repo)["labels"]
+
+
+@pytest.mark.parametrize("labels,why", [
+    (("runner:ready", "kind:check"), "no tier"),
+    (("runner:ready", "kind:check", "tier:c"), "tier:c"),
+    (("runner:ready", "kind:check", "tier:a", "tier:b"), "two tiers"),
+])
+def test_untiered_tier_c_and_ambiguous_tasks_are_refused_and_blocked(env, labels, why):
+    env.add_issue(7, labels=labels)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and "runner:ready" not in i["labels"], why
+    assert not ran(env, 7) and not reports(i)
+    assert any("tier" in c["body"] and "refus" in c["body"] for c in i["comments"])
+    assert not list(env.logs.glob("SDG-ARMA3-7-*.jsonl"))        # the agent never ran
+
+
+def test_halt_holds_tier_b_ready_with_one_halted_comment(env):
+    halt(env)
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"))
+    env.run()
+    env.run()                                                    # every cycle re-checks; comments only once
+    i = env.issue(7)
+    assert i["labels"] == ["runner:ready", "kind:check", "tier:b"] and not reports(i)
+    assert sum("halted" in c["body"] for c in i["comments"]) == 1
+
+
+def test_halt_still_runs_tier_a(env, monkeypatch):
+    monkeypatch.setenv("FAKE_TASK", "8")                         # the fake agent reports for the task it runs
+    halt(env)
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"), created="2026-10-30T08:00:00Z")
+    env.add_issue(8, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T09:00:00Z")
+    env.run()
+    assert ran(env, 8) and not ran(env, 7)
+
+
+def test_tier_b_runs_when_not_halted(env):
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"))
+    env.run()
+    assert ran(env, 7)
+
+
+def test_halt_is_per_repo(env):
+    halt(env, repo=OTHER)
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"))
+    env.run()
+    assert ran(env, 7)
+
+
+def test_closed_halt_issue_does_not_halt(env):
+    halt(env, state="CLOSED")
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"))
+    env.run()
+    assert ran(env, 7)
+
+
+def test_refusals_do_not_use_up_the_cycle(env):
+    # an untiered issue is refused, then the oldest eligible one still runs in the same cycle
+    env.add_issue(6, labels=("runner:ready", "kind:check"), created="2026-10-30T08:00:00Z")
+    env.add_issue(7, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T09:00:00Z")
+    env.run()
+    assert "runner:blocked" in env.issue(6)["labels"] and ran(env, 7)

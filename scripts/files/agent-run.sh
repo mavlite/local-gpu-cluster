@@ -1,7 +1,8 @@
 #!/bin/bash
 # agent-run DIR MESSAGE [opencode run args...]: one headless lab-runner session, sandboxed.
 #
-# Called as `runner` (the dispatcher). opencode itself runs as the unprivileged user `agent` in a transient
+# Called as `runner` (the dispatcher). opencode itself runs as the repo's own unprivileged user (egress.conf:
+# agent-rust, agent-arma) in a transient
 # systemd unit (hardening 2026-10-30, after `cat > file` wrote despite edit: deny and the gh token was readable):
 #   - the checkout DIR (must be under /home/runner/work) is bind-mounted READ-ONLY at /work/<repo>
 #   - $AGENT_RESULTS_DIR (created here, agent-writable, group runner) is bind-mounted at /results
@@ -19,6 +20,17 @@ dir=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; msg=${2:?usage: agent-run DIR 
 dir=$(realpath -e "$dir")
 case "$dir" in /home/runner/work/?*) ;; *) echo "agent-run: DIR must be a checkout under /home/runner/work" >&2; exit 2 ;; esac
 name=$(basename "$dir")
+
+# Per-repo sandbox user + egress (egress.conf, one table -> systemd IPAddressAllow here, nftables per uid+port).
+# A repo without an entry does not run; neither does any task while the nft table is missing (fail closed).
+EG=/usr/local/lib/agent-runner/agent_runner_egress.py
+EGCONF=/etc/agent-runner-agent/egress.conf
+user=$(python3 "$EG" --conf "$EGCONF" user "$name") || { echo "agent-run: no sandbox entry for $name in $EGCONF" >&2; exit 2; }
+read -ra ipallow <<<"$(python3 "$EG" --conf "$EGCONF" ip-allow "$name")"
+if ! sudo /usr/sbin/nft list table inet agent_egress >/dev/null 2>&1; then
+  echo "agent-run: nftables table inet agent_egress is not loaded (agent-runner-egress.service); refusing to start" >&2
+  exit 2
+fi
 
 if [[ "${AGENT_RUN_SHELL:-}" == 1 ]]; then
   model=none
@@ -38,7 +50,7 @@ case "$results" in /var/lib/agent-results/?*) ;; *) echo "agent-run: results dir
 max=${AGENT_MAX_SECONDS:-3600}
 envf="/run/agent-runner/${unit}.env"
 
-sudo install -d -o agent -g runner -m 2770 "$results"
+sudo install -d -o "$user" -g runner -m 2770 "$results"
 sudo install -d -o root -g root -m 0700 /run/agent-runner
 sudo install -o root -g root -m 0600 /dev/null "$envf"
 printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' </etc/agent-runner/router.key)" | sudo tee "$envf" >/dev/null
@@ -60,14 +72,23 @@ cleanup() { sudo systemctl stop "$unit" 2>/dev/null || true; sudo rm -f "$envf";
 trap cleanup EXIT
 trap 'exit 143' TERM INT
 
+ipprops=(); for ip in "${ipallow[@]}"; do ipprops+=(-p "IPAddressAllow=$ip"); done
+
 props=(
-  --uid=agent --gid=agent --unit="$unit" --quiet --wait --pipe --collect
+  --uid="$user" --gid="$user" --unit="$unit" --quiet --wait --pipe --collect
   -p RuntimeMaxSec="$max"
   -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes
   -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes
   -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes -p LockPersonality=yes
   -p CapabilityBoundingSet= -p UMask=0007
+  # Network (hardening 2026-10-30): the router, loopback 127.0.0.1/::1 and the repo's own lab endpoints ONLY (the
+  # nft table adds the per-port check). No DNS: not "localhost" (that includes resolved's stub 127.0.0.53, which
+  # resolved names for the sandbox), and resolved's varlink socket and the system bus are hidden too. The VM itself
+  # is limited further out by 178.fw (GitHub ipset for the dispatcher, VPN endpoint, NTP via the host).
+  -p IPAddressDeny=any "${ipprops[@]}"
+  -p RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6"
   -p InaccessiblePaths=/etc/agent-runner -p InaccessiblePaths=/run/agent-runner
+  -p InaccessiblePaths=/run/systemd/resolve -p InaccessiblePaths=/run/dbus
   -p BindReadOnlyPaths="$dir:/work/$name"
   -p BindPaths="$results:/results"
   -p EnvironmentFile="$envf"

@@ -29,14 +29,27 @@ MANIFEST=(
   "host|agent-runner-key-renew.sh|/usr/local/sbin/agent-runner-key-renew|root:root|750"
   "host|agent-runner-key-renew.service|/etc/systemd/system/agent-runner-key-renew.service|root:root|644"
   "host|agent-runner-key-renew.timer|/etc/systemd/system/agent-runner-key-renew.timer|root:root|644"
+  # 178.fw: its [IPSET github] block (last section) is filled by the ipset refresher; diff ignores that block.
   "host|agent-runner-178.fw|/etc/pve/firewall/${VMID}.fw|root:www-data|640"
+  "host|agent-runner-github-ipset.sh|/usr/local/sbin/agent-runner-github-ipset|root:root|750"
+  "host|agent-runner-github-ipset.service|/etc/systemd/system/agent-runner-github-ipset.service|root:root|644"
+  "host|agent-runner-github-ipset.timer|/etc/systemd/system/agent-runner-github-ipset.timer|root:root|644"
+  "host|agent-runner-chrony.conf|/etc/chrony/conf.d/agent-runner.conf|root:root|644"
   "vm|agent-run.sh|/usr/local/bin/agent-run|root:root|755"
+  "vm|agent-runner-timesyncd.conf|/etc/systemd/timesyncd.conf.d/agent-runner.conf|root:root|644"
   # The profile lives OUTSIDE /etc/agent-runner: the sandbox makes that dir inaccessible to the agent.
   "vm|agent-runner-opencode.json|/etc/agent-runner-agent/opencode.json|root:root|644"
+  # Per-repo sandbox egress: one table -> sandbox user + IPAddressAllow (agent-run) + nft rules (the unit).
+  "vm|agent-runner-egress.conf|/etc/agent-runner-agent/egress.conf|root:root|644"
+  "vm|agent_runner_egress.py|/usr/local/lib/agent-runner/agent_runner_egress.py|root:root|755"
+  "vm|agent-runner-egress.service|/etc/systemd/system/agent-runner-egress.service|root:root|644"
 )
 # Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
 SANDBOX_CHECKS=(
-  "agent user exists, no sudo, not in group runner|id agent >/dev/null && ! id -Gn agent | grep -qwE 'runner|sudo'"
+  "per-repo users agent-rust/agent-arma exist, no sudo, not in group runner|for u in agent-rust agent-arma; do id \$u >/dev/null && ! id -Gn \$u | grep -qwE 'runner|sudo' || exit 1; done"
+  "old shared user 'agent' removed|! id agent >/dev/null 2>&1"
+  "nft table inet agent_egress loaded|sudo /usr/sbin/nft list table inet agent_egress >/dev/null"
+  "agent-runner-egress.service enabled|systemctl is-enabled agent-runner-egress.service >/dev/null"
   "/etc/agent-runner is root:runner 750|[ \"\$(stat -c '%U:%G %a' /etc/agent-runner)\" = 'root:runner 750' ]"
   "/home/runner is 700|[ \"\$(stat -c '%a' /home/runner)\" = 700 ]"
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
@@ -56,9 +69,16 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 vm() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@"; }
 field() { cut -d'|' -f"$2" <<<"$1"; }
 
+# Content hash; for a .fw file without the [IPSET github] entries, which the refresher owns. In this file only
+# set entries start with a digit (rules start IN/OUT, options are key: value), so dropping ^[0-9] lines is exact.
+HASH_CMD="sha256sum"
+FW_HASH_CMD="grep -vE '^[0-9]' | sha256sum"
+repo_sha() { if [[ "$1" == *.fw ]]; then grep -vE '^[0-9]' "$1" | sha256sum | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+
 live_meta() {   # where path -> "sha256 owner:group mode" or "missing"
-  local where="$1" path="$2" cmd
-  cmd="if [ -e '$path' ]; then echo \"\$(sha256sum '$path' | cut -d' ' -f1) \$(stat -c '%U:%G %a' '$path')\"; else echo missing; fi"
+  local where="$1" path="$2" cmd h="$HASH_CMD"
+  [[ "$path" == *.fw ]] && h="$FW_HASH_CMD"
+  cmd="if [ -e '$path' ]; then echo \"\$(cat '$path' | $h | cut -d' ' -f1) \$(stat -c '%U:%G %a' '$path')\"; else echo missing; fi"
   if [[ "$where" == host ]]; then bash -c "$cmd"; else vm "$cmd"; fi
 }
 
@@ -67,7 +87,7 @@ do_diff() {
   for e in "${MANIFEST[@]}"; do
     where=$(field "$e" 1); src=$(field "$e" 2); dst=$(field "$e" 3); own=$(field "$e" 4); mode=$(field "$e" 5)
     [[ -r "$F/$src" ]] || die "missing repo file $F/$src"
-    want="$(sha256sum "$F/$src" | cut -d' ' -f1) $own $mode"
+    want="$(repo_sha "$F/$src") $own $mode"
     got=$(live_meta "$where" "$dst")
     if [[ "$got" == "$want" ]]; then printf 'ok     %-4s %s\n' "$where" "$dst"
     else printf 'DRIFT  %-4s %s\n       repo: %s\n       live: %s\n' "$where" "$dst" "$want" "$got"; drift=1; fi
@@ -104,7 +124,19 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     [[ -r "$F/$src" ]] || die "missing repo file $F/$src"
     if [[ -n "$dry" ]]; then printf 'would install %s -> %s:%s (%s %s)\n' "$src" "$where" "$dst" "$own" "$mode"; continue; fi
     if [[ "$where" == host ]]; then
-      if [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"   # pmxcfs: owner/mode are fixed by the filesystem
+      if [[ "$dst" == *.fw ]]; then
+        # Repo rules + the LIVE [IPSET github] entries, so installing never empties GitHub egress. pmxcfs fixes
+        # owner/mode itself; write via a temp copy.
+        local t; t=$(mktemp)
+        local keep=""
+        if [[ -e "$dst" ]] && grep -qx '\[IPSET github\]' "$dst"; then   # first install: no live set to keep
+          keep=$(awk '/^\[IPSET github\]$/{f=1;next} /^\[/{f=0} f && /^[0-9]/' "$dst")
+        fi
+        # repo file, with the kept entries inserted after the set's comment line
+        awk -v keep="$keep" '{print} /^\[IPSET github\]$/{h=1;next} h && /^#/ {if (keep != "") print keep; h=0}' \
+          "$F/$src" > "$t"
+        cp "$t" "$dst"; rm -f "$t"
+      elif [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"
       else install -D -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$F/$src" "$dst"; fi
     else
       base64 -w0 "$F/$src" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m '$mode' -o '${own%%:*}' -g '${own##*:}' \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
@@ -112,13 +144,30 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     echo "installed $dst"
   done
   [[ -n "$dry" ]] && return 0
-  if [[ "$target" == host ]]; then systemctl daemon-reload; pve-firewall compile >/dev/null && echo "pve-firewall compiles"
-  else vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"; fi
+  if [[ "$target" == host ]]; then
+    systemctl daemon-reload
+    /usr/local/sbin/agent-runner-github-ipset            # fill/refresh the GitHub set now, not at the next timer tick
+    pve-firewall compile >/dev/null && echo "pve-firewall compiles"
+    systemctl enable --now agent-runner-github-ipset.timer >/dev/null && echo "github ipset timer enabled"
+    systemctl restart chrony && echo "chrony restarted (serving 10.81.0.0/24 on 10.81.0.254)"
+  else
+    vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"
+    vm "sudo systemctl restart systemd-timesyncd && echo 'timesyncd restarted (NTP=10.81.0.254)'"
+    # (re)render and load the per-repo egress table; the users must exist (setup-sandbox) or rendering fails
+    vm "sudo systemctl daemon-reload && sudo systemctl enable agent-runner-egress.service >/dev/null && sudo systemctl restart agent-runner-egress.service && sudo /usr/sbin/nft list table inet agent_egress | grep -c 'accept' | sed 's/^/agent_egress loaded, accept rules: /'"
+  fi
 }
 
 setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
-  local steps=(
-    "id agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agent"
+  # one unprivileged user per repo, straight from the egress table (so the table and the users cannot drift)
+  local u users
+  users=$(python3 "$F/agent_runner_egress.py" --conf "$F/agent-runner-egress.conf" users)
+  local steps=()
+  for u in $users; do
+    steps+=("id $u >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin $u")
+  done
+  steps+=(
+    "! id agent >/dev/null 2>&1 || sudo userdel agent"      # the shared pre-2026-10-30 sandbox user
     "sudo install -d -o root -g runner -m 0750 /var/lib/agent-results"
     "sudo install -d -o root -g root -m 0755 /etc/agent-runner-agent"
     "sudo chown root:runner /etc/agent-runner && sudo chmod 0750 /etc/agent-runner"

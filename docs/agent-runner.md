@@ -56,12 +56,23 @@ Not managed by the script:
 - **SNAT** 10.81.0.0/24 → .78 by `agent-runner-net.service`. Each `ifreload` or SDN apply re-appends SDN's
   `snat 1` rules as duplicates; de-duplicate them by hand. Expect exactly 4 NAT rules: DNAT :21422 → tester,
   SNAT 10.81 → .78, 10.50.10 → .175, 10.78 → .175.
-- **Firewall** (`178.fw`, DROP both ways):
+- **Firewall** (`178.fw`, DROP both ways; egress locked down 2026-10-30):
   - **In:** SSH from the host only.
-  - **Out, allowed:** DNS 9.9.9.9, the router 192.168.6.153:8000, Memory Vault 192.168.6.223:3005, and the CPU
-    workers 172.16.10.205-207:8090.
-  - **Out, then dropped:** every other private range.
-  - **Out, public:** 443/80/123, and the VPN on udp 1196.
+  - **Out, allowed, and nothing else:**
+    - DNS 9.9.9.9;
+    - the router 192.168.6.153:8000;
+    - Memory Vault 192.168.6.223:3005;
+    - the CPU workers 172.16.10.205-207:8090;
+    - **NTP to the host** 10.81.0.254:123. Host chrony serves `vmbrar` only (`agent-runner-chrony.conf`), and
+      the VM's timesyncd points there (`agent-runner-timesyncd.conf`);
+    - the **VPN endpoint** 38.107.232.37 udp 1196;
+    - **GitHub on 443**, through the `[IPSET github]` set only.
+  - **The GitHub set** holds GitHub's published `api`, `git` and `web` IPv4 ranges from `api.github.com/meta`,
+    collapsed (68 ranges on 2026-10-30). `agent-runner-github-ipset.timer` refreshes it daily on the host. The set
+    must be declared **before** `[RULES]`: PVE parses the file top-down, and a set declared after the rules
+    gives `no such ipset` and silently drops the rule.
+  - **Not allowed any more:** general 80/443/123, so `apt` and `npm` can't reach their mirrors. To update
+    packages, add a temporary rule, or add the mirror to an ipset.
 
 ## Model access
 
@@ -98,6 +109,7 @@ now the kernel, not the allowlist:
 |---|---|
 | User `agent` | System user (uid 999), no sudo, not in group `runner`, no home, no GitHub config, no SSH keys |
 | `systemd-run` per task | `ProtectSystem=strict`, `ProtectHome=tmpfs` (all of `/home` hidden), `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`, an empty capability set, `RuntimeMaxSec` = the task's limit |
+| Network | `IPAddressDeny=any` with `IPAddressAllow=localhost` and the router `192.168.6.153`, plus `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. The agent reaches **only the model**: no DNS, no GitHub, no VPN, no panel. A secret it can read (the router key, `SDG_PTERO_*`) has nowhere to go. The VM's GitHub access is for the dispatcher, outside the sandbox |
 | Filesystem view | The checkout is **read-only** at `/work/<repo>`. The writable per-task `/results` is `/var/lib/agent-results/<repo>-<issue>-<UTC>` (root:runner 750 parent), plus private `/tmp`. `/etc/agent-runner` and `/run/agent-runner` are inaccessible |
 | Secrets | No GitHub credentials at all: an empty `GH_CONFIG_DIR`, the token stays in `/etc/agent-runner` (root:runner 750). The router key arrives through a root-only `EnvironmentFile` that systemd reads before dropping to `agent`; it is deleted after the run |
 | Per-repo lab secrets | The same `EnvironmentFile`, **for that repo's tasks only**, from a table in `agent-run` (`REPO_ENV_FILE` / `REPO_ENV_PREFIX`). Today: SDG-RUST ← `/etc/agent-runner/ptero-156.env` (root:runner 640; `SDG_PTERO_SFTP_USER`, `SDG_PTERO_SFTP_PASSWORD`, `SDG_PTERO_API_KEY` for the Rust test server 156 subuser). SDG-ARMA3 gets none. A file with any line that is not `PREFIX_*=value` (or a comment or blank) is refused, so it cannot inject `LD_PRELOAD`, `PATH` and the like. The dispatcher strips each value literally (values of 8+ characters) from anything it posts |
@@ -114,9 +126,11 @@ agent. **2026-10-30: 18/18 passed.**
   appears nowhere in its event log.
 
 **Residual risks, by design:**
-- **The router key is visible to the agent's own processes** (it needs the key to call the model). It is a
-  scoped, chat-only key with a 14-day TTL, and the dispatcher strips its literal value from anything it posts.
-  A loopback proxy that holds the key would remove even this.
+- **Secrets the agent can read:** the router key, and for SDG-RUST the `SDG_PTERO_*` values. The agent needs
+  them, and its processes can read them. Since 2026-10-30 the sandbox can reach only the router, so it cannot
+  send them anywhere directly. What remains is the agent writing a secret into its printed report or into
+  `/results`: the dispatcher strips their literal values from anything it posts, and `/results` stays on the
+  VM. A loopback proxy holding the router key would take that key out of the agent's reach entirely.
 - **The agent can no longer reach the panel.** `ssh panel` was removed: the panel key lives in runner's
   `~/.ssh` and must stay out of the sandbox. Playbooks that need the panel need a design first, for example
   an ssh-agent socket held by runner so the key can be used but never read.

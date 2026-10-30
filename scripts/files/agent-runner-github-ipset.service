@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh VM 178's GitHub egress ipset from api.github.com/meta
+After=network-online.target pve-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agent-runner-github-ipset

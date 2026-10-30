@@ -17,8 +17,9 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
 2. Reads the router's `/healthz`. If the loaded chat profile has no lane for scoped keys
    (only `rag-qwen3.6` and `qwen3.8` do), it claims nothing. This avoids one "lane closed" comment
    every 5 minutes while another profile is loaded.
-3. Picks the **oldest** open `runner:ready` issue across both repos. An issue that also carries another
-   `runner:*` label is skipped and logged, never touched.
+3. Picks the **oldest** open `runner:ready` issue across both repos that passes the tier and halt rules (below).
+   An issue that also carries another `runner:*` label is skipped and logged, never touched. Refused and held
+   issues don't use up the cycle; the next eligible one still runs.
 4. Claims it: `runner:ready` → `runner:running`, plus a start comment.
 5. Checks out the first line of **Branch / commit** (`branch` or `branch@sha`, backticks allowed):
    `fetch --prune`, `switch`, `pull --ff-only`, then verifies the sha. It refuses (BLOCKED) if tracked
@@ -44,6 +45,24 @@ dispatcher posts goes through `redact()`, which removes:
 - GitHub/API tokens and bearer values;
 - `*KEY=`/`*TOKEN=`/`*PASSWORD=` assignments;
 - 48+ hex strings. 40-hex git SHAs are kept.
+
+## Tiers and the halt flag (owner decision 2026-10-30)
+
+Claude sessions may self-approve runner tasks by tier. The dispatcher enforces it:
+
+| Labels on a `runner:ready` issue | What the dispatcher does |
+|---|---|
+| exactly one of `tier:a` (no servers) | runs it |
+| exactly one of `tier:b` (staff test servers), repo **not** halted | runs it |
+| `tier:b` while the repo is **halted** | leaves it `runner:ready`, comments "runner: halted …" **once**, runs it after the halt is lifted |
+| `tier:c` (never auto-run), no tier label, or more than one tier | refuses: a comment, `runner:ready` → `runner:blocked` |
+
+**Halt:** a repo is halted while any **open** issue in it carries `runner:halt`. That label normally lives on the
+pinned **"Runner control"** issue: [SDG-RUST#4](https://github.com/DraconisCluster/SDG-RUST/issues/4) and
+[SDG-ARMA3#3](https://github.com/DraconisCluster/SDG-ARMA3/issues/3). Both were halted when they were
+created (2026-10-30). The dispatcher checks every cycle. Remove the label to release that repo's `tier:b`
+tasks; add it back to hold them again. The check uses the label, not the title, so a renamed or unpinned control
+issue still halts, which is the safe direction.
 
 ## Operating
 

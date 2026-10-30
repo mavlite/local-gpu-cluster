@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily refresh of VM 178's GitHub egress ipset
+
+[Timer]
+OnBootSec=5min
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
