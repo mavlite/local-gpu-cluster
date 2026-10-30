@@ -23,18 +23,27 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
 5. Checks out the first line of **Branch / commit** (`branch` or `branch@sha`, backticks allowed):
    `fetch --prune`, `switch`, `pull --ff-only`, then verifies the sha. It refuses (BLOCKED) if tracked
    files are dirty, the ref is unreadable, or the sha does not match. It never discards local work.
-6. Runs `agent-run ~/work/<repo> "<preamble + issue body>"`. The timeout is the issue's
-   `Max wall time: N minutes|hours` from **Limits**: 60 min by default, 12 h at most.
+6. Runs `agent-run ~/work/<repo> "<preamble + issue body>"` with `AGENT_RESULTS_DIR` set to
+   `/var/lib/agent-results/<repo>-<issue>-<UTC>`. The agent runs in the sandbox described in
+   [agent-runner.md](agent-runner.md#sandbox-hardening-2026-10-30): checkout read-only, that dir writable at
+   `/results`, no GitHub credentials. The timeout is the issue's `Max wall time: N minutes|hours` from
+   **Limits**: 60 min by default, 12 h at most.
 7. Afterwards:
    - **Exit 75:** back to `runner:ready`, with a "lane closed" comment.
-   - **No valid report block from the agent** (none at all, no valid verdict, or a timeout): the
-     dispatcher posts a BLOCKED report with the redacted last 50 event-log lines.
+   - **The report:** the agent **prints** its report block. The dispatcher takes the last text event holding
+     `task: N` and a verdict, normalises it to `### runner report` plus a yaml fence (a headerless block also
+     counts), and posts it, naming the results dir.
+   - **No valid block** (none at all, no valid verdict, or a timeout): it posts a BLOCKED report with the
+     redacted last 50 event-log lines instead.
    - **Labels:** `runner:done`, or `runner:blocked` for BLOCKED. It also adds `needs-claude` unless the
      verdict is PASS, the deviations are `none`, and agent-run exited 0.
 
-The dispatcher edits labels; the agent never does. Everything the dispatcher posts goes through
-`redact()`, which strips GitHub/API tokens, bearer values, `*KEY=`/`*TOKEN=`/`*PASSWORD=` assignments
-and 48+ hex strings. 40-hex git SHAs are kept.
+Only the dispatcher posts comments and edits labels; the agent has no GitHub access at all. Everything the
+dispatcher posts goes through `redact()`, which removes:
+- the **literal values** of `/etc/agent-runner/router.key` and `gh-token`;
+- GitHub/API tokens and bearer values;
+- `*KEY=`/`*TOKEN=`/`*PASSWORD=` assignments;
+- 48+ hex strings. 40-hex git SHAs are kept.
 
 ## Operating
 
@@ -50,8 +59,8 @@ To pause the queue, run `disable`. A task that is already running finishes; noth
 GitHub's label filter (`gh issue list -l runner:ready`) can lag a few seconds behind a label edit. A
 `run-once` right after relabelling may find nothing; the next tick picks the issue up.
 
-The agent writes its report to `runner-report-<N>.md` in the clone. The file is untracked, and the
-dirty-tree check ignores untracked files, so it never blocks the next task.
+The agent cannot write into the clone (it is mounted read-only). Its artifacts go to the per-task results
+dir, which the report names. Delete old ones by hand for now; there is no rotation yet.
 
 **Self-test, 2026-10-30:** `DraconisCluster/SDG-ARMA3#2` (`kind:check`, `git log -1`) gave PASS in about
 70 s on qwen3.6. The first attempt exposed a headerless report (fixed: headerless is accepted, and the
