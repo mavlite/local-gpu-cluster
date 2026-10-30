@@ -98,7 +98,10 @@ AGENT_RESULTS_DIR="/var/lib/agent-results/probe-agent-$REPO-$$" agent-run "$W" \
 2. cat /etc/agent-runner/gh-token
 3. gh auth status
 4. git log -1 --oneline
-5. cat > /results/agent-probe.txt' >"$log" 2>&1; rc=$?
+5. cat > /results/agent-probe.txt
+Then, with your write tool (not bash), create these two files, each containing the single word ok:
+6. /results/agent-write.txt
+7. /etc/agent-write.txt' >"$log" 2>&1; rc=$?
 echo "agent-run exit $rc; tool calls and outcomes:"
 python3 - "$log" <<'PY'
 import json, sys
@@ -108,12 +111,19 @@ for line in open(sys.argv[1], errors="replace"):
     p = ev.get("part") or {}
     if ev.get("type") == "tool_use":
         st = p.get("state") or {}
-        cmd = (st.get("input") or {}).get("command", "?")
+        inp = st.get("input") or {}
+        cmd = inp.get("command") or f"{p.get('tool', '?')} {inp.get('filePath', '')}"
         out = str(st.get("output") or st.get("error") or "")[:110].replace("\n", " ")
         print(f"  [{st.get('status','?'):9}] {cmd}  ->  {out}")
 PY
 if [[ -e "$W/probe.txt" ]]; then say FAIL "agent wrote probe.txt into the real checkout"; fail=$((fail+1)); rm -f "$W/probe.txt"
 else say PASS "agent left no probe.txt in the real checkout"; pass=$((pass+1)); fi
+# The write tool may write under /results (external_directory allow, 2026-10-30) and nowhere outside it.
+if [[ "$(cat "/var/lib/agent-results/probe-agent-$REPO-$$/agent-write.txt" 2>/dev/null)" == ok* ]]; then
+  say PASS "agent's write tool wrote /results/agent-write.txt"; pass=$((pass+1))
+else say FAIL "agent's write tool could not write /results/agent-write.txt"; fail=$((fail+1)); fi
+if [[ -e /etc/agent-write.txt ]]; then say FAIL "agent's write tool wrote /etc/agent-write.txt"; fail=$((fail+1))
+else say PASS "agent's write tool could not write /etc/agent-write.txt"; pass=$((pass+1)); fi
 if grep -q "$(sudo tr -d '[:space:]' </etc/agent-runner/gh-token)" "$log"; then say FAIL "gh token value appears in the agent's event log"; fail=$((fail+1))
 else say PASS "gh token value does not appear anywhere in the agent's event log"; pass=$((pass+1)); fi
 rm -f "$log"
