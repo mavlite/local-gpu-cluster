@@ -385,3 +385,35 @@ def test_refusals_do_not_use_up_the_cycle(env):
     env.add_issue(7, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T09:00:00Z")
     env.run()
     assert "runner:blocked" in env.issue(6)["labels"] and ran(env, 7)
+
+
+# Readiness (2026-10-30, after SDG-ARMA3#1 and SDG-RUST#3 were claimed while agent_egress was not loaded and
+# ended BLOCKED): `agent-run --preflight` is asked before claiming; a runner that is not ready claims nothing.
+
+def test_not_ready_runner_claims_nothing(env, monkeypatch):
+    monkeypatch.setenv("FAKE_PREFLIGHT_FAIL", "all")
+    env.add_issue(7)
+    assert env.run() == 0
+    i = env.issue(7)
+    assert i["labels"] == ["runner:ready", "kind:check", "tier:a"] and i["comments"] == []
+
+
+def test_preflight_is_per_repo(env, monkeypatch):
+    # the older task's repo is not ready: it stays untouched and the other repo's task still runs this cycle
+    monkeypatch.setenv("FAKE_PREFLIGHT_FAIL", "SDG-RUST")
+    env.add_issue(3, repo=OTHER, created="2026-10-30T08:00:00Z")
+    env.add_issue(7, created="2026-10-30T09:00:00Z")
+    env.run()
+    o = env.issue(3, repo=OTHER)
+    assert o["labels"] == ["runner:ready", "kind:check", "tier:a"] and o["comments"] == []
+    assert "runner:done" in env.issue(7)["labels"]
+
+
+def test_exit_76_after_claim_puts_the_task_back(env, monkeypatch):
+    # the sandbox went away between preflight and the run: back to runner:ready, not BLOCKED
+    monkeypatch.setenv("FAKE_AGENT_MODE", "exit76")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    assert set(i["labels"]) == {"runner:ready", "kind:check", "tier:a"}
+    assert any("not ready" in c["body"] for c in i["comments"]) and not reports(i)

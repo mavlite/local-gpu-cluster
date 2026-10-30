@@ -1,9 +1,10 @@
-"""Stand-in for /usr/local/bin/agent-run: `fake_agent_run.py DIR MESSAGE`.
+"""Stand-in for /usr/local/bin/agent-run: `fake_agent_run.py DIR MESSAGE` or `fake_agent_run.py --preflight DIR`.
 
 The sandboxed agent has no GitHub credentials: it PRINTS its report as a text event of the opencode JSON
 stream and the dispatcher posts it. Behaviour from $FAKE_AGENT_MODE:
-  pass | fail | headerless | noreport | exit75 | hang | crash-after-pass | leak
+  pass | fail | headerless | noreport | exit75 | exit76 | hang | crash-after-pass | leak
 It writes one artifact into $AGENT_RESULTS_DIR, as a real task would into /results.
+--preflight exits 76 when $FAKE_PREFLIGHT_FAIL is "all" or names the checkout's directory (comma list), else 0.
 """
 import json
 import os
@@ -16,7 +17,18 @@ def emit(kind, **part):
     print(json.dumps({"type": kind, "part": dict(part, type=kind)}), flush=True)
 
 
+def preflight(work_dir):
+    failing = [n.strip() for n in os.environ.get("FAKE_PREFLIGHT_FAIL", "").split(",") if n.strip()]
+    if "all" in failing or os.path.basename(os.path.normpath(work_dir)) in failing:
+        print("agent-run: nftables table inet agent_egress is not loaded", file=sys.stderr)
+        return 76
+    print("agent-run: preflight ok")
+    return 0
+
+
 def main(argv):
+    if argv[0] == "--preflight":
+        return preflight(argv[1])
     work_dir = argv[0]
     mode = os.environ.get("FAKE_AGENT_MODE", "pass")
     emit("step_start")
@@ -24,6 +36,9 @@ def main(argv):
     if mode == "exit75":
         print("agent-run: lane closed", file=sys.stderr)
         return 75
+    if mode == "exit76":
+        print("agent-run: nftables table inet agent_egress is not loaded", file=sys.stderr)
+        return 76
     if mode == "hang":
         time.sleep(120)
         return 0

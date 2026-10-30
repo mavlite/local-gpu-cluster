@@ -19,7 +19,11 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
    every 5 minutes while another profile is loaded.
 3. Picks the **oldest** open `runner:ready` issue across both repos that passes the tier and halt rules (below).
    An issue that also carries another `runner:*` label is skipped and logged, never touched. Refused and held
-   issues don't use up the cycle; the next eligible one still runs.
+   issues don't use up the cycle; the next eligible one still runs. Before claiming, it asks
+   `agent-run --preflight ~/work/<repo>` (the repo's sandbox entry exists and the `inet agent_egress` table is
+   loaded). If that fails, the repo is skipped for this run, logged, and its issues stay `runner:ready` with no
+   comment, so a runner that is not ready never burns a task as BLOCKED (SDG-ARMA3#1 and SDG-RUST#3,
+   2026-10-30).
 4. Claims it: `runner:ready` → `runner:running`, plus a start comment.
 5. Checks out the first line of **Branch / commit** (`branch` or `branch@sha`, backticks allowed):
    `fetch --prune`, `switch`, `pull --ff-only`, then verifies the sha. It refuses (BLOCKED) if tracked
@@ -31,6 +35,8 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
    **Limits**: 60 min by default, 12 h at most.
 7. Afterwards:
    - **Exit 75:** back to `runner:ready`, with a "lane closed" comment.
+   - **Exit 76** (the sandbox went away between the preflight and the run): back to `runner:ready`, with a
+     "not ready" comment; nothing ran.
    - **The report:** the agent **prints** its report block. The dispatcher takes the last text event holding
      `task: N` and a verdict, normalises it to `### runner report` plus a yaml fence (a headerless block also
      counts), and posts it, naming the results dir.

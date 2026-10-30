@@ -15,8 +15,16 @@
 #
 # Probe mode (runner only, for testing the walls): AGENT_RUN_SHELL=1 agent-run DIR 'shell command' runs
 # /bin/bash -c in the identical sandbox instead of opencode.
+#
+# Preflight: `agent-run --preflight DIR` runs only the readiness checks below (the repo's sandbox entry and the
+# nft table) and exits 0, so the dispatcher can check BEFORE it claims an issue. Exit 76 = the sandbox is not
+# ready; nothing ran, and the caller leaves (or puts back) the task as runner:ready.
 set -euo pipefail
-dir=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; msg=${2:?usage: agent-run DIR MESSAGE [ARGS...]}; shift 2
+EXIT_NOT_READY=76
+preflight=0
+if [[ "${1:-}" == --preflight ]]; then preflight=1; shift; fi
+dir=${1:?usage: agent-run [--preflight] DIR MESSAGE [ARGS...]}; shift
+if [[ "$preflight" == 0 ]]; then msg=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; shift; fi
 dir=$(realpath -e "$dir")
 case "$dir" in /home/runner/work/?*) ;; *) echo "agent-run: DIR must be a checkout under /home/runner/work" >&2; exit 2 ;; esac
 name=$(basename "$dir")
@@ -25,11 +33,16 @@ name=$(basename "$dir")
 # A repo without an entry does not run; neither does any task while the nft table is missing (fail closed).
 EG=/usr/local/lib/agent-runner/agent_runner_egress.py
 EGCONF=/etc/agent-runner-agent/egress.conf
-user=$(python3 "$EG" --conf "$EGCONF" user "$name") || { echo "agent-run: no sandbox entry for $name in $EGCONF" >&2; exit 2; }
+user=$(python3 "$EG" --conf "$EGCONF" user "$name") || {
+  echo "agent-run: no sandbox entry for $name in $EGCONF" >&2; exit "$EXIT_NOT_READY"; }
 read -ra ipallow <<<"$(python3 "$EG" --conf "$EGCONF" ip-allow "$name")"
 if ! sudo /usr/sbin/nft list table inet agent_egress >/dev/null 2>&1; then
   echo "agent-run: nftables table inet agent_egress is not loaded (agent-runner-egress.service); refusing to start" >&2
-  exit 2
+  exit "$EXIT_NOT_READY"
+fi
+if [[ "$preflight" == 1 ]]; then
+  echo "agent-run: preflight ok ($name runs as $user, agent_egress loaded)"
+  exit 0
 fi
 
 if [[ "${AGENT_RUN_SHELL:-}" == 1 ]]; then

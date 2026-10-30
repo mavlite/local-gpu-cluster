@@ -6,13 +6,15 @@ Runs ON VM 178 as user `runner`, from agent-runner-dispatch.timer every 5 minute
   1. flock; rotate event logs older than 30 days.
   2. If the router's loaded chat profile has no lane for scoped keys, stop quietly (nothing is claimed).
   3. Oldest open `runner:ready` issue across DISPATCH_REPOS (in that order on ties) that carries no other
-     runner:* label. Claim it: runner:ready -> runner:running plus a start comment.
+     runner:* label and whose repo passes `agent-run --preflight` (sandbox entry + agent_egress table loaded;
+     a repo that is not ready is skipped and its tasks stay runner:ready, untouched).
+     Claim it: runner:ready -> runner:running plus a start comment.
   4. Check out the issue's "Branch / commit" in ~/work/<repo> (fetch, switch, pull --ff-only, verify sha).
   5. agent-run <dir> "<preamble + issue body>" with the issue's max wall time; raw JSON events to
      ~/runner-logs/<repo>-<issue>-<UTC>.jsonl. agent-run runs opencode as the unprivileged user `agent` in a
      systemd sandbox: the checkout read-only at /work/<repo>, a per-task results dir at /results
      (AGENT_RESULTS_DIR on the host side), private /tmp, no /home, no /etc/agent-runner, no GitHub credentials.
-  6. Exit 75 (lane closed): back to runner:ready with a comment. Otherwise take the report block the agent
+  6. Exit 75 (lane closed) or 76 (sandbox not ready after all): back to runner:ready with a comment. Otherwise take the report block the agent
      PRINTED (the last text event of the stream holding `task: N` and a verdict) and post it here; if there is
      none (or it is malformed), post a BLOCKED one with the redacted tail of the event log.
      Set runner:done / runner:blocked, plus needs-claude unless PASS with no deviations and a clean exit.
@@ -48,6 +50,8 @@ VERDICTS = ("PASS", "FAIL", "INDETERMINATE", "BLOCKED")
 DEFAULT_TIMEOUT_MIN, MAX_TIMEOUT_MIN = 60, 720
 LOG_KEEP_DAYS = 30
 EXIT_LANE_CLOSED = 75
+EXIT_NOT_READY = 76      # agent-run: sandbox entry or agent_egress table missing; nothing ran
+PREFLIGHT_TIMEOUT_S = 60
 TAIL_LINES, TAIL_LINE_CHARS, COMMENT_MAX = 50, 300, 60000
 
 
@@ -337,10 +341,28 @@ def note_halted(c, repo, issue):
     log(f"{repo}#{issue['number']}: tier:b held by runner:halt")
 
 
-def pick(c, queue):
-    """Apply tier and halt rules in queue order: refuse what may never run, hold tier:b under a halt, and return
-    the first runnable (repo, issue) or None. Refusals do not use up the cycle."""
-    halt = {}
+def runner_ready(c, repo):
+    """`agent-run --preflight` for the repo's checkout: its sandbox entry exists and agent_egress is loaded.
+    Asked before claiming, so a runner that is not ready leaves the task runner:ready instead of burning it."""
+    cmd = c["agent"] + ["--preflight", os.path.join(c["work"], repo.split("/")[-1])]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=PREFLIGHT_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"{repo}: agent-run preflight did not run ({e}); not claiming")
+        return False
+    if r.returncode != 0:
+        log(f"{repo}: runner not ready (preflight exit {r.returncode}: {redact(r.stderr.strip())[-300:]}); "
+            "not claiming")
+        return False
+    return True
+
+
+def pick(c, queue, ready=lambda repo: True):
+    """Apply tier and halt rules in queue order: refuse what may never run, hold tier:b under a halt, skip a repo
+    whose runner is not ready (`ready`, asked once per repo), and return the first runnable (repo, issue) or None.
+    Refusals do not use up the cycle."""
+    halt, ok = {}, {}
     for repo, issue in queue:
         tier = tier_of(issue)
         if tier is None or tier == TIER_C:
@@ -352,6 +374,10 @@ def pick(c, queue):
             if halt[repo]:
                 note_halted(c, repo, issue)
                 continue
+        if repo not in ok:
+            ok[repo] = ready(repo)
+        if not ok[repo]:
+            continue
         return repo, issue
     return None
 
@@ -487,6 +513,12 @@ def dispatch(c, repo, issue, model):
                               "back to runner:ready, retrying next cycle.")
         log(f"{repo}#{num}: lane closed, requeued")
         return 0
+    if code == EXIT_NOT_READY:
+        relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
+        comment(c, repo, num, "runner: the runner's sandbox was not ready (agent-run exit 76: egress table or "
+                              "sandbox entry missing); nothing ran. Back to runner:ready, retrying next cycle.")
+        log(f"{repo}#{num}: sandbox not ready, requeued")
+        return 0
     rep = find_report(event_texts(log_base + ".jsonl"), num)
     if code is None:
         reason = f"agent-run timed out after {timeout_s}s and was stopped."
@@ -539,7 +571,7 @@ def main(argv=None):
         if model is None:
             log("router lane closed for scoped keys; nothing claimed")
             return 0
-        chosen = pick(c, ready_issues(c, only))
+        chosen = pick(c, ready_issues(c, only), ready=lambda repo: runner_ready(c, repo))
         if chosen is None:
             return 0
         repo, issue = chosen
