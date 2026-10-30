@@ -39,10 +39,17 @@ MANIFEST=(
   "vm|agent-runner-timesyncd.conf|/etc/systemd/timesyncd.conf.d/agent-runner.conf|root:root|644"
   # The profile lives OUTSIDE /etc/agent-runner: the sandbox makes that dir inaccessible to the agent.
   "vm|agent-runner-opencode.json|/etc/agent-runner-agent/opencode.json|root:root|644"
+  # Per-repo sandbox egress: one table -> sandbox user + IPAddressAllow (agent-run) + nft rules (the unit).
+  "vm|agent-runner-egress.conf|/etc/agent-runner-agent/egress.conf|root:root|644"
+  "vm|agent_runner_egress.py|/usr/local/lib/agent-runner/agent_runner_egress.py|root:root|755"
+  "vm|agent-runner-egress.service|/etc/systemd/system/agent-runner-egress.service|root:root|644"
 )
 # Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
 SANDBOX_CHECKS=(
-  "agent user exists, no sudo, not in group runner|id agent >/dev/null && ! id -Gn agent | grep -qwE 'runner|sudo'"
+  "per-repo users agent-rust/agent-arma exist, no sudo, not in group runner|for u in agent-rust agent-arma; do id \$u >/dev/null && ! id -Gn \$u | grep -qwE 'runner|sudo' || exit 1; done"
+  "old shared user 'agent' removed|! id agent >/dev/null 2>&1"
+  "nft table inet agent_egress loaded|sudo /usr/sbin/nft list table inet agent_egress >/dev/null"
+  "agent-runner-egress.service enabled|systemctl is-enabled agent-runner-egress.service >/dev/null"
   "/etc/agent-runner is root:runner 750|[ \"\$(stat -c '%U:%G %a' /etc/agent-runner)\" = 'root:runner 750' ]"
   "/home/runner is 700|[ \"\$(stat -c '%a' /home/runner)\" = 700 ]"
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
@@ -146,12 +153,21 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
   else
     vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"
     vm "sudo systemctl restart systemd-timesyncd && echo 'timesyncd restarted (NTP=10.81.0.254)'"
+    # (re)render and load the per-repo egress table; the users must exist (setup-sandbox) or rendering fails
+    vm "sudo systemctl daemon-reload && sudo systemctl enable agent-runner-egress.service >/dev/null && sudo systemctl restart agent-runner-egress.service && sudo /usr/sbin/nft list table inet agent_egress | grep -c 'accept' | sed 's/^/agent_egress loaded, accept rules: /'"
   fi
 }
 
 setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
-  local steps=(
-    "id agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agent"
+  # one unprivileged user per repo, straight from the egress table (so the table and the users cannot drift)
+  local u users
+  users=$(python3 "$F/agent_runner_egress.py" --conf "$F/agent-runner-egress.conf" users)
+  local steps=()
+  for u in $users; do
+    steps+=("id $u >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin $u")
+  done
+  steps+=(
+    "! id agent >/dev/null 2>&1 || sudo userdel agent"      # the shared pre-2026-10-30 sandbox user
     "sudo install -d -o root -g runner -m 0750 /var/lib/agent-results"
     "sudo install -d -o root -g root -m 0755 /etc/agent-runner-agent"
     "sudo chown root:runner /etc/agent-runner && sudo chmod 0750 /etc/agent-runner"
