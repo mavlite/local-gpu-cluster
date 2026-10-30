@@ -122,10 +122,14 @@ def parse_timeout_minutes(text):
 
 
 def find_report(comments, task, since):
-    """The agent's report: the last comment at/after `since` holding '### runner report' for this task."""
+    """The agent's report: the last comment at/after `since` for this task with a report block. The
+    '### runner report' heading is what the preamble asks for, but a comment with both `task:` and
+    `verdict:` lines also counts -- qwen3.6 dropped the heading and fence on the first live run."""
     for c in reversed(comments or []):
         b = c.get("body") or ""
-        if c.get("createdAt", "") < since or "### runner report" not in b:
+        if c.get("createdAt", "") < since:
+            continue
+        if "### runner report" not in b and not re.search(r"(?m)^verdict:\s*\S", b):
             continue
         m = re.search(r"(?m)^task:\s*#?(\d+)\s*$", b)
         if not m or int(m.group(1)) != int(task):
@@ -227,8 +231,10 @@ Rules:
 - Work only in the current directory (already checked out at {ref}). Run only the commands in Steps, in order.
 - Check every Precondition first; if one fails, or anything happens that Steps do not cover, stop and report BLOCKED.
 - Never change issue labels, never push, never write secrets or player data anywhere.
-- When finished (or stopped), post EXACTLY ONE comment on the issue with this block, filled in:
-  write it to runner-out/report-{num}.md, then run: gh issue comment {num} -R {repo} --body-file runner-out/report-{num}.md
+- When finished (or stopped), post EXACTLY ONE comment on the issue. Its first line must be `### runner report`,
+  followed by the ```yaml fenced block below, copied as-is (heading and fence included) and filled in.
+  Write it with the write tool to the file runner-report-{num}.md in the current directory (do not run mkdir;
+  it is not allowed and not needed), then run: gh issue comment {num} -R {repo} --body-file runner-report-{num}.md
 
 ### runner report
 ```yaml
