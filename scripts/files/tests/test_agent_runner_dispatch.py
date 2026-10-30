@@ -65,6 +65,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
     monkeypatch.setenv("DISPATCH_RETRY_SLEEP_S", "0")
+    monkeypatch.delenv("FAKE_GH_TOKEN_EXPIRY", raising=False)
     monkeypatch.setenv("DISPATCH_MIRROR_BRANCHES", "SDG-ARMA3:upstream")
     monkeypatch.delenv("FAKE_GH_EDIT_FAIL", raising=False)
     secret = tmp_path / "router.key"
@@ -314,6 +315,8 @@ def test_parse_ref(text, expected):
 @pytest.mark.parametrize("text,minutes", [
     ("Max wall time: 45 minutes", 45), ("max wall time 2 h", 120), ("Max wall time: 90m.", 90),
     ("leave the server stopped", 60), ("Max wall time: 48 hours", 720),
+    # SDG-RUST#1 (2026-10-30) wrote it without "Max" and was killed at the 60-minute default
+    ("- Wall time: 6 h at most.", 360), ("Wall-time: 20 minutes", 20),
 ])
 def test_parse_timeout_minutes(text, minutes):
     assert d.parse_timeout_minutes(text) == minutes
@@ -520,3 +523,40 @@ def test_task_on_the_mirror_branch_itself_still_runs(env):
     env.run()
     i = env.issue(7)
     assert "runner:done" in i["labels"], reports(i)
+
+
+def _expiry_in(days):
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+    return t.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _expiry_checks(env):
+    return [a for a in json.loads(env.state.read_text())["calls"] if a == ["api", "-i", "rate_limit"]]
+
+
+def test_token_expiring_within_14_days_is_warned_once_a_day(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_GH_TOKEN_EXPIRY", _expiry_in(5))
+    env.run()
+    env.run()
+    err = capsys.readouterr().err
+    assert err.count("WARNING: the runner's GitHub token expires in 4 days") == 1
+    assert len(_expiry_checks(env)) == 1          # the second run inside 24 h does not ask again
+
+
+def test_token_far_from_expiry_is_not_warned(env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_GH_TOKEN_EXPIRY", _expiry_in(60))
+    env.run()
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_selftest_reports_token_days_left_without_failing(env, monkeypatch, capsys):
+    monkeypatch.setenv("DISPATCH_SELFTEST", "1")
+    monkeypatch.setenv("FAKE_GH_TOKEN_EXPIRY", "2027-01-25 14:09:35 UTC")
+    assert env.run() == 0
+    assert "selftest GitHub token: expires 2027-01-25 14:09:35 UTC" in capsys.readouterr().err
+
+
+def test_token_without_expiry_header_is_reported_unknown_not_an_error(env, monkeypatch, capsys):
+    monkeypatch.setenv("DISPATCH_SELFTEST", "1")
+    assert env.run() == 0
+    assert "selftest GitHub token: expiry unknown" in capsys.readouterr().err

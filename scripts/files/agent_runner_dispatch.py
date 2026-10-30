@@ -199,7 +199,8 @@ def parse_ref(text):
 
 
 def parse_timeout_minutes(text):
-    m = re.search(r"(?i)max(?:imum)?\s+wall\s*time\D{0,10}?(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)\b",
+    # "Max wall time: 2 h" and "Wall time: 6 h at most" (SDG-RUST#1 used the latter and got the 60-min default)
+    m = re.search(r"(?i)(?:max(?:imum)?\s+)?wall[\s-]*time\D{0,10}?(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)\b",
                   text or "")
     if not m:
         return DEFAULT_TIMEOUT_MIN
@@ -309,6 +310,38 @@ def lane_model(c):
         log(f"healthz unreadable ({e}); not claiming")
         return None
     return LANE_MODELS.get(profile)
+
+
+TOKEN_WARN_DAYS = 14
+
+
+def token_expiry(c):
+    """(expiry string, days left) for the runner's fine-grained gh token, read from the response header GitHub
+    sends on any API call (rate_limit costs nothing). (None, None) when there is no header or the call fails."""
+    out = gh(c, "api", "-i", "rate_limit", check=False)
+    m = re.search(r"(?im)^github-authentication-token-expiration:\s*(.+?)\s*$", out or "")
+    if not m:
+        return None, None
+    try:
+        when = datetime.datetime.strptime(m.group(1).replace(" UTC", ""), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return m.group(1), None
+    return m.group(1), (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 86400
+
+
+def warn_token_expiry(c):
+    """At most once a day: a journal WARNING when the gh token has under TOKEN_WARN_DAYS left. A fine-grained token
+    cannot be renewed by the VM; the owner makes a new one (docs/agent-runner.md). Never stops a dispatch."""
+    stamp = os.path.join(c["logs"], ".token-expiry-checked")
+    if os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < 86400:
+        return
+    with open(stamp, "w"):
+        pass
+    when, days = token_expiry(c)
+    if days is not None and days < TOKEN_WARN_DAYS:
+        log(f"WARNING: the runner's GitHub token expires in {int(days)} days ({when}); replace "
+            f"/etc/agent-runner/gh-token before then")
 
 
 def rotate_logs(c):
@@ -620,6 +653,9 @@ def main(argv=None):
         results = {repo: runner_ready(c, repo) for repo in c["repos"]}
         for repo, ok in results.items():
             log(f"selftest {repo}: {'ready' if ok else 'NOT READY'}")
+        when, days = token_expiry(c)
+        log(f"selftest GitHub token: expires {when} ({int(days)} days left)" if days is not None
+            else "selftest GitHub token: expiry unknown (no expiry header)")
         return 0 if all(results.values()) else 1
     with open(os.path.join(c["logs"], ".dispatch.lock"), "w") as lock:
         try:
@@ -628,6 +664,7 @@ def main(argv=None):
             log("another dispatch is running; exiting")
             return 0
         rotate_logs(c)
+        warn_token_expiry(c)
         model = lane_model(c)
         if model is None:
             log("router lane closed for scoped keys; nothing claimed")

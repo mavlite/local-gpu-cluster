@@ -31,6 +31,11 @@ def main(argv):
     out = None
     if argv[:2] == ["api", "user"]:
         out = st.get("user", "mavlite")
+    elif argv == ["api", "-i", "rate_limit"]:
+        # FAKE_GH_TOKEN_EXPIRY: the fine-grained token's expiry header, as GitHub sends it ("" = no header)
+        exp = os.environ.get("FAKE_GH_TOKEN_EXPIRY", "")
+        header = f"Github-Authentication-Token-Expiration: {exp}\n" if exp else ""
+        out = "HTTP/2.0 200 OK\n" + header + "\n{}"
     elif argv[:1] == ["issue"]:
         sub, args = argv[1], argv[2:]
         repo = opt(args, "-R", "--repo")
