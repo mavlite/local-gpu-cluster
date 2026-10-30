@@ -30,11 +30,12 @@ def main(argv):
     sha = subprocess.run(["git", "-C", work_dir, "log", "-1", "--format=%H"],
                          capture_output=True, text=True, check=True).stdout.strip()
     verdict = "FAIL" if mode == "fail" else "PASS"
-    body = ("### runner report\n```yaml\n"
-            f"task: {os.environ['FAKE_TASK']}\nverdict: {verdict}\nref: main@{sha}\n"
+    yaml = (f"task: {os.environ['FAKE_TASK']}\nverdict: {verdict}\nref: main@{sha}\n"
             "started: x\nfinished: y\nmodel: qwen3.6\nresults:\n  - check: git log -1\n"
             f"    value: {sha}\n    pass: {'true' if verdict == 'PASS' else 'false'}\n"
-            "artifacts: []\ndeviations: none\nstate_left: main\n```\n")
+            "artifacts: []\ndeviations: none\nstate_left: main\n")
+    # headerless: what qwen3.6 actually posted on 2026-10-30 -- a bare '---' YAML document, no heading/fence
+    body = ("---\n" + yaml) if mode == "headerless" else ("### runner report\n```yaml\n" + yaml + "```\n")
     gh = shlex.split(os.environ["FAKE_GH_CMD"])
     subprocess.run(gh + ["issue", "comment", os.environ["FAKE_TASK"], "-R", os.environ["FAKE_REPO"],
                          "--body", body], check=True)

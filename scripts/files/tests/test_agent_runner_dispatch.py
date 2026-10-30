@@ -97,6 +97,29 @@ def test_pass_report_marks_done_without_needs_claude(env):
     assert len(logs) == 1 and "step_start" in logs[0].read_text()
 
 
+def test_headerless_report_is_accepted(env, monkeypatch):
+    # Live 2026-10-30: the agent posted the yaml without '### runner report' or a fence.
+    monkeypatch.setenv("FAKE_AGENT_MODE", "headerless")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    assert set(i["labels"]) == {"runner:done", "kind:check"}
+    assert not any("verdict: BLOCKED" in c["body"] for c in i["comments"])
+
+
+def test_start_comment_is_not_mistaken_for_a_report(env, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "noreport")
+    env.add_issue(7)
+    env.run()
+    assert "runner:blocked" in env.issue(7)["labels"]
+
+
+def test_preamble_demands_heading_fence_and_no_mkdir():
+    p = d.preamble("o/r", 5, "main@abc", "2026-10-30T00:00:00Z", "qwen3.6")
+    assert "### runner report" in p and "```yaml" in p
+    assert "first line" in p.lower() and "mkdir" in p
+
+
 def test_fail_report_marks_done_and_needs_claude(env, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "fail")
     env.add_issue(7)
