@@ -35,6 +35,17 @@ if [[ "$REPO" == SDG-RUST ]]; then
 else
   expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
 fi
+# The panel key's ssh-agent reaches SDG-ARMA3 tasks only, and the key there runs only the panel's forced command.
+if [[ "$REPO" == SDG-ARMA3 ]]; then
+  expect ok   "ssh-agent holds the panel key (fingerprint only)" 'ssh-add -l | cut -d" " -f2,4; [ "$(ssh-add -l | wc -l)" = 1 ]'
+  expect ok   "ssh panel authenticates; the gate refuses 'id'" 'o=$(timeout 25 ssh panel id 2>&1); echo "$o"; grep -q "refused by sdg-lab-gate" <<<"$o"'
+  expect fail "ssh panel interactive shell"               'timeout 25 ssh -T panel </dev/null 2>&1 | grep -v "refused by sdg-lab-gate"'
+  expect fail "ssh -L port forward through the panel"     'timeout 15 ssh -o ClearAllForwardings=no -o ExitOnForwardFailure=yes -N -L 127.0.0.1:18022:127.0.0.1:22 panel & sleep 6; timeout 4 bash -c "exec 3<>/dev/tcp/127.0.0.1/18022; head -c 4 <&3 | grep -q SSH"'
+  expect fail "read the ssh-agent's memory (/proc/PID/environ)" 'p=$(pgrep -x ssh-agent | head -1); test -n "$p" && cat /proc/$p/environ >/dev/null'
+else
+  expect fail "an ssh-agent socket is present for $REPO"   'test -n "${SSH_AUTH_SOCK:-}" || ls /run/agent-ssh-arma'
+  expect fail "$REPO talks to the arma agent socket"       'SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -l'
+fi
 expect fail "list /etc/agent-runner"                   'ls /etc/agent-runner'
 expect fail "read runner gh config"                    'cat /home/runner/.config/gh/hosts.yml'
 expect fail "read runner panel ssh key"                'cat /home/runner/.ssh/id_ed25519_panel'
