@@ -7,18 +7,15 @@ ndp: 0
 macfilter: 1
 
 [RULES]
-IN ACCEPT -source 10.81.0.254 -p tcp -dport 22
-OUT ACCEPT -dest 9.9.9.9 -p udp -dport 53
-OUT ACCEPT -dest 9.9.9.9 -p tcp -dport 53
-OUT ACCEPT -dest 192.168.6.153 -p tcp -dport 8000
-OUT ACCEPT -dest 192.168.6.223 -p tcp -dport 3005
-OUT ACCEPT -dest 172.16.10.205-172.16.10.207 -p tcp -dport 8090
-OUT DROP -dest 10.0.0.0/8
-OUT DROP -dest 172.16.0.0/12
-OUT DROP -dest 192.168.0.0/16
-OUT DROP -dest 100.64.0.0/10
-OUT DROP -dest 169.254.0.0/16
-OUT ACCEPT -p tcp -dport 443
-OUT ACCEPT -p tcp -dport 80
-OUT ACCEPT -p udp -dport 123
-OUT ACCEPT -p udp -dport 1196
+IN ACCEPT -source 10.81.0.254 -p tcp -dport 22 # admin ssh from the host only
+OUT ACCEPT -dest 9.9.9.9 -p udp -dport 53 # DNS
+OUT ACCEPT -dest 9.9.9.9 -p tcp -dport 53 # DNS
+OUT ACCEPT -dest 192.168.6.153 -p tcp -dport 8000 # router (the model)
+OUT ACCEPT -dest 192.168.6.223 -p tcp -dport 3005 # Memory Vault
+OUT ACCEPT -dest 172.16.10.205-172.16.10.207 -p tcp -dport 8090 # CPU workers
+OUT ACCEPT -dest 10.81.0.254 -p udp -dport 123 # NTP via the host's chrony (vmbrar only)
+OUT ACCEPT -dest 38.107.232.37 -p udp -dport 1196 # OpenVPN endpoint (OPNsense Agent Runner VPN)
+OUT ACCEPT -dest +guest/github -p tcp -dport 443 # GitHub only (ipset below); no general 80/443
+
+[IPSET github]
+# api.github.com/meta api+git+web IPv4, refreshed by agent-runner-github-ipset.sh

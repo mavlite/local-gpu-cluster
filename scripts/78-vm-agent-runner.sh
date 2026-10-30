@@ -29,8 +29,14 @@ MANIFEST=(
   "host|agent-runner-key-renew.sh|/usr/local/sbin/agent-runner-key-renew|root:root|750"
   "host|agent-runner-key-renew.service|/etc/systemd/system/agent-runner-key-renew.service|root:root|644"
   "host|agent-runner-key-renew.timer|/etc/systemd/system/agent-runner-key-renew.timer|root:root|644"
+  # 178.fw: its [IPSET github] block (last section) is filled by the ipset refresher; diff ignores that block.
   "host|agent-runner-178.fw|/etc/pve/firewall/${VMID}.fw|root:www-data|640"
+  "host|agent-runner-github-ipset.sh|/usr/local/sbin/agent-runner-github-ipset|root:root|750"
+  "host|agent-runner-github-ipset.service|/etc/systemd/system/agent-runner-github-ipset.service|root:root|644"
+  "host|agent-runner-github-ipset.timer|/etc/systemd/system/agent-runner-github-ipset.timer|root:root|644"
+  "host|agent-runner-chrony.conf|/etc/chrony/conf.d/agent-runner.conf|root:root|644"
   "vm|agent-run.sh|/usr/local/bin/agent-run|root:root|755"
+  "vm|agent-runner-timesyncd.conf|/etc/systemd/timesyncd.conf.d/agent-runner.conf|root:root|644"
   # The profile lives OUTSIDE /etc/agent-runner: the sandbox makes that dir inaccessible to the agent.
   "vm|agent-runner-opencode.json|/etc/agent-runner-agent/opencode.json|root:root|644"
 )
@@ -56,9 +62,15 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 vm() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@"; }
 field() { cut -d'|' -f"$2" <<<"$1"; }
 
+# Content hash; for a .fw file only up to and including the '[IPSET github]' header (the refresher owns the rest).
+HASH_CMD="sha256sum"
+FW_HASH_CMD="sed '/^\\[IPSET github\\]\$/q' | sha256sum"
+repo_sha() { if [[ "$1" == *.fw ]]; then sed '/^\[IPSET github\]$/q' "$1" | sha256sum | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+
 live_meta() {   # where path -> "sha256 owner:group mode" or "missing"
-  local where="$1" path="$2" cmd
-  cmd="if [ -e '$path' ]; then echo \"\$(sha256sum '$path' | cut -d' ' -f1) \$(stat -c '%U:%G %a' '$path')\"; else echo missing; fi"
+  local where="$1" path="$2" cmd h="$HASH_CMD"
+  [[ "$path" == *.fw ]] && h="$FW_HASH_CMD"
+  cmd="if [ -e '$path' ]; then echo \"\$(cat '$path' | $h | cut -d' ' -f1) \$(stat -c '%U:%G %a' '$path')\"; else echo missing; fi"
   if [[ "$where" == host ]]; then bash -c "$cmd"; else vm "$cmd"; fi
 }
 
@@ -67,7 +79,7 @@ do_diff() {
   for e in "${MANIFEST[@]}"; do
     where=$(field "$e" 1); src=$(field "$e" 2); dst=$(field "$e" 3); own=$(field "$e" 4); mode=$(field "$e" 5)
     [[ -r "$F/$src" ]] || die "missing repo file $F/$src"
-    want="$(sha256sum "$F/$src" | cut -d' ' -f1) $own $mode"
+    want="$(repo_sha "$F/$src") $own $mode"
     got=$(live_meta "$where" "$dst")
     if [[ "$got" == "$want" ]]; then printf 'ok     %-4s %s\n' "$where" "$dst"
     else printf 'DRIFT  %-4s %s\n       repo: %s\n       live: %s\n' "$where" "$dst" "$want" "$got"; drift=1; fi
@@ -104,7 +116,13 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     [[ -r "$F/$src" ]] || die "missing repo file $F/$src"
     if [[ -n "$dry" ]]; then printf 'would install %s -> %s:%s (%s %s)\n' "$src" "$where" "$dst" "$own" "$mode"; continue; fi
     if [[ "$where" == host ]]; then
-      if [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"   # pmxcfs: owner/mode are fixed by the filesystem
+      if [[ "$dst" == *.fw ]]; then
+        # Repo rules + the LIVE [IPSET github] entries, so installing never empties GitHub egress. pmxcfs fixes
+        # owner/mode itself; write via a temp copy.
+        local t; t=$(mktemp)
+        { cat "$F/$src"; [[ -e "$dst" ]] && sed '1,/^\[IPSET github\]$/d' "$dst" | grep -v '^#'; } > "$t"
+        cp "$t" "$dst"; rm -f "$t"
+      elif [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"
       else install -D -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$F/$src" "$dst"; fi
     else
       base64 -w0 "$F/$src" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m '$mode' -o '${own%%:*}' -g '${own##*:}' \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
@@ -112,8 +130,16 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     echo "installed $dst"
   done
   [[ -n "$dry" ]] && return 0
-  if [[ "$target" == host ]]; then systemctl daemon-reload; pve-firewall compile >/dev/null && echo "pve-firewall compiles"
-  else vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"; fi
+  if [[ "$target" == host ]]; then
+    systemctl daemon-reload
+    /usr/local/sbin/agent-runner-github-ipset            # fill/refresh the GitHub set now, not at the next timer tick
+    pve-firewall compile >/dev/null && echo "pve-firewall compiles"
+    systemctl enable --now agent-runner-github-ipset.timer >/dev/null && echo "github ipset timer enabled"
+    systemctl restart chrony && echo "chrony restarted (serving 10.81.0.0/24 on 10.81.0.254)"
+  else
+    vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"
+    vm "sudo systemctl restart systemd-timesyncd && echo 'timesyncd restarted (NTP=10.81.0.254)'"
+  fi
 }
 
 setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.

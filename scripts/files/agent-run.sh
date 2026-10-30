@@ -67,6 +67,11 @@ props=(
   -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes
   -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes -p LockPersonality=yes
   -p CapabilityBoundingSet= -p UMask=0007
+  # Network (hardening 2026-10-30): the agent reaches the router and loopback ONLY -- no DNS, no GitHub, nothing
+  # else -- so a secret it can read (router key, SDG_PTERO_*) has nowhere to go. The VM itself is limited further
+  # out by 178.fw (GitHub ipset for the dispatcher, VPN endpoint, NTP via the host).
+  -p IPAddressDeny=any -p IPAddressAllow=localhost -p IPAddressAllow=192.168.6.153
+  -p RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6"
   -p InaccessiblePaths=/etc/agent-runner -p InaccessiblePaths=/run/agent-runner
   -p BindReadOnlyPaths="$dir:/work/$name"
   -p BindPaths="$results:/results"
