@@ -141,14 +141,45 @@ def field(secs, *names):
 _REF = re.compile(r"^([A-Za-z0-9._/-]+?)(?:@([0-9a-fA-F]{7,40}))?$")
 
 
+_SWITCH = re.compile(r"\bgit\s+(?:switch|checkout)\s+([A-Za-z0-9._/][A-Za-z0-9._/-]*)")
+_SHA_EXPECT = re.compile(r"(?i)\b(?:expect(?:ed)?|sha)\b\s*[:=]?\s*([0-9a-f]{7,40})\b")
+_SHA_BARE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
 def parse_ref(text):
-    """'branch' or 'branch@sha' (backticks allowed) from the first line of the Branch / commit field."""
-    first = next((l.strip() for l in (text or "").splitlines() if l.strip()), "")
-    first = first.strip("`").strip()
-    m = _REF.match(first)
-    if not m or first.startswith("-") or ".." in first:
-        raise ValueError(f"cannot read a ref from {first!r}; write `branch` or `branch@sha` on the first line")
-    return m.group(1), m.group(2)
+    """(branch, sha-or-None) from the Branch / commit field. Accepts, anywhere in the field (code fences ignored):
+    `branch`, `branch@sha`, the spec's `git switch <branch> && git pull --ff-only` (or `git checkout <branch>`),
+    and the sha to verify as `# expect: <sha>` or a bare 40-hex line. Exactly one branch must be named.
+    SDG-RUST#3 (2026-10-30) used a ```shell fence and the first-line parser took `shell` as the branch."""
+    branches, shas = [], []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("```"):
+            continue
+        bare = line.strip("`").strip()
+        if _SHA_BARE.match(bare):
+            shas.append(bare.lower())
+            continue
+        m = _SHA_EXPECT.search(line)
+        if m:
+            shas.append(m.group(1).lower())
+            continue
+        found = _SWITCH.findall(line)
+        if found:
+            branches += found
+            continue
+        m = _REF.match(bare)
+        if m:
+            branches.append(m.group(1))
+            if m.group(2):
+                shas.append(m.group(2).lower())
+    distinct = sorted(set(branches))
+    if len(distinct) != 1 or distinct[0].startswith("-") or ".." in distinct[0]:
+        what = "no branch" if not distinct else f"branches {', '.join(distinct)}"
+        raise ValueError(f"found {what}; name exactly one: `branch`, `branch@sha` or `git switch <branch>`")
+    if len(set(shas)) > 1:
+        raise ValueError(f"more than one sha to verify: {', '.join(sorted(set(shas)))}")
+    return distinct[0], (shas[0] if shas else None)
 
 
 def parse_timeout_minutes(text):
