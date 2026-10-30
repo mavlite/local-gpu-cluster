@@ -107,7 +107,8 @@ GitHub's label filter (`gh issue list -l runner:ready`) can lag a few seconds be
 `run-once` right after relabelling may find nothing; the next tick picks the issue up.
 
 The agent cannot write into the clone (it is mounted read-only). Its artifacts go to the per-task results
-dir, which the report names. Delete old ones by hand for now; there is no rotation yet.
+dir, which the report names. `agent-runner-results-clean.timer` deletes task dirs older than 14 days, daily
+(top-level dirs by their own mtime; a task runs 12 h at most). Copy anything you want to keep before then.
 
 **Self-test, 2026-10-30:** `DraconisCluster/SDG-ARMA3#2` (`kind:check`, `git log -1`) gave PASS in about
 70 s on qwen3.6. The first attempt exposed a headerless report (fixed: headerless is accepted, and the
