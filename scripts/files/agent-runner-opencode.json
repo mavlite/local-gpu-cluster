@@ -1,0 +1,109 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "mcp": {},
+  "model": "router/qwen3.6",
+  "provider": {
+    "router": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "router",
+      "options": {
+        "baseURL": "http://192.168.6.153:8000/v1",
+        "apiKey": "{env:WF_ROUTER_KEY}",
+        "timeout": 1800000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "qwen3.6": {
+          "name": "qwen3.6",
+          "tools": true,
+          "limit": {
+            "context": 131072,
+            "output": 16384
+          }
+        },
+        "qwen3.8-nothink": {
+          "name": "qwen3.8-nothink",
+          "tools": true,
+          "limit": {
+            "context": 131072,
+            "output": 16384
+          }
+        }
+      }
+    }
+  },
+  "permission": {
+    "edit": "deny",
+    "bash": {
+      "*": "deny"
+    },
+    "webfetch": "deny",
+    "websearch": "deny",
+    "task": "deny",
+    "external_directory": "deny",
+    "skill": {
+      "*": "deny"
+    },
+    "doom_loop": "deny"
+  },
+  "agent": {
+    "general": {
+      "disable": true
+    },
+    "explore": {
+      "disable": true
+    },
+    "lab-runner": {
+      "mode": "primary",
+      "model": "router/qwen3.6",
+      "steps": 80,
+      "prompt": "You run one GitHub issue's lab playbook on SDG test servers. Follow the issue's steps exactly, run only the commands it names, never change server configs or code beyond what it says, and write results only into the report path it gives. Stop and report BLOCKED on anything unexpected. Finish with the issue's report block.",
+      "permission": {
+        "edit": "allow",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "task": "deny",
+        "external_directory": "deny",
+        "skill": {
+          "*": "deny"
+        },
+        "doom_loop": "deny",
+        "bash": {
+          "*": "deny",
+          "ls*": "allow",
+          "cat *": "allow",
+          "head *": "allow",
+          "tail *": "allow",
+          "wc *": "allow",
+          "rg *": "allow",
+          "jq *": "allow",
+          "sleep *": "allow",
+          "date*": "allow",
+          "git status*": "allow",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "git show*": "allow",
+          "git pull --ff-only*": "allow",
+          "git switch *": "allow",
+          "git fetch*": "allow",
+          "gh issue view *": "allow",
+          "gh issue list*": "allow",
+          "gh issue comment *": "allow",
+          "python3 tools/*": "allow",
+          "bash tools/*": "allow",
+          "./tools/*": "allow",
+          "python3 -m pytest*": "allow",
+          "pytest*": "allow",
+          "ssh panel *": "allow",
+          "git push*": "deny",
+          "gh pr merge*": "deny",
+          "gh repo*": "deny",
+          "gh auth*": "deny",
+          "gh api*": "deny"
+        }
+      }
+    }
+  }
+}

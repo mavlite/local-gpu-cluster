@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew the agent runner router key (LXC 153) and push it to VM 178
+After=network-online.target pve-guests.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agent-runner-key-renew
