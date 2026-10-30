@@ -1,0 +1,34 @@
+[Unit]
+Description=ssh-agent holding the runner's panel key for SDG-ARMA3 sandbox tasks (use, never read)
+Documentation=https://github.com/mavlite/local-gpu-cluster/blob/main/docs/agent-runner.md
+# Live only because the panel side locks this key to a forced command (sdg-lab-gate, SDG-IAC: sdg-lab-lock and
+# sdg-lab-panel for servers 158-160; anything else, a shell and port forwarding are refused; probed 2026-10-30).
+# The agent runs AS agent-arma: ssh-agent only accepts peers with its own uid (or root), so agent-rust cannot use it,
+# and it marks itself non-dumpable, so agent-arma cannot read the key out of its memory.
+
+[Service]
+Type=simple
+User=agent-arma
+Group=agent-arma
+RuntimeDirectory=agent-ssh-arma
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/ssh-agent -D -a /run/agent-ssh-arma/agent.sock
+# Root ('+': outside User= and the sandbox below) feeds the key on stdin; agent-arma never gets the file.
+ExecStartPost=+/bin/sh -c 's=/run/agent-ssh-arma/agent.sock; for i in $(seq 50); do [ -S "$s" ] && break; sleep 0.1; done; SSH_AUTH_SOCK="$s" /usr/bin/ssh-add -q - < /home/runner/.ssh/id_ed25519_panel'
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -10,6 +10,8 @@
 #   - no GitHub credentials (GH_CONFIG_DIR points at an empty dir; the token stays in /etc/agent-runner)
 #   - the router key arrives via a root-only EnvironmentFile that systemd reads before dropping to `agent`;
 #     per-repo lab secrets (SDG-RUST: /etc/agent-runner/ptero-156.env, SDG_PTERO_*) ride along, for that repo only
+#   - SDG-ARMA3 only: SSH_AUTH_SOCK = the panel key's ssh-agent (agent-runner-panel-agent.service); `ssh panel`
+#     works through it, the key file itself stays out of reach
 # The model follows the router's loaded chat profile (scoped keys cannot swap it): rag-qwen3.6 -> qwen3.6,
 # qwen3.8 -> qwen3.8-nothink, anything else -> lane closed, exit 75 so the caller retries later.
 #
@@ -44,6 +46,21 @@ fi
 if ! sudo /usr/sbin/nft list table inet agent_egress >/dev/null 2>&1; then
   echo "agent-run: nftables table inet agent_egress is not loaded (agent-runner-egress.service); refusing to start" >&2
   exit "$EXIT_NOT_READY"
+fi
+# Per-repo ssh-agent (use, never read): SDG-ARMA3 tasks get the panel key's agent socket, nothing else does, and
+# every other repo's sandbox has those sockets made inaccessible. The panel locks the key to a forced command.
+declare -A REPO_SSH_AGENT=( [SDG-ARMA3]=/run/agent-ssh-arma/agent.sock )
+sshprops=()
+for r in "${!REPO_SSH_AGENT[@]}"; do
+  [[ "$r" == "$name" ]] || sshprops+=(-p "InaccessiblePaths=-$(dirname "${REPO_SSH_AGENT[$r]}")")
+done
+if [[ -n "${REPO_SSH_AGENT[$name]:-}" ]]; then
+  sock=${REPO_SSH_AGENT[$name]}
+  if ! sudo env SSH_AUTH_SOCK="$sock" ssh-add -l >/dev/null 2>&1; then
+    echo "agent-run: ssh-agent at $sock is not up or holds no key (agent-runner-panel-agent.service); not ready" >&2
+    exit "$EXIT_NOT_READY"
+  fi
+  sshprops+=(--setenv=SSH_AUTH_SOCK="$sock")
 fi
 if [[ "$preflight" == 1 ]]; then
   # A REAL no-op sandbox start on exactly the task path (sudo, the env file, systemd-run with every property
@@ -110,6 +127,7 @@ props=(
   -p RestrictAddressFamilies="AF_UNIX AF_INET AF_INET6"
   -p InaccessiblePaths=/etc/agent-runner -p InaccessiblePaths=/run/agent-runner
   -p InaccessiblePaths=/run/systemd/resolve -p InaccessiblePaths=/run/dbus
+  "${sshprops[@]}"
   -p BindReadOnlyPaths="$dir:/work/$name"
   -p BindPaths="$results:/results"
   -p EnvironmentFile="$envf"

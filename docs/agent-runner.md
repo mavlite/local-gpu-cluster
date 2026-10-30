@@ -141,9 +141,26 @@ agent. **2026-10-30: 18/18 passed.**
   send them anywhere directly. What remains is the agent writing a secret into its printed report or into
   `/results`: the dispatcher strips their literal values from anything it posts, and `/results` stays on the
   VM. A loopback proxy holding the router key would take that key out of the agent's reach entirely.
-- **The agent can no longer reach the panel.** `ssh panel` was removed: the panel key lives in runner's
-  `~/.ssh` and must stay out of the sandbox. Playbooks that need the panel need a design first, for example
-  an ssh-agent socket held by runner so the key can be used but never read.
+- **`ssh panel` from SDG-ARMA3 tasks only, through an ssh-agent (2026-10-30).** The panel key stays in runner's
+  `~/.ssh`, and sandbox users can't read it. Here is how a task uses it:
+  - **The agent:** `agent-runner-panel-agent.service` runs `ssh-agent` **as agent-arma** with its socket at
+    `/run/agent-ssh-arma/agent.sock` (dir 700). Root loads the key into it on stdin at start.
+  - **Why other users can't use it:** ssh-agent only serves its own uid or root, so agent-rust can't use it.
+    It also marks itself non-dumpable, so agent-arma can't read the key out of its memory.
+  - **The task side:** `agent-run` sets `SSH_AUTH_SOCK` for SDG-ARMA3 only, and makes the socket dir
+    inaccessible to every other repo's sandbox.
+  - **The `panel` alias:** `/etc/ssh/ssh_config.d/agent-runner-panel.conf`. It uses the key's public half and
+    the host key, both copied from runner's files at install.
+  - **Readiness:** if the agent is down or holds no key, `agent-run` exits 76, so the dispatcher doesn't claim
+    SDG-ARMA3 tasks.
+  - **The gate that makes this safe:** SDG-IAC locks the key on the panel to a forced command (`sdg-lab-gate`:
+    `sdg-lab-lock` and `sdg-lab-panel` for servers 158–160 only). Any other command, a shell and port
+    forwarding are all refused. The key was root-equivalent on the panel before that gate, so the socket must
+    not go live without it.
+  - **Checks:** the probes test both sides from inside the sandbox. SDG-ARMA3: the key is held, `ssh panel id`
+    authenticates and is refused, `-L` forwarding fails and the agent's `/proc` entry can't be read. SDG-RUST: no socket.
+  - The opencode profile still denies `ssh*` to the model. Only repo tools (`python3 tools/*`, `./tools/*`)
+    call `ssh panel`.
 - **Playbooks must write their output under `/results`**, not into the repo. Repo tools that write into the
   tree (caches, build output) need a flag or an out-of-tree path.
 - **GitHub:**
@@ -156,7 +173,8 @@ agent. **2026-10-30: 18/18 passed.**
 - **Tunnel:** OPNsense OpenVPN instance "Agent Runner VPN", udp 1196, client CN `agent-runner` pinned to
   **10.60.56.10**; it pushes only 10.60.40.10/32.
 - **Reachable:** only the Pterodactyl panel's SSH (`ssh panel` = deploy@10.60.40.10, key restricted to
-  `from="10.60.56.10"`, no forwarding).
+  `from="10.60.56.10"`, no forwarding, and since 2026-10-30 a forced command: `sdg-lab-gate`, which allows only
+  `sdg-lab-lock` and `sdg-lab-panel` for servers 158–160).
 - **Not reachable:** Wings nodes, RCON, game ports and everything else, until SDG-IAC opens a path on request.
 
 ## Ownership

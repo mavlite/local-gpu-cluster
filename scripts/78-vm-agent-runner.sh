@@ -48,6 +48,11 @@ MANIFEST=(
   "vm|agent-runner-egress.conf|/etc/agent-runner-agent/egress.conf|root:root|644"
   "vm|agent_runner_egress.py|/usr/local/lib/agent-runner/agent_runner_egress.py|root:root|755"
   "vm|agent-runner-egress.service|/etc/systemd/system/agent-runner-egress.service|root:root|644"
+  # SDG-ARMA3's `ssh panel`: an ssh-agent as agent-arma holding the panel key (use, never read) + the client config.
+  # The panel's forced command (SDG-IAC) is what makes this safe; the key's public half + host key are copied from
+  # runner's ~/.ssh at install (not kept in the repo), so a key rotation there cannot leave a stale copy here.
+  "vm|agent-runner-panel-agent.service|/etc/systemd/system/agent-runner-panel-agent.service|root:root|644"
+  "vm|agent-runner-panel-ssh.conf|/etc/ssh/ssh_config.d/agent-runner-panel.conf|root:root|644"
 )
 # Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
 SANDBOX_CHECKS=(
@@ -60,6 +65,9 @@ SANDBOX_CHECKS=(
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
   "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
   "SDG-RUST umod cache holds every plugin in origin/main's plugins.lock (seed-umod)|cd /home/runner/work/SDG-RUST && h=\$(git show origin/main:plugins.lock | grep -oE '[0-9a-f]{40}') && [ -n \"\$h\" ] && for x in \$h; do [ -s .cache/umod/\$x.cs ] || exit 1; done"
+  "panel ssh-agent (agent-arma) up, holding exactly runner's panel key|[ \"\$(sudo env SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -L | cut -d' ' -f1,2)\" = \"\$(cut -d' ' -f1,2 /home/runner/.ssh/id_ed25519_panel.pub)\" ]"
+  "panel socket dir is agent-arma 700|[ \"\$(sudo stat -c '%U %a' /run/agent-ssh-arma)\" = 'agent-arma 700' ]"
+  "/etc/agent-runner-agent panel.pub + known_hosts_panel = runner's copies|cmp -s /etc/agent-runner-agent/panel.pub /home/runner/.ssh/id_ed25519_panel.pub && cmp -s /etc/agent-runner-agent/known_hosts_panel /home/runner/.ssh/known_hosts_panel"
 )
 # Debian packages the tasks need on the VM (install-tools; host and VM are both trixie). python-is-python3:
 # SDG-ARMA3#1 checks /usr/bin/python as a precondition. python3-paramiko (+ python3-nacl, its one dependency the VM
@@ -176,6 +184,9 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     vm "sudo systemctl restart systemd-timesyncd && echo 'timesyncd restarted (NTP=10.81.0.254)'"
     # (re)render and load the per-repo egress table; the users must exist (setup-sandbox) or rendering fails
     vm "sudo systemctl daemon-reload && sudo systemctl enable agent-runner-egress.service >/dev/null && sudo systemctl restart agent-runner-egress.service && sudo /usr/sbin/nft list table inet agent_egress | grep -c 'accept' | sed 's/^/agent_egress loaded, accept rules: /'"
+    # the panel key's public half + the panel host key, from runner's own files (public data; never the private key)
+    vm "sudo install -m 644 -o root -g root /home/runner/.ssh/id_ed25519_panel.pub /etc/agent-runner-agent/panel.pub && sudo install -m 644 -o root -g root /home/runner/.ssh/known_hosts_panel /etc/agent-runner-agent/known_hosts_panel"
+    vm "sudo systemctl enable agent-runner-panel-agent.service >/dev/null && sudo systemctl restart agent-runner-panel-agent.service && sudo env SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -l | sed 's/^/panel ssh-agent holds: /'"
   fi
 }
 
