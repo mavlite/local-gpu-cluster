@@ -199,7 +199,8 @@ def parse_ref(text):
 
 
 def parse_timeout_minutes(text):
-    m = re.search(r"(?i)max(?:imum)?\s+wall\s*time\D{0,10}?(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)\b",
+    # "Max wall time: 2 h" and "Wall time: 6 h at most" (SDG-RUST#1 used the latter and got the 60-min default)
+    m = re.search(r"(?i)(?:max(?:imum)?\s+)?wall[\s-]*time\D{0,10}?(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)\b",
                   text or "")
     if not m:
         return DEFAULT_TIMEOUT_MIN
