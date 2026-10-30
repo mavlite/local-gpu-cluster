@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cleanup of agent-runner task results older than 14 days
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Delete agent-runner task results older than 14 days (/var/lib/agent-results)
+Documentation=https://github.com/mavlite/local-gpu-cluster/blob/main/docs/agent-runner-dispatcher.md
+
+[Service]
+Type=oneshot
+# Top-level task dirs only, by their own mtime. A task runs 12 h at most, so a running task's dir is never this old.
+ExecStart=/usr/bin/find /var/lib/agent-results -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf -- {} +
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-results
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes

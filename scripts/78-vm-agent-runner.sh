@@ -53,6 +53,9 @@ MANIFEST=(
   # runner's ~/.ssh at install (not kept in the repo), so a key rotation there cannot leave a stale copy here.
   "vm|agent-runner-panel-agent.service|/etc/systemd/system/agent-runner-panel-agent.service|root:root|644"
   "vm|agent-runner-panel-ssh.conf|/etc/ssh/ssh_config.d/agent-runner-panel.conf|root:root|644"
+  # Task results (/var/lib/agent-results/<task>) are kept 14 days, then deleted by a daily timer.
+  "vm|agent-runner-results-clean.service|/etc/systemd/system/agent-runner-results-clean.service|root:root|644"
+  "vm|agent-runner-results-clean.timer|/etc/systemd/system/agent-runner-results-clean.timer|root:root|644"
 )
 # Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
 SANDBOX_CHECKS=(
@@ -64,6 +67,7 @@ SANDBOX_CHECKS=(
   "/home/runner is 700|[ \"\$(stat -c '%a' /home/runner)\" = 700 ]"
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
   "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
+  "results retention timer enabled (14 days)|systemctl is-enabled agent-runner-results-clean.timer >/dev/null"
   "SDG-RUST umod cache holds every plugin in origin/main's plugins.lock (seed-umod)|cd /home/runner/work/SDG-RUST && h=\$(git show origin/main:plugins.lock | grep -oE '[0-9a-f]{40}') && [ -n \"\$h\" ] && for x in \$h; do [ -s .cache/umod/\$x.cs ] || exit 1; done"
   "panel ssh-agent (agent-arma) up, holding exactly runner's panel key|[ \"\$(sudo env SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -L | cut -d' ' -f1,2)\" = \"\$(cut -d' ' -f1,2 /home/runner/.ssh/id_ed25519_panel.pub)\" ]"
   "panel socket dir is agent-arma 700|[ \"\$(sudo stat -c '%U %a' /run/agent-ssh-arma)\" = 'agent-arma 700' ]"
@@ -186,6 +190,7 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
     vm "sudo systemctl daemon-reload && sudo systemctl enable agent-runner-egress.service >/dev/null && sudo systemctl restart agent-runner-egress.service && sudo /usr/sbin/nft list table inet agent_egress | grep -c 'accept' | sed 's/^/agent_egress loaded, accept rules: /'"
     # the panel key's public half + the panel host key, from runner's own files (public data; never the private key)
     vm "sudo install -m 644 -o root -g root /home/runner/.ssh/id_ed25519_panel.pub /etc/agent-runner-agent/panel.pub && sudo install -m 644 -o root -g root /home/runner/.ssh/known_hosts_panel /etc/agent-runner-agent/known_hosts_panel"
+    vm "sudo systemctl daemon-reload && sudo systemctl enable --now agent-runner-results-clean.timer >/dev/null && systemctl list-timers agent-runner-results-clean.timer --no-pager --no-legend | sed 's/^/results retention: /'"
     vm "sudo systemctl enable agent-runner-panel-agent.service >/dev/null && sudo systemctl restart agent-runner-panel-agent.service && sudo env SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -l | sed 's/^/panel ssh-agent holds: /'"
   fi
 }
