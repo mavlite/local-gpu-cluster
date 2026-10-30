@@ -36,7 +36,8 @@ def test_handles_only_the_three_aliases():
 def test_config_defaults_and_overrides():
     c = escalation.load_config({})
     assert c.month_cap == 150.0 and c.day_cap == 7.0
-    assert c.shared_daily_calls == 15 and c.auto_daily_calls == 5 and c.hard_daily_calls == 3
+    # owner decision 2026-10-30: no call-count limit for ask/hard (dollar caps guard spend); auto keeps 5
+    assert c.shared_daily_calls is None and c.auto_daily_calls == 5 and c.hard_daily_calls is None
     assert c.models == {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
     assert c.prices == {} and c.key_file == "/etc/router-anthropic.key"
     c2 = escalation.load_config({"ESCALATION_PRICES": '{"m": [3, 15]}', "ESCALATION_DAY_CAP_USD": "2.5"})
@@ -235,7 +236,7 @@ def test_torn_line_is_skipped_and_next_append_starts_fresh(tmp_path):
 
 
 def test_check_budget_caps_and_counts(tmp_path):
-    c = cfg(tmp_path)
+    c = cfg(tmp_path, ESCALATION_DAILY_CALLS="15", ESCALATION_HARD_DAILY_CALLS="3")   # numeric limits, set explicitly
     u = {"day_cost": 6.9, "month_cost": 10.0, "calls": {"claude-ask": 0, "claude-auto": 0, "claude-hard": 0}}
     assert escalation.check_budget(c, u, "claude-ask", 0.2) == "daily cap reached ($7.00)"
     u = {"day_cost": 0.0, "month_cost": 149.95, "calls": {"claude-ask": 0, "claude-auto": 0, "claude-hard": 0}}
@@ -263,7 +264,7 @@ def test_reservation_counts_until_released(tmp_path):
 
 
 def test_footer_and_report(tmp_path):
-    c = cfg(tmp_path)
+    c = cfg(tmp_path, ESCALATION_DAILY_CALLS="15", ESCALATION_HARD_DAILY_CALLS="3")   # numeric limits, set explicitly
     led = escalation.Ledger(c.ledger_path)
     led.append({"ts": ts(2026, 10, 15, 8), "alias": "claude-auto", "model": "claude-sonnet-5-5", "cost_usd": 0.05,
                 "input_tokens": 900, "output_tokens": 300, "outcome": "ok", "brief_sha256": "ab" * 32})
@@ -892,6 +893,7 @@ def test_upstream_errors_become_word_classes(broker, err, word):
 def test_every_refusal_and_error_path_is_non_retryable_and_clean(broker, tmp_path, monkeypatch):
     """Drive each refusal/error path once and check status and message against opencode's retry triggers."""
     stub, c, _ = broker
+    monkeypatch.setattr(escalation, "BREAKER_COUNT", 99)   # three brief refusals in a row here are on purpose
     seen = []
 
     def go(body, cf, now=None):
@@ -1128,6 +1130,8 @@ def test_three_rejections_in_a_row_turn_into_a_stop(broker):
     assert [e["code"] for e in codes] == ["brief_section", "brief_section", "brief_loop"]
     assert codes[2]["message"].startswith("STOP: 3 briefs rejected in a row")
     assert "missing or empty section Reproduce" in codes[2]["message"]     # the reason is still there
+    for e in codes:                                                        # opencode must not auto-resend any of them
+        assert not escalation._RETRY_DIGITS.search(e["message"]) and not escalation._RETRY_PHRASES.search(e["message"])
 
 
 def test_a_valid_brief_still_goes_through_after_the_stop_and_resets_the_streak(broker):

@@ -66,6 +66,15 @@ def test_budget_report_format_has_no_secrets():
     assert "ask 11 · auto 3 · hard 3 calls left today" in s and "claude-ask" in s
 
 
+def test_budget_report_says_no_limit_where_there_is_no_call_count():
+    rep = {"month": {"spent_usd": 0.0, "cap_usd": 150.0}, "day": {"spent_usd": 0.0, "cap_usd": 7.0},
+           "calls_left": {"claude-ask": None, "claude-auto": 4, "claude-hard": None},
+           "resets": {"day": "2026-10-31 00:00 CDT", "month": "2026-11-01 00:00 CDT"}, "recent": []}
+    s = claude_budget.format_report(rep)
+    assert "calls left today: ask no limit · auto 4 · hard no limit (the dollar caps still apply)" in s
+    assert "None" not in s
+
+
 # ---- fix round 1 ----
 import io  # noqa: E402
 

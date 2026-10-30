@@ -359,9 +359,11 @@ PY
     # refuses (424) until the operator sets prices verified against Anthropic's current price list.
     ensure_env ESCALATION_MONTH_CAP_USD 150
     ensure_env ESCALATION_DAY_CAP_USD 7
-    ensure_env ESCALATION_DAILY_CALLS 15
+    # Call counts: "none" for user-asked calls (owner decision 2026-10-30: the dollar caps stop runaway spend);
+    # model-initiated claude-auto keeps 5/day. ensure_env never overwrites, so an existing router keeps its values.
+    ensure_env ESCALATION_DAILY_CALLS none
     ensure_env ESCALATION_AUTO_DAILY_CALLS 5
-    ensure_env ESCALATION_HARD_DAILY_CALLS 3
+    ensure_env ESCALATION_HARD_DAILY_CALLS none
     chmod 600 /etc/router.env
 
     cat > /etc/systemd/system/llm-router.service <<EOF
