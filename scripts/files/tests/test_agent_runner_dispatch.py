@@ -490,7 +490,7 @@ def _commit(cwd, msg):
     git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg, cwd=cwd)
 
 
-def test_mirror_branch_is_created_and_fast_forwarded_from_origin(env):
+def test_mirror_branch_is_created_and_fast_forwarded_from_origin(env, monkeypatch):
     # SDG-RUST#1: tools/build.py reads `upstream:plugin/...`, a LOCAL branch the clone never had; the dispatcher
     # keeps it equal to origin/upstream on every run.
     git("branch", "upstream", cwd=env.origin)
@@ -502,6 +502,7 @@ def test_mirror_branch_is_created_and_fast_forwarded_from_origin(env):
     _commit(env.origin, "upstream moves")
     git("switch", "-q", "main", cwd=env.origin)
     env.add_issue(8)
+    monkeypatch.setenv("FAKE_TASK", "8")      # the fake agent reports for this task number
     env.run()
     assert git("rev-parse", "upstream", cwd=clone) == git("rev-parse", "upstream", cwd=env.origin)
     assert "runner:done" in env.issue(8)["labels"]
