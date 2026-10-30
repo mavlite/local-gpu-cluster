@@ -135,7 +135,7 @@ if [[ "$(cat "/var/lib/agent-results/probe-agent-$REPO-$$/agent-write.txt" 2>/de
 else say FAIL "agent's write tool could not write /results/agent-write.txt"; fail=$((fail+1)); fi
 if [[ -e /etc/agent-write.txt ]]; then say FAIL "agent's write tool wrote /etc/agent-write.txt"; fail=$((fail+1))
 else say PASS "agent's write tool could not write /etc/agent-write.txt"; pass=$((pass+1)); fi
-if grep -q "$(sudo tr -d '[:space:]' </etc/agent-runner/gh-token)" "$log"; then say FAIL "gh token value appears in the agent's event log"; fail=$((fail+1))
+if grep -q "$(sudo cat /etc/agent-runner/gh-token | tr -d '[:space:]')" "$log"; then say FAIL "gh token value appears in the agent's event log"; fail=$((fail+1))
 else say PASS "gh token value does not appear anywhere in the agent's event log"; pass=$((pass+1)); fi
 rm -f "$log"
 sudo rm -rf /var/lib/agent-results/probe-*-$$

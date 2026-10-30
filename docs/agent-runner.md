@@ -226,7 +226,9 @@ From the infra summary's section 10, tracked here.
 - [x] **GitHub token expiry recorded:** **Mon 2027-01-25**, with a reminder issue in this repo.
 - [ ] **Renew the GitHub token before 2027-01-25.** The owner creates a new fine-grained token (account `mavlite`;
   repos SDG-IAC, SDG-RUST, SDG-ARMA3), types it into `/etc/agent-runner/gh-token` (root:runner 640), then runs
-  `gh auth login --with-token` as `runner`. Update the date above.
+  `gh auth login --with-token` as `runner`. Update the date above. The dispatcher also reads the expiry from
+  GitHub's `Github-Authentication-Token-Expiration` response header. It logs a journal `WARNING` once a day
+  when under 14 days remain, and `80 selftest` prints the days left.
 - [ ] **VPN client certificate `agent-runner`** expires around **2027-11** (397 days from 2026-10-30). Renew
   through SDG-IAC.
 - [ ] **Lab secrets** for playbooks (RCON passwords, panel API keys): the owner provisions them into
