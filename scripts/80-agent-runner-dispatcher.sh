@@ -7,6 +7,8 @@
 #   install            copy the dispatcher + units to the VM, daemon-reload (timer left as it was)
 #   enable | disable   start/stop the 5-minute timer
 #   run-once REPO#N    run one dispatch now, restricted to that issue (e.g. DraconisCluster/SDG-ARMA3#12)
+#   selftest           run agent-runner-dispatch.service ITSELF (its exact properties) with DISPATCH_SELFTEST=1:
+#                      a preflight -- a real no-op sandbox start -- per repo; claims nothing. Exit 0 = all ready.
 #   status             timer state, last runs, recent event logs
 #   uninstall          disable and remove the units and the script (event logs are kept)
 #
@@ -54,6 +56,19 @@ case "$cmd" in
     vm "sudo systemd-run --uid=runner --gid=runner --wait --pipe --collect \
           --property=WorkingDirectory=/home/runner --setenv=HOME=/home/runner \
           /usr/bin/python3 $LIB/agent_runner_dispatch.py --only '$target'"
+    ;;
+  selftest)
+    # A runtime drop-in (gone at reboot, removed right after) so the check runs with the unit's own properties,
+    # not over ssh and not via systemd-run -- that is the path NoNewPrivileges broke (2026-10-30).
+    vm 'set -u; d=/run/systemd/system/agent-runner-dispatch.service.d
+        sudo install -d "$d" && printf "[Service]\nEnvironment=DISPATCH_SELFTEST=1\n" | sudo tee "$d/selftest.conf" >/dev/null
+        sudo systemctl daemon-reload
+        rc=0; sudo systemctl start agent-runner-dispatch.service || rc=$?
+        inv=$(systemctl show -p InvocationID --value agent-runner-dispatch.service)
+        sudo rm -f "$d/selftest.conf"; sudo systemctl daemon-reload
+        journalctl _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat | grep -E "selftest|preflight|not ready|sudo"
+        echo "selftest via agent-runner-dispatch.service: $([ $rc -eq 0 ] && echo PASS || echo "FAIL (rc=$rc)")"
+        exit $rc'
     ;;
   status)
     vm "systemctl list-timers agent-runner-dispatch.timer --no-pager; systemctl status agent-runner-dispatch.service --no-pager -n 0 2>/dev/null | head -5; \
