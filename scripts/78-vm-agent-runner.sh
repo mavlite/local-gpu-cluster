@@ -12,6 +12,8 @@
 #   install-tools [--dry-run]  install the task tools on the VM (idempotent): the debs in VM_DEBS (apt-get download
 #                              on the host, dpkg -i on the VM -- it has no apt mirror) and the pinned binaries in
 #                              files/agent-runner-tools.lock.json (downloaded + sha256-checked on the host). No egress change.
+#   seed-umod DIR [--dry-run]  copy SDG-RUST's plugin cache (<sha1>.cs, gitignored) into the VM clone; each file must
+#                              hash to its name and be listed by a plugins.lock on origin
 #   probe [REPO]               run scripts/files/agent-runner-probes.sh on the VM: the sandbox's walls, shell + agent
 #
 # Not managed here (not files, or not this repo's): VM creation itself (see docs/agent-runner.md for the qm settings),
@@ -57,10 +59,12 @@ SANDBOX_CHECKS=(
   "/home/runner is 700|[ \"\$(stat -c '%a' /home/runner)\" = 700 ]"
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
   "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
+  "SDG-RUST umod cache holds every plugin in origin/main's plugins.lock (seed-umod)|cd /home/runner/work/SDG-RUST && h=\$(git show origin/main:plugins.lock | grep -oE '[0-9a-f]{40}') && [ -n \"\$h\" ] && for x in \$h; do [ -s .cache/umod/\$x.cs ] || exit 1; done"
 )
 # Debian packages the tasks need on the VM (install-tools; host and VM are both trixie). python-is-python3:
-# SDG-ARMA3#1 checks /usr/bin/python as a precondition.
-VM_DEBS=(nftables python-is-python3)
+# SDG-ARMA3#1 checks /usr/bin/python as a precondition. python3-paramiko (+ python3-nacl, its one dependency the VM
+# lacked): SDG-RUST tools/lab/ptero.py, Wings SFTP. dpkg -i resolves nothing, so list every dependency the VM lacks.
+VM_DEBS=(nftables python-is-python3 python3-nacl python3-paramiko)
 TOOLS_LOCK="$F/agent-runner-tools.lock.json"
 # Lines that must be present in /etc/network/interfaces (checked, never written).
 IFACE_LINES=(
@@ -236,6 +240,24 @@ install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifie
   vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version 2>&1 | head -3" || die "sqfvm does not run on the VM"
 }
 
+seed_umod() {   # $1 = dir of <sha1>.cs files (copied from a workstation's raidable-bases-sdg/.cache/umod), $2 = --dry-run
+  # SDG-RUST tools/build.py reads plugins from .cache/umod (gitignored) and the sandbox mounts the clone read-only,
+  # so the cache is seeded here. Every file must hash to its own name and be named by a plugins.lock on origin.
+  local src="${1:?seed-umod needs the directory holding the <sha1>.cs files}" dry="${2:-}" f h n=0 lock
+  local clone=/home/runner/work/SDG-RUST
+  lock=$(vm "cd $clone && for r in \$(git for-each-ref --format='%(refname)' refs/remotes/origin); do git show \$r:plugins.lock 2>/dev/null; done" | grep -oE '[0-9a-f]{40}' | sort -u)
+  [[ -n "$lock" ]] || die "no plugins.lock hashes found in $clone"
+  for f in "$src"/*.cs; do
+    [[ -e "$f" ]] || die "no .cs files in $src"
+    h=$(sha1sum "$f" | cut -d' ' -f1)
+    [[ "$(basename "$f")" == "$h.cs" ]] || die "$f: its content hashes to $h, not to its name"
+    grep -qx "$h" <<<"$lock" || die "$f: no plugins.lock on origin names it"
+    n=$((n+1))
+  done
+  if [[ -n "$dry" ]]; then echo "would seed $n files into $clone/.cache/umod"; return 0; fi
+  (cd "$src" && tar --owner=0 --group=0 --mode=644 -cf - ./*.cs) | vm "set -e; install -d -m 755 $clone/.cache $clone/.cache/umod; tar -C $clone/.cache/umod --no-same-owner -xf -; echo \"seeded \$(ls $clone/.cache/umod | wc -l) files in $clone/.cache/umod\""
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   manifest) for e in "${MANIFEST[@]}"; do printf '%-4s %-34s -> %-52s %s %s\n' "$(field "$e" 1)" "$(field "$e" 2)" "$(field "$e" 3)" "$(field "$e" 4)" "$(field "$e" 5)"; done ;;
@@ -244,6 +266,7 @@ case "$cmd" in
   install-vm) vm true || die "cannot reach $VM with $KEY"; do_install vm "${1:-}" ;;
   setup-sandbox) vm true || die "cannot reach $VM with $KEY"; setup_sandbox "${1:-}" ;;
   install-tools) vm true || die "cannot reach $VM with $KEY"; install_tools "${1:-}" ;;
+  seed-umod) vm true || die "cannot reach $VM with $KEY"; seed_umod "${1:-}" "${2:-}" ;;
   probe) vm "bash -s -- '${1:-SDG-ARMA3}'" < "$F/agent-runner-probes.sh" ;;
-  *) sed -n '2,19p' "$0"; exit 2 ;;
+  *) sed -n '2,21p' "$0"; exit 2 ;;
 esac
