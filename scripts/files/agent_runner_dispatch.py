@@ -560,6 +560,14 @@ def main(argv=None):
         only = (m.group(1), m.group(2))
     os.makedirs(c["logs"], exist_ok=True)
     load_secrets(c)
+    if os.environ.get("DISPATCH_SELFTEST") == "1":
+        # Run the preflight (a real no-op sandbox start) for every repo, from whatever unit started us, and claim
+        # nothing. 80-agent-runner-dispatcher.sh selftest runs this THROUGH agent-runner-dispatch.service, so the
+        # check has exactly the unit's properties (2026-10-30: NoNewPrivileges there broke every sudo).
+        results = {repo: runner_ready(c, repo) for repo in c["repos"]}
+        for repo, ok in results.items():
+            log(f"selftest {repo}: {'ready' if ok else 'NOT READY'}")
+        return 0 if all(results.values()) else 1
     with open(os.path.join(c["logs"], ".dispatch.lock"), "w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
