@@ -80,8 +80,9 @@ def env(tmp_path, monkeypatch):
 
     def add_issue(num, repo=REPO, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T10:00:00Z", **kw):
         st = json.loads(state.read_text())
-        st["issues"][f"{repo}#{num}"] = {"number": num, "title": f"task {num}", "body": kw.get("b", body()),
-                                         "createdAt": created, "labels": list(labels), "comments": []}
+        st["issues"][f"{repo}#{num}"] = {"number": num, "title": kw.get("title", f"task {num}"),
+                                         "body": kw.get("b", body()), "createdAt": created,
+                                         "labels": list(labels), "comments": [], "state": kw.get("state", "OPEN")}
         state.write_text(json.dumps(st))
     e.add_issue = add_issue
     e.issue = lambda num, repo=REPO: json.loads(state.read_text())["issues"][f"{repo}#{num}"]
