@@ -812,8 +812,8 @@ def test_deploy_script_ships_escalation_and_seeds_env_only_when_absent():
     s = open(os.path.join(root, "53-lxc-router.sh"), encoding="utf-8").read()
     assert "files/escalation.py" in s and "/opt/llm-router/escalation.py" in s
     assert "install -d -o router -g router -m 0700 /var/lib/llm-router" in s
-    for k in ("ESCALATION_MONTH_CAP_USD 150", "ESCALATION_DAY_CAP_USD 7", "ESCALATION_DAILY_CALLS 15",
-              "ESCALATION_AUTO_DAILY_CALLS 5", "ESCALATION_HARD_DAILY_CALLS 3"):
+    for k in ("ESCALATION_MONTH_CAP_USD 150", "ESCALATION_DAY_CAP_USD 7", "ESCALATION_DAILY_CALLS none",
+              "ESCALATION_AUTO_DAILY_CALLS 5", "ESCALATION_HARD_DAILY_CALLS none"):
         assert f"ensure_env {k}" in s
     assert "ensure_env ESCALATION_PRICES" not in s                    # prices are set by the operator, verified
     assert "ensure_env() {" in s
