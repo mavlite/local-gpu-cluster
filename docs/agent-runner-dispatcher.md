@@ -20,10 +20,12 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
 3. Picks the **oldest** open `runner:ready` issue across both repos that passes the tier and halt rules (below).
    An issue that also carries another `runner:*` label is skipped and logged, never touched. Refused and held
    issues don't use up the cycle; the next eligible one still runs. Before claiming, it asks
-   `agent-run --preflight ~/work/<repo>` (the repo's sandbox entry exists and the `inet agent_egress` table is
-   loaded). If that fails, the repo is skipped for this run, logged, and its issues stay `runner:ready` with no
-   comment, so a runner that is not ready never burns a task as BLOCKED (SDG-ARMA3#1 and SDG-RUST#3,
-   2026-10-30).
+   `agent-run --preflight ~/work/<repo>`, once per repo per run. The preflight checks that the repo has a sandbox
+   entry, that sudo works, and that the `inet agent_egress` table is loaded. It then does a **real no-op sandbox
+   start**: the same sudo, env file and `systemd-run` properties as a task, running `/bin/true`. If any of this
+   fails (exit 76), the repo is skipped for this run and logged as "runner not ready … not claiming". Its issues
+   stay `runner:ready` with no comment, so a runner that isn't ready never burns a task as BLOCKED (SDG-ARMA3#1
+   and SDG-RUST#3, 2026-10-30).
 4. Claims it: `runner:ready` → `runner:running`, plus a start comment.
 5. Checks out the first line of **Branch / commit** (`branch` or `branch@sha`, backticks allowed):
    `fetch --prune`, `switch`, `pull --ff-only`, then verifies the sha. It refuses (BLOCKED) if tracked
@@ -76,8 +78,22 @@ issue still halts, which is the safe direction.
 scripts/80-agent-runner-dispatcher.sh install                       # copy + daemon-reload (timer unchanged)
 scripts/80-agent-runner-dispatcher.sh run-once DraconisCluster/SDG-ARMA3#N   # one dispatch, that issue only
 scripts/80-agent-runner-dispatcher.sh enable | disable              # the 5-minute timer
+scripts/80-agent-runner-dispatcher.sh selftest                      # preflight per repo THROUGH the unit; claims nothing
 scripts/80-agent-runner-dispatcher.sh status
 ```
+
+**Selftest:** run `selftest` after any change to the unit, agent-run, sudo or the egress table. It starts
+`agent-runner-dispatch.service` itself with `DISPATCH_SELFTEST=1`, set by a runtime drop-in that it removes
+right after. Testing over ssh or `systemd-run` is not enough: those don't run with the unit's own properties.
+Exit 0 means every repo is ready.
+
+On 2026-10-30 the unit had `NoNewPrivileges=yes`. That made every `sudo` inside agent-run fail, so every task
+failed while the same commands worked over ssh. The unit no longer sets it. The agent's own unit still does.
+Verified on VM 178 the same day:
+- the selftest passes for both repos;
+- with `agent-runner-egress.service` stopped (table deleted), both repos log "runner not ready" and the
+  selftest fails;
+- after a restart, it passes again.
 
 To pause the queue, run `disable`. A task that is already running finishes; nothing new is claimed.
 

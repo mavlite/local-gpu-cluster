@@ -38,6 +38,7 @@ the VPN config stay on the machines that hold them.
 scripts/78-vm-agent-runner.sh diff                       # read-only drift check, exit 1 on drift
 scripts/78-vm-agent-runner.sh install-host --dry-run     # then without --dry-run (host files, daemon-reload, pve-firewall compile)
 scripts/78-vm-agent-runner.sh install-vm   --dry-run     # then without --dry-run (wrapper + profile, opencode config validated)
+scripts/78-vm-agent-runner.sh install-tools --dry-run    # then without: VM_DEBS + pinned binaries (agent-runner-tools.lock.json)
 ```
 Not managed by the script:
 - **VM creation:** use the settings above with `qm create` / `qm set`.
@@ -89,6 +90,15 @@ Not managed by the script:
 
 - **Packages:** git 2.47, gh 2.46, python3 3.13, nodejs 20, ripgrep, jq, openvpn, qemu-guest-agent. opencode
   **1.18.34** (`npm install -g opencode-ai@1.18.34`), the same pin as the workforce harness.
+- **Task tools, installed by `78 install-tools` and checked by `78 diff`** (added 2026-10-30):
+  - **Debs:** `nftables` and `python-is-python3`, which gives `/usr/bin/python` (SDG-ARMA3#1 checks for it).
+    The VM has no apt mirror, so the host runs `apt-get download` (verified against its signed index; both are
+    trixie) and the VM runs `dpkg -i`.
+  - **SQF-VM 2026.04.03** at `/opt/sdg-tools/sqfvm/2026.04.03/sqfvm`, the path `a3 lint` expects. The pin is in
+    `agent-runner-tools.lock.json`, mirrored from SDG-ARMA3 `tools/lab/tools.lock.json`. The host downloads
+    the zip, checks the zip's sha256 and the binary's sha256, then pushes it. No egress change.
+  - **Verified** inside the SDG-ARMA3 sandbox as `agent-arma`: `sqfvm -a -i file.sqf` evaluates, with no
+    missing libraries. Without `-a`, sqfvm drops into its REPL and hangs until the timeout.
 - **Locked profile** (`agent-runner-opencode.json`, installed at `/etc/agent-runner-agent/opencode.json`,
   outside the directory the sandbox hides):
   - only agent `lab-runner` is enabled (general and explore are disabled), with an 80-step cap;
