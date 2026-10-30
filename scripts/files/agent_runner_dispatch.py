@@ -37,6 +37,13 @@ import urllib.request
 LANE_MODELS = {"rag-qwen3.6": "qwen3.6", "qwen3.8": "qwen3.8-nothink"}   # mirrors agent-run
 LABEL_READY, LABEL_RUNNING = "runner:ready", "runner:running"
 LABEL_DONE, LABEL_BLOCKED, LABEL_CLAUDE = "runner:done", "runner:blocked", "needs-claude"
+# Tiers (owner decision 2026-10-30): tier:a = no servers, tier:b = staff test servers, tier:c = never auto-run.
+# Exactly one tier label is required. An open issue labelled runner:halt (the pinned "Runner control" issue)
+# halts that repo's tier:b tasks; tier:a still runs.
+TIER_A, TIER_B, TIER_C = "tier:a", "tier:b", "tier:c"
+TIERS = (TIER_A, TIER_B, TIER_C)
+LABEL_HALT = "runner:halt"
+HALTED_PREFIX = "runner: halted"
 VERDICTS = ("PASS", "FAIL", "INDETERMINATE", "BLOCKED")
 DEFAULT_TIMEOUT_MIN, MAX_TIMEOUT_MIN = 60, 720
 LOG_KEEP_DAYS = 30
@@ -258,6 +265,66 @@ def ready_issues(c, only):
     return [(repo, i) for _, _, repo, i in sorted(found, key=lambda t: (t[0], t[1], t[3]["number"]))]
 
 
+def halted(c, repo):
+    """True while any OPEN issue in the repo carries runner:halt (the pinned "Runner control" issue). Keyed on the
+    label alone, so a renamed or unpinned control issue still halts: the safe direction."""
+    rows = json.loads(gh(c, "issue", "list", "-R", repo, "-l", LABEL_HALT, "--state", "open",
+                         "--json", "number", "--limit", "5") or "[]")
+    return bool(rows)
+
+
+def tier_of(issue):
+    names = [l["name"] for l in issue.get("labels", [])]
+    tiers = [n for n in names if n in TIERS]
+    return tiers[0] if len(tiers) == 1 else None
+
+
+def refuse_tier(c, repo, issue):
+    names = [l["name"] for l in issue.get("labels", [])]
+    tiers = [n for n in names if n in TIERS]
+    if not tiers:
+        why = "it has no tier label"
+    elif len(tiers) > 1:
+        why = f"it has more than one tier label ({', '.join(tiers)})"
+    else:
+        why = "tier:c tasks are never auto-run"
+    comment(c, repo, issue["number"],
+            f"runner: refused -- {why}. The runner only runs runner:ready issues with exactly one of tier:a "
+            "(no servers) or tier:b (staff test servers). Fix the labels and set runner:ready again.")
+    relabel(c, repo, issue["number"], remove=[LABEL_READY], add=[LABEL_BLOCKED])
+    log(f"{repo}#{issue['number']}: refused ({why})")
+
+
+def note_halted(c, repo, issue):
+    """Leave a tier:b task runner:ready under a halt; comment once, not every 5 minutes."""
+    view = json.loads(gh(c, "issue", "view", str(issue["number"]), "-R", repo, "--json", "comments"))
+    last = (view.get("comments") or [{}])[-1].get("body", "") if view.get("comments") else ""
+    if not last.startswith(HALTED_PREFIX):
+        comment(c, repo, issue["number"],
+                f"{HALTED_PREFIX} -- {repo} has an open runner:halt issue (Runner control), so tier:b tasks wait. "
+                "This stays runner:ready and runs once the halt label is removed.")
+    log(f"{repo}#{issue['number']}: tier:b held by runner:halt")
+
+
+def pick(c, queue):
+    """Apply tier and halt rules in queue order: refuse what may never run, hold tier:b under a halt, and return
+    the first runnable (repo, issue) or None. Refusals do not use up the cycle."""
+    halt = {}
+    for repo, issue in queue:
+        tier = tier_of(issue)
+        if tier is None or tier == TIER_C:
+            refuse_tier(c, repo, issue)
+            continue
+        if tier == TIER_B:
+            if repo not in halt:
+                halt[repo] = halted(c, repo)
+            if halt[repo]:
+                note_halted(c, repo, issue)
+                continue
+        return repo, issue
+    return None
+
+
 def git(cwd, *args):
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
 
@@ -441,10 +508,10 @@ def main(argv=None):
         if model is None:
             log("router lane closed for scoped keys; nothing claimed")
             return 0
-        queue = ready_issues(c, only)
-        if not queue:
+        chosen = pick(c, ready_issues(c, only))
+        if chosen is None:
             return 0
-        repo, issue = queue[0]
+        repo, issue = chosen
         return dispatch(c, repo, issue, model)
 
 
