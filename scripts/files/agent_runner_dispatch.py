@@ -57,7 +57,8 @@ def cfg():
         "max_timeout_s": int(os.environ.get("DISPATCH_MAX_TIMEOUT_S", str(MAX_TIMEOUT_MIN * 60))),
         "results_root": os.environ.get("DISPATCH_RESULTS_ROOT", "/var/lib/agent-results"),
         "secret_files": [p for p in os.environ.get(
-            "DISPATCH_SECRET_FILES", "/etc/agent-runner/router.key,/etc/agent-runner/gh-token").split(",") if p],
+            "DISPATCH_SECRET_FILES",
+            "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env").split(",") if p],
     }
 
 
@@ -65,15 +66,22 @@ LITERAL_SECRETS = []   # exact secret values, loaded once per run by load_secret
 
 
 def load_secrets(c):
+    """Bare-value files (router.key, gh-token) contribute their content; KEY=value files (ptero-156.env)
+    contribute each value. Values shorter than 8 characters are too generic to redact literally."""
     LITERAL_SECRETS.clear()
     for path in c["secret_files"]:
         try:
             with open(path) as f:
-                v = f.read().strip()
+                raw = f.read()
         except OSError:
             continue
-        if len(v) >= 8:
-            LITERAL_SECRETS.append(v)
+        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.strip().startswith("#")]
+        if lines and all(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", l) for l in lines):
+            values = [l.split("=", 1)[1].strip().strip("'\"") for l in lines]
+        else:
+            values = [raw.strip()]
+        LITERAL_SECRETS.extend(v for v in values if len(v) >= 8)
+    LITERAL_SECRETS.sort(key=len, reverse=True)       # longest first, so a value inside another is not split
 
 
 def log(msg):
