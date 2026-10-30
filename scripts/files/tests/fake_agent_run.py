@@ -39,8 +39,11 @@ def main(argv):
     verdict = "FAIL" if mode == "fail" else "PASS"
     extra = ""
     if mode == "leak":
-        with open(os.environ["FAKE_SECRET_FILE"]) as f:
-            extra = "    note: " + f.read().strip() + "\n"
+        leaked = os.environ.get("FAKE_LEAK_VALUE")
+        if not leaked:
+            with open(os.environ["FAKE_SECRET_FILE"]) as f:
+                leaked = f.read().strip()
+        extra = "    note: " + leaked + "\n"
     yaml = (f"task: {os.environ['FAKE_TASK']}\nverdict: {verdict}\nref: main@{sha}\n"
             "started: x\nfinished: y\nmodel: qwen3.6\nresults:\n  - check: git log -1\n"
             f"    value: {sha}\n    pass: {'true' if verdict == 'PASS' else 'false'}\n{extra}"

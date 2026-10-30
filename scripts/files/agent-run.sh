@@ -7,7 +7,8 @@
 #   - $AGENT_RESULTS_DIR (created here, agent-writable, group runner) is bind-mounted at /results
 #   - private /tmp (HOME=/tmp/home), /home hidden, /etc/agent-runner and /run/agent-runner inaccessible
 #   - no GitHub credentials (GH_CONFIG_DIR points at an empty dir; the token stays in /etc/agent-runner)
-#   - the router key arrives via a root-only EnvironmentFile that systemd reads before dropping to `agent`
+#   - the router key arrives via a root-only EnvironmentFile that systemd reads before dropping to `agent`;
+#     per-repo lab secrets (SDG-RUST: /etc/agent-runner/ptero-156.env, SDG_PTERO_*) ride along, for that repo only
 # The model follows the router's loaded chat profile (scoped keys cannot swap it): rag-qwen3.6 -> qwen3.6,
 # qwen3.8 -> qwen3.8-nothink, anything else -> lane closed, exit 75 so the caller retries later.
 #
@@ -41,6 +42,19 @@ sudo install -d -o agent -g runner -m 2770 "$results"
 sudo install -d -o root -g root -m 0700 /run/agent-runner
 sudo install -o root -g root -m 0600 /dev/null "$envf"
 printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' </etc/agent-runner/router.key)" | sudo tee "$envf" >/dev/null
+
+# Per-repo lab secrets, passed in exactly like the router key and ONLY for that repo's tasks.
+# Each file may hold only PREFIX_*=value lines (comments/blank ok): anything else is refused, so a secret file
+# can never smuggle LD_PRELOAD, PATH or the like into the sandbox.
+declare -A REPO_ENV_FILE=( [SDG-RUST]=/etc/agent-runner/ptero-156.env )
+declare -A REPO_ENV_PREFIX=( [SDG-RUST]=SDG_PTERO_ )
+if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
+  f=${REPO_ENV_FILE[$name]}; p=${REPO_ENV_PREFIX[$name]}
+  if grep -qvE "^(${p}[A-Z0-9_]+=.*|[[:space:]]*|#.*)$" "$f"; then
+    echo "agent-run: $f has a line that is not ${p}*=...; refusing to start" >&2; exit 2
+  fi
+  grep -E "^${p}[A-Z0-9_]+=" "$f" | sudo tee -a "$envf" >/dev/null
+fi
 
 cleanup() { sudo systemctl stop "$unit" 2>/dev/null || true; sudo rm -f "$envf"; }
 trap cleanup EXIT

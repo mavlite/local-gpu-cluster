@@ -125,6 +125,27 @@ def test_literal_secret_values_are_redacted(env, monkeypatch):
     assert env.secret not in json.dumps(i["comments"])
 
 
+def test_values_from_env_style_secret_files_are_redacted(env, monkeypatch):
+    # /etc/agent-runner/ptero-156.env holds KEY=value lines; each VALUE must be stripped, not the whole file.
+    envfile = env.tmp / "ptero-156.env"
+    api = "ptla_" + "Zx9" * 12
+    envfile.write_text(f"SDG_PTERO_SFTP_USER=lab\nSDG_PTERO_SFTP_PASSWORD=hunter2-but-longer\nSDG_PTERO_API_KEY={api}\n")
+    monkeypatch.setenv("DISPATCH_SECRET_FILES", f"{envfile}")
+    monkeypatch.setenv("FAKE_AGENT_MODE", "leak")
+    monkeypatch.setenv("FAKE_LEAK_VALUE", f"{api} and hunter2-but-longer")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    posted = json.dumps(i["comments"])
+    assert len(reports(i)) == 1
+    assert api not in posted and "hunter2-but-longer" not in posted
+
+
+def test_default_secret_files_include_the_rust_lab_secrets(monkeypatch):
+    monkeypatch.delenv("DISPATCH_SECRET_FILES", raising=False)
+    assert "/etc/agent-runner/ptero-156.env" in d.cfg()["secret_files"]
+
+
 def test_headerless_report_is_accepted_and_posted_with_heading(env, monkeypatch):
     # Live 2026-10-30: the agent wrote the yaml without '### runner report' or a fence.
     monkeypatch.setenv("FAKE_AGENT_MODE", "headerless")
