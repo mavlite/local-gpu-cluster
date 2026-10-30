@@ -287,7 +287,17 @@ def test_old_logs_are_rotated(env):
     ("main", ("main", None)),
     ("`feat/perception-plan2`", ("feat/perception-plan2", None)),
     ("feat/v26@abc1234", ("feat/v26", "abc1234")),
-    ("git switch feat/v26 && git pull --ff-only", None),
+    # the spec's own form (section 4): the switch command, then the sha to verify
+    ("git switch feat/v26 && git pull --ff-only", ("feat/v26", None)),
+    # SDG-RUST#3 verbatim (2026-10-30): a fenced block -- the dispatcher read the fence's "shell" as the branch
+    ("```shell\ngit switch feat/v26 && git pull --ff-only\ngit log -1 --format=%H\n"
+     "# expect: 22fb1c04d16ba94f956d128cb72e5d839f03f4c8\n```\nThe dispatcher does the switch and pull.",
+     ("feat/v26", "22fb1c04d16ba94f956d128cb72e5d839f03f4c8")),
+    ("git checkout main\n22fb1c04d16ba94f956d128cb72e5d839f03f4c8", ("main", "22fb1c04d16ba94f956d128cb72e5d839f03f4c8")),
+    ("```\nfeat/x\n```", ("feat/x", None)),
+    ("git switch a && git switch b", None),               # two different branches: ambiguous, refuse
+    ("```shell\n```", None),
+    ("please test whatever is newest", None),
     ("", None),
 ])
 def test_parse_ref(text, expected):
