@@ -340,7 +340,8 @@ def test_halt_holds_tier_b_ready_with_one_halted_comment(env):
     assert sum("halted" in c["body"] for c in i["comments"]) == 1
 
 
-def test_halt_still_runs_tier_a(env):
+def test_halt_still_runs_tier_a(env, monkeypatch):
+    monkeypatch.setenv("FAKE_TASK", "8")                         # the fake agent reports for the task it runs
     halt(env)
     env.add_issue(7, labels=("runner:ready", "kind:check", "tier:b"), created="2026-10-30T08:00:00Z")
     env.add_issue(8, labels=("runner:ready", "kind:check", "tier:a"), created="2026-10-30T09:00:00Z")
