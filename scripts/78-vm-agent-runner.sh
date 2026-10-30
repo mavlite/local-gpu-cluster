@@ -210,7 +210,8 @@ install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifie
     if [[ -n "$dry" ]]; then echo "would install debs: ${need[*]}"
     else
       # apt-get download verifies against the host's signed index; the VM installs exactly those files
-      t=$(mktemp -d); (cd "$t" && apt-get download -q "${need[@]}")
+      t=$(mktemp -d); chmod 755 "$t"   # so apt's sandbox user (_apt) can write the download
+      (cd "$t" && apt-get download -q "${need[@]}")
       tar -C "$t" -cf - . | vm 'set -e; d=$(mktemp -d); tar -C "$d" -xf -; sudo dpkg -i "$d"/*.deb >/dev/null; rm -rf "$d"'
       rm -rf "$t"; echo "installed debs: ${need[*]}"
     fi
