@@ -23,6 +23,13 @@ expect fail "cat > probe.txt in the checkout"          'cat > /work/'"$REPO"'/pr
 expect fail "cat > ./probe.txt (cwd = checkout)"       'cat > probe.txt </dev/null'
 expect fail "read /etc/agent-runner/gh-token"          'cat /etc/agent-runner/gh-token'
 expect fail "read /etc/agent-runner/router.key"        'cat /etc/agent-runner/router.key'
+expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/ptero-156.env'
+# Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
+if [[ "$REPO" == SDG-RUST ]]; then
+  expect ok   "SDG_PTERO_* present for SDG-RUST (3 names)" 'n=$(compgen -e | grep -c "^SDG_PTERO_"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+else
+  expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
+fi
 expect fail "list /etc/agent-runner"                   'ls /etc/agent-runner'
 expect fail "read runner gh config"                    'cat /home/runner/.config/gh/hosts.yml'
 expect fail "read runner panel ssh key"                'cat /home/runner/.ssh/id_ed25519_panel'
