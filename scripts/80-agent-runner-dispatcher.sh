@@ -41,7 +41,8 @@ case "$cmd" in
     push "$SRC_TMR" /etc/systemd/system/agent-runner-dispatch.timer   0644
     vm "sudo systemctl daemon-reload && mkdir -p ~/runner-logs && chmod 700 ~/runner-logs"
     vm "sudo systemd-analyze verify /etc/systemd/system/agent-runner-dispatch.service /etc/systemd/system/agent-runner-dispatch.timer"
-    vm "python3 -m py_compile $LIB/agent_runner_dispatch.py"
+    # Parse-only check: py_compile would try to write __pycache__ into the root-owned $LIB.
+    vm "python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' $LIB/agent_runner_dispatch.py"
     echo "installed; timer is $(vm 'systemctl is-enabled agent-runner-dispatch.timer 2>/dev/null || true')"
     ;;
   enable)  vm "sudo systemctl enable --now agent-runner-dispatch.timer && systemctl list-timers agent-runner-dispatch.timer --no-pager" ;;
