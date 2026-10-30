@@ -120,7 +120,10 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
         # Repo rules + the LIVE [IPSET github] entries, so installing never empties GitHub egress. pmxcfs fixes
         # owner/mode itself; write via a temp copy.
         local t; t=$(mktemp)
-        { cat "$F/$src"; [[ -e "$dst" ]] && sed '1,/^\[IPSET github\]$/d' "$dst" | grep -v '^#'; } > "$t"
+        cat "$F/$src" > "$t"
+        if [[ -e "$dst" ]] && grep -qx '\[IPSET github\]' "$dst"; then   # first install: no live set to keep
+          sed '1,/^\[IPSET github\]$/d' "$dst" | { grep -v '^#' || true; } >> "$t"
+        fi
         cp "$t" "$dst"; rm -f "$t"
       elif [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"
       else install -D -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$F/$src" "$dst"; fi
