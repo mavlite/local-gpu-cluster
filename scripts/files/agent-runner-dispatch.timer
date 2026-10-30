@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the agent runner dispatcher every 5 minutes
+
+[Timer]
+# Wall-clock schedule: while a long task is still running the service is "activating", so systemd
+# skips the elapsed tick instead of starting a second run (the dispatcher's flock is the backstop).
+OnCalendar=*:0/5
+AccuracySec=30s
+Unit=agent-runner-dispatch.service
+
+[Install]
+WantedBy=timers.target
