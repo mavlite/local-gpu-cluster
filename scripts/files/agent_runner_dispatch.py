@@ -9,13 +9,17 @@ Runs ON VM 178 as user `runner`, from agent-runner-dispatch.timer every 5 minute
      runner:* label. Claim it: runner:ready -> runner:running plus a start comment.
   4. Check out the issue's "Branch / commit" in ~/work/<repo> (fetch, switch, pull --ff-only, verify sha).
   5. agent-run <dir> "<preamble + issue body>" with the issue's max wall time; raw JSON events to
-     ~/runner-logs/<repo>-<issue>-<UTC>.jsonl.
-  6. Exit 75 (lane closed): back to runner:ready with a comment. Otherwise read the agent's report block;
-     if there is none (or it is malformed), post a BLOCKED one with the redacted tail of the event log.
+     ~/runner-logs/<repo>-<issue>-<UTC>.jsonl. agent-run runs opencode as the unprivileged user `agent` in a
+     systemd sandbox: the checkout read-only at /work/<repo>, a per-task results dir at /results
+     (AGENT_RESULTS_DIR on the host side), private /tmp, no /home, no /etc/agent-runner, no GitHub credentials.
+  6. Exit 75 (lane closed): back to runner:ready with a comment. Otherwise take the report block the agent
+     PRINTED (the last text event of the stream holding `task: N` and a verdict) and post it here; if there is
+     none (or it is malformed), post a BLOCKED one with the redacted tail of the event log.
      Set runner:done / runner:blocked, plus needs-claude unless PASS with no deviations and a clean exit.
 
-The dispatcher is a plain script, not an opencode session, so it may edit labels; the agent never does.
-Nothing it posts may contain tokens, keys or environment dumps (see redact()).
+The dispatcher is a plain script, not an opencode session: it alone posts comments and edits labels.
+Nothing it posts may contain tokens, keys or environment dumps (see redact(), which also removes the literal
+values of the runner's own secret files).
 """
 import argparse
 import datetime
@@ -51,7 +55,33 @@ def cfg():
         "gh": shlex.split(os.environ.get("DISPATCH_GH", "gh")),
         "agent": shlex.split(os.environ.get("DISPATCH_AGENT_RUN", "agent-run")),
         "max_timeout_s": int(os.environ.get("DISPATCH_MAX_TIMEOUT_S", str(MAX_TIMEOUT_MIN * 60))),
+        "results_root": os.environ.get("DISPATCH_RESULTS_ROOT", "/var/lib/agent-results"),
+        "secret_files": [p for p in os.environ.get(
+            "DISPATCH_SECRET_FILES",
+            "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env").split(",") if p],
     }
+
+
+LITERAL_SECRETS = []   # exact secret values, loaded once per run by load_secrets()
+
+
+def load_secrets(c):
+    """Bare-value files (router.key, gh-token) contribute their content; KEY=value files (ptero-156.env)
+    contribute each value. Values shorter than 8 characters are too generic to redact literally."""
+    LITERAL_SECRETS.clear()
+    for path in c["secret_files"]:
+        try:
+            with open(path) as f:
+                raw = f.read()
+        except OSError:
+            continue
+        lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.strip().startswith("#")]
+        if lines and all(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", l) for l in lines):
+            values = [l.split("=", 1)[1].strip().strip("'\"") for l in lines]
+        else:
+            values = [raw.strip()]
+        LITERAL_SECRETS.extend(v for v in values if len(v) >= 8)
+    LITERAL_SECRETS.sort(key=len, reverse=True)       # longest first, so a value inside another is not split
 
 
 def log(msg):
@@ -73,6 +103,8 @@ _SECRETS = [
 
 
 def redact(text):
+    for v in LITERAL_SECRETS:
+        text = text.replace(v, "<redacted>")
     for pat in _SECRETS:
         text = pat.sub("<redacted>", text)
     return text
@@ -121,23 +153,46 @@ def parse_timeout_minutes(text):
     return int(max(1, min(n, MAX_TIMEOUT_MIN)))
 
 
-def find_report(comments, task, since):
-    """The agent's report: the last comment at/after `since` for this task with a report block. The
-    '### runner report' heading is what the preamble asks for, but a comment with both `task:` and
-    `verdict:` lines also counts -- qwen3.6 dropped the heading and fence on the first live run."""
-    for c in reversed(comments or []):
-        b = c.get("body") or ""
-        if c.get("createdAt", "") < since:
-            continue
-        if "### runner report" not in b and not re.search(r"(?m)^verdict:\s*\S", b):
-            continue
-        m = re.search(r"(?m)^task:\s*#?(\d+)\s*$", b)
-        if not m or int(m.group(1)) != int(task):
-            continue
-        v = re.search(r"(?m)^verdict:\s*([A-Z]+)\s*$", b)
-        dev = re.search(r"(?m)^deviations:\s*(.*)$", b)
-        return {"verdict": v.group(1) if v and v.group(1) in VERDICTS else None,
-                "deviations": (dev.group(1).strip() if dev else "")}
+def event_texts(path):
+    """Text parts of an opencode --format json event stream, in order."""
+    out = []
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                part = ev.get("part") if isinstance(ev, dict) else None
+                if ev.get("type") == "text" and isinstance(part, dict) and isinstance(part.get("text"), str):
+                    out.append(part["text"])
+    except OSError:
+        pass
+    return out
+
+
+def report_block(text, task):
+    """The report block in one text, normalised to '### runner report' + a yaml fence, or None. The heading is
+    what the preamble asks for; a bare `task:` ... `verdict:` yaml also counts (qwen3.6 dropped the heading and
+    the fence on the first live run)."""
+    m = re.search(r"(?m)^task:\s*#?(\d+)\s*$", text)
+    if not m or int(m.group(1)) != int(task) or not re.search(r"(?m)^verdict:\s*\S", text):
+        return None
+    yaml = text[m.start():]
+    yaml = yaml.split("```", 1)[0].rstrip()          # stop at the closing fence, if any
+    v = re.search(r"(?m)^verdict:\s*([A-Z]+)\s*$", yaml)
+    dev = re.search(r"(?m)^deviations:\s*(.*)$", yaml)
+    return {"block": f"### runner report\n```yaml\n{yaml}\n```",
+            "verdict": v.group(1) if v and v.group(1) in VERDICTS else None,
+            "deviations": dev.group(1).strip() if dev else ""}
+
+
+def find_report(texts, task):
+    """The last printed report block for this task, from the agent's text events."""
+    for t in reversed(texts):
+        rep = report_block(t, task)
+        if rep:
+            return rep
     return None
 
 
@@ -228,13 +283,13 @@ def preamble(repo, num, ref, started, model):
     return f"""You are the lab runner for {repo} issue #{num}. Execute the task below exactly.
 
 Rules:
-- Work only in the current directory (already checked out at {ref}). Run only the commands in Steps, in order.
+- The current directory is the checkout at {ref}. It is mounted read-only. Run only the commands in Steps, in order.
+- Write every log, result or artifact under /results (writable, kept after the run); use /tmp for scratch.
 - Check every Precondition first; if one fails, or anything happens that Steps do not cover, stop and report BLOCKED.
-- Never change issue labels, never push, never write secrets or player data anywhere.
-- When finished (or stopped), post EXACTLY ONE comment on the issue. Its first line must be `### runner report`,
-  followed by the ```yaml fenced block below, copied as-is (heading and fence included) and filled in.
-  Write it with the write tool to the file runner-report-{num}.md in the current directory (do not run mkdir;
-  it is not allowed and not needed), then run: gh issue comment {num} -R {repo} --body-file runner-report-{num}.md
+- You have no GitHub access. Do not post, comment, push or change labels: the dispatcher posts your report.
+- Never write secrets or player data anywhere.
+- When finished (or stopped), PRINT the block below as your final message: the line `### runner report`, then the
+  ```yaml fenced block, copied as-is (heading and fence included) and filled in.
 
 ### runner report
 ```yaml
@@ -249,7 +304,7 @@ results:
     value: <number or string>
     pass: true | false
 artifacts:
-  - <repo-relative path of logs/results you wrote>
+  - </results/... path of each log or result you wrote>
 deviations: <none | what differed from the steps>
 state_left: <servers, locks, branch>
 ```
@@ -259,10 +314,11 @@ The verdict follows the Pass criteria literally. You never decide that a FAIL is
 """
 
 
-def run_agent(c, work_dir, message, timeout_s, log_base):
+def run_agent(c, work_dir, message, timeout_s, log_base, results_dir):
     """Returns (exit_code or None on timeout)."""
+    env = dict(os.environ, AGENT_RESULTS_DIR=results_dir, AGENT_MAX_SECONDS=str(timeout_s + 60))
     with open(log_base + ".jsonl", "w") as out, open(log_base + ".stderr", "w") as err:
-        p = subprocess.Popen(c["agent"] + [work_dir, message], stdout=out, stderr=err,
+        p = subprocess.Popen(c["agent"] + [work_dir, message], stdout=out, stderr=err, env=env,
                              stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             return p.wait(timeout=timeout_s)
@@ -323,8 +379,9 @@ def dispatch(c, repo, issue, model):
 
     stamp = started.replace("-", "").replace(":", "")
     log_base = os.path.join(c["logs"], f"{name}-{num}-{stamp}")
+    results_dir = os.path.join(c["results_root"], f"{name}-{num}-{stamp}")
     message = preamble(repo, num, ref, started, model) + issue.get("body", "")
-    code = run_agent(c, os.path.join(c["work"], name), message, timeout_s, log_base)
+    code = run_agent(c, os.path.join(c["work"], name), message, timeout_s, log_base, results_dir)
 
     if code == EXIT_LANE_CLOSED:
         relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
@@ -332,25 +389,28 @@ def dispatch(c, repo, issue, model):
                               "back to runner:ready, retrying next cycle.")
         log(f"{repo}#{num}: lane closed, requeued")
         return 0
-    view = json.loads(gh(c, "issue", "view", str(num), "-R", repo, "--json", "comments,labels"))
-    rep = find_report(view.get("comments"), num, started)
+    rep = find_report(event_texts(log_base + ".jsonl"), num)
     if code is None:
         reason = f"agent-run timed out after {timeout_s}s and was stopped."
         return finish(c, repo, num, None, blocked_report(num, ref, started, model, reason, log_base))
     if rep is None or rep["verdict"] is None:
-        why = "the agent posted no report block" if rep is None else "the agent's report block has no valid verdict"
+        why = "the agent printed no report block" if rep is None else "the agent's report block has no valid verdict"
         return finish(c, repo, num, None,
                       blocked_report(num, ref, started, model, f"{why} (agent-run exit {code}).", log_base))
-    return finish(c, repo, num, rep, None, exit_code=code)
+    return finish(c, repo, num, rep, None, exit_code=code, results_dir=results_dir)
 
 
-def finish(c, repo, num, rep, fallback, exit_code=0):
+def finish(c, repo, num, rep, fallback, exit_code=0, results_dir=None):
     if fallback is not None:
         comment(c, repo, num, fallback)
         verdict, claude = "BLOCKED", True
     else:
         verdict = rep["verdict"]
         claude = needs_claude(verdict, rep["deviations"], exit_code)
+        note = f"\n\nPosted by the dispatcher; `/results` is `{results_dir}` on the runner VM."
+        if exit_code != 0:
+            note += f" agent-run exited {exit_code}."
+        comment(c, repo, num, rep["block"] + note)
     add = [LABEL_BLOCKED if verdict == "BLOCKED" else LABEL_DONE] + ([LABEL_CLAUDE] if claude else [])
     relabel(c, repo, num, remove=[LABEL_RUNNING], add=add)
     log(f"{repo}#{num}: {verdict}{' + needs-claude' if claude else ''}")
@@ -369,6 +429,7 @@ def main(argv=None):
             ap.error("--only takes OWNER/REPO#N")
         only = (m.group(1), m.group(2))
     os.makedirs(c["logs"], exist_ok=True)
+    load_secrets(c)
     with open(os.path.join(c["logs"], ".dispatch.lock"), "w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

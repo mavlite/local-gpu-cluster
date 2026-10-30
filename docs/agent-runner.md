@@ -30,7 +30,8 @@ the VPN config stay on the machines that hold them.
 | `agent-runner-key-renew.sh` (installed without `.sh`) + `.service` + `.timer` | `/usr/local/sbin/agent-runner-key-renew`, `/etc/systemd/system/` | host |
 | `agent-runner-178.fw` | `/etc/pve/firewall/178.fw` | host |
 | `agent-run.sh` | `/usr/local/bin/agent-run` | VM |
-| `agent-runner-opencode.json` | `/etc/agent-runner/opencode.json` | VM |
+| `agent-runner-opencode.json` | `/etc/agent-runner-agent/opencode.json` (moved out of `/etc/agent-runner` 2026-10-30) | VM |
+| `agent-runner-probes.sh` | run by `78-vm-agent-runner.sh probe` (not installed) | VM |
 | dispatcher (`agent_runner_dispatch.py`, its units) | see `80-agent-runner-dispatcher.sh` | VM |
 
 ```
@@ -77,13 +78,50 @@ Not managed by the script:
 
 - **Packages:** git 2.47, gh 2.46, python3 3.13, nodejs 20, ripgrep, jq, openvpn, qemu-guest-agent. opencode
   **1.18.34** (`npm install -g opencode-ai@1.18.34`), the same pin as the workforce harness.
-- **Locked profile** (`agent-runner-opencode.json`):
+- **Locked profile** (`agent-runner-opencode.json`, installed at `/etc/agent-runner-agent/opencode.json`,
+  outside the directory the sandbox hides):
   - only agent `lab-runner` is enabled (general and explore are disabled), with an 80-step cap;
-  - default deny, with the bash allowlist; `git push`, `gh api|auth|repo` and `gh pr merge` are denied
-    explicitly;
+  - default deny. Allowed: read-only commands (`ls`, `cat`, `head`, `tail`, `wc`, `rg`, `jq`, `date`,
+    `sleep`, `git status|log|diff|show`), `python3 tools/*`, `bash tools/*`, `./tools/*` and `pytest`.
+    Denied explicitly: `gh*`, `ssh*` and `git push*`;
   - 131072 context per model.
-- **Wrapper** `agent-run DIR "MESSAGE"`: sets the lock-down environment and runs
-  `opencode run --pure --agent lab-runner --format json` with stdin closed.
+- **Wrapper** `agent-run DIR "MESSAGE"`: called by `runner`; it starts opencode as user `agent` in the sandbox
+  below.
+
+### Sandbox (hardening 2026-10-30)
+
+The opencode allowlist only matches command *prefixes*. `cat > file` wrote a file despite `edit: deny`, and
+`cat /etc/agent-runner/gh-token` followed by `gh issue comment` could have leaked the token. So the boundary is
+now the kernel, not the allowlist:
+
+| Layer | What it does |
+|---|---|
+| User `agent` | System user (uid 999), no sudo, not in group `runner`, no home, no GitHub config, no SSH keys |
+| `systemd-run` per task | `ProtectSystem=strict`, `ProtectHome=tmpfs` (all of `/home` hidden), `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`, an empty capability set, `RuntimeMaxSec` = the task's limit |
+| Filesystem view | The checkout is **read-only** at `/work/<repo>`. The writable per-task `/results` is `/var/lib/agent-results/<repo>-<issue>-<UTC>` (root:runner 750 parent), plus private `/tmp`. `/etc/agent-runner` and `/run/agent-runner` are inaccessible |
+| Secrets | No GitHub credentials at all: an empty `GH_CONFIG_DIR`, the token stays in `/etc/agent-runner` (root:runner 750). The router key arrives through a root-only `EnvironmentFile` that systemd reads before dropping to `agent`; it is deleted after the run |
+| Per-repo lab secrets | The same `EnvironmentFile`, **for that repo's tasks only**, from a table in `agent-run` (`REPO_ENV_FILE` / `REPO_ENV_PREFIX`). Today: SDG-RUST ← `/etc/agent-runner/ptero-156.env` (root:runner 640; `SDG_PTERO_SFTP_USER`, `SDG_PTERO_SFTP_PASSWORD`, `SDG_PTERO_API_KEY` for the Rust test server 156 subuser). SDG-ARMA3 gets none. A file with any line that is not `PREFIX_*=value` (or a comment or blank) is refused, so it cannot inject `LD_PRELOAD`, `PATH` and the like. The dispatcher strips each value literally (values of 8+ characters) from anything it posts |
+| Reporting | The agent **prints** its report block. The dispatcher (`runner`) takes it from the event log, removes the literal secret values plus token patterns, posts it, and edits the labels |
+
+`scripts/78-vm-agent-runner.sh probe` proves the walls: a shell in the identical sandbox, then a real opencode
+agent. **2026-10-30: 18/18 passed.**
+- `cat > probe.txt` fails with "Read-only file system".
+- Reading the gh token, the router key, `/etc/agent-runner`, runner's gh config and runner's panel key all fail.
+- `gh auth status` says not logged in, and no GitHub token is in the environment.
+- `sudo` is blocked by no-new-privileges.
+- `/results` and `/tmp` are writable, and `git log -1` works.
+- The agent's own attempts are blocked by the allowlist or by the read-only filesystem, and the token value
+  appears nowhere in its event log.
+
+**Residual risks, by design:**
+- **The router key is visible to the agent's own processes** (it needs the key to call the model). It is a
+  scoped, chat-only key with a 14-day TTL, and the dispatcher strips its literal value from anything it posts.
+  A loopback proxy that holds the key would remove even this.
+- **The agent can no longer reach the panel.** `ssh panel` was removed: the panel key lives in runner's
+  `~/.ssh` and must stay out of the sandbox. Playbooks that need the panel need a design first, for example
+  an ssh-agent socket held by runner so the key can be used but never read.
+- **Playbooks must write their output under `/results`**, not into the repo. Repo tools that write into the
+  tree (caches, build output) need a flag or an out-of-tree path.
 - **GitHub:**
   - fine-grained token (account `mavlite`; repos SDG-IAC, SDG-RUST, SDG-ARMA3) in `/etc/agent-runner/gh-token`;
   - clones in `~/work/{SDG-RUST,SDG-ARMA3,SDG-IAC}` with their push URL disabled;
@@ -142,7 +180,10 @@ From the infra summary's section 10, tracked here.
 - [ ] **VPN client certificate `agent-runner`** expires around **2027-11** (397 days from 2026-10-30). Renew
   through SDG-IAC.
 - [ ] **Lab secrets** for playbooks (RCON passwords, panel API keys): the owner provisions them into
-  `/etc/agent-runner/`, root:runner 640, once the Rust and Arma sessions say which they need.
+  `/etc/agent-runner/`, root:runner 640, once the Rust and Arma sessions say which they need. Each new file
+  also needs a row in `agent-run`'s `REPO_ENV_FILE` table, and its path in the dispatcher's
+  `DISPATCH_SECRET_FILES` defaults so its values get redacted.
+  - [x] **2026-10-30:** `ptero-156.env` (SDG_PTERO_*) for SDG-RUST, wired in and probed.
 - [ ] **Network openings beyond the panel:** SDG-IAC adds them on request, from a host:port list from each game
   repo.
 - [ ] **All game testing is halted** by the owner as of 2026-10-30 ~12:00Z. No task that touches a server runs

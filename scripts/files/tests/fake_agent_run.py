@@ -1,45 +1,59 @@
 """Stand-in for /usr/local/bin/agent-run: `fake_agent_run.py DIR MESSAGE`.
 
-Behaviour from $FAKE_AGENT_MODE: pass | fail | noreport | exit75 | hang | crash-after-pass.
-It reports through the fake gh ($FAKE_GH_CMD), exactly as the real agent would with `gh issue comment`.
+The sandboxed agent has no GitHub credentials: it PRINTS its report as a text event of the opencode JSON
+stream and the dispatcher posts it. Behaviour from $FAKE_AGENT_MODE:
+  pass | fail | headerless | noreport | exit75 | hang | crash-after-pass | leak
+It writes one artifact into $AGENT_RESULTS_DIR, as a real task would into /results.
 """
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
 
 
+def emit(kind, **part):
+    print(json.dumps({"type": kind, "part": dict(part, type=kind)}), flush=True)
+
+
 def main(argv):
-    work_dir, message = argv[0], argv[1]
+    work_dir = argv[0]
     mode = os.environ.get("FAKE_AGENT_MODE", "pass")
-    print(json.dumps({"type": "step_start", "dir": work_dir}), flush=True)
-    print(json.dumps({"type": "text", "text": "leaked ghp_" + "A" * 36 + " and Bearer abc.def.ghi"}), flush=True)
+    emit("step_start")
+    emit("text", text="leaked ghp_" + "A" * 36 + " and Bearer abc.def.ghi")
     if mode == "exit75":
         print("agent-run: lane closed", file=sys.stderr)
         return 75
     if mode == "hang":
         time.sleep(120)
         return 0
-    with open(os.path.join(work_dir, "probe.txt"), "w") as f:
-        f.write(message)
+    results = os.environ["AGENT_RESULTS_DIR"]
+    os.makedirs(results, exist_ok=True)
+    with open(os.path.join(results, "probe.txt"), "w") as f:
+        f.write("artifact\n")
     if mode == "noreport":
-        print(json.dumps({"type": "text", "text": "I forgot the report"}), flush=True)
+        emit("text", text="I forgot the report")
         return 0
     sha = subprocess.run(["git", "-C", work_dir, "log", "-1", "--format=%H"],
                          capture_output=True, text=True, check=True).stdout.strip()
     verdict = "FAIL" if mode == "fail" else "PASS"
+    extra = ""
+    if mode == "leak":
+        leaked = os.environ.get("FAKE_LEAK_VALUE")
+        if not leaked:
+            with open(os.environ["FAKE_SECRET_FILE"]) as f:
+                leaked = f.read().strip()
+        extra = "    note: " + leaked + "\n"
     yaml = (f"task: {os.environ['FAKE_TASK']}\nverdict: {verdict}\nref: main@{sha}\n"
             "started: x\nfinished: y\nmodel: qwen3.6\nresults:\n  - check: git log -1\n"
-            f"    value: {sha}\n    pass: {'true' if verdict == 'PASS' else 'false'}\n"
-            "artifacts: []\ndeviations: none\nstate_left: main\n")
-    # headerless: what qwen3.6 actually posted on 2026-10-30 -- a bare '---' YAML document, no heading/fence
-    body = ("---\n" + yaml) if mode == "headerless" else ("### runner report\n```yaml\n" + yaml + "```\n")
-    gh = shlex.split(os.environ["FAKE_GH_CMD"])
-    subprocess.run(gh + ["issue", "comment", os.environ["FAKE_TASK"], "-R", os.environ["FAKE_REPO"],
-                         "--body", body], check=True)
-    print(json.dumps({"type": "step_finish"}), flush=True)
+            f"    value: {sha}\n    pass: {'true' if verdict == 'PASS' else 'false'}\n{extra}"
+            "artifacts:\n  - /results/probe.txt\ndeviations: none\nstate_left: main\n")
+    if mode == "headerless":
+        text = "Done.\n\n---\n" + yaml
+    else:
+        text = "Done.\n\n### runner report\n```yaml\n" + yaml + "```\n"
+    emit("text", text=text)
+    emit("step_finish")
     return 3 if mode == "crash-after-pass" else 0
 
 

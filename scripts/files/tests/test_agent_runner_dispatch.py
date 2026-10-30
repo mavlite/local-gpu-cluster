@@ -64,12 +64,19 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_GH", gh_cmd)
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
+    secret = tmp_path / "router.key"
+    secret.write_text("rk_live_" + "Q" * 30 + "\n")        # not hex, not a gh token: only a literal match catches it
+    monkeypatch.setenv("FAKE_SECRET_FILE", str(secret))
+    monkeypatch.setenv("DISPATCH_SECRET_FILES", f"{secret},{tmp_path / 'absent-token'}")
+    monkeypatch.setenv("DISPATCH_RESULTS_ROOT", str(tmp_path / "results"))
 
     class E:
         pass
     e = E()
     e.tmp, e.state, e.healthz, e.work, e.origin = tmp_path, state, healthz, work, origin
     e.logs = tmp_path / "logs"
+    e.secret = secret.read_text().strip()
+    e.results = tmp_path / "results"
 
     def add_issue(num, repo=REPO, labels=("runner:ready", "kind:check"), created="2026-10-30T10:00:00Z", **kw):
         st = json.loads(state.read_text())
@@ -97,14 +104,57 @@ def test_pass_report_marks_done_without_needs_claude(env):
     assert len(logs) == 1 and "step_start" in logs[0].read_text()
 
 
-def test_headerless_report_is_accepted(env, monkeypatch):
-    # Live 2026-10-30: the agent posted the yaml without '### runner report' or a fence.
+def test_dispatcher_posts_the_printed_report_and_names_the_results_dir(env):
+    # Hardening 2026-10-30: the agent has no GitHub credentials; it prints the block, the dispatcher posts it.
+    env.add_issue(7)
+    env.run()
+    rep = reports(env.issue(7))
+    assert len(rep) == 1 and rep[0].startswith("### runner report") and "verdict: PASS" in rep[0]
+    assert "Done." not in rep[0]                       # only the block, not the agent's chatter
+    dirs = list(env.results.glob("SDG-ARMA3-7-*"))
+    assert len(dirs) == 1 and (dirs[0] / "probe.txt").exists() and dirs[0].name in rep[0]
+
+
+def test_literal_secret_values_are_redacted(env, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "leak")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    rep = reports(i)
+    assert len(rep) == 1 and "note: <redacted>" in rep[0]
+    assert env.secret not in json.dumps(i["comments"])
+
+
+def test_values_from_env_style_secret_files_are_redacted(env, monkeypatch):
+    # /etc/agent-runner/ptero-156.env holds KEY=value lines; each VALUE must be stripped, not the whole file.
+    envfile = env.tmp / "ptero-156.env"
+    api = "ptla_" + "Zx9" * 12
+    envfile.write_text(f"SDG_PTERO_SFTP_USER=lab\nSDG_PTERO_SFTP_PASSWORD=hunter2-but-longer\nSDG_PTERO_API_KEY={api}\n")
+    monkeypatch.setenv("DISPATCH_SECRET_FILES", f"{envfile}")
+    monkeypatch.setenv("FAKE_AGENT_MODE", "leak")
+    monkeypatch.setenv("FAKE_LEAK_VALUE", f"{api} and hunter2-but-longer")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    posted = json.dumps(i["comments"])
+    assert len(reports(i)) == 1
+    assert api not in posted and "hunter2-but-longer" not in posted
+
+
+def test_default_secret_files_include_the_rust_lab_secrets(monkeypatch):
+    monkeypatch.delenv("DISPATCH_SECRET_FILES", raising=False)
+    assert "/etc/agent-runner/ptero-156.env" in d.cfg()["secret_files"]
+
+
+def test_headerless_report_is_accepted_and_posted_with_heading(env, monkeypatch):
+    # Live 2026-10-30: the agent wrote the yaml without '### runner report' or a fence.
     monkeypatch.setenv("FAKE_AGENT_MODE", "headerless")
     env.add_issue(7)
     env.run()
     i = env.issue(7)
     assert set(i["labels"]) == {"runner:done", "kind:check"}
-    assert not any("verdict: BLOCKED" in c["body"] for c in i["comments"])
+    rep = reports(i)
+    assert len(rep) == 1 and "```yaml\ntask: 7" in rep[0] and "verdict: BLOCKED" not in rep[0]
 
 
 def test_start_comment_is_not_mistaken_for_a_report(env, monkeypatch):
@@ -114,10 +164,11 @@ def test_start_comment_is_not_mistaken_for_a_report(env, monkeypatch):
     assert "runner:blocked" in env.issue(7)["labels"]
 
 
-def test_preamble_demands_heading_fence_and_no_mkdir():
+def test_preamble_says_print_the_block_and_write_only_to_results():
     p = d.preamble("o/r", 5, "main@abc", "2026-10-30T00:00:00Z", "qwen3.6")
     assert "### runner report" in p and "```yaml" in p
-    assert "first line" in p.lower() and "mkdir" in p
+    assert "/results" in p and "read-only" in p
+    assert "gh issue comment" not in p and "do not post" in p.lower()
 
 
 def test_fail_report_marks_done_and_needs_claude(env, monkeypatch):
