@@ -67,7 +67,13 @@ and run the verification it names. The answer ends with a budget footer; mention
 
 ## When the broker refuses
 
-422/413: fix the brief (missing section / too large) and resend; that costs nothing. 400 duplicate: the same
-brief was already sent moments ago -- never resend it unchanged; change it or wait. 402 (budget or daily calls):
-stop escalating. Continue without Claude where you can, otherwise tell the user you are stuck, what you tried,
-and that the escalation budget is used for now.
+422 `brief_section` / 413: the message's first line names every bad section, the next lines say exactly what
+to change (e.g. "found '### Goal' -- write the heading exactly as '## Goal'") and show the template. Make
+exactly those changes and resend; a rejection costs nothing. 400 duplicate: the same brief was already sent
+moments ago -- never resend it unchanged; change it or wait.
+
+422 `brief_loop` (the message starts with STOP): three briefs in a row were rejected. Do not send another brief.
+Show the user the brief and the reasons, and let them decide.
+
+402 (budget): the dollar cap for the day or the month is reached. Stop escalating. Continue without Claude where
+you can, otherwise tell the user you are stuck, what you tried, and that the escalation budget is used for now.

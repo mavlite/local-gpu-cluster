@@ -26,12 +26,21 @@ def _open(req):
     return urllib.request.build_opener(NoRedirect).open(req, timeout=10)
 
 
+def _calls_line(left: dict) -> str:
+    """None = no call-count limit for that alias (owner decision 2026-10-30); the dollar caps still apply."""
+    if all(v is not None for v in left.values()):
+        return f"ask {left['claude-ask']} · auto {left['claude-auto']} · hard {left['claude-hard']} calls left today"
+    show = {k: "no limit" if v is None else v for k, v in left.items()}
+    return (f"calls left today: ask {show['claude-ask']} · auto {show['claude-auto']} · hard {show['claude-hard']} "
+            f"(the dollar caps still apply)")
+
+
 def format_report(rep: dict) -> str:
     m, d, left = rep["month"], rep["day"], rep["calls_left"]
     lines = [f"Claude escalation: ${m['spent_usd']:.2f} of ${m['cap_usd']:.2f} this month "
              f"(resets {rep['resets']['month']}), ${d['spent_usd']:.2f} of ${d['cap_usd']:.2f} today "
              f"(resets {rep['resets']['day']})",
-             f"ask {left['claude-ask']} · auto {left['claude-auto']} · hard {left['claude-hard']} calls left today"]
+             _calls_line(left)]
     if rep.get("recent"):
         lines.append("recent:")
         lines += [f"  {r['alias']:<11} {r.get('model') or '-':<20} ${float(r.get('cost_usd') or 0):.3f}  "

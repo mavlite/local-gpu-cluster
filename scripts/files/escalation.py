@@ -57,9 +57,9 @@ class Config:
     prices: dict
     month_cap: float
     day_cap: float
-    shared_daily_calls: int
-    auto_daily_calls: int
-    hard_daily_calls: int
+    shared_daily_calls: Optional[int]          # None = no call-count limit (the dollar caps still apply)
+    auto_daily_calls: Optional[int]
+    hard_daily_calls: Optional[int]
     tz: str
     ledger_path: str
     key_file: str
@@ -80,6 +80,13 @@ def _money(name: str, raw) -> float:
     if not math.isfinite(v) or v < 0:
         raise ValueError(f"escalation config: {name} must be a finite number >= 0")
     return v
+
+
+def _limit(name: str, raw) -> Optional[int]:
+    """A daily call-count limit: "none" (or empty) for no limit, else an integer >= 0. 0 still means none allowed."""
+    if raw is None or str(raw).strip().lower() in ("", "none"):
+        return None
+    return _count(name, raw)
 
 
 def _count(name: str, raw) -> int:
@@ -151,9 +158,11 @@ def load_config(env=None) -> Config:
         prices=_prices(env.get("ESCALATION_PRICES", "{}") or "{}"),
         month_cap=_money("ESCALATION_MONTH_CAP_USD", env.get("ESCALATION_MONTH_CAP_USD", "150")),
         day_cap=_money("ESCALATION_DAY_CAP_USD", env.get("ESCALATION_DAY_CAP_USD", "7")),
-        shared_daily_calls=_count("ESCALATION_DAILY_CALLS", env.get("ESCALATION_DAILY_CALLS", "15")),
-        auto_daily_calls=_count("ESCALATION_AUTO_DAILY_CALLS", env.get("ESCALATION_AUTO_DAILY_CALLS", "5")),
-        hard_daily_calls=_count("ESCALATION_HARD_DAILY_CALLS", env.get("ESCALATION_HARD_DAILY_CALLS", "3")),
+        # Owner decision 2026-10-30: the dollar caps stop runaway spend; per-day call counts only got in the way of
+        # legitimate work. Model-initiated calls (claude-auto) keep a count, since nobody confirms them.
+        shared_daily_calls=_limit("ESCALATION_DAILY_CALLS", env.get("ESCALATION_DAILY_CALLS", "none")),
+        auto_daily_calls=_limit("ESCALATION_AUTO_DAILY_CALLS", env.get("ESCALATION_AUTO_DAILY_CALLS", "5")),
+        hard_daily_calls=_limit("ESCALATION_HARD_DAILY_CALLS", env.get("ESCALATION_HARD_DAILY_CALLS", "none")),
         tz=_tz(env.get("ESCALATION_TZ", "")),
         ledger_path=env.get("ESCALATION_LEDGER", "/var/lib/llm-router/escalation-ledger.jsonl"),
         key_file=env.get("ANTHROPIC_API_KEY_FILE", "/etc/router-anthropic.key"),
@@ -239,14 +248,49 @@ def _is_na(content: str) -> bool:
     return _NA_RE.match(content.strip(_NA_EDGE)) is not None
 
 
+_NEAR_EDGE = " \t#*_:"
+
+
+def _near_miss(text: str, name: str) -> Optional[str]:
+    """A line that was evidently meant as the heading for `name` but isn't exactly "## <name>" ("### Goal",
+    "## Goal:", "**Goal**", "Goal:", "## goal"), outside ``` fences; None if there is none."""
+    in_fence = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence and line.rstrip() != f"## {name}" and line.strip(_NEAR_EDGE).lower() == name.lower():
+            return line.strip()
+    return None
+
+
+def _brief_guidance(text: str, missing: list) -> str:
+    """What to change: the near-miss headings found, then the exact template. Costs nothing; the broker knows."""
+    hints = []
+    for name in missing:
+        near = _near_miss(text, name)
+        if near:
+            hints.append(f"- found '{near}' -- write the heading exactly as '## {name}'")
+        elif name in NEVER_NA:
+            hints.append(f"- '## {name}' is missing, empty or n/a; it needs real content")
+        else:
+            hints.append(f"- '## {name}' is missing or empty (write 'n/a: <why>' if it truly does not apply)")
+    template = "\n".join(f"## {n}" for n in SECTIONS)
+    return ("\n".join(hints) + "\nA brief has these headings, each alone on its own line and followed by content "
+            "(Goal, Exact error and Question may not be n/a; the others may say n/a: <why>):\n" + template)
+
+
 def validate_brief(text: str, alias: str):
     """None when the brief may be sent, else (status, code, message). Structural only: sufficiency is judged
-    locally by the escalate skill's checklist."""
+    locally by the escalate skill's checklist. A section rejection names every bad section on its first line and
+    then says how to fix it, so the local model can correct the brief without spending a call."""
     secs = parse_sections(text)
-    for name in SECTIONS:
-        content = secs.get(name, "")
-        if not content or (name in NEVER_NA and _is_na(content)):
-            return 422, "brief_section", f"brief: missing or empty section {name}"
+    missing = [name for name in SECTIONS
+               if not secs.get(name, "") or (name in NEVER_NA and _is_na(secs.get(name, "")))]
+    if missing:
+        first = (f"brief: missing or empty section {missing[0]}" if len(missing) == 1
+                 else f"brief: missing or empty sections {', '.join(missing)}")
+        return 422, "brief_section", first + "\n" + _brief_guidance(text, missing)
     cap = ALIASES[alias]["max_brief"]
     n = estimate_tokens(text)
     if n > cap:
@@ -307,12 +351,12 @@ def check_budget(cfg: Config, usage: dict, alias: str, worst: float) -> Optional
     if not (usage["day_cost"] + worst <= cfg.day_cap):
         return f"daily cap reached (${cfg.day_cap:.2f})"
     if alias == "claude-hard":
-        if calls["claude-hard"] >= cfg.hard_daily_calls:
+        if cfg.hard_daily_calls is not None and calls["claude-hard"] >= cfg.hard_daily_calls:
             return f"Opus calls for today used ({cfg.hard_daily_calls})"
         return None
-    if calls["claude-ask"] + calls["claude-auto"] >= cfg.shared_daily_calls:
+    if cfg.shared_daily_calls is not None and calls["claude-ask"] + calls["claude-auto"] >= cfg.shared_daily_calls:
         return f"daily calls used ({cfg.shared_daily_calls})"
-    if alias == "claude-auto" and calls["claude-auto"] >= cfg.auto_daily_calls:
+    if alias == "claude-auto" and cfg.auto_daily_calls is not None and calls["claude-auto"] >= cfg.auto_daily_calls:
         return f"automatic calls for today used ({cfg.auto_daily_calls})"
     return None
 
@@ -434,18 +478,24 @@ def ledger_for(path: str) -> Ledger:
 
 
 def _calls_left(cfg: Config, usage: dict) -> dict:
+    """Calls left today per alias; None where no call-count limit applies (the dollar caps still do)."""
     c = usage["calls"]
-    shared_left = max(0, cfg.shared_daily_calls - c["claude-ask"] - c["claude-auto"])
-    return {"claude-ask": shared_left,
-            "claude-auto": max(0, min(cfg.auto_daily_calls - c["claude-auto"], shared_left)),
-            "claude-hard": max(0, cfg.hard_daily_calls - c["claude-hard"])}
+
+    def left(limit, used):
+        return None if limit is None else max(0, limit - used)
+    shared_left = left(cfg.shared_daily_calls, c["claude-ask"] + c["claude-auto"])
+    auto_left = left(cfg.auto_daily_calls, c["claude-auto"])
+    if shared_left is not None:
+        auto_left = shared_left if auto_left is None else min(auto_left, shared_left)
+    return {"claude-ask": shared_left, "claude-auto": auto_left,
+            "claude-hard": left(cfg.hard_daily_calls, c["claude-hard"])}
 
 
 def footer(cfg: Config, model: str, cost: float, usage: dict) -> str:
     auto_left = _calls_left(cfg, usage)["claude-auto"]
+    auto = "auto: no call limit" if auto_left is None else f"auto {auto_left}/{cfg.auto_daily_calls} left today"
     return (f"\n\n---\nClaude {model}: ${cost:.3f} this call · ${usage['day_cost']:.2f} today of "
-            f"${cfg.day_cap:.2f} · ${usage['month_cost']:.2f} this month of ${cfg.month_cap:.2f} · "
-            f"auto {auto_left}/{cfg.auto_daily_calls} left today")
+            f"${cfg.day_cap:.2f} · ${usage['month_cost']:.2f} this month of ${cfg.month_cap:.2f} · {auto}")
 
 
 def budget_report(cfg: Config, ledger: Ledger, now: float) -> dict:
@@ -607,6 +657,25 @@ def _duplicate_age(cfg: Config, ledger: Ledger, sha: str, now: float) -> Optiona
     return min(ages) if ages else None
 
 
+BRIEF_REFUSALS = ("brief_missing", "brief_section", "brief_too_large", "duplicate", "brief_loop")
+BREAKER_COUNT = 3
+BREAKER_WINDOW_S = 600
+
+
+def rejection_streak(ledger, now: float) -> int:
+    """Brief refusals in a row, newest first, within BREAKER_WINDOW_S of `now`. Any other row (an answered call,
+    an error, a budget refusal) ends the streak. Global, not per session: the ledger does not record sessions."""
+    n = 0
+    for r in reversed(ledger.rows()):
+        t = _finite(r.get("ts"))
+        if t is None or t > now:
+            continue
+        if now - t > BREAKER_WINDOW_S or str(r.get("outcome", "")) not in {f"refused:{c}" for c in BRIEF_REFUSALS}:
+            break
+        n += 1
+    return n
+
+
 def _ago(age: float) -> str:
     return "under a minute ago" if age < 60 else f"under {int(age // 60) + 1} minutes ago"
 
@@ -626,6 +695,15 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
            "output_tokens": 0, "cost_usd": 0.0, "brief_sha256": sha, "brief_tokens_est": estimate_tokens(brief or "")}
 
     def refuse(status, code, message):
+        if code in BRIEF_REFUSALS:
+            # A loop of bad briefs costs nothing at Anthropic but burns the session; after BREAKER_COUNT in a row
+            # the refusal says STOP. A valid brief is never held back by this.
+            n = rejection_streak(ledger, now) + 1
+            if n >= BREAKER_COUNT:
+                code, message = "brief_loop", (f"STOP: {n} briefs rejected in a row in the last "
+                                               f"{BREAKER_WINDOW_S // 60} minutes. Do not send another brief; show "
+                                               f"the user the brief and the reason below, and let them decide.\n"
+                                               + message)
         ledger.append(dict(row, outcome=f"refused:{code}"))
         return status, error_body(code, message)
 

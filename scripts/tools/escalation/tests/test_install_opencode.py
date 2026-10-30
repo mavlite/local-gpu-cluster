@@ -66,6 +66,15 @@ def test_budget_report_format_has_no_secrets():
     assert "ask 11 · auto 3 · hard 3 calls left today" in s and "claude-ask" in s
 
 
+def test_budget_report_says_no_limit_where_there_is_no_call_count():
+    rep = {"month": {"spent_usd": 0.0, "cap_usd": 150.0}, "day": {"spent_usd": 0.0, "cap_usd": 7.0},
+           "calls_left": {"claude-ask": None, "claude-auto": 4, "claude-hard": None},
+           "resets": {"day": "2026-10-31 00:00 CDT", "month": "2026-11-01 00:00 CDT"}, "recent": []}
+    s = claude_budget.format_report(rep)
+    assert "calls left today: ask no limit · auto 4 · hard no limit (the dollar caps still apply)" in s
+    assert "None" not in s
+
+
 # ---- fix round 1 ----
 import io  # noqa: E402
 
@@ -287,3 +296,14 @@ def test_skill_md_has_lf_line_endings():
 def test_skill_md_names_the_broker_statuses():
     skill = open(os.path.join(inst.HERE, "skill", "SKILL.md"), encoding="utf-8").read()
     assert "402" in skill and "429" not in skill and "duplicate" in skill
+
+
+def test_rerun_keeps_a_display_name_the_user_set():
+    # 2026-10-30: a re-run reset "Claude · hard (Opus, budgeted)" to the default name.
+    cfg = {"provider": {"router": {"models": {"claude-hard": {"name": "Claude · hard (Opus, budgeted)",
+                                                              "tool_call": True}}}}}
+    out = inst.merge_config(cfg)
+    m = out["provider"]["router"]["models"]
+    assert m["claude-hard"]["name"] == "Claude · hard (Opus, budgeted)"
+    assert m["claude-hard"]["tool_call"] is False                         # the safety-relevant fields still win
+    assert m["claude-ask"]["name"] == "Claude via escalation broker (claude-ask)"
