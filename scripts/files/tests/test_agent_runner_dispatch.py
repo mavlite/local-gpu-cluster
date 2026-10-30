@@ -315,6 +315,8 @@ def test_parse_ref(text, expected):
 @pytest.mark.parametrize("text,minutes", [
     ("Max wall time: 45 minutes", 45), ("max wall time 2 h", 120), ("Max wall time: 90m.", 90),
     ("leave the server stopped", 60), ("Max wall time: 48 hours", 720),
+    # SDG-RUST#1 (2026-10-30) wrote it without "Max" and was killed at the 60-minute default
+    ("- Wall time: 6 h at most.", 360), ("Wall-time: 20 minutes", 20),
 ])
 def test_parse_timeout_minutes(text, minutes):
     assert d.parse_timeout_minutes(text) == minutes
