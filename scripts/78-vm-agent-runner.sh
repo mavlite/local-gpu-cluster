@@ -36,8 +36,9 @@ IFACE_LINES=(
   'iface vmbrar inet static'
   $'\taddress 10.81.0.254/24'
 )
-# qm settings the runner depends on (checked, never written). onboot is reported, not required.
-QM_EXPECT=("net0:bridge=vmbrar,firewall=1" "ipconfig0:ip=10.81.0.10/24,gw=10.81.0.254" "cpuunits:50" "memory:8192")
+# qm settings the runner depends on (checked, never written). onboot 1: owner's decision 2026-10-30.
+QM_EXPECT=("net0:bridge=vmbrar,firewall=1" "ipconfig0:ip=10.81.0.10/24,gw=10.81.0.254" "cpuunits:50" "memory:8192"
+           "onboot:1")
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 vm() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@"; }
@@ -71,7 +72,6 @@ do_diff() {
     if grep -E "^${k}: " <<<"$cfg" | grep -qF -- "$v"; then printf 'ok     qm %s: has %s\n' "$k" "$v"
     else printf 'DRIFT  qm %s: expected to contain %s, got: %s\n' "$k" "$v" "$(grep -E "^${k}: " <<<"$cfg" || echo none)"; drift=1; fi
   done
-  printf 'info   qm onboot: %s (open item: decide when the dispatcher goes live)\n' "$(grep -E '^onboot: ' <<<"$cfg" | cut -d' ' -f2 || echo unset)"
   for u in agent-runner-net.service agent-runner-key-renew.timer; do
     printf 'info   host %s: %s\n' "$u" "$(systemctl is-enabled "$u" 2>&1 || true)"
   done

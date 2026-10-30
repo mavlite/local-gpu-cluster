@@ -19,7 +19,8 @@ the VPN config stay on the machines that hold them.
 | Address | 10.81.0.10/24, gateway 10.81.0.254, DNS 9.9.9.9; egress SNAT to **192.168.6.78** |
 | User / admin | `runner` (cloud-init, passwordless sudo). Admin SSH from the host only: `ssh -i /root/.ssh/agent-runner-admin runner@10.81.0.10` |
 | Guest agent / console | `qemu-guest-agent` (`qm agent 178 ping`); `vga: serial0`, `serial0: socket` (`qm terminal 178`) |
-| Autostart | **`onboot: 0`**. It does not start after a host reboot (open item 1) |
+| Autostart | `onboot: 1` (set 2026-10-30, owner's decision, once the dispatcher went live) |
+| GitHub token | expires **Mon 2027-01-25**: the runner loses GitHub access that day (reminder issue in this repo) |
 
 ### Files managed as code (`scripts/78-vm-agent-runner.sh manifest`)
 
@@ -132,10 +133,12 @@ From the infra summary's section 10, tracked here.
 
 - [x] **The dispatcher** (queue spec section 6) and its tests: PR #52, live on the VM since 2026-10-30 with the
   timer enabled and a self-test PASS.
-- [ ] **Decide `onboot`** for VM 178 now the dispatcher is live (`qm set 178 --onboot 1`).
+- [x] **`onboot` decided:** `qm set 178 --onboot 1` (2026-10-30). The drift check now expects it.
 - [x] **Mark the workforce sandbox (VM 176) retired** in `docs/wf-sandbox-runbook.md`: PR #51.
-- [ ] **Record the GitHub token's expiry date** (ask the owner). The runner loses GitHub access that day.
-  Add a reminder.
+- [x] **GitHub token expiry recorded:** **Mon 2027-01-25**, with a reminder issue in this repo.
+- [ ] **Renew the GitHub token before 2027-01-25.** The owner creates a new fine-grained token (account `mavlite`;
+  repos SDG-IAC, SDG-RUST, SDG-ARMA3), types it into `/etc/agent-runner/gh-token` (root:runner 640), then runs
+  `gh auth login --with-token` as `runner`. Update the date above.
 - [ ] **VPN client certificate `agent-runner`** expires around **2027-11** (397 days from 2026-10-30). Renew
   through SDG-IAC.
 - [ ] **Lab secrets** for playbooks (RCON passwords, panel API keys): the owner provisions them into
