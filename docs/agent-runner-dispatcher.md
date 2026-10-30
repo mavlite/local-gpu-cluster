@@ -37,7 +37,7 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
 6. Runs `agent-run ~/work/<repo> "<preamble + issue body>"` with `AGENT_RESULTS_DIR` set to
    `/var/lib/agent-results/<repo>-<issue>-<UTC>`. The agent runs in the sandbox described in
    [agent-runner.md](agent-runner.md#sandbox-hardening-2026-10-30): checkout read-only, that dir writable at
-   `/results`, no GitHub credentials. The timeout is the issue's `Max wall time: N minutes|hours` from
+   `/results`, no GitHub credentials. The timeout is the issue's `Max wall time: N minutes|hours` (or `Wall time: N h`) from
    **Limits**: 60 min by default, 12 h at most.
 7. Afterwards:
    - **Exit 75:** back to `runner:ready`, with a "lane closed" comment.
