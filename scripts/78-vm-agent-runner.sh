@@ -7,6 +7,9 @@
 #                              and the VM's key qm settings. Exit 0 = no drift, 1 = drift.
 #   install-host [--dry-run]   install the host files (SNAT script/unit, key renewal script/units, 178.fw), daemon-reload
 #   install-vm   [--dry-run]   install the VM files (agent-run wrapper, locked opencode profile) over the admin key
+#   setup-sandbox [--dry-run]  create the unprivileged `agent` user and the sandbox dirs on the VM (idempotent),
+#                              remove the old /etc/agent-runner/opencode.json (the profile moved out of that dir)
+#   probe [REPO]               run scripts/files/agent-runner-probes.sh on the VM: the sandbox's walls, shell + agent
 #
 # Not managed here (not files, or not this repo's): VM creation itself (see docs/agent-runner.md for the qm settings),
 # /etc/network/interfaces (checked by `diff`, edited by hand with ifreload -a), the router key and gh token values,
@@ -28,7 +31,16 @@ MANIFEST=(
   "host|agent-runner-key-renew.timer|/etc/systemd/system/agent-runner-key-renew.timer|root:root|644"
   "host|agent-runner-178.fw|/etc/pve/firewall/${VMID}.fw|root:www-data|640"
   "vm|agent-run.sh|/usr/local/bin/agent-run|root:root|755"
-  "vm|agent-runner-opencode.json|/etc/agent-runner/opencode.json|root:root|644"
+  # The profile lives OUTSIDE /etc/agent-runner: the sandbox makes that dir inaccessible to the agent.
+  "vm|agent-runner-opencode.json|/etc/agent-runner-agent/opencode.json|root:root|644"
+)
+# Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
+SANDBOX_CHECKS=(
+  "agent user exists, no sudo, not in group runner|id agent >/dev/null && ! id -Gn agent | grep -qwE 'runner|sudo'"
+  "/etc/agent-runner is root:runner 750|[ \"\$(stat -c '%U:%G %a' /etc/agent-runner)\" = 'root:runner 750' ]"
+  "/home/runner is 700|[ \"\$(stat -c '%a' /home/runner)\" = 700 ]"
+  "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
+  "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
 )
 # Lines that must be present in /etc/network/interfaces (checked, never written).
 IFACE_LINES=(
@@ -72,6 +84,11 @@ do_diff() {
     if grep -E "^${k}: " <<<"$cfg" | grep -qF -- "$v"; then printf 'ok     qm %s: has %s\n' "$k" "$v"
     else printf 'DRIFT  qm %s: expected to contain %s, got: %s\n' "$k" "$v" "$(grep -E "^${k}: " <<<"$cfg" || echo none)"; drift=1; fi
   done
+  local s
+  for s in "${SANDBOX_CHECKS[@]}"; do
+    if vm "${s#*|}" 2>/dev/null; then printf 'ok     vm   %s\n' "${s%%|*}"
+    else printf 'DRIFT  vm   %s\n' "${s%%|*}"; drift=1; fi
+  done
   for u in agent-runner-net.service agent-runner-key-renew.timer; do
     printf 'info   host %s: %s\n' "$u" "$(systemctl is-enabled "$u" 2>&1 || true)"
   done
@@ -96,7 +113,22 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
   done
   [[ -n "$dry" ]] && return 0
   if [[ "$target" == host ]]; then systemctl daemon-reload; pve-firewall compile >/dev/null && echo "pve-firewall compiles"
-  else vm "OPENCODE_CONFIG=/etc/agent-runner/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"; fi
+  else vm "OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json opencode debug config >/dev/null && echo 'opencode profile validates'"; fi
+}
+
+setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
+  local steps=(
+    "id agent >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agent"
+    "sudo install -d -o root -g runner -m 0750 /var/lib/agent-results"
+    "sudo install -d -o root -g root -m 0755 /etc/agent-runner-agent"
+    "sudo chown root:runner /etc/agent-runner && sudo chmod 0750 /etc/agent-runner"
+    "sudo chmod 0700 /home/runner"
+    "sudo rm -f /etc/agent-runner/opencode.json"
+  )
+  local s
+  for s in "${steps[@]}"; do
+    if [[ -n "${1:-}" ]]; then echo "would run on VM: $s"; else vm "$s" && echo "ok: $s"; fi
+  done
 }
 
 cmd="${1:-}"; shift || true
@@ -105,5 +137,7 @@ case "$cmd" in
   diff) do_diff ;;
   install-host) do_install host "${1:-}" ;;
   install-vm) vm true || die "cannot reach $VM with $KEY"; do_install vm "${1:-}" ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  setup-sandbox) vm true || die "cannot reach $VM with $KEY"; setup_sandbox "${1:-}" ;;
+  probe) vm "bash -s -- '${1:-SDG-ARMA3}'" < "$F/agent-runner-probes.sh" ;;
+  *) sed -n '2,16p' "$0"; exit 2 ;;
 esac
