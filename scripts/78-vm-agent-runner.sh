@@ -256,7 +256,7 @@ seed_umod() {   # $1 = dir of <sha1>.cs files (copied from a workstation's raida
   # so the cache is seeded here. Every file must hash to its own name and be named by a plugins.lock on origin.
   local src="${1:?seed-umod needs the directory holding the <sha1>.cs files}" dry="${2:-}" f h n=0 lock
   local clone=/home/runner/work/SDG-RUST
-  lock=$(vm "cd $clone && for r in \$(git for-each-ref --format='%(refname)' refs/remotes/origin); do git show \$r:plugins.lock 2>/dev/null; done" | grep -oE '[0-9a-f]{40}' | sort -u)
+  lock=$(vm "cd $clone && for r in \$(git for-each-ref --format='%(refname)' refs/remotes/origin); do git show \$r:plugins.lock 2>/dev/null; done; true" | grep -oE '[0-9a-f]{40}' | sort -u)
   [[ -n "$lock" ]] || die "no plugins.lock hashes found in $clone"
   for f in "$src"/*.cs; do
     [[ -e "$f" ]] || die "no .cs files in $src"
