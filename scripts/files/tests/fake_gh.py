@@ -46,10 +46,19 @@ def main(argv):
             num = args[0]
             issue = st["issues"][f"{repo}#{num}"]
             if sub == "edit":
+                # FAKE_GH_EDIT_FAIL=N: the first N edits apply only their removals and then fail, as GitHub's
+                # GraphQL "Something went wrong" did on SDG-ARMA3#1 (2026-10-30).
+                failing = st.get("edit_failures", 0) < int(os.environ.get("FAKE_GH_EDIT_FAIL", "0"))
                 for group in opt(args, "--remove-label", multi=True):
                     for n in group.split(","):
                         if n in issue["labels"]:
                             issue["labels"].remove(n)
+                if failing:
+                    st["edit_failures"] = st.get("edit_failures", 0) + 1
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(st, f)
+                    print("GraphQL: Something went wrong while executing your query.", file=sys.stderr)
+                    return 1
                 for group in opt(args, "--add-label", multi=True):
                     for n in group.split(","):
                         if n not in issue["labels"]:

@@ -64,6 +64,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_GH", gh_cmd)
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("DISPATCH_RETRY_SLEEP_S", "0")
+    monkeypatch.delenv("FAKE_GH_EDIT_FAIL", raising=False)
     secret = tmp_path / "router.key"
     secret.write_text("rk_live_" + "Q" * 30 + "\n")        # not hex, not a gh token: only a literal match catches it
     monkeypatch.setenv("FAKE_SECRET_FILE", str(secret))
@@ -442,3 +444,42 @@ def test_dispatch_unit_allows_sudo_and_orders_after_the_egress_table():
     assert not any(l.startswith("NoNewPrivileges") for l in live)
     after = next(l for l in live if l.startswith("After="))
     assert "agent-runner-egress.service" in after
+
+
+def test_partial_label_edit_failure_is_retried_and_ends_runner_done(env, monkeypatch):
+    # SDG-ARMA3#1, 2026-10-30: GitHub removed runner:running, then failed before adding runner:done; the
+    # dispatcher crashed and left the issue with no runner:* label at all.
+    env.add_issue(7)
+    # the claim succeeds; the finishing edit then fails once, after applying its removal
+    real = d.relabel
+    calls = {"n": 0}
+
+    def flaky(c, repo, num, remove=(), add=()):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "1")
+        return real(c, repo, num, remove=remove, add=add)
+    monkeypatch.setattr(d, "relabel", flaky)
+    assert env.run() == 0
+    labels = env.issue(7)["labels"]
+    assert "runner:done" in labels and "runner:running" not in labels
+    assert len(reports(env.issue(7))) == 1
+
+
+def test_label_edit_that_keeps_failing_still_raises(env, monkeypatch):
+    env.add_issue(7)
+    c = d.cfg()
+    monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "99")
+    with pytest.raises(RuntimeError):
+        d.relabel(c, REPO, 7, remove=["runner:ready"], add=["runner:running"])
+    edits = [a for a in json.loads(env.state.read_text())["calls"] if a[:2] == ["issue", "edit"]]
+    assert len(edits) == d.RELABEL_TRIES
+
+
+def test_relabel_retry_sends_only_what_is_still_missing(env, monkeypatch):
+    env.add_issue(7, labels=("runner:running", "kind:check", "tier:a"))
+    monkeypatch.setenv("FAKE_GH_EDIT_FAIL", "1")
+    d.relabel(d.cfg(), REPO, 7, remove=["runner:running"], add=["runner:done"])
+    assert env.issue(7)["labels"] == ["kind:check", "tier:a", "runner:done"]
+    edits = [a for a in json.loads(env.state.read_text())["calls"] if a[:2] == ["issue", "edit"]]
+    assert "--remove-label" not in edits[-1] and edits[-1][-2:] == ["--add-label", "runner:done"]
