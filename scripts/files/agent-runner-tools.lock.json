@@ -1,0 +1,11 @@
+{
+  "_comment": "Pinned task tools on VM 178, installed by `78-vm-agent-runner.sh install-tools` (download + verify on the Proxmox host; the VM has no general egress). sqfvm mirrors SDG-ARMA3 tools/lab/tools.lock.json (branch feat/runner-lab-access); the install path is the one `a3 lint` expects. member is the full path inside the zip (SDG-ARMA3's lock gives only its basename).",
+  "sqfvm": {
+    "version": "2026.04.03",
+    "url": "https://github.com/SQFvm/runtime/releases/download/v2026.04.03-ed9f5f5/sqfvm_linux_x64_gcc.zip",
+    "sha256": "bb4e3bb415305d2ef2c4cdb75e98f442baea3a4575887c6570a11435a780615b",
+    "member": "sqfvm_linux_x64_gcc/sqfvm",
+    "member_sha256": "fdb10bd59226d43fadc90532e293fc0ae5978ec2065fb78cba52e62be9b97c7b",
+    "install_path": "/opt/sdg-tools/sqfvm/2026.04.03/sqfvm"
+  }
+}

@@ -9,6 +9,9 @@
 #   install-vm   [--dry-run]   install the VM files (agent-run wrapper, locked opencode profile) over the admin key
 #   setup-sandbox [--dry-run]  create the unprivileged `agent` user and the sandbox dirs on the VM (idempotent),
 #                              remove the old /etc/agent-runner/opencode.json (the profile moved out of that dir)
+#   install-tools [--dry-run]  install the task tools on the VM (idempotent): the debs in VM_DEBS (apt-get download
+#                              on the host, dpkg -i on the VM -- it has no apt mirror) and the pinned binaries in
+#                              files/agent-runner-tools.lock.json (downloaded + sha256-checked on the host). No egress change.
 #   probe [REPO]               run scripts/files/agent-runner-probes.sh on the VM: the sandbox's walls, shell + agent
 #
 # Not managed here (not files, or not this repo's): VM creation itself (see docs/agent-runner.md for the qm settings),
@@ -55,6 +58,10 @@ SANDBOX_CHECKS=(
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
   "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
 )
+# Debian packages the tasks need on the VM (install-tools; host and VM are both trixie). python-is-python3:
+# SDG-ARMA3#1 checks /usr/bin/python as a precondition.
+VM_DEBS=(nftables python-is-python3)
+TOOLS_LOCK="$F/agent-runner-tools.lock.json"
 # Lines that must be present in /etc/network/interfaces (checked, never written).
 IFACE_LINES=(
   $'\taddress 192.168.6.78/24'
@@ -109,6 +116,16 @@ do_diff() {
     if vm "${s#*|}" 2>/dev/null; then printf 'ok     vm   %s\n' "${s%%|*}"
     else printf 'DRIFT  vm   %s\n' "${s%%|*}"; drift=1; fi
   done
+  local p
+  for p in "${VM_DEBS[@]}"; do
+    if vm "$(deb_installed_cmd "$p")"; then printf 'ok     vm   deb %s installed\n' "$p"
+    else printf 'DRIFT  vm   deb %s not installed (install-tools)\n' "$p"; drift=1; fi
+  done
+  local ver url zsha member msha dst
+  read -r ver url zsha member msha dst <<<"$(lock_sqfvm)"
+  if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1; stat -c '%U:%G %a' '$dst' 2>/dev/null")" == "$msha"$'\n'"root:root 755" ]]
+  then printf 'ok     vm   sqfvm %s at %s (sha256 + root:root 755)\n' "$ver" "$dst"
+  else printf 'DRIFT  vm   sqfvm %s missing or not the pinned build at %s (install-tools)\n' "$ver" "$dst"; drift=1; fi
   for u in agent-runner-net.service agent-runner-key-renew.timer; do
     printf 'info   host %s: %s\n' "$u" "$(systemctl is-enabled "$u" 2>&1 || true)"
   done
@@ -180,6 +197,45 @@ setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
   done
 }
 
+deb_installed_cmd() { echo "dpkg-query -W -f='\${Status}' '$1' 2>/dev/null | grep -qx 'install ok installed'"; }
+lock_sqfvm() {   # -> "version url sha256 member member_sha256 install_path"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["sqfvm"]
+print(*(d[k] for k in ("version","url","sha256","member","member_sha256","install_path")))' "$TOOLS_LOCK"
+}
+
+install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifies on the host, never on the VM.
+  local dry="${1:-}" p need=() t
+  for p in "${VM_DEBS[@]}"; do vm "$(deb_installed_cmd "$p")" || need+=("$p"); done
+  if (( ${#need[@]} )); then
+    if [[ -n "$dry" ]]; then echo "would install debs: ${need[*]}"
+    else
+      # apt-get download verifies against the host's signed index; the VM installs exactly those files
+      t=$(mktemp -d); chmod 755 "$t"   # so apt's sandbox user (_apt) can write the download
+      (cd "$t" && apt-get download -q "${need[@]}")
+      tar -C "$t" -cf - . | vm 'set -e; d=$(mktemp -d); tar -C "$d" -xf -; sudo dpkg -i "$d"/*.deb >/dev/null; rm -rf "$d"'
+      rm -rf "$t"; echo "installed debs: ${need[*]}"
+    fi
+  else echo "ok: debs ${VM_DEBS[*]} already installed"; fi
+
+  local ver url zsha member msha dst
+  read -r ver url zsha member msha dst <<<"$(lock_sqfvm)"
+  if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1")" == "$msha" ]]; then echo "ok: sqfvm $ver already at $dst"
+  elif [[ -n "$dry" ]]; then echo "would install sqfvm $ver -> $dst"
+  else
+    t=$(mktemp -d)
+    curl -fsSL --retry 2 -o "$t/sqfvm.zip" "$url"
+    echo "$zsha  $t/sqfvm.zip" | sha256sum -c --quiet || { rm -rf "$t"; die "sqfvm zip sha256 mismatch"; }
+    # extract ONE named member, by name, to a fixed path (no path from the archive is used)
+    python3 -I -c 'import sys,zipfile; open(sys.argv[3],"wb").write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
+      "$t/sqfvm.zip" "$member" "$t/sqfvm.bin"
+    echo "$msha  $t/sqfvm.bin" | sha256sum -c --quiet || { rm -rf "$t"; die "sqfvm binary sha256 mismatch"; }
+    base64 -w0 "$t/sqfvm.bin" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m 755 -o root -g root \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
+    rm -rf "$t"; echo "installed sqfvm $ver -> $dst (zip + binary sha256 verified)"
+  fi
+  [[ -n "$dry" ]] && return 0
+  vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version 2>&1 | head -3" || die "sqfvm does not run on the VM"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   manifest) for e in "${MANIFEST[@]}"; do printf '%-4s %-34s -> %-52s %s %s\n' "$(field "$e" 1)" "$(field "$e" 2)" "$(field "$e" 3)" "$(field "$e" 4)" "$(field "$e" 5)"; done ;;
@@ -187,6 +243,7 @@ case "$cmd" in
   install-host) do_install host "${1:-}" ;;
   install-vm) vm true || die "cannot reach $VM with $KEY"; do_install vm "${1:-}" ;;
   setup-sandbox) vm true || die "cannot reach $VM with $KEY"; setup_sandbox "${1:-}" ;;
+  install-tools) vm true || die "cannot reach $VM with $KEY"; install_tools "${1:-}" ;;
   probe) vm "bash -s -- '${1:-SDG-ARMA3}'" < "$F/agent-runner-probes.sh" ;;
-  *) sed -n '2,16p' "$0"; exit 2 ;;
+  *) sed -n '2,19p' "$0"; exit 2 ;;
 esac

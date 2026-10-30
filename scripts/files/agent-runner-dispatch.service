@@ -1,7 +1,7 @@
 [Unit]
 Description=Agent runner work-queue dispatcher (one runner:ready GitHub issue per run)
 Documentation=https://github.com/mavlite/local-gpu-cluster/blob/main/docs/agent-runner-dispatcher.md
-After=network-online.target
+After=network-online.target agent-runner-egress.service
 Wants=network-online.target
 
 [Service]
@@ -13,5 +13,7 @@ ExecStart=/usr/bin/python3 /usr/local/lib/agent-runner-dispatch/agent_runner_dis
 # A task may run up to the dispatcher's 12 h cap; leave room for the claim, checkout and report.
 TimeoutStartSec=13h
 Nice=5
-NoNewPrivileges=yes
+# No NoNewPrivileges here: agent-run needs sudo (results dir, env file, nft check, systemd-run as the repo's
+# sandbox user). With NoNewPrivileges=yes every sudo failed, so the preflight read "not ready" forever
+# (2026-10-30). runner has full sudo either way; the AGENT's unit is the one with NoNewPrivileges.
 PrivateTmp=yes

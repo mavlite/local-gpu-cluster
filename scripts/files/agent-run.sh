@@ -15,8 +15,16 @@
 #
 # Probe mode (runner only, for testing the walls): AGENT_RUN_SHELL=1 agent-run DIR 'shell command' runs
 # /bin/bash -c in the identical sandbox instead of opencode.
+#
+# Preflight: `agent-run --preflight DIR` runs only the readiness checks below (the repo's sandbox entry and the
+# nft table) and exits 0, so the dispatcher can check BEFORE it claims an issue. Exit 76 = the sandbox is not
+# ready; nothing ran, and the caller leaves (or puts back) the task as runner:ready.
 set -euo pipefail
-dir=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; msg=${2:?usage: agent-run DIR MESSAGE [ARGS...]}; shift 2
+EXIT_NOT_READY=76
+preflight=0
+if [[ "${1:-}" == --preflight ]]; then preflight=1; shift; fi
+dir=${1:?usage: agent-run [--preflight] DIR MESSAGE [ARGS...]}; shift
+if [[ "$preflight" == 0 ]]; then msg=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; shift; fi
 dir=$(realpath -e "$dir")
 case "$dir" in /home/runner/work/?*) ;; *) echo "agent-run: DIR must be a checkout under /home/runner/work" >&2; exit 2 ;; esac
 name=$(basename "$dir")
@@ -25,11 +33,24 @@ name=$(basename "$dir")
 # A repo without an entry does not run; neither does any task while the nft table is missing (fail closed).
 EG=/usr/local/lib/agent-runner/agent_runner_egress.py
 EGCONF=/etc/agent-runner-agent/egress.conf
-user=$(python3 "$EG" --conf "$EGCONF" user "$name") || { echo "agent-run: no sandbox entry for $name in $EGCONF" >&2; exit 2; }
+user=$(python3 "$EG" --conf "$EGCONF" user "$name") || {
+  echo "agent-run: no sandbox entry for $name in $EGCONF" >&2; exit "$EXIT_NOT_READY"; }
 read -ra ipallow <<<"$(python3 "$EG" --conf "$EGCONF" ip-allow "$name")"
+# Every step below needs sudo; say so plainly instead of misreporting the egress table as missing.
+if ! sudo -n true 2>/dev/null; then
+  echo "agent-run: sudo is not usable for $(id -un) here (NoNewPrivileges on the calling unit?); not ready" >&2
+  exit "$EXIT_NOT_READY"
+fi
 if ! sudo /usr/sbin/nft list table inet agent_egress >/dev/null 2>&1; then
   echo "agent-run: nftables table inet agent_egress is not loaded (agent-runner-egress.service); refusing to start" >&2
-  exit 2
+  exit "$EXIT_NOT_READY"
+fi
+if [[ "$preflight" == 1 ]]; then
+  # A REAL no-op sandbox start on exactly the task path (sudo, the env file, systemd-run with every property
+  # below) running /bin/true, so "ready" means a task would actually start. The table check alone passed while
+  # the dispatcher's own unit (NoNewPrivileges=yes) made every sudo fail (2026-10-30).
+  AGENT_RUN_SHELL=1; msg=/bin/true
+  AGENT_RESULTS_DIR=/var/lib/agent-results/.preflight-${name}-$$
 fi
 
 if [[ "${AGENT_RUN_SHELL:-}" == 1 ]]; then
@@ -101,7 +122,14 @@ props=(
   --setenv=OPENCODE_DISABLE_CLAUDE_CODE=1 --setenv=OPENCODE_DISABLE_EXTERNAL_SKILLS=1
   --setenv=OPENCODE_DISABLE_AUTOUPDATE=1 --setenv=OPENCODE_DISABLE_MODELS_FETCH=1 --setenv=OPENCODE_DISABLE_SHARE=1
 )
-if [[ "$model" == none ]]; then
+if [[ "$preflight" == 1 ]]; then
+  rc=0
+  sudo systemd-run "${props[@]}" /bin/true </dev/null || rc=$?
+  sudo rm -rf "$results"
+  if [[ $rc -ne 0 ]]; then echo "agent-run: no-op sandbox start failed (systemd-run exit $rc)" >&2; exit "$EXIT_NOT_READY"; fi
+  echo "agent-run: preflight ok ($name runs as $user; agent_egress loaded; no-op sandbox start succeeded)"
+  exit 0
+elif [[ "$model" == none ]]; then
   sudo systemd-run "${props[@]}" /bin/bash -c "$msg" </dev/null
 else
   sudo systemd-run "${props[@]}" /usr/local/bin/opencode run --pure --agent lab-runner --model "$model" \
