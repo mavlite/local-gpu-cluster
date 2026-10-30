@@ -145,10 +145,20 @@ agent. **2026-10-30: 18/18 passed.**
 
 **Residual risks, by design:**
 - **Secrets the agent can read:** the router key, and for SDG-RUST the `SDG_PTERO_*` values. The agent needs
-  them, and its processes can read them. Since 2026-10-30 the sandbox can reach only the router, so it cannot
-  send them anywhere directly. What remains is the agent writing a secret into its printed report or into
-  `/results`: the dispatcher strips their literal values from anything it posts, and `/results` stays on the
-  VM. A loopback proxy holding the router key would take that key out of the agent's reach entirely.
+  them, and its processes can read them. The sandbox can reach only the router and its repo's own lab endpoints
+  (`egress.conf`), so it cannot send them anywhere outside. What remains is the agent writing a secret into its
+  printed report, into `/results`, or onto a lab server it can reach: the dispatcher strips their literal values
+  from anything it posts, and `/results` stays on the VM.
+- **Accepted risk: the router key stays in the agent's environment** (owner decision 2026-10-30). A loopback
+  proxy that holds the key was considered and rejected; the gain does not pay for a new service on every task's
+  path.
+  - **Why the key is low-value:** it is scoped to the two local qwen aliases on one chat slot. It cannot swap
+    profiles or call Claude, it expires every 14 days (renewed automatically), and revoking it is one
+    `router-keys` command.
+  - **Why a leak is hard to use:** the router is reachable only from the LAN, so using a leaked key needs a
+    foothold there, which is worth far more than the key.
+  - **Revisit only if** the key gains broader rights: owner scope, a `claude-*` alias, or the right to swap
+    profiles.
 - **`ssh panel` from SDG-ARMA3 tasks only, through an ssh-agent (2026-10-30).** The panel key stays in runner's
   `~/.ssh`, and sandbox users can't read it. Here is how a task uses it:
   - **The agent:** `agent-runner-panel-agent.service` runs `ssh-agent` **as agent-arma** with its socket at
