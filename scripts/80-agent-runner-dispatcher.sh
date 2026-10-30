@@ -66,7 +66,7 @@ case "$cmd" in
         rc=0; sudo systemctl start agent-runner-dispatch.service || rc=$?
         inv=$(systemctl show -p InvocationID --value agent-runner-dispatch.service)
         sudo rm -f "$d/selftest.conf"; sudo systemctl daemon-reload
-        journalctl _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat | grep -E "selftest|preflight|not ready|sudo"
+        journalctl _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat | grep -E "^(agent-runner-dispatch|agent-run):"
         echo "selftest via agent-runner-dispatch.service: $([ $rc -eq 0 ] && echo PASS || echo "FAIL (rc=$rc)")"
         exit $rc'
     ;;
