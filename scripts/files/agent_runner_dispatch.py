@@ -275,7 +275,7 @@ def preamble(repo, num, ref, started, model):
     return f"""You are the lab runner for {repo} issue #{num}. Execute the task below exactly.
 
 Rules:
-- The current directory is the checkout at {ref}. It is READ-ONLY. Run only the commands in Steps, in order.
+- The current directory is the checkout at {ref}. It is mounted read-only. Run only the commands in Steps, in order.
 - Write every log, result or artifact under /results (writable, kept after the run); use /tmp for scratch.
 - Check every Precondition first; if one fails, or anything happens that Steps do not cover, stop and report BLOCKED.
 - You have no GitHub access. Do not post, comment, push or change labels: the dispatcher posts your report.
