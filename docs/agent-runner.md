@@ -100,6 +100,7 @@ now the kernel, not the allowlist:
 | `systemd-run` per task | `ProtectSystem=strict`, `ProtectHome=tmpfs` (all of `/home` hidden), `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`, an empty capability set, `RuntimeMaxSec` = the task's limit |
 | Filesystem view | The checkout is **read-only** at `/work/<repo>`. The writable per-task `/results` is `/var/lib/agent-results/<repo>-<issue>-<UTC>` (root:runner 750 parent), plus private `/tmp`. `/etc/agent-runner` and `/run/agent-runner` are inaccessible |
 | Secrets | No GitHub credentials at all: an empty `GH_CONFIG_DIR`, the token stays in `/etc/agent-runner` (root:runner 750). The router key arrives through a root-only `EnvironmentFile` that systemd reads before dropping to `agent`; it is deleted after the run |
+| Per-repo lab secrets | The same `EnvironmentFile`, **for that repo's tasks only**, from a table in `agent-run` (`REPO_ENV_FILE` / `REPO_ENV_PREFIX`). Today: SDG-RUST ← `/etc/agent-runner/ptero-156.env` (root:runner 640; `SDG_PTERO_SFTP_USER`, `SDG_PTERO_SFTP_PASSWORD`, `SDG_PTERO_API_KEY` for the Rust test server 156 subuser). SDG-ARMA3 gets none. A file with any line that is not `PREFIX_*=value` (or a comment or blank) is refused, so it cannot inject `LD_PRELOAD`, `PATH` and the like. The dispatcher strips each value literally (values of 8+ characters) from anything it posts |
 | Reporting | The agent **prints** its report block. The dispatcher (`runner`) takes it from the event log, removes the literal secret values plus token patterns, posts it, and edits the labels |
 
 `scripts/78-vm-agent-runner.sh probe` proves the walls: a shell in the identical sandbox, then a real opencode
@@ -179,7 +180,10 @@ From the infra summary's section 10, tracked here.
 - [ ] **VPN client certificate `agent-runner`** expires around **2027-11** (397 days from 2026-10-30). Renew
   through SDG-IAC.
 - [ ] **Lab secrets** for playbooks (RCON passwords, panel API keys): the owner provisions them into
-  `/etc/agent-runner/`, root:runner 640, once the Rust and Arma sessions say which they need.
+  `/etc/agent-runner/`, root:runner 640, once the Rust and Arma sessions say which they need. Each new file
+  also needs a row in `agent-run`'s `REPO_ENV_FILE` table, and its path in the dispatcher's
+  `DISPATCH_SECRET_FILES` defaults so its values get redacted.
+  - [x] **2026-10-30:** `ptero-156.env` (SDG_PTERO_*) for SDG-RUST, wired in and probed.
 - [ ] **Network openings beyond the panel:** SDG-IAC adds them on request, from a host:port list from each game
   repo.
 - [ ] **All game testing is halted** by the owner as of 2026-10-30 ~12:00Z. No task that touches a server runs
