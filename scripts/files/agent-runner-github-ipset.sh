@@ -4,7 +4,8 @@
 # from agent-runner-github-ipset.timer (daily). The VM may reach GitHub on 443 ONLY through this set; the agent's
 # own sandbox cannot reach GitHub at all (agent-run: IPAddressAllow=router only).
 #
-# Safe by construction: the [IPSET github] header must exist exactly once and be the LAST section; entries are
+# Safe by construction: the [IPSET github] header must exist exactly once (PVE requires it BEFORE [RULES], which
+# reference it); only the lines between it and the next section are replaced; entries are
 # validated with Python's ipaddress module; fewer than MIN_ENTRIES aborts (a broken fetch never empties the set);
 # the new file must pass `pve-firewall compile` or the old one is put back.
 set -euo pipefail
@@ -38,12 +39,14 @@ old = open(old_p).read()
 header = "[IPSET github]\n"
 if old.count(header) != 1:
     sys.exit("expected exactly one '[IPSET github]' header in the firewall file")
-head, tail = old.split(header, 1)
-if any(l.lstrip().startswith("[") for l in tail.splitlines()):
-    sys.exit("[IPSET github] must be the last section of the firewall file")
-body = "# api.github.com/meta api+git+web IPv4, refreshed by agent-runner-github-ipset.sh\n"
-body += "".join(f"{n}\n" for n in nets)
-open(new_p, "w").write(head + header + body)
+head, rest = old.split(header, 1)
+lines = rest.splitlines(keepends=True)
+cut = next((i for i, l in enumerate(lines) if l.lstrip().startswith("[")), len(lines))
+block, after = lines[:cut], "".join(lines[cut:])
+comments = [l for l in block if l.lstrip().startswith("#")] or \
+    ["# api.github.com/meta api+git+web IPv4, refreshed by agent-runner-github-ipset.sh\n"]
+body = "".join(comments) + "".join(f"{n}\n" for n in nets) + ("\n" if after else "")
+open(new_p, "w").write(head + header + body + after)
 print(f"{len(nets)} ranges")
 PY
 
@@ -55,4 +58,4 @@ if ! $PVE_COMPILE_CMD >/dev/null 2>&1; then
   cp "$tmp/old.fw" "$FW_FILE"
   echo "pve-firewall compile failed with the new set; restored the previous file" >&2; exit 1
 fi
-echo "github ipset updated: $(grep -cvE '^#|^\[|^$' <(sed -n '/^\[IPSET github\]/,$p' "$FW_FILE")) ranges"
+echo "github ipset updated: $(awk '/^\[IPSET github\]$/{f=1;next} /^\[/{f=0} f&&/^[0-9]/' "$FW_FILE" | wc -l) ranges"

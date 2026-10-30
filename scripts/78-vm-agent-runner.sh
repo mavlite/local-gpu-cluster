@@ -62,10 +62,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 vm() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$VM" "$@"; }
 field() { cut -d'|' -f"$2" <<<"$1"; }
 
-# Content hash; for a .fw file only up to and including the '[IPSET github]' header (the refresher owns the rest).
+# Content hash; for a .fw file without the [IPSET github] entries, which the refresher owns. In this file only
+# set entries start with a digit (rules start IN/OUT, options are key: value), so dropping ^[0-9] lines is exact.
 HASH_CMD="sha256sum"
-FW_HASH_CMD="sed '/^\\[IPSET github\\]\$/q' | sha256sum"
-repo_sha() { if [[ "$1" == *.fw ]]; then sed '/^\[IPSET github\]$/q' "$1" | sha256sum | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
+FW_HASH_CMD="grep -vE '^[0-9]' | sha256sum"
+repo_sha() { if [[ "$1" == *.fw ]]; then grep -vE '^[0-9]' "$1" | sha256sum | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi; }
 
 live_meta() {   # where path -> "sha256 owner:group mode" or "missing"
   local where="$1" path="$2" cmd h="$HASH_CMD"
@@ -120,10 +121,13 @@ do_install() {   # $1 = host|vm, $2 = --dry-run or empty
         # Repo rules + the LIVE [IPSET github] entries, so installing never empties GitHub egress. pmxcfs fixes
         # owner/mode itself; write via a temp copy.
         local t; t=$(mktemp)
-        cat "$F/$src" > "$t"
+        local keep=""
         if [[ -e "$dst" ]] && grep -qx '\[IPSET github\]' "$dst"; then   # first install: no live set to keep
-          sed '1,/^\[IPSET github\]$/d' "$dst" | { grep -v '^#' || true; } >> "$t"
+          keep=$(awk '/^\[IPSET github\]$/{f=1;next} /^\[/{f=0} f && /^[0-9]/' "$dst")
         fi
+        # repo file, with the kept entries inserted after the set's comment line
+        awk -v keep="$keep" '{print} /^\[IPSET github\]$/{h=1;next} h && /^#/ {if (keep != "") print keep; h=0}' \
+          "$F/$src" > "$t"
         cp "$t" "$dst"; rm -f "$t"
       elif [[ "$dst" == /etc/pve/* ]]; then cp "$F/$src" "$dst"
       else install -D -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$F/$src" "$dst"; fi

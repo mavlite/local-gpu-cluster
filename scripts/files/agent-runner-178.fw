@@ -6,6 +6,9 @@ dhcp: 0
 ndp: 0
 macfilter: 1
 
+[IPSET github]
+# api.github.com/meta api+git+web IPv4, refreshed by agent-runner-github-ipset.sh (must precede [RULES])
+
 [RULES]
 IN ACCEPT -source 10.81.0.254 -p tcp -dport 22 # admin ssh from the host only
 OUT ACCEPT -dest 9.9.9.9 -p udp -dport 53 # DNS
@@ -15,7 +18,4 @@ OUT ACCEPT -dest 192.168.6.223 -p tcp -dport 3005 # Memory Vault
 OUT ACCEPT -dest 172.16.10.205-172.16.10.207 -p tcp -dport 8090 # CPU workers
 OUT ACCEPT -dest 10.81.0.254 -p udp -dport 123 # NTP via the host's chrony (vmbrar only)
 OUT ACCEPT -dest 38.107.232.37 -p udp -dport 1196 # OpenVPN endpoint (OPNsense Agent Runner VPN)
-OUT ACCEPT -dest +guest/github -p tcp -dport 443 # GitHub only (ipset below); no general 80/443
-
-[IPSET github]
-# api.github.com/meta api+git+web IPv4, refreshed by agent-runner-github-ipset.sh
+OUT ACCEPT -dest +guest/github -p tcp -dport 443 # GitHub only (ipset above); no general 80/443
