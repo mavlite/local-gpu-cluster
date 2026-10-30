@@ -47,8 +47,8 @@ def test_writes_sorted_unique_ipv4_from_api_git_web_only(tmp_path):
     r, f = run(tmp_path)
     assert r.returncode == 0, r.stderr
     got = [e for e in entries(f.read_text()) if not e.startswith("#")]
-    assert got == ["140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22", "20.201.28.151", "4.208.26.197"] \
-        or got == sorted(set(got)), got
+    # collapsed, de-duplicated, numeric order
+    assert got == ["4.208.26.197/32", "20.201.28.151/32", "140.82.112.0/20", "185.199.108.0/22", "192.30.252.0/22"], got
     assert "13.64.0.0/16" not in f.read_text() and "2a0a" not in f.read_text()
     assert f.read_text().startswith(BASE)
 
