@@ -1,0 +1,24 @@
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: DROP
+dhcp: 0
+ndp: 0
+macfilter: 1
+
+[RULES]
+IN ACCEPT -source 10.81.0.254 -p tcp -dport 22
+OUT ACCEPT -dest 9.9.9.9 -p udp -dport 53
+OUT ACCEPT -dest 9.9.9.9 -p tcp -dport 53
+OUT ACCEPT -dest 192.168.6.153 -p tcp -dport 8000
+OUT ACCEPT -dest 192.168.6.223 -p tcp -dport 3005
+OUT ACCEPT -dest 172.16.10.205-172.16.10.207 -p tcp -dport 8090
+OUT DROP -dest 10.0.0.0/8
+OUT DROP -dest 172.16.0.0/12
+OUT DROP -dest 192.168.0.0/16
+OUT DROP -dest 100.64.0.0/10
+OUT DROP -dest 169.254.0.0/16
+OUT ACCEPT -p tcp -dport 443
+OUT ACCEPT -p tcp -dport 80
+OUT ACCEPT -p udp -dport 123
+OUT ACCEPT -p udp -dport 1196

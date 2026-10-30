@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent runner SNAT identity (10.81.0.0/24 -> 192.168.6.78 on vmbr0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/agent-runner-net.sh add
+ExecStop=/usr/local/sbin/agent-runner-net.sh del
+
+[Install]
+WantedBy=multi-user.target
