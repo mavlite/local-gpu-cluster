@@ -67,6 +67,7 @@ def cfg():
         "agent": shlex.split(os.environ.get("DISPATCH_AGENT_RUN", "agent-run")),
         "max_timeout_s": int(os.environ.get("DISPATCH_MAX_TIMEOUT_S", str(MAX_TIMEOUT_MIN * 60))),
         "results_root": os.environ.get("DISPATCH_RESULTS_ROOT", "/var/lib/agent-results"),
+        "retry_sleep_s": float(os.environ.get("DISPATCH_RETRY_SLEEP_S", "5")),
         "secret_files": [p for p in os.environ.get(
             "DISPATCH_SECRET_FILES",
             "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env").split(",") if p],
@@ -255,13 +256,38 @@ def comment(c, repo, num, text):
     gh(c, "issue", "comment", str(num), "-R", repo, "--body", redact(text)[:COMMENT_MAX])
 
 
+RELABEL_TRIES = 4
+
+
 def relabel(c, repo, num, remove=(), add=()):
-    args = ["issue", "edit", str(num), "-R", repo]
-    if remove:
-        args += ["--remove-label", ",".join(remove)]
-    if add:
-        args += ["--add-label", ",".join(add)]
-    gh(c, *args)
+    """GitHub can apply part of a label edit and then fail (GraphQL "Something went wrong": SDG-ARMA3#1 lost
+    runner:running but never got runner:done, 2026-10-30). Retry with backoff; before each retry read the labels
+    back and send only what is still missing. Raises if the last try fails."""
+    remove, add = list(remove), list(add)
+    for attempt in range(1, RELABEL_TRIES + 1):
+        args = ["issue", "edit", str(num), "-R", repo]
+        if remove:
+            args += ["--remove-label", ",".join(remove)]
+        if add:
+            args += ["--add-label", ",".join(add)]
+        try:
+            gh(c, *args)
+            return
+        except RuntimeError as e:
+            if attempt == RELABEL_TRIES:
+                raise
+            log(f"{repo}#{num}: label edit failed (try {attempt}/{RELABEL_TRIES}), retrying: {e}")
+        time.sleep(c["retry_sleep_s"] * attempt)
+        try:
+            view = json.loads(gh(c, "issue", "view", str(num), "-R", repo, "--json", "labels"))
+            have = {lab["name"] for lab in view["labels"]}
+        except (RuntimeError, ValueError, KeyError) as e:
+            log(f"{repo}#{num}: could not read labels back ({e}); resending the whole edit")
+            continue
+        remove = [lab for lab in remove if lab in have]
+        add = [lab for lab in add if lab not in have]
+        if not remove and not add:
+            return
 
 
 def lane_model(c):
