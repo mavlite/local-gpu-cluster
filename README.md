@@ -23,6 +23,7 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 | 154 `anythingllm` | Docker host running AnythingLLM | `anythingllm` (3001) | 192.168.6.154 |
 | 155 `mcp-stack` | Docker host for MCP servers + Python MCP bridge | `mcp-sdg.service` (port 3004) exposes `sdg-documentation` + `vcf-reference` workspaces via SSE; Docker compose stack optional | 192.168.6.155 |
 | 156 `memory-vault` | Shared persistent memory (Postgres 16/pgvector + dashboard) | `memory-vault` (8000, LAN) + `memory-vault-bridge` (3005, MCP Streamable HTTP at `/mcp`) | 192.168.6.223 (DHCP) |
+| VM 178 `agent-runner` | Headless agent host: local Qwen agents (opencode) run lab playbooks from GitHub issues in SDG-RUST / SDG-ARMA3; a 5-minute dispatcher timer claims `runner:ready` issues. Isolated bridge `vmbrar`, PVE firewall default-DROP, scoped router key (one chat lane slot) | `agent-runner-dispatch.timer`, `agent-run` wrapper; OpenVPN to the SDG panel only | 10.81.0.10 (egress 192.168.6.78) |
 | host | Host services: fan-control bridge (V620 shroud fans by GPU temp), cluster-monitor (dashboard + health checks, 8888), swap-webhook (router-triggered profile swaps, 9100), RAG refresh + memvault backup timers | `v620-fan-bridge.service`, `cluster-monitor.service`, `swap-webhook.service`, RAG refresh timer, memvault backup timer | 192.168.6.175 |
 
 ### Models
@@ -30,9 +31,8 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 | Service | Model | Port | Notes |
 |---|---|---|---|
 | chat (default profile `qwen3.8`) | Qwen3.8-27B (UD-Q6_K_XL, ~23.6 GB) | 8080 | DENSE 27.78B, hybrid Gated DeltaNet + Gated Attention; tensor-split `1,1` with `--split-mode tensor` (+42.8%, measured on the UD-Q4_K_XL sibling); in-GGUF MTP spec-decode `--spec-type draft-mtp` n-3 (+63.8%, measured on the UD-Q4_K_XL sibling — deployed UD-Q6_K_XL benches 43.13 t/s at the same config, `swap-chat-model.sh:225`); 256K ctx (262144); q8_0 KV; cache-reuse 1024 (auto-disabled for this arch). Decode 49.5 t/s short / 32.6 @122K; prefill 553 t/s @22K (2026-08-19, b10509, UD-Q6_K_XL). Only ONE chat profile occupies the chat slot at a time |
-| chat (alt profile `qwen3.6`) | Qwen3.6-35B-A3B (UD-Q6_K, ~29 GB) | 8080 | MoE 3B active; tensor-split 1,1.5; 256K ctx; spec-decode disabled (MoE expert-load overhead). Pivoted to Q6_K on 2026-05-27 — Q6_K captures ~99% of Q8 quality |
+| chat (alt profile `qwen3.6`) | Qwen3.6-35B-A3B MTP (UD-Q6_K_XL) | 8080 | MoE 3B active; split 1,1.3; **2 slots × 128K** since 2026-10-29 (one is the scoped-key lane for the agent runner); in-GGUF MTP `draft-mtp` n3 (~120 t/s single stream); vision projector on ROCm0 |
 | chat (alt profile `qwen3.6-fast`) | Qwen3.6-35B-A3B (UD-Q4_K_M, ~22 GB) | 8080 | throughput-prioritized; tensor-split 1,1; 256K ctx |
-| chat (alt profile `coder`) | Qwen3-Coder-Next 80B/3B-A (UD-IQ4_XS, ~38 GB) | 8080 | 128K ctx; cache-reuse 1024 (was 0 as a llama.cpp #19908 workaround; re-enabled after the b9582 regression fix — `swap-chat-model.sh:159-164`) |
 | chat (alt profile `devstral`) | Devstral Small 2 24B (Q8_0, ~25 GB) | 8080 | Mistral arch; 256K ctx; q4_0 KV (required); cache-reuse 0 |
 | chat (alt profile `devstral-large`) | Devstral 2 123B (UD-IQ2_M, ~40.6 GB) | 8080 | 64K ctx; q4_0 KV; cache-reuse 0 |
 | embed | Qwen3-Embedding-0.6B (Q8_0, 1024-dim) | 8082 | V620 #1 pinned; `--pooling last` (CRITICAL — `cls` produces wrong embeddings) |
@@ -87,6 +87,7 @@ The AnythingLLM `/workspace/{slug}` REST endpoint returns ~2 rows per underlying
 | [`local-gpu-cluster-v2.md`](./local-gpu-cluster-v2.md) | Architecture reference. Hardware rationale, GPU passthrough strategy, LXC vs VM trade-offs. The *why*. |
 | [`docs/archive/local-gpu-cluster-reference.md`](./docs/archive/local-gpu-cluster-reference.md) | Historical v1 reference (Dell T7910 + 3× RTX 3060 + Ollama). Archived for context. |
 | [`scripts/README.md`](./scripts/README.md) | Bootstrap automation under `scripts/`. Idempotent shell+python scripts for Phases 4-11. |
+| [`docs/agent-runner.md`](./docs/agent-runner.md) | Agent runner VM 178: inventory, networking, model access, ownership, runbook and open items. Its queue: [`docs/agent-runner-dispatcher.md`](./docs/agent-runner-dispatcher.md). |
 
 ---
 
