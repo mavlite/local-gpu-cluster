@@ -65,6 +65,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
     monkeypatch.setenv("DISPATCH_RETRY_SLEEP_S", "0")
+    monkeypatch.setenv("DISPATCH_MIRROR_BRANCHES", "SDG-ARMA3:upstream")
     monkeypatch.delenv("FAKE_GH_EDIT_FAIL", raising=False)
     secret = tmp_path / "router.key"
     secret.write_text("rk_live_" + "Q" * 30 + "\n")        # not hex, not a gh token: only a literal match catches it
@@ -483,3 +484,38 @@ def test_relabel_retry_sends_only_what_is_still_missing(env, monkeypatch):
     assert env.issue(7)["labels"] == ["kind:check", "tier:a", "runner:done"]
     edits = [a for a in json.loads(env.state.read_text())["calls"] if a[:2] == ["issue", "edit"]]
     assert "--remove-label" not in edits[-1] and edits[-1][-2:] == ["--add-label", "runner:done"]
+
+
+def _commit(cwd, msg):
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", msg, cwd=cwd)
+
+
+def test_mirror_branch_is_created_and_fast_forwarded_from_origin(env):
+    # SDG-RUST#1: tools/build.py reads `upstream:plugin/...`, a LOCAL branch the clone never had; the dispatcher
+    # keeps it equal to origin/upstream on every run.
+    git("branch", "upstream", cwd=env.origin)
+    env.add_issue(7)
+    env.run()
+    clone = env.work / "SDG-ARMA3"
+    assert git("rev-parse", "upstream", cwd=clone) == git("rev-parse", "upstream", cwd=env.origin)
+    git("switch", "-q", "upstream", cwd=env.origin)
+    _commit(env.origin, "upstream moves")
+    git("switch", "-q", "main", cwd=env.origin)
+    env.add_issue(8)
+    env.run()
+    assert git("rev-parse", "upstream", cwd=clone) == git("rev-parse", "upstream", cwd=env.origin)
+    assert "runner:done" in env.issue(8)["labels"]
+
+
+def test_mirror_branch_missing_on_origin_does_not_block(env):
+    env.add_issue(7)                       # origin has no `upstream` branch at all
+    env.run()
+    assert "runner:done" in env.issue(7)["labels"]
+
+
+def test_task_on_the_mirror_branch_itself_still_runs(env):
+    git("branch", "upstream", cwd=env.origin)
+    env.add_issue(7, b=body(ref="upstream"))
+    env.run()
+    i = env.issue(7)
+    assert "runner:done" in i["labels"], reports(i)
