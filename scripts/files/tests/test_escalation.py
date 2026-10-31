@@ -445,7 +445,7 @@ def test_successful_call_strips_prices_ledgers_and_footers(broker, caplog):
     status, out = run(ask(), c, ts(2026, 10, 15, 9))
     assert status == 200
     headers, req = stub.requests[0]
-    assert req == escalation.build_request("claude-sonnet-5-5", GOOD, 2048)     # nothing but prompt + brief
+    assert req == escalation.build_request("claude-sonnet-5-5", GOOD, escalation.ANSWER_MAX_TOKENS)  # prompt + brief
     assert headers["x-api-key"] == SENTINEL_KEY and headers["anthropic-version"] == "2023-06-01"
     text = out["choices"][0]["message"]["content"]
     assert text.startswith("Root cause: X.") and "\n---\nClaude claude-sonnet-5-5: $0.006 this call" in text
@@ -459,10 +459,10 @@ def test_successful_call_strips_prices_ledgers_and_footers(broker, caplog):
     assert SENTINEL_KEY not in _json.dumps(out)
 
 
-def test_opus_alias_uses_opus_and_bigger_answer_cap(broker):
+def test_opus_alias_uses_opus_and_the_model_maximum_answer(broker):
     stub, c, _ = broker
     assert run(ask("claude-hard"), c)[0] == 200
-    assert stub.requests[0][1]["model"] == "claude-opus-5-5" and stub.requests[0][1]["max_tokens"] == 4096
+    assert stub.requests[0][1]["model"] == "claude-opus-5-5" and stub.requests[0][1]["max_tokens"] == 128000
 
 
 def test_refusals_spend_nothing_and_are_ledgered(broker, tmp_path):
@@ -560,7 +560,8 @@ def test_cut_answer_is_returned_charged_and_marked_length(broker):
 
 def test_concurrent_calls_cannot_both_pass_a_cap_only_one_fits(broker):
     stub, c, _ = broker
-    worst = escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
+    worst = escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD),
+                                  escalation.RESERVE_ANSWER_TOKENS)
     tight = escalation.load_config({"ESCALATION_PRICES": PRICES, "ESCALATION_TZ": UTC, "ANTHROPIC_URL": stub.url,
                                     "ESCALATION_LEDGER": c.ledger_path, "ANTHROPIC_API_KEY_FILE": c.key_file,
                                     "ESCALATION_DAY_CAP_USD": str(worst * 1.5)})
@@ -603,7 +604,8 @@ import httpx as _httpx  # noqa: E402,F811
 
 
 def _worst(c):
-    return escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD), 2048)
+    return escalation.worst_cost(c, "claude-sonnet-5-5", escalation.estimate_tokens(GOOD),
+                                 escalation.RESERVE_ANSWER_TOKENS)
 
 
 def _cfg(c, stub, **env):
@@ -1149,3 +1151,27 @@ def test_rejections_older_than_the_window_do_not_count(broker):
     run(ask(brief=BAD), c, t0)
     run(ask(brief=BAD), c, t0 + 60)
     assert run(ask(brief=BAD), c, t0 + 60 + 601)[1]["error"]["code"] == "brief_section"
+
+
+# --- no answer cap (owner decision 2026-10-31): the model maximum, a typical reservation, a longer timeout ---
+
+def test_every_alias_asks_for_the_model_maximum_answer():
+    assert escalation.ANSWER_MAX_TOKENS == 128000                       # Anthropic models API, both 5.5 models
+    assert all(spec["max_answer"] == escalation.ANSWER_MAX_TOKENS for spec in escalation.ALIASES.values())
+
+
+def test_opus_is_not_locked_out_by_reserving_the_full_128k(broker):
+    # Reserving 128k output at $75/Mtok would refuse every Opus call once ~$-2.6 of a $7 day were spent.
+    stub, c, tmp = broker
+    now = ts(2026, 10, 15, 9)
+    escalation.Ledger(c.ledger_path).append({"ts": now - 60, "alias": "claude-ask", "cost_usd": 5.0, "outcome": "ok"})
+    assert run(ask("claude-hard"), c, now)[0] == 200
+
+
+def test_timeout_default_allows_a_long_answer():
+    assert escalation.load_config({}).timeout_s == 900.0
+
+
+def test_system_prompt_asks_for_a_complete_detailed_answer():
+    p = escalation.SYSTEM_PROMPT
+    assert "Be concise" not in p and "detail" in p and "every" in p
