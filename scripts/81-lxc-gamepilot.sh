@@ -185,7 +185,7 @@ do_verify() {
   [[ "$r" == 200 ]] && echo "PASS  allowed  http://deb.debian.org (apt over plain HTTP)" \
     || { echo "FAIL  allowed  http://deb.debian.org -> $r"; fail=1; }
   if in_ct "$CT" sudo -u gamepilot -H sh -c 'test "$https_proxy" = http://192.168.6.155:3129'; then
-    echo "PASS  sudo -u gamepilot gets the proxy (/etc/environment via pam_env)"
+    echo "PASS  sudo -u gamepilot gets the proxy (sudoers env_file)"
   else echo "FAIL  sudo -u gamepilot has no proxy"; fail=1; fi
   # Without the proxy nothing leaves at all: not the internet, not the LAN, not the router, not the runner.
   for u in https://1.1.1.1 http://192.168.6.153:8000/healthz http://10.81.0.10:22 http://192.168.6.1; do
