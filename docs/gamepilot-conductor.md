@@ -13,7 +13,7 @@ provides. Request: #66.
 | Network | bridge `vmbrgp` 10.82.0.254/24 (in `/etc/network/interfaces`), CT at 10.82.0.10, SNAT to 192.168.6.175 (`gamepilot-net.service`) |
 | Egress | **only** the allowlisting proxy `192.168.6.155:3129` on LXC 155 (`gamepilot-proxy.service`, a second tinyproxy instance next to the redteam one on 3128) |
 | Firewall | `160.fw`: inbound DROP, outbound REJECT, one rule: tcp to 192.168.6.155:3129. No DNS, no LAN, no router, no runner (10.81) |
-| Allowlist | `github.com`, `api.github.com`, `api.anthropic.com`, `claude.ai`, `console.anthropic.com`, `deb.debian.org`, `security.debian.org` |
+| Allowlist | `github.com`, `api.github.com`, `api.anthropic.com`, `claude.ai`, `console.anthropic.com`, `platform.claude.com` (claude login, added 2026-10-31), `deb.debian.org`, `security.debian.org` |
 | Software | `python3`, `python3-yaml`, `git`, `gh` (Debian 2.23), `curl`, `sudo`; `claude` pinned in `gamepilot-tools.lock.json` at `/usr/local/bin/claude` |
 | Code | `/opt/gamepilot` = SDG-GAMEPILOT `main`, origin set to GitHub. `deploy/install.sh` was run; **the timer is not enabled** |
 
