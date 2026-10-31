@@ -1,4 +1,4 @@
 # CT 160: sudo sessions (the GamePilot runbook's `sudo -u gamepilot -H claude` login) get the allowlisting proxy.
 # Debian's sudo does not read /etc/environment by itself; env_file loads it and env_keep lets these names through.
 Defaults env_file=/etc/environment
-Defaults env_keep += "https_proxy HTTPS_PROXY http_proxy HTTP_PROXY no_proxy NO_PROXY DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+Defaults env_keep += "https_proxy HTTPS_PROXY http_proxy HTTP_PROXY no_proxy NO_PROXY DISABLE_AUTOUPDATER CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ENABLE_CLAUDEAI_MCP_SERVERS"
