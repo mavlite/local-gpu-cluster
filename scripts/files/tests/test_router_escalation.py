@@ -181,3 +181,42 @@ def test_rag_aliases_are_swap_exempt_but_interactive_mains_are_not(env):
     assert mod.is_swap_exempt("rag-qwen3.6-fast") is True
     for m in ("qwen3.8", "qwen3.8-think", "qwen3.6-think", "hemmingway", "qwen3.8-redteam", "coder"):
         assert mod.is_swap_exempt(m) is False, m
+
+
+def test_slow_stream_answer_sends_keepalives_then_the_answer(env, monkeypatch):
+    # A long Claude answer can take minutes; opencode drops a stream that is silent for 3 minutes (chunkTimeout).
+    import asyncio
+    real = env["mod"].escalation.handle
+
+    async def slow(body, cfg, now=None):
+        await asyncio.sleep(0.5)
+        return await real(body, cfg, now)
+    monkeypatch.setattr(env["mod"].escalation, "handle", slow)
+    monkeypatch.setattr(env["mod"], "ESCALATION_KEEPALIVE_S", 0.1)
+    monkeypatch.setattr(env["mod"], "ESCALATION_STREAM_GRACE_S", 0.1)
+    r = post(env, OWNER, **esc_body(stream=True))
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    events = [e for e in r.text.split("\n\n") if e]
+    assert events[0] == ": keepalive" and events[-1] == "data: [DONE]"
+    chunk = json.loads(events[-2][len("data: "):])
+    assert "Claude claude-sonnet-5-5:" in chunk["choices"][0]["delta"]["content"]
+
+
+def test_slow_stream_failure_arrives_as_an_error_event(env, monkeypatch):
+    import asyncio
+
+    async def slow_fail(body, cfg, now=None):
+        await asyncio.sleep(0.3)
+        return 424, env["mod"].escalation.error_body("upstream", "escalation: Claude did not answer")
+    monkeypatch.setattr(env["mod"].escalation, "handle", slow_fail)
+    monkeypatch.setattr(env["mod"], "ESCALATION_KEEPALIVE_S", 0.1)
+    monkeypatch.setattr(env["mod"], "ESCALATION_STREAM_GRACE_S", 0.1)
+    r = post(env, OWNER, **esc_body(stream=True))
+    events = [e for e in r.text.split("\n\n") if e]
+    err = json.loads(events[-1][len("data: "):])
+    assert err["error"]["code"] == "upstream" and "[DONE]" not in r.text
+
+
+def test_a_fast_refusal_is_still_a_plain_json_error_even_when_streaming(env):
+    r = post(env, OWNER, **esc_body(brief="no headings", stream=True))
+    assert r.status_code == 422 and r.json()["error"]["code"] in ("brief_section", "brief_loop")

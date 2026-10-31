@@ -12,10 +12,13 @@ router enforces the caps; never try to work around a refusal.
 You may call `claude-auto` on your own, under the rules below. NEVER call `claude` or `claude-hard` unless the
 user invoked /ask-claude or explicitly asked you to ask Claude in this turn.
 
-## The brief: sufficient first, small second
+## The brief: concise and sufficient; expect a detailed answer
 
 Claude sees ONLY the brief: no repo, no transcript, no tools. A brief that leaves Claude guessing wastes the call.
-Leave out irrelevant material, never relevant context. The cap is ~8K tokens for Sonnet, ~16K for Opus.
+Keep it concise: the facts Claude needs, the relevant code excerpts (not whole files), nothing else; never leave
+out relevant context. The brief cap is ~8K tokens for Sonnet, ~16K for Opus. The answer has no length cap: Claude
+is asked for a complete, detailed answer (every problem, the exact fix, how to verify), so ask the whole question
+in one brief instead of splitting it into several small calls.
 
 Use exactly these headings, copied from the template below. All are required; a section that truly does not
 apply says `n/a: <why>`. Goal, Exact error and Question can never be n/a.

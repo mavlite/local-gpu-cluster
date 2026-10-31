@@ -28,18 +28,28 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+# No answer cap (owner decision 2026-10-31): every alias asks for the model maximum. The Anthropic API requires a
+# max_tokens; 128000 is max_tokens for both claude-opus-5-5 and claude-sonnet-5-5 (models API, 2026-10-31). A 4096
+# cap cut 10 of 16 Opus reviews short, and opencode's automatic "continue" then failed the brief check.
+ANSWER_MAX_TOKENS = 128000
+# What a call reserves against the dollar caps while in flight, and what a charged failure (timeout, cancel) is
+# booked at. Reserving the full 128k (about $2.6 at Opus's $20/Mtok output price, 2026-10-31) would refuse every
+# Opus call once ~$4.4 of a $7 day was spent. The cost: a day or month cap can be overshot by one unusually long
+# answer (at most ANSWER_MAX_TOKENS - this, at the output price: about $2.2 for Opus).
+RESERVE_ANSWER_TOKENS = 16384
 ALIASES = {
-    "claude-ask": {"origin": "user", "tier": "sonnet", "max_brief": 8192, "max_answer": 2048},
-    "claude-auto": {"origin": "model", "tier": "sonnet", "max_brief": 8192, "max_answer": 2048},
-    "claude-hard": {"origin": "user", "tier": "opus", "max_brief": 16384, "max_answer": 4096},
+    "claude-ask": {"origin": "user", "tier": "sonnet", "max_brief": 8192, "max_answer": ANSWER_MAX_TOKENS},
+    "claude-auto": {"origin": "model", "tier": "sonnet", "max_brief": 8192, "max_answer": ANSWER_MAX_TOKENS},
+    "claude-hard": {"origin": "user", "tier": "opus", "max_brief": 16384, "max_answer": ANSWER_MAX_TOKENS},
 }
 SECTIONS = ("Goal", "Context", "Reproduce", "Exact error", "Code", "What was tried", "Question")
 NEVER_NA = ("Goal", "Exact error", "Question")
 SYSTEM_PROMPT = (
-    "You are a senior engineer helping a local coding model that is stuck. Answer the Question using only the "
-    "brief. Be concise: diagnosis in a few sentences, then the minimal fix as a diff or a short snippet, plus how "
-    "to verify it (the command or test to run). If the brief lacks information you need, say exactly what is "
-    "missing and stop — do not guess."
+    "You are a senior engineer helping a local coding model that is stuck; it will apply your answer itself. The "
+    "brief is deliberately concise. Answer the Question completely and in detail, using only the brief: cover every "
+    "problem you find, most severe first, and for each give the diagnosis, the exact fix as a diff or complete code, "
+    "and how to verify it (the command or test to run). Do not shorten or leave anything out for length. If the "
+    "brief lacks information you need, say exactly what is missing; answer what you can and do not guess the rest."
 )
 SYSTEM_TOKENS = 200                 # allowance for SYSTEM_PROMPT in the worst-case budget check
 ANTHROPIC_VERSION = "2023-06-01"
@@ -169,7 +179,8 @@ def load_config(env=None) -> Config:
         url=env.get("ANTHROPIC_URL", "https://api.anthropic.com/v1/messages"),
         keep_briefs=_count("ESCALATION_KEEP_BRIEFS", env.get("ESCALATION_KEEP_BRIEFS", "0")),
         briefs_dir=env.get("ESCALATION_BRIEFS_DIR", "/var/lib/llm-router/escalation-briefs"),
-        timeout_s=_seconds("ESCALATION_TIMEOUT_S", env.get("ESCALATION_TIMEOUT_S", "120"), positive=True),
+        # 15 minutes: an uncapped answer can run several minutes (2026-10-31); 120 s was sized for 4k answers.
+        timeout_s=_seconds("ESCALATION_TIMEOUT_S", env.get("ESCALATION_TIMEOUT_S", "900"), positive=True),
         retry_delay_s=_seconds("ESCALATION_RETRY_DELAY_S", env.get("ESCALATION_RETRY_DELAY_S", "2"), positive=False),
         dedupe_s=_seconds("ESCALATION_DEDUPE_S", env.get("ESCALATION_DEDUPE_S", "120"), positive=False),
     )
@@ -721,7 +732,7 @@ async def handle(body: dict, cfg: Config, now: Optional[float] = None):
     age = _duplicate_age(cfg, ledger, sha, now)
     if age is not None:
         return refuse(400, "duplicate", f"brief: identical brief already sent {_ago(age)} -- change it or wait")
-    worst = worst_cost(cfg, model, row["brief_tokens_est"], spec["max_answer"])
+    worst = worst_cost(cfg, model, row["brief_tokens_est"], min(spec["max_answer"], RESERVE_ANSWER_TOKENS))
     token, reason = ledger.reserve(cfg, alias, worst, now)
     if token is None:
         return refuse(402, "budget", reason)

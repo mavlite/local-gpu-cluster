@@ -19,8 +19,9 @@ def test_merge_adds_models_agents_commands_without_mutating_input():
     out = inst.merge_config(BASE)
     assert BASE == before
     models = out["provider"]["router"]["models"]
-    for alias, cap in (("claude-ask", 2048), ("claude-auto", 2048), ("claude-hard", 4096)):
-        assert models[alias]["tool_call"] is False and models[alias]["limit"] == {"context": 16384, "output": cap}
+    for alias in ("claude-ask", "claude-auto", "claude-hard"):
+        assert models[alias]["tool_call"] is False
+        assert models[alias]["limit"] == {"context": 200000, "output": 128000}    # no answer cap (2026-10-31)
     assert models["qwen3.8-think"] == {"name": "q"}
     agents = out["agent"]
     assert agents["claude"]["model"] == "router/claude-ask" and agents["claude"]["mode"] == "subagent"
