@@ -34,7 +34,7 @@ both allowlists.
 - Interactive shells: `/etc/profile.d`.
 - apt: `apt.conf.d`.
 
-**claude CLI settings:** `DISABLE_AUTOUPDATER=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. The binary is
+**claude CLI settings:** `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` (owner, 2026-10-31). The last turns off the claude.ai connectors on the owner's account (Gmail, Drive and so on, reached via `mcp-proxy.anthropic.com`), so triage jobs cannot reach them. That host stays off the allowlist, as does `downloads.claude.ai`. The binary is
 updated from the host; telemetry hosts are not on the allowlist.
 
 **Budget:** `claude -p` on this CT uses the Claude login of the `gamepilot` user, the owner's Max subscription. It

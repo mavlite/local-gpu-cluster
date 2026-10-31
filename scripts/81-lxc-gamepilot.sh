@@ -187,6 +187,10 @@ do_verify() {
   if in_ct "$CT" sudo -u gamepilot -H sh -c 'test "$https_proxy" = http://192.168.6.155:3129'; then
     echo "PASS  sudo -u gamepilot gets the proxy (sudoers env_file)"
   else echo "FAIL  sudo -u gamepilot has no proxy"; fail=1; fi
+  # claude.ai connectors (the owner's Gmail/Drive via mcp-proxy.anthropic.com) are off for units and sudo sessions.
+  if in_unit /bin/sh -c 'test "$ENABLE_CLAUDEAI_MCP_SERVERS" = false'      && in_ct "$CT" sudo -u gamepilot -H sh -c 'test "$ENABLE_CLAUDEAI_MCP_SERVERS" = false'; then
+    echo "PASS  claude.ai connectors off (units + sudo)"
+  else echo "FAIL  ENABLE_CLAUDEAI_MCP_SERVERS is not false everywhere"; fail=1; fi
   # Without the proxy nothing leaves at all: not the internet, not the LAN, not the router, not the runner.
   for u in https://1.1.1.1 http://192.168.6.153:8000/healthz http://10.81.0.10:22 http://192.168.6.1; do
     if in_ct "$CT" env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY curl -s -o /dev/null -m 8 "$u"
