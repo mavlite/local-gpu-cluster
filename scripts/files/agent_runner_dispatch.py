@@ -488,12 +488,17 @@ def prepare_checkout(path, branch, sha, mirrors=()):
     return f"{branch}@{head}", None
 
 
-def preamble(repo, num, ref, started, model):
+def preamble(repo, num, ref, started, model, timeout_s=DEFAULT_TIMEOUT_MIN * 60):
+    minutes = int(timeout_s // 60)
     return f"""You are the lab runner for {repo} issue #{num}. Execute the task below exactly.
 
 Rules:
 - The current directory is the checkout at {ref}. It is mounted read-only. Run only the commands in Steps, in order.
 - Write every log, result or artifact under /results (writable, kept after the run); use /tmp for scratch.
+- You have {minutes} minutes in total. The bash tool's default timeout is short: give every long command (lab runs,
+  walks, test suites) a `timeout` in milliseconds for its expected duration plus margin, at most
+  {minutes * 60000} ({minutes} minutes). If a command hits its timeout, do not run it again: stop and report
+  BLOCKED, naming the command and the timeout.
 - Check every Precondition first; if one fails, or anything happens that Steps do not cover, stop and report BLOCKED.
 - You have no GitHub access. Do not post, comment, push or change labels: the dispatcher posts your report.
 - Never write secrets or player data anywhere.
@@ -590,7 +595,7 @@ def dispatch(c, repo, issue, model):
     stamp = started.replace("-", "").replace(":", "")
     log_base = os.path.join(c["logs"], f"{name}-{num}-{stamp}")
     results_dir = os.path.join(c["results_root"], f"{name}-{num}-{stamp}")
-    message = preamble(repo, num, ref, started, model) + issue.get("body", "")
+    message = preamble(repo, num, ref, started, model, timeout_s) + issue.get("body", "")
     code = run_agent(c, os.path.join(c["work"], name), message, timeout_s, log_base, results_dir)
 
     if code == EXIT_LANE_CLOSED:
