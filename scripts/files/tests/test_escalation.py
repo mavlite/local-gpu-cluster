@@ -1161,7 +1161,7 @@ def test_every_alias_asks_for_the_model_maximum_answer():
 
 
 def test_opus_is_not_locked_out_by_reserving_the_full_128k(broker):
-    # Reserving 128k output at $75/Mtok would refuse every Opus call once ~$-2.6 of a $7 day were spent.
+    # With this test's $75/Mtok Opus price, reserving the full 128k output ($9.6) could never fit a $7 day.
     stub, c, tmp = broker
     now = ts(2026, 10, 15, 9)
     escalation.Ledger(c.ledger_path).append({"ts": now - 60, "alias": "claude-ask", "cost_usd": 5.0, "outcome": "ok"})

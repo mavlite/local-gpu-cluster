@@ -1688,6 +1688,30 @@ def _escalation_config_error():
     return JSONResponse(escalation.error_body("config", "escalation: invalid configuration"), status_code=424)
 
 
+# A streaming escalation that is still waiting on Claude after the grace period answers with SSE comment lines
+# every ESCALATION_KEEPALIVE_S until the answer is ready: opencode drops a stream that is silent for its
+# chunkTimeout (3 min), and an uncapped Claude answer can take longer. Refusals come back within the grace period,
+# so they stay plain JSON errors with their status codes.
+ESCALATION_KEEPALIVE_S = 15.0
+ESCALATION_STREAM_GRACE_S = 10.0
+
+
+def _escalation_stream(task, finish):
+    async def gen():
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=ESCALATION_KEEPALIVE_S)
+                if done:
+                    break
+                yield ": keepalive\n\n"
+            status, payload = finish(task.result())
+            yield escalation.sse(payload) if status == 200 else f"data: {json.dumps(payload)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()                           # the client left: the broker charges the cancelled call
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 async def _escalate(request: Request, principal, body: dict):
     """claude-* aliases: owner key only, answered by the escalation broker, never forwarded to llama.cpp."""
     t0 = time.monotonic()
@@ -1704,13 +1728,24 @@ async def _escalate(request: Request, principal, body: dict):
         log_access("/v1/chat/completions", model, -1, 0, int((time.monotonic() - t0) * 1000), 424, ip,
                    error="config")
         return _escalation_config_error()
-    status, payload = await escalation.handle(body, cfg)   # CancelledError propagates (spend already recorded)
-    usage = payload.get("usage") or {}
-    log_access("/v1/chat/completions", model, int(usage.get("prompt_tokens", -1)),
-               int(usage.get("completion_tokens", 0)), int((time.monotonic() - t0) * 1000), status, ip,
-               error=None if status == 200 else payload.get("error", {}).get("code"))
-    if status == 200 and body.get("stream"):
-        return StreamingResponse(iter([escalation.sse(payload)]), media_type="text/event-stream")
+    def finish(result):
+        status, payload = result
+        usage = payload.get("usage") or {}
+        log_access("/v1/chat/completions", model, int(usage.get("prompt_tokens", -1)),
+                   int(usage.get("completion_tokens", 0)), int((time.monotonic() - t0) * 1000), status, ip,
+                   error=None if status == 200 else payload.get("error", {}).get("code"))
+        return status, payload
+
+    if body.get("stream"):
+        task = asyncio.ensure_future(escalation.handle(body, cfg))
+        done, _ = await asyncio.wait({task}, timeout=ESCALATION_STREAM_GRACE_S)
+        if not done:
+            return _escalation_stream(task, finish)
+        status, payload = finish(task.result())
+        if status == 200:
+            return StreamingResponse(iter([escalation.sse(payload)]), media_type="text/event-stream")
+        return JSONResponse(payload, status_code=status)
+    status, payload = finish(await escalation.handle(body, cfg))   # CancelledError propagates (spend recorded)
     return JSONResponse(payload, status_code=status)
 
 

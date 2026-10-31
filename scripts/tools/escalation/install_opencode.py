@@ -41,11 +41,13 @@ BUDGET_TEMPLATE = ("Run this command with the bash tool and show its output verb
 def merge_config(cfg: dict) -> dict:
     out = copy.deepcopy(cfg)
     models = out.setdefault("provider", {}).setdefault("router", {}).setdefault("models", {})
-    for alias, cap in (("claude-ask", 2048), ("claude-auto", 2048), ("claude-hard", 4096)):
+    for alias in ("claude-ask", "claude-auto", "claude-hard"):
         # "tool_call" is the field opencode 1.18.35 reads on a provider model; "tools" there is ignored.
         # A display name the user set is kept; tool_call and the limits always come from here.
         name = (models.get(alias) or {}).get("name") or f"Claude via escalation broker ({alias})"
-        models[alias] = {"name": name, "tool_call": False, "limit": {"context": 16384, "output": cap}}
+        # No answer cap (2026-10-31): the broker asks Claude for up to 128000 tokens; match it so opencode does not
+        # cut the reply short itself.
+        models[alias] = {"name": name, "tool_call": False, "limit": {"context": 200000, "output": 128000}}
     agents = out.setdefault("agent", {})
     for name, alias, desc in (("claude", "claude-ask", "Claude Sonnet (user-asked); send a brief from the escalate skill"),
                               ("claude-hard", "claude-hard", "Claude Opus (user-asked, hard problems only)"),
