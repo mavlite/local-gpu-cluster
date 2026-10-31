@@ -24,7 +24,7 @@ F="$LGC_DIR/files"
 CT=160; HOSTNAME_CT=gamepilot; PROXY_CT=155
 BR=vmbrgp; BR_ADDR=10.82.0.254/24; CT_IP=10.82.0.10/24; CT_GW=10.82.0.254
 TEMPLATE="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
-DEBS=(python3 python3-yaml git gh curl ca-certificates)
+DEBS=(python3 python3-yaml git gh curl ca-certificates sudo)   # sudo: the GamePilot runbook uses it
 LOCK="$F/gamepilot-tools.lock.json"
 
 # where|repo file|installed path|owner:group|mode   (where: host, proxy = CT 155, ct = CT 160)
@@ -38,6 +38,7 @@ MANIFEST=(
   "ct|gamepilot-ct-environment|/etc/environment|root:root|644"
   "ct|gamepilot-ct-systemd-proxy.conf|/etc/systemd/system.conf.d/gamepilot-proxy.conf|root:root|644"
   "ct|gamepilot-ct-apt-proxy.conf|/etc/apt/apt.conf.d/90gamepilot-proxy|root:root|644"
+  "ct|gamepilot-ct-profile.sh|/etc/profile.d/gamepilot-proxy.sh|root:root|644"
 )
 BRIDGE_STANZA=$'auto vmbrgp\niface vmbrgp inet static\n\taddress 10.82.0.254/24\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.disable_ipv6=1\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.forwarding=0'
 # qm/pct settings the conductor depends on (checked by diff, set by create)
@@ -45,6 +46,9 @@ CT_EXPECT=("hostname:gamepilot" "unprivileged:1" "cores:2" "memory:4096" "onboot
            "net0:bridge=vmbrgp" "net0:firewall=1" "net0:ip=10.82.0.10/24" "rootfs:size=20G")
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+# A command in CT 160 with exactly the environment a systemd unit there gets (the proxy via DefaultEnvironment).
+# pct exec alone reads neither /etc/environment nor profile.d, so it is not what the conductor sees.
+in_unit() { pct exec "$CT" -- systemd-run --wait --pipe -q "$@"; }
 field() { cut -d'|' -f"$2" <<<"$1"; }
 in_ct() { local c="$1"; shift; pct exec "$c" -- "$@"; }
 
@@ -166,18 +170,21 @@ do_verify() {
   # %{http_connect} is the proxy's answer to CONNECT: 200 = tunnel opened (allowlisted), 403 = refused by the filter.
   # The site's own status after that (claude.ai may well say 403 to a bare HEAD) is reported, not judged.
   for u in https://api.github.com https://github.com https://api.anthropic.com https://claude.ai https://console.anthropic.com; do
-    r=$(in_ct "$CT" curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
+    r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "200 "* && "${r#* }" != 000 ]]; then echo "PASS  allowed  $u -> tunnel 200, site HTTP ${r#* }"
     else echo "FAIL  allowed  $u -> ${r:-no answer}"; fail=1; fi
   done
   for u in https://example.com https://registry.npmjs.org https://objects.githubusercontent.com; do
-    r=$(in_ct "$CT" curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
+    r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "403 "* ]]; then echo "PASS  refused  $u (proxy CONNECT 403)"
     else echo "FAIL  refused  $u -> ${r:-no answer}"; fail=1; fi
   done
-  r=$(in_ct "$CT" curl -s -o /dev/null -w '%{http_code}' -m 20 http://deb.debian.org/debian/dists/bookworm/Release || true)
+  r=$(in_unit /usr/bin/curl -s -o /dev/null -w '%{http_code}' -m 20 http://deb.debian.org/debian/dists/bookworm/Release || true)
   [[ "$r" == 200 ]] && echo "PASS  allowed  http://deb.debian.org (apt over plain HTTP)" \
     || { echo "FAIL  allowed  http://deb.debian.org -> $r"; fail=1; }
+  if in_ct "$CT" sudo -u gamepilot -H sh -c 'test "$https_proxy" = http://192.168.6.155:3129'; then
+    echo "PASS  sudo -u gamepilot gets the proxy (/etc/environment via pam_env)"
+  else echo "FAIL  sudo -u gamepilot has no proxy"; fail=1; fi
   # Without the proxy nothing leaves at all: not the internet, not the LAN, not the router, not the runner.
   for u in https://1.1.1.1 http://192.168.6.153:8000/healthz http://10.81.0.10:22 http://192.168.6.1; do
     if in_ct "$CT" env -u https_proxy -u HTTPS_PROXY -u http_proxy -u HTTP_PROXY curl -s -o /dev/null -m 8 "$u"
