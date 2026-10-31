@@ -39,6 +39,7 @@ MANIFEST=(
   "ct|gamepilot-ct-systemd-proxy.conf|/etc/systemd/system.conf.d/gamepilot-proxy.conf|root:root|644"
   "ct|gamepilot-ct-apt-proxy.conf|/etc/apt/apt.conf.d/90gamepilot-proxy|root:root|644"
   "ct|gamepilot-ct-profile.sh|/etc/profile.d/gamepilot-proxy.sh|root:root|644"
+  "ct|gamepilot-ct-sudoers|/etc/sudoers.d/gamepilot-proxy|root:root|440"
 )
 BRIDGE_STANZA=$'auto vmbrgp\niface vmbrgp inet static\n\taddress 10.82.0.254/24\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.disable_ipv6=1\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.forwarding=0'
 # qm/pct settings the conductor depends on (checked by diff, set by create)
@@ -131,6 +132,7 @@ do_create() {
 do_provision() {
   push_where ct
   in_ct "$CT" systemctl daemon-reexec          # pick up DefaultEnvironment (the proxy) for every unit
+  in_ct "$CT" sh -c '! command -v visudo >/dev/null || visudo -c -q'   # a bad sudoers drop-in would lock sudo
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q update
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q -y install "${DEBS[@]}"
   local ver url sha dst t
