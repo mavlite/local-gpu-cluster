@@ -1,0 +1,13 @@
+[Unit]
+Description=GamePilot conductor SNAT (10.82.0.0/24 -> 192.168.6.175 on vmbr0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gamepilot-net.sh add
+ExecStop=/usr/local/sbin/gamepilot-net.sh del
+
+[Install]
+WantedBy=multi-user.target

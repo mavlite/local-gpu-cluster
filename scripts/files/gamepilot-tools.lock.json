@@ -1,0 +1,9 @@
+{
+  "_comment": "claude CLI on CT 160, installed by 81-lxc-gamepilot.sh provision: downloaded and sha256-checked on the Proxmox host (the CT reaches only the allowlisting proxy). Release manifest: https://downloads.claude.ai/claude-code-releases/<version>/manifest.json, platform linux-x64. Bump version + sha256 together.",
+  "claude": {
+    "version": "2.1.309",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.309/linux-x64/claude",
+    "sha256": "4d704a8aecbe038affa3000f498ae17c1b4f753add8facb8764120affc99b658",
+    "install_path": "/usr/local/bin/claude"
+  }
+}

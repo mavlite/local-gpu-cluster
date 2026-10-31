@@ -1,0 +1,10 @@
+[OPTIONS]
+enable: 1
+policy_in: DROP
+policy_out: REJECT
+
+[RULES]
+# GamePilot conductor (CT 160). Every outbound connection goes through the allowlisting proxy instance on LXC 155
+# (gamepilot-proxy: github, anthropic, claude.ai, debian mirrors). Nothing else leaves: no DNS, no LAN, no runner.
+# REJECT (not DROP) outbound, so a tool that ignores the proxy fails at once instead of hanging.
+OUT ACCEPT -dest 192.168.6.155 -p tcp -dport 3129 -log nolog
