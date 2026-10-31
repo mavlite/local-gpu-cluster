@@ -560,3 +560,22 @@ def test_token_without_expiry_header_is_reported_unknown_not_an_error(env, monke
     monkeypatch.setenv("DISPATCH_SELFTEST", "1")
     assert env.run() == 0
     assert "selftest GitHub token: expiry unknown" in capsys.readouterr().err
+
+
+def test_preamble_gives_the_shell_timeout_from_the_wall_time():
+    # SDG-RUST#1 (2026-10-30): the model gave a 5-6 h walk run `timeout: 7200000` on its own, hit it, and re-ran.
+    p = d.preamble("o/r", 5, "main@abc", "2026-10-30T00:00:00Z", "qwen3.6", 360 * 60)
+    assert "360 minutes" in p and "21600000" in p
+    assert "do not run it again" in p.lower()
+
+
+def test_dispatch_puts_the_issue_wall_time_into_the_preamble(env, monkeypatch):
+    seen = {}
+
+    def fake_run(c, work_dir, message, timeout_s, log_base, results_dir):
+        seen["message"], seen["timeout_s"] = message, timeout_s
+        return d.EXIT_NOT_READY                       # put the task back; the message is all we want
+    monkeypatch.setattr(d, "run_agent", fake_run)
+    env.add_issue(7, b=body(limits="Wall time: 5 h at most."))
+    env.run()
+    assert seen["timeout_s"] == 300 * 60 and "300 minutes" in seen["message"] and "18000000" in seen["message"]
