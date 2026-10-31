@@ -140,7 +140,8 @@ print(d["version"], d["url"], d["sha256"], d["install_path"])' "$LOCK")
     pct push "$CT" "$t/claude" "$dst" --user root --group root --perms 0755
     rm -rf "$t"; echo "installed claude $ver -> $dst (sha256 verified)"
   fi
-  in_ct "$CT" sh -c 'for b in python3 git gh claude; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
+  # pct exec has a short PATH without /usr/local/bin; check with the PATH a systemd unit gets.
+  in_ct "$CT" env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'for b in python3 git gh claude; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
 }
 
 do_clone() {
