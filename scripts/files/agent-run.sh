@@ -106,6 +106,12 @@ if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
   grep -E "^${p}[A-Z0-9_]+=" "$f" | sudo tee -a "$envf" >/dev/null
 fi
 
+# Per-repo fixed (non-secret) variables the repo's task docs say the runner provides. SDG-RUST's lab tools find the
+# checkout through SDG_RUST_MAIN; without it SDG-RUST#2 failed with DEPLOY FAILED (2026-10-31).
+declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST" )
+repoenv=()
+for kv in ${REPO_FIXED_ENV[$name]:-}; do repoenv+=(--setenv="$kv"); done
+
 cleanup() { sudo systemctl stop "$unit" 2>/dev/null || true; sudo rm -f "$envf"; }
 trap cleanup EXIT
 trap 'exit 143' TERM INT
@@ -134,6 +140,7 @@ props=(
   -p WorkingDirectory="/work/$name"
   -p ExecStartPre="/bin/mkdir -p /tmp/home /tmp/gh"
   --setenv=HOME=/tmp/home --setenv=GH_CONFIG_DIR=/tmp/gh --setenv=PYTHONDONTWRITEBYTECODE=1
+  "${repoenv[@]}"
   # the checkout is owned by runner, so git (as agent) would refuse it as "dubious ownership"
   --setenv=GIT_CONFIG_COUNT=1 --setenv=GIT_CONFIG_KEY_0=safe.directory --setenv=GIT_CONFIG_VALUE_0="/work/$name"
   --setenv=OPENCODE_CONFIG=/etc/agent-runner-agent/opencode.json --setenv=OPENCODE_DISABLE_PROJECT_CONFIG=1

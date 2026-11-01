@@ -32,8 +32,10 @@ expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/pt
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
   expect ok   "SDG_PTERO_* present for SDG-RUST (3 names)" 'n=$(compgen -e | grep -c "^SDG_PTERO_"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_RUST_MAIN is the checkout (/work/SDG-RUST)" 'echo "$SDG_RUST_MAIN"; [ "$SDG_RUST_MAIN" = /work/SDG-RUST ] && [ -d "$SDG_RUST_MAIN/tools/lab" ]'
 else
   expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
+  expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
 fi
 # The panel key's ssh-agent reaches SDG-ARMA3 tasks only, and the key there runs only the panel's forced command.
 if [[ "$REPO" == SDG-ARMA3 ]]; then
