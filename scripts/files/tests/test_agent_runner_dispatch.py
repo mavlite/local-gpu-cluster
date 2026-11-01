@@ -579,3 +579,36 @@ def test_dispatch_puts_the_issue_wall_time_into_the_preamble(env, monkeypatch):
     env.add_issue(7, b=body(limits="Wall time: 5 h at most."))
     env.run()
     assert seen["timeout_s"] == 300 * 60 and "300 minutes" in seen["message"] and "18000000" in seen["message"]
+
+
+def test_a_model_swap_mid_run_puts_the_task_back_instead_of_blocking(env, monkeypatch):
+    # SDG-RUST#2 (2026-11-01): the owner swapped the chat model during a 5 h step; the agent's next call got the
+    # router's 409 profile_mismatch and the dispatcher posted BLOCKED. Owner decision: requeue instead.
+    monkeypatch.setenv("FAKE_AGENT_MODE", "swapped")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    assert "runner:ready" in i["labels"] and "runner:running" not in i["labels"] and "runner:blocked" not in i["labels"]
+    assert reports(i) == []
+    assert any("chat model was swapped" in c["body"] for c in i["comments"])
+    # the work done before the swap stays visible, so a finished step can be judged without a re-run
+    note = next(c["body"] for c in i["comments"] if "chat model was swapped" in c["body"])
+    assert "SUMMARY pve 97/0/9" in note and "ghp_" + "B" * 36 not in note
+
+
+def test_a_blocked_report_carries_the_last_tool_output_redacted(env, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "dies-after-tool")
+    env.add_issue(7)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"]
+    rep = reports(i)[0]
+    assert "Last tool output" in rep and "SUMMARY pve 97/0/9" in rep and "SUMMARY pvp 31/0/75" in rep
+    assert "ghp_" + "B" * 36 not in rep                      # the same redaction as everything else posted
+
+
+def test_an_unrelated_error_is_not_mistaken_for_a_swap(env, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "dies-after-tool")
+    env.add_issue(7)
+    env.run()
+    assert "runner:ready" not in env.issue(7)["labels"]

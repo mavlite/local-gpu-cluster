@@ -3,6 +3,8 @@
 The sandboxed agent has no GitHub credentials: it PRINTS its report as a text event of the opencode JSON
 stream and the dispatcher posts it. Behaviour from $FAKE_AGENT_MODE:
   pass | fail | headerless | noreport | exit75 | exit76 | hang | crash-after-pass | leak
+  swapped (a long tool step, then the router's 409 because the chat model was swapped mid-run, no report)
+  dies-after-tool (a long tool step with SUMMARY lines, then an unrelated error, no report)
 It writes one artifact into $AGENT_RESULTS_DIR, as a real task would into /results.
 --preflight exits 76 when $FAKE_PREFLIGHT_FAIL is "all" or names the checkout's directory (comma list), else 0.
 """
@@ -49,6 +51,20 @@ def main(argv):
     if mode == "noreport":
         emit("text", text="I forgot the report")
         return 0
+    if mode in ("swapped", "dies-after-tool"):
+        # the shape of a real opencode tool event and error event (SDG-RUST#2, 2026-11-01)
+        out = "== profile pve\nSUMMARY pve 97/0/9\n== profile pvp\nSUMMARY pvp 31/0/75\ntoken ghp_" + "B" * 36
+        emit("tool_use", tool="bash", state={"status": "completed", "input": {"command": "bash tools/lab/run.sh"},
+                                              "output": out})
+        if mode == "swapped":
+            msg = ("model 'qwen3.6' targets profile backend 'rag-qwen3.6', but the chat unit is serving 'qwen3.8'. "
+                   "Swap profiles (scripts/swap-chat-model.sh) or request an alias for the loaded profile.")
+            print(json.dumps({"type": "error", "error": {"name": "APIError",
+                                                         "data": {"message": msg, "statusCode": 409}}}), flush=True)
+        else:
+            print(json.dumps({"type": "error", "error": {"name": "UnknownError",
+                                                         "data": {"message": "socket hang up"}}}), flush=True)
+        return 1
     sha = subprocess.run(["git", "-C", work_dir, "log", "-1", "--format=%H"],
                          capture_output=True, text=True, check=True).stdout.strip()
     verdict = "FAIL" if mode == "fail" else "PASS"

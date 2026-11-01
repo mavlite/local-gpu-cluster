@@ -208,6 +208,55 @@ def parse_timeout_minutes(text):
     return int(max(1, min(n, MAX_TIMEOUT_MIN)))
 
 
+def events(path):
+    """Every JSON event of an opencode --format json stream, in order (unreadable lines skipped)."""
+    out = []
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(ev, dict):
+                    out.append(ev)
+    except OSError:
+        pass
+    return out
+
+
+# The router's answer when the loaded chat profile no longer serves the task's model: the owner swapped the model
+# mid-run (SDG-RUST#2, 2026-11-01). Owner decision: such a task goes back to runner:ready instead of BLOCKED.
+SWAP_MARKER = "targets profile backend"
+
+
+def model_swapped(path):
+    for ev in events(path):
+        err = ev.get("error") if ev.get("type") == "error" else None
+        data = err.get("data") if isinstance(err, dict) else None
+        if isinstance(data, dict) and data.get("statusCode") == 409 and SWAP_MARKER in str(data.get("message", "")):
+            return True
+    return False
+
+
+LAST_TOOL_LINES = 60
+
+
+def last_tool_output(path, n=LAST_TOOL_LINES):
+    """(command, last n lines of output) of the agent's last tool call that produced output, else None."""
+    last = None
+    for ev in events(path):
+        part = ev.get("part") if ev.get("type") == "tool_use" else None
+        state = part.get("state") if isinstance(part, dict) else None
+        if isinstance(state, dict) and isinstance(state.get("output"), str) and state["output"].strip():
+            cmd = (state.get("input") or {}).get("command") if isinstance(state.get("input"), dict) else None
+            last = (str(cmd or part.get("tool") or "?"), state["output"])
+    if last is None:
+        return None
+    lines = last[1].splitlines()[-n:]
+    return last[0][:200], "\n".join(l if len(l) <= TAIL_LINE_CHARS else l[:TAIL_LINE_CHARS] + " ..." for l in lines)
+
+
 def event_texts(path):
     """Text parts of an opencode --format json event stream, in order."""
     out = []
@@ -559,11 +608,15 @@ def tail(path, n=TAIL_LINES):
 def blocked_report(num, ref, started, model, reason, log_base):
     ev = tail(log_base + ".jsonl") if log_base else ""
     er = tail(log_base + ".stderr", 20) if log_base else ""
+    tool = last_tool_output(log_base + ".jsonl") if log_base else None
     text = (f"### runner report\n```yaml\ntask: {num}\nverdict: BLOCKED\nref: {ref or 'unknown'}\n"
             f"started: {started}\nfinished: {utc_now()}\nmodel: {model}\nresults: []\nartifacts:\n"
             f"  - {os.path.basename(log_base) + '.jsonl' if log_base else 'none'} (runner VM ~/runner-logs)\n"
             f"deviations: posted by the dispatcher: {reason.splitlines()[0][:200]}\nstate_left: unknown\n```\n\n"
             f"**Dispatcher:** {reason}\n")
+    if tool:
+        # What the agent last saw: when it dies after a long step, this often holds the step's result.
+        text += f"\nLast tool output (`{tool[0]}`, last {LAST_TOOL_LINES} lines):\n```text\n{tool[1]}\n```\n"
     if ev:
         text += f"\nLast {TAIL_LINES} event-log lines:\n```text\n{ev}\n```\n"
     if er:
@@ -611,6 +664,17 @@ def dispatch(c, repo, issue, model):
         log(f"{repo}#{num}: sandbox not ready, requeued")
         return 0
     rep = find_report(event_texts(log_base + ".jsonl"), num)
+    if code is not None and (rep is None or rep["verdict"] is None) and model_swapped(log_base + ".jsonl"):
+        relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
+        note = ("runner: the chat model was swapped while this task ran (the router refused the task's model with "
+                "409 profile_mismatch), so the agent stopped without a report. Back to runner:ready; the next run "
+                f"uses the model loaded then. Event log: {os.path.basename(log_base)}.jsonl (runner VM ~/runner-logs).")
+        tool = last_tool_output(log_base + ".jsonl")
+        if tool:   # work finished before the swap stays visible, so it can be judged without a re-run
+            note += f"\n\nLast tool output (`{tool[0]}`, last {LAST_TOOL_LINES} lines):\n```text\n{tool[1]}\n```\n"
+        comment(c, repo, num, note)
+        log(f"{repo}#{num}: model swapped mid-run, requeued")
+        return 0
     if code is None:
         reason = f"agent-run timed out after {timeout_s}s and was stopped."
         return finish(c, repo, num, None, blocked_report(num, ref, started, model, reason, log_base))
