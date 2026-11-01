@@ -43,11 +43,16 @@ issues and labels in `DraconisCluster/SDG-RUST` and `DraconisCluster/SDG-ARMA3`;
    - **Exit 75:** back to `runner:ready`, with a "lane closed" comment.
    - **Exit 76** (the sandbox went away between the preflight and the run): back to `runner:ready`, with a
      "not ready" comment; nothing ran.
+   - **Model swapped mid-run** (owner decision 2026-11-01): no valid report, and the event log holds the router's
+     409 "targets profile backend" error (someone swapped the chat model while the task ran). The task goes back to
+     `runner:ready` instead of BLOCKED. The comment carries the agent's last tool output, so a long step that
+     finished before the swap can be judged without a re-run. Swaps are not blocked; they cost a re-run.
    - **The report:** the agent **prints** its report block. The dispatcher takes the last text event holding
      `task: N` and a verdict, normalises it to `### runner report` plus a yaml fence (a headerless block also
      counts), and posts it, naming the results dir.
    - **No valid block** (none at all, no valid verdict, or a timeout): it posts a BLOCKED report with the
-     redacted last 50 event-log lines instead.
+     agent's last tool output (its last 60 lines, which often hold a long step's result) and the last 50
+     event-log lines, all redacted.
    - **Labels:** `runner:done`, or `runner:blocked` for BLOCKED. It also adds `needs-claude` unless the
      verdict is PASS, the deviations are `none`, and agent-run exited 0. A label edit that fails is retried
      up to 4 times. GitHub can apply half of one: on SDG-ARMA3#1 it removed `runner:running` and then errored.
