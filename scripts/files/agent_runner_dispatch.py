@@ -666,10 +666,13 @@ def dispatch(c, repo, issue, model):
     rep = find_report(event_texts(log_base + ".jsonl"), num)
     if code is not None and (rep is None or rep["verdict"] is None) and model_swapped(log_base + ".jsonl"):
         relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
-        comment(c, repo, num, "runner: the chat model was swapped while this task ran (the router refused the "
-                              "task's model with 409 profile_mismatch), so the agent stopped without a report. Back "
-                              "to runner:ready; the next run uses the model loaded then. Event log: "
-                              f"{os.path.basename(log_base)}.jsonl (runner VM ~/runner-logs).")
+        note = ("runner: the chat model was swapped while this task ran (the router refused the task's model with "
+                "409 profile_mismatch), so the agent stopped without a report. Back to runner:ready; the next run "
+                f"uses the model loaded then. Event log: {os.path.basename(log_base)}.jsonl (runner VM ~/runner-logs).")
+        tool = last_tool_output(log_base + ".jsonl")
+        if tool:   # work finished before the swap stays visible, so it can be judged without a re-run
+            note += f"\n\nLast tool output (`{tool[0]}`, last {LAST_TOOL_LINES} lines):\n```text\n{tool[1]}\n```\n"
+        comment(c, repo, num, note)
         log(f"{repo}#{num}: model swapped mid-run, requeued")
         return 0
     if code is None:
