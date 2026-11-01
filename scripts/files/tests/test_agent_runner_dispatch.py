@@ -591,6 +591,9 @@ def test_a_model_swap_mid_run_puts_the_task_back_instead_of_blocking(env, monkey
     assert "runner:ready" in i["labels"] and "runner:running" not in i["labels"] and "runner:blocked" not in i["labels"]
     assert reports(i) == []
     assert any("chat model was swapped" in c["body"] for c in i["comments"])
+    # the work done before the swap stays visible, so a finished step can be judged without a re-run
+    note = next(c["body"] for c in i["comments"] if "chat model was swapped" in c["body"])
+    assert "SUMMARY pve 97/0/9" in note and "ghp_" + "B" * 36 not in note
 
 
 def test_a_blocked_report_carries_the_last_tool_output_redacted(env, monkeypatch):
