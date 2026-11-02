@@ -781,3 +781,12 @@ def test_tier_c_script_is_refused_like_any_task(env):
     _script_issue(env, labels=("runner:ready", "kind:script", "tier:c"))
     env.run()
     assert "runner:blocked" in env.issue(7)["labels"] and _argv(env) is None
+
+
+def test_script_gets_the_ref_it_runs_although_the_checkout_is_detached(env):
+    # SDG-RUST#9 (2026-11-02): checks.sh reported "no branch for ref" on the detached checkout.
+    sha = _commit_script(env)
+    _script_issue(env, sha=sha, branch="main")
+    env.run()
+    got = json.loads((env.tmp / "script-argv.json.env").read_text())
+    assert got == {"RUNNER_REF": f"main@{sha}", "RUNNER_BRANCH": "main"}

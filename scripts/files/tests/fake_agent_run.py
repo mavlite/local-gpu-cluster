@@ -36,6 +36,8 @@ def script(argv):
     if os.environ.get("FAKE_SCRIPT_ARGV"):
         with open(os.environ["FAKE_SCRIPT_ARGV"], "w") as f:
             json.dump(["--script"] + argv, f)
+        with open(os.environ["FAKE_SCRIPT_ARGV"] + ".env", "w") as f:
+            json.dump({k: os.environ.get(k) for k in ("RUNNER_REF", "RUNNER_BRANCH")}, f)
     mode = os.environ.get("FAKE_SCRIPT_MODE", "pass")
     results = os.environ["AGENT_RESULTS_DIR"]
     os.makedirs(results, exist_ok=True)
