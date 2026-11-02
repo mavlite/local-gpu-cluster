@@ -212,7 +212,8 @@ setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
     # Home /tmp/home: the directory every sandbox creates in its private /tmp. .NET's named mutexes (NuGet
     # restore, first run) take the home from the passwd entry, not $HOME, and fail when it does not exist (2026-11-02).
     steps+=("id $u >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /tmp/home --shell /usr/sbin/nologin $u")
-    steps+=("[ \"\$(getent passwd $u | cut -d: -f6)\" = /tmp/home ] || sudo usermod -d /tmp/home $u")
+    # usermod refuses while the user has a process: agent-arma runs the panel ssh-agent, so stop it around the change.
+    steps+=("[ \"\$(getent passwd $u | cut -d: -f6)\" = /tmp/home ] || { sudo systemctl stop agent-runner-panel-agent.service 2>/dev/null; sudo usermod -d /tmp/home $u; rc=\$?; sudo systemctl start agent-runner-panel-agent.service 2>/dev/null; exit \$rc; }")
   done
   steps+=(
     "! id agent >/dev/null 2>&1 || sudo userdel agent"      # the shared pre-2026-10-30 sandbox user
