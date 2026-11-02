@@ -789,4 +789,16 @@ def test_script_gets_the_ref_it_runs_although_the_checkout_is_detached(env):
     _script_issue(env, sha=sha, branch="main")
     env.run()
     got = json.loads((env.tmp / "script-argv.json.env").read_text())
-    assert got == {"RUNNER_REF": f"main@{sha}", "RUNNER_BRANCH": "main"}
+    assert got["RUNNER_REF"] == f"main@{sha}" and got["RUNNER_BRANCH"] == "main"
+
+
+def test_script_gets_its_wall_time_and_claim_time(env):
+    # SDG-RUST#9 (2026-11-02): without them checks.sh set no scenario deadline and the 3 h wall time killed it first.
+    import time as _t
+    _commit_script(env)
+    _script_issue(env, wall="Wall time: 3 h")
+    before = int(_t.time())
+    env.run()
+    got = json.loads((env.tmp / "script-argv.json.env").read_text())
+    assert got["RUNNER_WALL_MINUTES"] == "180"
+    assert before - 5 <= int(got["RUNNER_STARTED_EPOCH"]) <= int(_t.time())
