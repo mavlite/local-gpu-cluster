@@ -60,6 +60,7 @@ MANIFEST=(
 # Sandbox prerequisites on the VM (setup-sandbox creates them; diff checks them).
 SANDBOX_CHECKS=(
   "per-repo users agent-rust/agent-arma exist, no sudo, not in group runner|for u in agent-rust agent-arma; do id \$u >/dev/null && ! id -Gn \$u | grep -qwE 'runner|sudo' || exit 1; done"
+  "sandbox users' home is /tmp/home (.NET named mutexes need it to exist)|for u in agent-rust agent-arma; do [ \"\$(getent passwd \$u | cut -d: -f6)\" = /tmp/home ] || exit 1; done"
   "old shared user 'agent' removed|! id agent >/dev/null 2>&1"
   "nft table inet agent_egress loaded|sudo /usr/sbin/nft list table inet agent_egress >/dev/null"
   "agent-runner-egress.service enabled|systemctl is-enabled agent-runner-egress.service >/dev/null"
@@ -208,7 +209,10 @@ setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
   users=$(python3 "$F/agent_runner_egress.py" --conf "$F/agent-runner-egress.conf" users)
   local steps=()
   for u in $users; do
-    steps+=("id $u >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin $u")
+    # Home /tmp/home: the directory every sandbox creates in its private /tmp. .NET's named mutexes (NuGet
+    # restore, first run) take the home from the passwd entry, not $HOME, and fail when it does not exist (2026-11-02).
+    steps+=("id $u >/dev/null 2>&1 || sudo useradd --system --no-create-home --home-dir /tmp/home --shell /usr/sbin/nologin $u")
+    steps+=("[ \"\$(getent passwd $u | cut -d: -f6)\" = /tmp/home ] || sudo usermod -d /tmp/home $u")
   done
   steps+=(
     "! id agent >/dev/null 2>&1 || sudo userdel agent"      # the shared pre-2026-10-30 sandbox user
