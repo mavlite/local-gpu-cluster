@@ -52,6 +52,13 @@ if [[ "$scriptmode" == 1 ]]; then
   for a in "${scriptargs[@]}"; do
     [[ "$a" =~ ^[A-Za-z0-9:_.*-]+$ ]] || { echo "agent-run: argument '$a' is not allowed" >&2; exit 2; }
   done
+  # What the script runs (the checkout is detached at the exact sha): RUNNER_REF=<branch>@<sha>, RUNNER_BRANCH.
+  scriptenv=()
+  if [[ -n "${RUNNER_BRANCH:-}" ]]; then
+    if [[ "$RUNNER_BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "${RUNNER_REF:-}" =~ ^[A-Za-z0-9._/-]+@[0-9a-f]{40}$ ]]; then
+      scriptenv=(--setenv=RUNNER_REF="$RUNNER_REF" --setenv=RUNNER_BRANCH="$RUNNER_BRANCH")
+    else echo "agent-run: RUNNER_REF/RUNNER_BRANCH malformed" >&2; exit 2; fi
+  fi
 fi
 
 # Per-repo sandbox user + egress (egress.conf, one table -> systemd IPAddressAllow here, nftables per uid+port).
@@ -183,7 +190,7 @@ if [[ "$preflight" == 1 ]]; then
   echo "agent-run: preflight ok ($name runs as $user; agent_egress loaded; no-op sandbox start succeeded)"
   exit 0
 elif [[ "$scriptmode" == 1 ]]; then
-  sudo systemd-run "${props[@]}" /bin/bash "/work/$name/$script" "${scriptargs[@]}" /results </dev/null
+  sudo systemd-run "${props[@]}" "${scriptenv[@]}" /bin/bash "/work/$name/$script" "${scriptargs[@]}" /results </dev/null
 elif [[ "$model" == none ]]; then
   sudo systemd-run "${props[@]}" /bin/bash -c "$msg" </dev/null
 else

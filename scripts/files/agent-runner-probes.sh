@@ -115,13 +115,14 @@ done
 echo "== S. script mode (kind:script): agent-run --script, no model"
 tdir="$W/tools/runner/tasks"; made_tdir=0; [[ -d "$tdir" ]] || { mkdir -p "$tdir"; made_tdir=1; }
 pf="zz-probe-$$.sh"
-printf '%s\n' 'echo "args:$*"' '[ -z "${WF_ROUTER_KEY:-}" ] && echo nokey' \
+printf '%s\n' 'echo "args:$*"' 'echo "ref:${RUNNER_REF:-none}"' '[ -z "${WF_ROUTER_KEY:-}" ] && echo nokey' \
   'echo "{\"task\":\"probe\"}" > "${!#}/report.json" && echo wrote' > "$tdir/$pf"
 sres="/var/lib/agent-results/probe-script-$REPO-$$"
-out=$(AGENT_RESULTS_DIR="$sres" AGENT_MAX_SECONDS=60 agent-run --script "$W" "tools/runner/tasks/$pf" a:b c.d 2>&1); rc=$?
-if [[ $rc -eq 0 && "$out" == *"args:a:b c.d /results"* && "$out" == *nokey* && "$out" == *wrote* ]] \
+out=$(RUNNER_BRANCH=probe RUNNER_REF=probe@0000000000000000000000000000000000000000 AGENT_RESULTS_DIR="$sres" AGENT_MAX_SECONDS=60 agent-run --script "$W" "tools/runner/tasks/$pf" a:b c.d 2>&1); rc=$?
+if [[ $rc -eq 0 && "$out" == *"args:a:b c.d /results"* && "$out" == *nokey* && "$out" == *wrote* \
+      && "$out" == *"ref:probe@0000000000000000000000000000000000000000"* ]] \
    && sudo test -s "$sres/report.json"; then
-  say PASS "script: runs with args + /results last, writes report.json, no router key"; pass=$((pass+1))
+  say PASS "script: runs with args + /results last, gets RUNNER_REF, writes report.json, no router key"; pass=$((pass+1))
 else say FAIL "script: rc=$rc $(tr '\n' ' ' <<<"$out" | cut -c1-140)"; fail=$((fail+1)); fi
 for bad in "../../etc/passwd" "tools/lab/x.sh" "tools/runner/tasks/../../x.sh"; do
   if AGENT_RESULTS_DIR="$sres-x" agent-run --script "$W" "$bad" >/dev/null 2>&1; then
