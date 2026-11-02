@@ -175,6 +175,8 @@ props=(
   -p WorkingDirectory="/work/$name"
   -p ExecStartPre="/bin/mkdir -p /tmp/home /tmp/gh"
   --setenv=HOME=/tmp/home --setenv=GH_CONFIG_DIR=/tmp/gh --setenv=PYTHONDONTWRITEBYTECODE=1
+  # .NET SDK (/usr/local/bin/dotnet): no telemetry (no egress for it anyway), no first-run banner
+  --setenv=DOTNET_CLI_TELEMETRY_OPTOUT=1 --setenv=DOTNET_NOLOGO=1 --setenv=DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
   "${repoenv[@]}"
   # the checkout is owned by runner, so git (as agent) would refuse it as "dubious ownership"
   --setenv=GIT_CONFIG_COUNT=1 --setenv=GIT_CONFIG_KEY_0=safe.directory --setenv=GIT_CONFIG_VALUE_0="/work/$name"

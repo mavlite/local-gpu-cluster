@@ -76,7 +76,8 @@ SANDBOX_CHECKS=(
 # Debian packages the tasks need on the VM (install-tools; host and VM are both trixie). python-is-python3:
 # SDG-ARMA3#1 checks /usr/bin/python as a precondition. python3-paramiko (+ python3-nacl, its one dependency the VM
 # lacked): SDG-RUST tools/lab/ptero.py, Wings SFTP. dpkg -i resolves nothing, so list every dependency the VM lacks.
-VM_DEBS=(nftables python-is-python3 python3-nacl python3-paramiko)
+# libicu76: the .NET SDK's globalization library (SDG-RUST unit tests, 2026-11-02).
+VM_DEBS=(nftables python-is-python3 python3-nacl python3-paramiko libicu76)
 TOOLS_LOCK="$F/agent-runner-tools.lock.json"
 # Lines that must be present in /etc/network/interfaces (checked, never written).
 IFACE_LINES=(
@@ -142,6 +143,11 @@ do_diff() {
   if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1; stat -c '%U:%G %a' '$dst' 2>/dev/null")" == "$msha"$'\n'"root:root 755" ]]
   then printf 'ok     vm   sqfvm %s at %s (sha256 + root:root 755)\n' "$ver" "$dst"
   else printf 'DRIFT  vm   sqfvm %s missing or not the pinned build at %s (install-tools)\n' "$ver" "$dst"; drift=1; fi
+  local dver ddir dlink
+  read -r dver ddir dlink <<<"$(lock_dotnet | cut -d' ' -f1,4,5)"
+  if [[ "$(vm "readlink -f '$dlink' 2>/dev/null; '$dlink' --version 2>/dev/null")" == "$ddir/dotnet"$'\n'"$dver" ]]
+  then printf 'ok     vm   dotnet SDK %s at %s (%s)\n' "$dver" "$ddir" "$dlink"
+  else printf 'DRIFT  vm   dotnet SDK %s missing or %s does not point at it (install-tools)\n' "$dver" "$dlink"; drift=1; fi
   for u in agent-runner-net.service agent-runner-key-renew.timer; do
     printf 'info   host %s: %s\n' "$u" "$(systemctl is-enabled "$u" 2>&1 || true)"
   done
@@ -223,6 +229,30 @@ lock_sqfvm() {   # -> "version url sha256 member member_sha256 install_path"
 print(*(d[k] for k in ("version","url","sha256","member","member_sha256","install_path")))' "$TOOLS_LOCK"
 }
 
+lock_dotnet() {   # -> "version url sha512 install_dir link"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["dotnet"]
+print(*(d[k] for k in ("version","url","sha512","install_dir","link")))' "$LOCK"
+}
+
+install_dotnet() {   # $1 = --dry-run or empty. The SDK tarball, sha512-checked on the host, unpacked on the VM.
+  local dry="${1:-}" ver url sha dir link t
+  read -r ver url sha dir link <<<"$(lock_dotnet)"
+  if [[ "$(vm "'$dir/dotnet' --version 2>/dev/null")" == "$ver" ]]; then echo "ok: dotnet SDK $ver already at $dir"
+  elif [[ -n "$dry" ]]; then echo "would install dotnet SDK $ver -> $dir"; return 0
+  else
+    t=$(mktemp -d)
+    curl -fsSL --retry 2 -o "$t/sdk.tar.gz" "$url"
+    echo "$sha  $t/sdk.tar.gz" | sha512sum -c --quiet || { rm -rf "$t"; die "dotnet SDK sha512 mismatch"; }
+    vm "sudo install -d -o root -g root -m 755 '$dir.tmp' && sudo rm -rf '$dir.tmp'/*"
+    vm "sudo tar -xzf - -C '$dir.tmp' --no-same-owner" <"$t/sdk.tar.gz"
+    vm "sudo rm -rf '$dir' && sudo mv '$dir.tmp' '$dir' && sudo chmod -R go-w '$dir'"
+    rm -rf "$t"; echo "installed dotnet SDK $ver -> $dir (sha512 verified)"
+  fi
+  [[ -n "$dry" ]] && return 0
+  vm "sudo ln -sfn '$dir/dotnet' '$link' && DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 '$link' --version" \
+    | sed 's/^/dotnet --version: /' || die "dotnet does not run on the VM"
+}
+
 install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifies on the host, never on the VM.
   local dry="${1:-}" p need=() t
   for p in "${VM_DEBS[@]}"; do vm "$(deb_installed_cmd "$p")" || need+=("$p"); done
@@ -252,8 +282,9 @@ install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifie
     base64 -w0 "$t/sqfvm.bin" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m 755 -o root -g root \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
     rm -rf "$t"; echo "installed sqfvm $ver -> $dst (zip + binary sha256 verified)"
   fi
-  [[ -n "$dry" ]] && return 0
-  vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version 2>&1 | head -3" || die "sqfvm does not run on the VM"
+  [[ -n "$dry" ]] || vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version 2>&1 | head -3" \
+    || die "sqfvm does not run on the VM"
+  install_dotnet "$dry"
 }
 
 seed_umod() {   # $1 = dir of <sha1>.cs files (copied from a workstation's raidable-bases-sdg/.cache/umod), $2 = --dry-run
