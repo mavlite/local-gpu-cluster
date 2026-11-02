@@ -21,15 +21,45 @@
 # Preflight: `agent-run --preflight DIR` runs only the readiness checks below (the repo's sandbox entry and the
 # nft table) and exits 0, so the dispatcher can check BEFORE it claims an issue. Exit 76 = the sandbox is not
 # ready; nothing ran, and the caller leaves (or puts back) the task as runner:ready.
+#
+# Script mode (kind:script, local-gpu-cluster#65): `agent-run --script DIR SCRIPT [ARGS...]` runs
+# `bash /work/<repo>/SCRIPT ARGS... /results` in the identical sandbox, with no model and no router key. SCRIPT must be
+# a regular file under tools/runner/tasks/ in the checkout; each ARG matches [A-Za-z0-9:_.*-]+. At the wall time
+# (AGENT_MAX_SECONDS) systemd sends TERM and KILLs after AGENT_STOP_GRACE_S (default 120), so the script's own TERM
+# trap can clean up its game server.
 set -euo pipefail
 EXIT_NOT_READY=76
-preflight=0
+preflight=0; scriptmode=0
 if [[ "${1:-}" == --preflight ]]; then preflight=1; shift; fi
-dir=${1:?usage: agent-run [--preflight] DIR MESSAGE [ARGS...]}; shift
-if [[ "$preflight" == 0 ]]; then msg=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; shift; fi
+if [[ "${1:-}" == --script ]]; then scriptmode=1; shift; fi
+dir=${1:?usage: agent-run [--preflight|--script] DIR MESSAGE|SCRIPT [ARGS...]}; shift
+if [[ "$scriptmode" == 1 ]]; then
+  script=${1:?usage: agent-run --script DIR SCRIPT [ARGS...]}; shift
+  scriptargs=("$@")
+elif [[ "$preflight" == 0 ]]; then msg=${1:?usage: agent-run DIR MESSAGE [ARGS...]}; shift; fi
 dir=$(realpath -e "$dir")
 case "$dir" in /home/runner/work/?*) ;; *) echo "agent-run: DIR must be a checkout under /home/runner/work" >&2; exit 2 ;; esac
 name=$(basename "$dir")
+if [[ "$scriptmode" == 1 ]]; then
+  # Checked again here although the dispatcher checks too: this is the boundary that starts the process.
+  if ! [[ "$script" =~ ^tools/runner/tasks/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] || [[ "/$script/" == */../* ]]; then
+    echo "agent-run: SCRIPT must be a path under tools/runner/tasks/" >&2; exit 2
+  fi
+  real=$(realpath -e "$dir/$script" 2>/dev/null) || { echo "agent-run: $script is not in the checkout" >&2; exit 2; }
+  if [[ "$real" != "$dir"/tools/runner/tasks/* || ! -f "$real" ]]; then
+    echo "agent-run: $script is not a regular file under tools/runner/tasks/" >&2; exit 2
+  fi
+  for a in "${scriptargs[@]}"; do
+    [[ "$a" =~ ^[A-Za-z0-9:_.*-]+$ ]] || { echo "agent-run: argument '$a' is not allowed" >&2; exit 2; }
+  done
+  # What the script runs (the checkout is detached at the exact sha): RUNNER_REF=<branch>@<sha>, RUNNER_BRANCH.
+  scriptenv=()
+  if [[ -n "${RUNNER_BRANCH:-}" ]]; then
+    if [[ "$RUNNER_BRANCH" =~ ^[A-Za-z0-9._/-]+$ && "${RUNNER_REF:-}" =~ ^[A-Za-z0-9._/-]+@[0-9a-f]{40}$ ]]; then
+      scriptenv=(--setenv=RUNNER_REF="$RUNNER_REF" --setenv=RUNNER_BRANCH="$RUNNER_BRANCH")
+    else echo "agent-run: RUNNER_REF/RUNNER_BRANCH malformed" >&2; exit 2; fi
+  fi
+fi
 
 # Per-repo sandbox user + egress (egress.conf, one table -> systemd IPAddressAllow here, nftables per uid+port).
 # A repo without an entry does not run; neither does any task while the nft table is missing (fail closed).
@@ -70,7 +100,7 @@ if [[ "$preflight" == 1 ]]; then
   AGENT_RESULTS_DIR=/var/lib/agent-results/.preflight-${name}-$$
 fi
 
-if [[ "${AGENT_RUN_SHELL:-}" == 1 ]]; then
+if [[ "${AGENT_RUN_SHELL:-}" == 1 || "$scriptmode" == 1 ]]; then
   model=none
 else
   profile=$(curl -s -m 10 http://192.168.6.153:8000/healthz | jq -r '.active_chat_profile // empty')
@@ -91,7 +121,9 @@ envf="/run/agent-runner/${unit}.env"
 sudo install -d -o "$user" -g runner -m 2770 "$results"
 sudo install -d -o root -g root -m 0700 /run/agent-runner
 sudo install -o root -g root -m 0600 /dev/null "$envf"
-printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' </etc/agent-runner/router.key)" | sudo tee "$envf" >/dev/null
+if [[ "$scriptmode" == 0 ]]; then   # a script runs no model, so it gets no router key
+  printf 'WF_ROUTER_KEY=%s\n' "$(tr -d '[:space:]' </etc/agent-runner/router.key)" | sudo tee "$envf" >/dev/null
+fi
 
 # Per-repo lab secrets, passed in exactly like the router key and ONLY for that repo's tasks.
 # Each file may hold only PREFIX_*=value lines (comments/blank ok): anything else is refused, so a secret file
@@ -106,11 +138,14 @@ if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
   grep -E "^${p}[A-Z0-9_]+=" "$f" | sudo tee -a "$envf" >/dev/null
 fi
 
-# Per-repo fixed (non-secret) variables the repo's task docs say the runner provides. SDG-RUST's lab tools find the
-# checkout through SDG_RUST_MAIN; without it SDG-RUST#2 failed with DEPLOY FAILED (2026-10-31).
-declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST" )
+# Per-repo fixed (non-secret) variables the repo's task docs say the runner provides, NAME=value pairs separated by
+# '|' (values may contain spaces). SDG-RUST's lab tools find the checkout through SDG_RUST_MAIN (without it SDG-RUST#2
+# failed with DEPLOY FAILED, 2026-10-31) and may touch only SDG_PTERO_SERVERS (lab-env.sh defaults to 156). Roles:
+# 156 pve integration, 152 pvp integration, 154/155/157 dev; never 141 (owner, 2026-11-02, with #65).
+declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157" )
 repoenv=()
-for kv in ${REPO_FIXED_ENV[$name]:-}; do repoenv+=(--setenv="$kv"); done
+IFS='|' read -ra fixed <<<"${REPO_FIXED_ENV[$name]:-}"
+for kv in "${fixed[@]}"; do [[ -n "$kv" ]] && repoenv+=(--setenv="$kv"); done
 
 cleanup() { sudo systemctl stop "$unit" 2>/dev/null || true; sudo rm -f "$envf"; }
 trap cleanup EXIT
@@ -120,7 +155,7 @@ ipprops=(); for ip in "${ipallow[@]}"; do ipprops+=(-p "IPAddressAllow=$ip"); do
 
 props=(
   --uid="$user" --gid="$user" --unit="$unit" --quiet --wait --pipe --collect
-  -p RuntimeMaxSec="$max"
+  -p RuntimeMaxSec="$max" -p TimeoutStopSec="${AGENT_STOP_GRACE_S:-120}"
   -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes
   -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes
   -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectClock=yes -p LockPersonality=yes
@@ -140,6 +175,8 @@ props=(
   -p WorkingDirectory="/work/$name"
   -p ExecStartPre="/bin/mkdir -p /tmp/home /tmp/gh"
   --setenv=HOME=/tmp/home --setenv=GH_CONFIG_DIR=/tmp/gh --setenv=PYTHONDONTWRITEBYTECODE=1
+  # .NET SDK (/usr/local/bin/dotnet): no telemetry (no egress for it anyway), no first-run banner
+  --setenv=DOTNET_CLI_TELEMETRY_OPTOUT=1 --setenv=DOTNET_NOLOGO=1 --setenv=DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
   "${repoenv[@]}"
   # the checkout is owned by runner, so git (as agent) would refuse it as "dubious ownership"
   --setenv=GIT_CONFIG_COUNT=1 --setenv=GIT_CONFIG_KEY_0=safe.directory --setenv=GIT_CONFIG_VALUE_0="/work/$name"
@@ -154,6 +191,8 @@ if [[ "$preflight" == 1 ]]; then
   if [[ $rc -ne 0 ]]; then echo "agent-run: no-op sandbox start failed (systemd-run exit $rc)" >&2; exit "$EXIT_NOT_READY"; fi
   echo "agent-run: preflight ok ($name runs as $user; agent_egress loaded; no-op sandbox start succeeded)"
   exit 0
+elif [[ "$scriptmode" == 1 ]]; then
+  sudo systemd-run "${props[@]}" "${scriptenv[@]}" /bin/bash "/work/$name/$script" "${scriptargs[@]}" /results </dev/null
 elif [[ "$model" == none ]]; then
   sudo systemd-run "${props[@]}" /bin/bash -c "$msg" </dev/null
 else

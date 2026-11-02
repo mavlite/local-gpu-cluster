@@ -19,7 +19,9 @@ expect() {   # expect ok|fail "label" "command"
 
 declare -A SANDBOX_USER=( [SDG-RUST]=agent-rust [SDG-ARMA3]=agent-arma )
 # Lab endpoints (egress.conf) and which repo owns each; every repo must reach its own and only its own.
-LAB_ENDPOINTS=("SDG-RUST 10.60.40.10 80" "SDG-RUST 10.60.20.12 2022" "SDG-ARMA3 10.60.40.10 22")
+# SDG-RUST: panel; Wings SFTP on patron-us2 (155, 156), patron-us1 (152, 154), play-us2 (157).
+LAB_ENDPOINTS=("SDG-RUST 10.60.40.10 80" "SDG-RUST 10.60.20.12 2022" "SDG-RUST 10.60.20.11 2022"
+               "SDG-RUST 10.60.30.12 2022" "SDG-ARMA3 10.60.40.10 22")
 
 echo "== A. shell in the sandbox (the boundary itself)"
 expect ok   "runs as ${SANDBOX_USER[$REPO]:-?}, not in group runner" \
@@ -31,11 +33,13 @@ expect fail "read /etc/agent-runner/router.key"        'cat /etc/agent-runner/ro
 expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/ptero-156.env'
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
-  expect ok   "SDG_PTERO_* present for SDG-RUST (3 names)" 'n=$(compgen -e | grep -c "^SDG_PTERO_"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_PTERO_* secrets present for SDG-RUST (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vc "^SDG_PTERO_SERVERS$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_PTERO_SERVERS is the five lab servers" '[ "$SDG_PTERO_SERVERS" = "152 154 155 156 157" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "SDG_RUST_MAIN is the checkout (/work/SDG-RUST)" 'echo "$SDG_RUST_MAIN"; [ "$SDG_RUST_MAIN" = /work/SDG-RUST ] && [ -d "$SDG_RUST_MAIN/tools/lab" ]'
 else
   expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
   expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
+  expect fail "SDG_PTERO_SERVERS set for $REPO"            'printenv SDG_PTERO_SERVERS'
 fi
 # The panel key's ssh-agent reaches SDG-ARMA3 tasks only, and the key there runs only the panel's forced command.
 if [[ "$REPO" == SDG-ARMA3 ]]; then
@@ -68,6 +72,11 @@ expect fail "agent: resolved stub 127.0.0.53:53"       'timeout 5 bash -c "</dev
 for e in "${LAB_ENDPOINTS[@]}"; do
   read -r owner ip port <<<"$e"
   if [[ "$owner" == "$REPO" ]]; then want=ok; else want=fail; fi
+  # An own endpoint the VM itself cannot reach (no VPN route yet, SDG-IAC) says nothing about the sandbox: skip it.
+  if [[ "$want" == ok ]] && ! timeout 8 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then
+    say SKIP "agent: lab endpoint $ip:$port (${owner}'s) -- no path from the VM (VPN route / OPNsense, SDG-IAC)"
+    continue
+  fi
   expect "$want" "agent: lab endpoint $ip:$port (${owner}'s)" "timeout 8 bash -c '</dev/tcp/$ip/$port'"
 done
 expect fail "agent: arbitrary port (1.1.1.1:2202)"     'curl -sS -m 8 telnet://1.1.1.1:2202 </dev/null'
@@ -102,6 +111,29 @@ for e in "${LAB_ENDPOINTS[@]}"; do
   if timeout 8 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then say INFO "path open    $ip:$port (${owner}'s)"
   else say INFO "path CLOSED  $ip:$port (${owner}'s) -- VPN route / OPNsense rule needed (SDG-IAC)"; fi
 done
+
+echo "== S. script mode (kind:script): agent-run --script, no model"
+tdir="$W/tools/runner/tasks"; made_tdir=0; [[ -d "$tdir" ]] || { mkdir -p "$tdir"; made_tdir=1; }
+pf="zz-probe-$$.sh"
+printf '%s\n' 'echo "args:$*"' 'echo "ref:${RUNNER_REF:-none}"' '[ -z "${WF_ROUTER_KEY:-}" ] && echo nokey' \
+  'echo "{\"task\":\"probe\"}" > "${!#}/report.json" && echo wrote' > "$tdir/$pf"
+sres="/var/lib/agent-results/probe-script-$REPO-$$"
+out=$(RUNNER_BRANCH=probe RUNNER_REF=probe@0000000000000000000000000000000000000000 AGENT_RESULTS_DIR="$sres" AGENT_MAX_SECONDS=60 agent-run --script "$W" "tools/runner/tasks/$pf" a:b c.d 2>&1); rc=$?
+if [[ $rc -eq 0 && "$out" == *"args:a:b c.d /results"* && "$out" == *nokey* && "$out" == *wrote* \
+      && "$out" == *"ref:probe@0000000000000000000000000000000000000000"* ]] \
+   && sudo test -s "$sres/report.json"; then
+  say PASS "script: runs with args + /results last, gets RUNNER_REF, writes report.json, no router key"; pass=$((pass+1))
+else say FAIL "script: rc=$rc $(tr '\n' ' ' <<<"$out" | cut -c1-140)"; fail=$((fail+1)); fi
+for bad in "../../etc/passwd" "tools/lab/x.sh" "tools/runner/tasks/../../x.sh"; do
+  if AGENT_RESULTS_DIR="$sres-x" agent-run --script "$W" "$bad" >/dev/null 2>&1; then
+    say FAIL "script: path $bad was accepted"; fail=$((fail+1))
+  else say PASS "script: path $bad refused"; pass=$((pass+1)); fi
+done
+if AGENT_RESULTS_DIR="$sres-x" agent-run --script "$W" "tools/runner/tasks/$pf" 'a;id' >/dev/null 2>&1; then
+  say FAIL "script: argument 'a;id' was accepted"; fail=$((fail+1))
+else say PASS "script: argument 'a;id' refused"; pass=$((pass+1)); fi
+rm -f "$tdir/$pf"; [[ $made_tdir == 1 ]] && rmdir -p "$tdir" 2>/dev/null; true
+sudo rm -rf "$sres" "$sres-x"
 
 echo "== B. a real opencode agent tries the same"
 log=$(mktemp)

@@ -7,5 +7,14 @@
     "member": "sqfvm_linux_x64_gcc/sqfvm",
     "member_sha256": "fdb10bd59226d43fadc90532e293fc0ae5978ec2065fb78cba52e62be9b97c7b",
     "install_path": "/opt/sdg-tools/sqfvm/2026.04.03/sqfvm"
+  },
+  "dotnet": {
+    "_comment": "Microsoft .NET 8 SDK for SDG-RUST unit tests (owner approved 2026-11-02). From https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json, rid linux-x64; sha512 is Microsoft's. Bump version, url and sha512 together.",
+    "version": "8.0.427",
+    "runtime": "8.0.33",
+    "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-linux-x64.tar.gz",
+    "sha512": "85725692f465f5024b9b42a159a29d9f73e8c57ad9e8bfe1e7028a505d18031d68931e8aa3f9de44145b08170dde897c8a78e1aa18d4219698b6891af7095d39",
+    "install_dir": "/opt/dotnet/8.0.427",
+    "link": "/usr/local/bin/dotnet"
   }
 }

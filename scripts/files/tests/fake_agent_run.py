@@ -7,6 +7,8 @@ stream and the dispatcher posts it. Behaviour from $FAKE_AGENT_MODE:
   dies-after-tool (a long tool step with SUMMARY lines, then an unrelated error, no report)
 It writes one artifact into $AGENT_RESULTS_DIR, as a real task would into /results.
 --preflight exits 76 when $FAKE_PREFLIGHT_FAIL is "all" or names the checkout's directory (comma list), else 0.
+--script DIR SCRIPT [ARGS...] (kind:script, no model) records its argv to $FAKE_SCRIPT_ARGV and behaves per
+$FAKE_SCRIPT_MODE: pass | fail | deviations | noreport | malformed | hang | leak.
 """
 import json
 import os
@@ -28,9 +30,45 @@ def preflight(work_dir):
     return 0
 
 
+def script(argv):
+    """`agent-run --script DIR SCRIPT [ARGS...]`: the real one runs `bash SCRIPT ARGS... /results` in the sandbox."""
+    work_dir, path, args = argv[0], argv[1], argv[2:]
+    if os.environ.get("FAKE_SCRIPT_ARGV"):
+        with open(os.environ["FAKE_SCRIPT_ARGV"], "w") as f:
+            json.dump(["--script"] + argv, f)
+        with open(os.environ["FAKE_SCRIPT_ARGV"] + ".env", "w") as f:
+            json.dump({k: os.environ.get(k) for k in ("RUNNER_REF", "RUNNER_BRANCH")}, f)
+    mode = os.environ.get("FAKE_SCRIPT_MODE", "pass")
+    results = os.environ["AGENT_RESULTS_DIR"]
+    os.makedirs(results, exist_ok=True)
+    print(f"step 1 of {os.path.basename(path)}", flush=True)
+    if mode == "hang":
+        time.sleep(120)
+        return 0
+    if mode == "noreport":
+        print("deploy failed: server unreachable ghp_" + "C" * 36, file=sys.stderr, flush=True)
+        return 3
+    sha = subprocess.run(["git", "-C", work_dir, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    rep = {"task": "checks", "verdict": "FAIL" if mode == "fail" else "PASS", "ref": f"auto/rust-next@{sha}",
+           "started": "2026-11-01T10:00:00Z", "finished": "2026-11-01T10:05:00Z",
+           "steps": [{"name": "run", "ok": mode != "fail", "detail": "args " + " ".join(args)}],
+           "checks": {"scenario:x": {"pass": 1, "fail": 0, "skip": 0}},
+           "state_left": {"server": "stopped", "lock": "released", "tree": "clean"},
+           "deviations": ["re-ran one flaky scenario"] if mode == "deviations" else []}
+    if mode == "malformed":
+        del rep["verdict"]
+    if mode == "leak":
+        rep["steps"][0]["detail"] = "token ghp_" + "D" * 36
+    with open(os.path.join(results, "report.json"), "w") as f:
+        json.dump(rep, f, indent=2)
+    return 0
+
+
 def main(argv):
     if argv[0] == "--preflight":
         return preflight(argv[1])
+    if argv[0] == "--script":
+        return script(argv[1:])
     work_dir = argv[0]
     mode = os.environ.get("FAKE_AGENT_MODE", "pass")
     emit("step_start")

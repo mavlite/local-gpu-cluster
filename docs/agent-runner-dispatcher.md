@@ -65,6 +65,34 @@ dispatcher posts goes through `redact()`, which removes:
 - `*KEY=`/`*TOKEN=`/`*PASSWORD=` assignments;
 - 48+ hex strings. 40-hex git SHAs are kept.
 
+## Script tasks: `kind:script`, no model (#65, owner approved 2026-11-01)
+
+An issue labelled `kind:script` runs a script from the game repo directly. No model is involved at any point, and
+such an issue is never sent to the agent, not even as a fallback. The tier and halt rules are the same as for agent
+tasks. Script tasks still run while the router has no lane for scoped keys, since they don't use it.
+
+- **The issue:** a `Script: <path> [args]` line, plus an optional `Args: <tokens>` line, before the first heading.
+  `### Branch / commit` holds `<branch>@<40-hex sha>`, and `### Limits` holds `Wall time: N h`.
+  - The path must be under `tools/runner/tasks/`, with no `..`.
+  - Every argument must match `[A-Za-z0-9:_.*-]+`.
+  - Anything else is refused (`runner:blocked` plus a comment) before anything runs.
+- **Checkout:** the dispatcher fetches the branch and checks out exactly that sha, detached. An unresolved sha, or
+  a script that isn't a regular file under `tools/runner/tasks/` at that sha, is refused.
+- **Run:** `agent-run --script DIR SCRIPT ARGS...` starts `bash /work/<repo>/SCRIPT ARGS... /results`. That's the
+  same sandbox as agent tasks, with the same egress, the same per-repo secrets and variables, and no router key.
+  `/results` is always the last argument.
+- **Wall time:** systemd stops the unit with TERM, then KILLs it after 120 s (`TimeoutStopSec`), so the script's
+  TERM trap can clean up its game server.
+- **Report:**
+  - The dispatcher posts `/results/report.json` (redacted) under `### runner report` in a `json` fence.
+  - `task`, `verdict` (`PASS`, `FAIL` or `BLOCKED`), `ref`, `started` and `finished` are required.
+  - A missing or malformed report, or a run stopped by the wall time with no report, becomes a BLOCKED report
+    written by the dispatcher, with the exit code and the stderr tail. It never invents a PASS.
+- **Labels:** `runner:done`, or `runner:blocked` for BLOCKED. `needs-claude` is added unless the verdict is PASS,
+  `deviations` is empty or missing, and the script exited 0.
+- **Switch:** `DISPATCH_SCRIPT_MODE=0` (unit environment) turns script mode off. `kind:script` issues are then
+  refused, not run by the agent.
+
 ## Tiers and the halt flag (owner decision 2026-10-30)
 
 Claude sessions may self-approve runner tasks by tier. The dispatcher enforces it:

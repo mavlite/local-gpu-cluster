@@ -77,6 +77,9 @@ def cfg():
         "max_timeout_s": int(os.environ.get("DISPATCH_MAX_TIMEOUT_S", str(MAX_TIMEOUT_MIN * 60))),
         "results_root": os.environ.get("DISPATCH_RESULTS_ROOT", "/var/lib/agent-results"),
         "retry_sleep_s": float(os.environ.get("DISPATCH_RETRY_SLEEP_S", "5")),
+        # kind:script tasks (#65): on unless DISPATCH_SCRIPT_MODE=0; then they are refused, never sent to the model.
+        "script_mode": os.environ.get("DISPATCH_SCRIPT_MODE", "1") != "0",
+        "script_stop_grace_s": int(os.environ.get("DISPATCH_SCRIPT_STOP_GRACE_S", "120")),
         # repo name -> local branches kept equal to origin's (SDG-RUST tools/build.py reads `upstream:...`)
         "mirror_branches": parse_mirrors(os.environ.get("DISPATCH_MIRROR_BRANCHES", "SDG-RUST:upstream")),
         "secret_files": [p for p in os.environ.get(
@@ -509,7 +512,8 @@ def update_mirrors(path, branch, mirrors):
     """Fast-forward each local mirror branch to origin's (creating it if missing). Skips the checked-out task
     branch (pull --ff-only already did it) and branches origin doesn't have. Returns an error string or None."""
     for m in mirrors:
-        if m == branch or git(path, "rev-parse", "--verify", "-q", f"refs/remotes/origin/{m}").returncode != 0:
+        if (branch and m == branch) or git(path, "rev-parse", "--verify", "-q",
+                                             f"refs/remotes/origin/{m}").returncode != 0:
             continue
         r = git(path, "fetch", "origin", f"refs/heads/{m}:refs/heads/{m}")      # no '+': fast-forward only
         if r.returncode != 0:
@@ -535,6 +539,209 @@ def prepare_checkout(path, branch, sha, mirrors=()):
     if sha and not head.lower().startswith(sha.lower()):
         return None, f"HEAD {head} does not match the requested {sha} on {branch}"
     return f"{branch}@{head}", None
+
+
+# ------------------------------------------------------------------------------------------------ kind:script ---
+# local-gpu-cluster#65 and the GamePilot script-task contract: run a repo script in the sandbox, no model at any point.
+LABEL_KIND_SCRIPT = "kind:script"
+_SCRIPT_PATH = re.compile(r"^tools/runner/tasks/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
+_SCRIPT_ARG = re.compile(r"^[A-Za-z0-9:_.*-]+$")
+_SCRIPT_LINE = re.compile(r"(?m)^[ \t]*Script:[ \t]*(.*?)[ \t]*$")
+_ARGS_LINE = re.compile(r"(?m)^[ \t]*Args:[ \t]*(.*?)[ \t]*$")
+SCRIPT_REPORT_FIELDS = ("task", "verdict", "ref", "started", "finished")
+SCRIPT_VERDICTS = ("PASS", "FAIL", "BLOCKED")
+
+
+def is_script(issue):
+    return LABEL_KIND_SCRIPT in {lab["name"] for lab in issue.get("labels", [])}
+
+
+def parse_script(body):
+    """(path, [args]) from the issue's `Script: <path> [args]` line plus an optional `Args: <tokens>` line.
+    Raises ValueError naming what is wrong. Nothing here ever reaches a shell: the args travel as argv."""
+    m = _SCRIPT_LINE.search(body or "")
+    if not m or not m.group(1):
+        raise ValueError("no `Script:` line")
+    tokens = m.group(1).split()
+    a = _ARGS_LINE.search(body or "")
+    path, args = tokens[0], tokens[1:] + (a.group(1).split() if a else [])
+    if not _SCRIPT_PATH.match(path) or ".." in path.split("/"):
+        raise ValueError(f"`Script:` must be a path under tools/runner/tasks/, got {path!r}")
+    bad = [t for t in args if not _SCRIPT_ARG.match(t)]
+    if bad:
+        raise ValueError(f"argument {bad[0]!r} is not allowed (letters, digits and :_.*- only)")
+    return path, args
+
+
+def prepare_exact_checkout(path, branch, sha, mirrors=()):
+    """Script tasks run exactly the commit the conductor read the script from: fetch the branch, then check out
+    `sha` (all 40 hex) detached. Returns (ref, error). Never discards local work."""
+    if not sha or not _SHA_BARE.match(sha):
+        return None, "a kind:script task needs `<branch>@<40-hex sha>` in Branch / commit"
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return None, f"no clone at {path}"
+    dirty = git(path, "status", "--porcelain", "--untracked-files=no").stdout.strip()
+    if dirty:
+        return None, "the clone has uncommitted changes to tracked files:\n" + dirty[:1000]
+    for step in (("fetch", "--prune", "origin"), ("fetch", "origin", branch)):
+        r = git(path, *step)
+        if r.returncode != 0:
+            return None, f"git {' '.join(step)} failed: {(r.stderr or r.stdout).strip()[:800]}"
+    if git(path, "cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
+        return None, f"commit {sha} does not resolve after fetching {branch}"
+    r = git(path, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", sha)
+    if r.returncode != 0:
+        return None, f"git checkout --detach {sha} failed: {(r.stderr or r.stdout).strip()[:800]}"
+    err = update_mirrors(path, None, mirrors)
+    if err:
+        return None, err
+    return f"{branch}@{sha.lower()}", None
+
+
+def script_file_ok(work_dir, path):
+    """The script must be a regular file inside the checkout's tools/runner/tasks/ (no symlink out of it)."""
+    root = os.path.realpath(os.path.join(work_dir, "tools", "runner", "tasks"))
+    real = os.path.realpath(os.path.join(work_dir, path))
+    return real.startswith(root + os.sep) and os.path.isfile(real)
+
+
+def run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha):
+    """`agent-run --script DIR PATH ARGS...` (agent-run appends /results). The sandbox unit stops the script at the
+    wall time with TERM, then KILL after the stop grace; this side waits a little longer as a backstop.
+    Returns the exit code, or None when the wall time ran out."""
+    grace = c["script_stop_grace_s"]
+    # The checkout is detached at the exact sha, so the script cannot ask git for its branch: tell it (SDG-RUST#9).
+    env = dict(os.environ, AGENT_RESULTS_DIR=results_dir, AGENT_MAX_SECONDS=str(timeout_s),
+               AGENT_STOP_GRACE_S=str(grace), RUNNER_REF=f"{branch}@{sha}", RUNNER_BRANCH=branch)
+    with open(log_base + ".stdout", "w") as out, open(log_base + ".stderr", "w") as err:
+        p = subprocess.Popen(c["agent"] + ["--script", work_dir, path] + args, stdout=out, stderr=err, env=env,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            p.wait(timeout=timeout_s)
+            return p.returncode
+        except subprocess.TimeoutExpired:
+            pass
+        # Wall time: TERM to agent-run, whose cleanup stops the unit (the script's own TERM trap runs), then KILL.
+        for sig, wait in ((signal.SIGTERM, grace + 10), (signal.SIGKILL, 10)):
+            try:
+                os.killpg(p.pid, sig)
+                p.wait(timeout=wait)
+                break
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+
+def load_script_report(results_dir):
+    """(report dict, raw text, error) from results_dir/report.json. A report missing a required field, or with a
+    verdict outside PASS/FAIL/BLOCKED, is malformed and is never read as a pass."""
+    path = os.path.join(results_dir, "report.json")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        return None, None, "the script wrote no /results/report.json"
+    try:
+        obj = json.loads(raw)
+    except ValueError as e:
+        return None, raw, f"/results/report.json is malformed: not JSON ({e})"
+    if not isinstance(obj, dict):
+        return None, raw, "/results/report.json is malformed: not a JSON object"
+    missing = [k for k in SCRIPT_REPORT_FIELDS if not obj.get(k)]
+    if missing:
+        return None, raw, f"/results/report.json is malformed: missing {', '.join(missing)}"
+    if obj["verdict"] not in SCRIPT_VERDICTS:
+        return None, raw, f"/results/report.json is malformed: verdict {obj['verdict']!r}"
+    return obj, raw, None
+
+
+def script_needs_claude(rep, exit_code):
+    devs = rep.get("deviations", [])
+    clean = devs is None or devs == []                   # missing or an empty list counts as none (#65 comment)
+    return not (rep["verdict"] == "PASS" and clean and exit_code == 0)
+
+
+def script_blocked_report(task, ref, started, reason, exit_code, log_base):
+    """The dispatcher's own BLOCKED report.json when the script left none (or a malformed one): never a pass."""
+    steps = [{"name": "run script", "ok": False,
+              "detail": reason if exit_code is None else f"{reason} (exit {exit_code})"}]
+    er = tail(log_base + ".stderr", 30) if log_base else ""
+    if er:
+        steps.append({"name": "stderr tail", "ok": False, "detail": er})
+    rep = {"task": task, "verdict": "BLOCKED", "ref": ref or "unknown", "started": started, "finished": utc_now(),
+           "steps": steps, "state_left": {"server": "unknown", "lock": "unknown", "tree": "clean"},
+           "deviations": [f"posted by the dispatcher: {reason}"]}
+    return json.dumps(rep, indent=2)
+
+
+def post_script_report(c, repo, num, raw, verdict, claude, results_dir, exit_code):
+    note = f"\n\nPosted by the dispatcher (kind:script, no model); `/results` is `{results_dir}` on the runner VM."
+    if exit_code not in (0, None):
+        note += f" The script exited {exit_code}."
+    comment(c, repo, num, "### runner report\n\n```json\n" + raw.strip() + "\n```" + note)
+    add = [LABEL_BLOCKED if verdict == "BLOCKED" else LABEL_DONE] + ([LABEL_CLAUDE] if claude else [])
+    relabel(c, repo, num, remove=[LABEL_RUNNING], add=add)
+    log(f"{repo}#{num}: {verdict}{' + needs-claude' if claude else ''} (script)")
+    return 0
+
+
+def refuse_script(c, repo, num, why, claimed):
+    """kind:script issues that cannot run are refused, never sent to the model."""
+    relabel(c, repo, num, remove=[LABEL_RUNNING if claimed else LABEL_READY], add=[LABEL_BLOCKED])
+    comment(c, repo, num, f"runner: refused this kind:script task: {why}. It was not run and never goes to the "
+                          "model. Fix the issue and set runner:ready again.")
+    log(f"{repo}#{num}: kind:script refused: {why}")
+    return 0
+
+
+def dispatch_script(c, repo, issue):
+    num = issue["number"]
+    name = repo.split("/")[-1]
+    body = issue.get("body", "")
+    if not c["script_mode"]:
+        return refuse_script(c, repo, num, "script mode is off on this runner (DISPATCH_SCRIPT_MODE=0)", False)
+    try:
+        path, args = parse_script(body)
+    except ValueError as e:
+        return refuse_script(c, repo, num, str(e), False)
+    started = utc_now()
+    relabel(c, repo, num, remove=[LABEL_READY], add=[LABEL_RUNNING])
+    comment(c, repo, num, f"runner: claimed at {started} (kind:script, no model): `{' '.join([path] + args)}`.")
+    log(f"claimed {repo}#{num} (script)")
+    secs = sections(body)
+    timeout_s = min(parse_timeout_minutes(field(secs, "Limits")) * 60, c["max_timeout_s"])
+    try:
+        branch, sha = parse_ref(field(secs, "Branch / commit", "Branch", "Commit"))
+    except ValueError as e:
+        return refuse_script(c, repo, num, f"Branch / commit: {e}", True)
+    work_dir = os.path.join(c["work"], name)
+    ref, err = prepare_exact_checkout(work_dir, branch, sha, c["mirror_branches"].get(name, ()))
+    if err:
+        return refuse_script(c, repo, num, err, True)
+    if not script_file_ok(work_dir, path):
+        return refuse_script(c, repo, num, f"{path} is not a file under tools/runner/tasks/ at {ref}", True)
+    stamp = started.replace("-", "").replace(":", "")
+    log_base = os.path.join(c["logs"], f"{name}-{num}-{stamp}")
+    results_dir = os.path.join(c["results_root"], f"{name}-{num}-{stamp}")
+    code = run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha.lower())
+    if code == EXIT_NOT_READY:
+        relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
+        comment(c, repo, num, "runner: the runner's sandbox was not ready (agent-run exit 76); nothing ran. Back to "
+                              "runner:ready, retrying next cycle.")
+        return 0
+    task = os.path.splitext(os.path.basename(path))[0]
+    if code is None:
+        raw = script_blocked_report(task, ref, started, f"wall time of {timeout_s // 60} min ran out; the script "
+                                    "was stopped (TERM, then KILL after the grace)", None, log_base)
+        rep, raw2, err = load_script_report(results_dir)
+        if rep is not None:            # the script still managed to write its report while stopping: relay it
+            return post_script_report(c, repo, num, raw2, rep["verdict"], True, results_dir, None)
+        return post_script_report(c, repo, num, raw, "BLOCKED", True, results_dir, None)
+    rep, raw, err = load_script_report(results_dir)
+    if err:
+        return post_script_report(c, repo, num, script_blocked_report(task, ref, started, err, code, log_base),
+                                  "BLOCKED", True, results_dir, code)
+    return post_script_report(c, repo, num, raw, rep["verdict"], script_needs_claude(rep, code), results_dir, code)
 
 
 def preamble(repo, num, ref, started, model, timeout_s=DEFAULT_TIMEOUT_MIN * 60):
@@ -735,13 +942,19 @@ def main(argv=None):
         rotate_logs(c)
         warn_token_expiry(c)
         model = lane_model(c)
+        queue = ready_issues(c, only)
         if model is None:
-            log("router lane closed for scoped keys; nothing claimed")
-            return 0
-        chosen = pick(c, ready_issues(c, only), ready=lambda repo: runner_ready(c, repo))
+            # kind:script tasks need no model, so they still run while the lane is closed
+            queue = [(repo, issue) for repo, issue in queue if is_script(issue)]
+            if not queue:
+                log("router lane closed for scoped keys; nothing claimed")
+                return 0
+        chosen = pick(c, queue, ready=lambda repo: runner_ready(c, repo))
         if chosen is None:
             return 0
         repo, issue = chosen
+        if is_script(issue):
+            return dispatch_script(c, repo, issue)
         return dispatch(c, repo, issue, model)
 
 
