@@ -81,6 +81,14 @@ tasks. Script tasks still run while the router has no lane for scoped keys, sinc
 - **Run:** `agent-run --script DIR SCRIPT ARGS...` starts `bash /work/<repo>/SCRIPT ARGS... /results`. That's the
   same sandbox as agent tasks, with the same egress, the same per-repo secrets and variables, and no router key.
   `/results` is always the last argument.
+- **Script environment:**
+  - `RUNNER_REF=<branch>@<sha>` and `RUNNER_BRANCH`: the checkout is detached, so git can't name the branch.
+  - `RUNNER_WALL_MINUTES` and `RUNNER_STARTED_EPOCH`: the claim time, so the script can stop in time to write its
+    report.
+  - SDG-RUST also gets `SDG_RUST_MAIN`, `SDG_PTERO_SERVERS` and `SDG_NUGET_CACHE` (a read-only NuGet package folder
+    at `/opt/sdg-tools/nuget/sdg-rust`, installed by `78 seed-nuget DIR`; no nuget.org egress).
+  - Anything a script keeps under `/tmp` or `$HOME` (= `/tmp/home`) is gone when the run ends; logs belong in
+    `/results`.
 - **Wall time:** systemd stops the unit with TERM, then KILLs it after 120 s (`TimeoutStopSec`), so the script's
   TERM trap can clean up its game server.
 - **Report:**
