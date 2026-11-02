@@ -131,11 +131,14 @@ if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
   grep -E "^${p}[A-Z0-9_]+=" "$f" | sudo tee -a "$envf" >/dev/null
 fi
 
-# Per-repo fixed (non-secret) variables the repo's task docs say the runner provides. SDG-RUST's lab tools find the
-# checkout through SDG_RUST_MAIN; without it SDG-RUST#2 failed with DEPLOY FAILED (2026-10-31).
-declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST" )
+# Per-repo fixed (non-secret) variables the repo's task docs say the runner provides, NAME=value pairs separated by
+# '|' (values may contain spaces). SDG-RUST's lab tools find the checkout through SDG_RUST_MAIN (without it SDG-RUST#2
+# failed with DEPLOY FAILED, 2026-10-31) and may touch only SDG_PTERO_SERVERS (lab-env.sh defaults to 156). Roles:
+# 156 pve integration, 152 pvp integration, 154/155/157 dev; never 141 (owner, 2026-11-02, with #65).
+declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157" )
 repoenv=()
-for kv in ${REPO_FIXED_ENV[$name]:-}; do repoenv+=(--setenv="$kv"); done
+IFS='|' read -ra fixed <<<"${REPO_FIXED_ENV[$name]:-}"
+for kv in "${fixed[@]}"; do [[ -n "$kv" ]] && repoenv+=(--setenv="$kv"); done
 
 cleanup() { sudo systemctl stop "$unit" 2>/dev/null || true; sudo rm -f "$envf"; }
 trap cleanup EXIT
