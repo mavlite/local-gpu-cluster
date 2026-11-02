@@ -34,6 +34,7 @@ expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/pt
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
   expect ok   "SDG_PTERO_* secrets present for SDG-RUST (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vc "^SDG_PTERO_SERVERS$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_NUGET_CACHE holds the unit-test packages, read-only" '[ -f "$SDG_NUGET_CACHE/xunit/2.9.2/.nupkg.metadata" ] && ! touch "$SDG_NUGET_CACHE/x" 2>/dev/null && echo "$SDG_NUGET_CACHE"'
   expect ok   "SDG_PTERO_SERVERS is the five lab servers" '[ "$SDG_PTERO_SERVERS" = "152 154 155 156 157" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "SDG_RUST_MAIN is the checkout (/work/SDG-RUST)" 'echo "$SDG_RUST_MAIN"; [ "$SDG_RUST_MAIN" = /work/SDG-RUST ] && [ -d "$SDG_RUST_MAIN/tools/lab" ]'
 else
