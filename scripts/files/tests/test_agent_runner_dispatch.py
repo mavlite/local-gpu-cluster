@@ -65,6 +65,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DISPATCH_AGENT_RUN", f"{PY} {os.path.join(HERE, 'fake_agent_run.py')}")
     monkeypatch.delenv("DISPATCH_MAX_TIMEOUT_S", raising=False)
     monkeypatch.setenv("DISPATCH_RETRY_SLEEP_S", "0")
+    monkeypatch.delenv("DISPATCH_SCRIPT_MODE", raising=False)
+    monkeypatch.delenv("FAKE_SCRIPT_MODE", raising=False)
+    monkeypatch.setenv("FAKE_SCRIPT_ARGV", str(tmp_path / "script-argv.json"))
     monkeypatch.delenv("FAKE_GH_TOKEN_EXPIRY", raising=False)
     monkeypatch.setenv("DISPATCH_MIRROR_BRANCHES", "SDG-ARMA3:upstream")
     monkeypatch.delenv("FAKE_GH_EDIT_FAIL", raising=False)
@@ -612,3 +615,169 @@ def test_an_unrelated_error_is_not_mistaken_for_a_swap(env, monkeypatch):
     env.add_issue(7)
     env.run()
     assert "runner:ready" not in env.issue(7)["labels"]
+
+
+
+# --- kind:script (local-gpu-cluster#65): run a repo script, no model ----------------------------------------------
+
+def _script_issue(env, num=7, script="tools/runner/tasks/checks.sh", args="", extra="", labels=None, sha=None,
+                  wall="Wall time: 1 h", branch="main"):
+    clone = env.work / "SDG-ARMA3"
+    sha = sha or git("rev-parse", "HEAD", cwd=env.origin)
+    b = (f"Closes gap: E1-x\nScript: {script}{(' ' + args) if args else ''}\n{extra}"
+         f"### Branch / commit\n\n{branch}@{sha}\n\n### Limits\n\n{wall}\n\n### Intent\n\nRun the checks.\n")
+    env.add_issue(num, b=b, labels=labels or ("runner:ready", "kind:script", "tier:a"))
+    return clone
+
+
+def _commit_script(env, path="tools/runner/tasks/checks.sh"):
+    p = env.origin / path
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/bash\necho run\n")
+    git("add", "-A", cwd=env.origin)
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "task script", cwd=env.origin)
+    return git("rev-parse", "HEAD", cwd=env.origin)
+
+
+def _argv(env):
+    p = env.tmp / "script-argv.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def test_script_pass_posts_report_json_without_the_model(env, monkeypatch):
+    _commit_script(env)
+    _script_issue(env, args="pve smoke:*")
+    env.run()
+    i = env.issue(7)
+    assert "runner:done" in i["labels"] and "needs-claude" not in i["labels"]
+    rep = reports(i)[0]
+    assert "```json" in rep and '"verdict": "PASS"' in rep and "```yaml" not in rep
+    argv = _argv(env)
+    assert argv[0] == "--script" and argv[2:] == ["tools/runner/tasks/checks.sh", "pve", "smoke:*"]
+    claim = i["comments"][0]["body"]
+    assert "no model" in claim
+
+
+def test_script_args_line_is_appended_and_checkout_is_the_exact_sha_detached(env):
+    sha = _commit_script(env)
+    _script_issue(env, extra="Args: suite all\n", sha=sha)
+    env.run()
+    assert _argv(env)[2:] == ["tools/runner/tasks/checks.sh", "suite", "all"]
+    clone = env.work / "SDG-ARMA3"
+    assert git("rev-parse", "HEAD", cwd=clone) == sha
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone) == "HEAD"        # detached
+
+
+def test_script_fail_or_deviations_or_nonzero_exit_need_claude(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("FAKE_SCRIPT_MODE", "deviations")
+    _script_issue(env)
+    env.run()
+    i = env.issue(7)
+    assert "runner:done" in i["labels"] and "needs-claude" in i["labels"]
+
+
+def test_missing_report_is_blocked_with_exit_code_and_redacted_stderr(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("FAKE_SCRIPT_MODE", "noreport")
+    _script_issue(env)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and "needs-claude" in i["labels"]
+    rep = reports(i)[0]
+    assert '"verdict": "BLOCKED"' in rep and "exit 3" in rep and "server unreachable" in rep
+    assert "ghp_" + "C" * 36 not in rep
+
+
+def test_malformed_report_is_never_read_as_a_pass(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("FAKE_SCRIPT_MODE", "malformed")
+    _script_issue(env)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and "malformed" in reports(i)[0]
+
+
+def test_report_json_is_redacted(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("FAKE_SCRIPT_MODE", "leak")
+    _script_issue(env)
+    env.run()
+    assert "ghp_" + "D" * 36 not in reports(env.issue(7))[0]
+
+
+def test_wall_time_stops_the_script_and_blocks(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("FAKE_SCRIPT_MODE", "hang")
+    monkeypatch.setenv("DISPATCH_MAX_TIMEOUT_S", "2")
+    monkeypatch.setenv("DISPATCH_SCRIPT_STOP_GRACE_S", "1")
+    _script_issue(env)
+    t0 = datetime.datetime.now()
+    env.run()
+    assert (datetime.datetime.now() - t0).total_seconds() < 60
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and "wall time" in reports(i)[0]
+
+
+@pytest.mark.parametrize("script,args,why", [
+    ("/etc/passwd", "", "tools/runner/tasks/"),
+    ("tools/runner/tasks/../../x.sh", "", "tools/runner/tasks/"),
+    ("tools/lab/rust-integrate.sh", "", "tools/runner/tasks/"),
+    ("tools/runner/tasks/checks.sh", "pve;rm", "argument"),
+    ("tools/runner/tasks/checks.sh", "$(id)", "argument"),
+])
+def test_bad_script_line_is_refused_and_never_reaches_the_model(env, script, args, why):
+    _commit_script(env)
+    _script_issue(env, script=script, args=args)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and _argv(env) is None
+    assert any(why in c["body"] for c in i["comments"]) and reports(i) == []
+
+
+def test_script_missing_from_the_checkout_is_refused(env):
+    _script_issue(env, script="tools/runner/tasks/nope.sh")
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and _argv(env) is None
+    assert any("not a file" in c["body"] for c in i["comments"])
+
+
+def test_unresolvable_sha_is_refused(env):
+    _commit_script(env)
+    _script_issue(env, sha="0" * 40)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and _argv(env) is None
+
+
+def test_short_sha_is_refused_for_scripts(env):
+    sha = _commit_script(env)
+    _script_issue(env, sha=sha[:10])
+    env.run()
+    assert "runner:blocked" in env.issue(7)["labels"] and _argv(env) is None
+
+
+def test_script_mode_off_refuses_and_never_falls_back_to_the_agent(env, monkeypatch):
+    _commit_script(env)
+    monkeypatch.setenv("DISPATCH_SCRIPT_MODE", "0")
+    _script_issue(env)
+    env.run()
+    i = env.issue(7)
+    assert "runner:blocked" in i["labels"] and _argv(env) is None and reports(i) == []
+    assert any("script mode" in c["body"] for c in i["comments"])
+
+
+def test_script_tasks_run_while_the_model_lane_is_closed(env):
+    _commit_script(env)
+    env.healthz.write_text(json.dumps({"active_chat_profile": "coder"}))         # no lane for scoped keys
+    _script_issue(env)
+    env.run()
+    assert "runner:done" in env.issue(7)["labels"]
+
+
+def test_tier_c_script_is_refused_like_any_task(env):
+    _commit_script(env)
+    _script_issue(env, labels=("runner:ready", "kind:script", "tier:c"))
+    env.run()
+    assert "runner:blocked" in env.issue(7)["labels"] and _argv(env) is None
