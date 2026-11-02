@@ -59,6 +59,13 @@ if [[ "$scriptmode" == 1 ]]; then
       scriptenv=(--setenv=RUNNER_REF="$RUNNER_REF" --setenv=RUNNER_BRANCH="$RUNNER_BRANCH")
     else echo "agent-run: RUNNER_REF/RUNNER_BRANCH malformed" >&2; exit 2; fi
   fi
+  # The wall time and claim time, so the script can stop in time to write its report (SDG-RUST#9, 2026-11-02).
+  for v in RUNNER_WALL_MINUTES RUNNER_STARTED_EPOCH; do
+    if [[ -n "${!v:-}" ]]; then
+      [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "agent-run: $v must be a number" >&2; exit 2; }
+      scriptenv+=(--setenv="$v=${!v}")
+    fi
+  done
 fi
 
 # Per-repo sandbox user + egress (egress.conf, one table -> systemd IPAddressAllow here, nftables per uid+port).
