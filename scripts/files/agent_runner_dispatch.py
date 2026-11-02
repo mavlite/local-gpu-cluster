@@ -605,14 +605,16 @@ def script_file_ok(work_dir, path):
     return real.startswith(root + os.sep) and os.path.isfile(real)
 
 
-def run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha):
+def run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha, started_epoch):
     """`agent-run --script DIR PATH ARGS...` (agent-run appends /results). The sandbox unit stops the script at the
     wall time with TERM, then KILL after the stop grace; this side waits a little longer as a backstop.
     Returns the exit code, or None when the wall time ran out."""
     grace = c["script_stop_grace_s"]
     # The checkout is detached at the exact sha, so the script cannot ask git for its branch: tell it (SDG-RUST#9).
     env = dict(os.environ, AGENT_RESULTS_DIR=results_dir, AGENT_MAX_SECONDS=str(timeout_s),
-               AGENT_STOP_GRACE_S=str(grace), RUNNER_REF=f"{branch}@{sha}", RUNNER_BRANCH=branch)
+               AGENT_STOP_GRACE_S=str(grace), RUNNER_REF=f"{branch}@{sha}", RUNNER_BRANCH=branch,
+               # so the script can end before the wall time and still write its report (SDG-RUST#9 was killed first)
+               RUNNER_WALL_MINUTES=str(timeout_s // 60), RUNNER_STARTED_EPOCH=str(started_epoch))
     with open(log_base + ".stdout", "w") as out, open(log_base + ".stderr", "w") as err:
         p = subprocess.Popen(c["agent"] + ["--script", work_dir, path] + args, stdout=out, stderr=err, env=env,
                              stdin=subprocess.DEVNULL, start_new_session=True)
@@ -704,7 +706,7 @@ def dispatch_script(c, repo, issue):
         path, args = parse_script(body)
     except ValueError as e:
         return refuse_script(c, repo, num, str(e), False)
-    started = utc_now()
+    started, started_epoch = utc_now(), int(time.time())
     relabel(c, repo, num, remove=[LABEL_READY], add=[LABEL_RUNNING])
     comment(c, repo, num, f"runner: claimed at {started} (kind:script, no model): `{' '.join([path] + args)}`.")
     log(f"claimed {repo}#{num} (script)")
@@ -723,7 +725,7 @@ def dispatch_script(c, repo, issue):
     stamp = started.replace("-", "").replace(":", "")
     log_base = os.path.join(c["logs"], f"{name}-{num}-{stamp}")
     results_dir = os.path.join(c["results_root"], f"{name}-{num}-{stamp}")
-    code = run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha.lower())
+    code = run_script(c, work_dir, path, args, timeout_s, log_base, results_dir, branch, sha.lower(), started_epoch)
     if code == EXIT_NOT_READY:
         relabel(c, repo, num, remove=[LABEL_RUNNING], add=[LABEL_READY])
         comment(c, repo, num, "runner: the runner's sandbox was not ready (agent-run exit 76); nothing ran. Back to "

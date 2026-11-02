@@ -12,6 +12,9 @@
 #   install-tools [--dry-run]  install the task tools on the VM (idempotent): the debs in VM_DEBS (apt-get download
 #                              on the host, dpkg -i on the VM -- it has no apt mirror) and the pinned binaries in
 #                              files/agent-runner-tools.lock.json (downloaded + sha256-checked on the host). No egress change.
+#   seed-nuget DIR [--dry-run] install SDG-RUST's NuGet package folder (a `dotnet restore --packages` output made on a
+#                              machine with nuget.org access) read-only at /opt/sdg-tools/nuget/sdg-rust; it must hold
+#                              the packages in NUGET_REQUIRED. Tasks get it as SDG_NUGET_CACHE (agent-run).
 #   seed-umod DIR [--dry-run]  copy SDG-RUST's plugin cache (<sha1>.cs, gitignored) into the VM clone; each file must
 #                              hash to its name and be listed by a plugins.lock on origin
 #   probe [REPO]               run scripts/files/agent-runner-probes.sh on the VM: the sandbox's walls, shell + agent
@@ -69,6 +72,7 @@ SANDBOX_CHECKS=(
   "/var/lib/agent-results is root:runner 750|[ \"\$(stat -c '%U:%G %a' /var/lib/agent-results)\" = 'root:runner 750' ]"
   "old profile /etc/agent-runner/opencode.json removed|[ ! -e /etc/agent-runner/opencode.json ]"
   "results retention timer enabled (14 days)|systemctl is-enabled agent-runner-results-clean.timer >/dev/null"
+  "SDG-RUST NuGet folder holds the unit-test packages (seed-nuget)|for p in microsoft.net.test.sdk/17.11.1 xunit/2.9.2 xunit.runner.visualstudio/2.8.2; do [ -f /opt/sdg-tools/nuget/sdg-rust/\$p/.nupkg.metadata ] || exit 1; done"
   "SDG-RUST umod cache holds every plugin in origin/main's plugins.lock (seed-umod)|cd /home/runner/work/SDG-RUST && h=\$(git show origin/main:plugins.lock | grep -oE '[0-9a-f]{40}') && [ -n \"\$h\" ] && for x in \$h; do [ -s .cache/umod/\$x.cs ] || exit 1; done"
   "panel ssh-agent (agent-arma) up, holding exactly runner's panel key|[ \"\$(sudo env SSH_AUTH_SOCK=/run/agent-ssh-arma/agent.sock ssh-add -L | cut -d' ' -f1,2)\" = \"\$(cut -d' ' -f1,2 /home/runner/.ssh/id_ed25519_panel.pub)\" ]"
   "panel socket dir is agent-arma 700|[ \"\$(sudo stat -c '%U %a' /run/agent-ssh-arma)\" = 'agent-arma 700' ]"
@@ -294,6 +298,25 @@ install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifie
   install_dotnet "$dry"
 }
 
+# SDG-RUST unit tests (tests/Sdg.Logic.Tests): the packages a restore needs, offline (owner decision 2026-11-02: a
+# seeded folder, no nuget.org egress). checks.sh passes SDG_NUGET_CACHE as RestoreAdditionalProjectFallbackFolders.
+NUGET_DIR=/opt/sdg-tools/nuget/sdg-rust
+NUGET_REQUIRED=(microsoft.net.test.sdk/17.11.1 xunit/2.9.2 xunit.runner.visualstudio/2.8.2)
+
+seed_nuget() {   # $1 = a `dotnet restore --packages` folder, $2 = --dry-run
+  local src="${1:?seed-nuget needs the restored packages folder}" dry="${2:-}" p n
+  for p in "${NUGET_REQUIRED[@]}"; do
+    [[ -f "$src/$p/.nupkg.metadata" ]] || die "$src has no $p (restore tests/Sdg.Logic.Tests with --packages first)"
+  done
+  n=$(find "$src" -mindepth 2 -maxdepth 2 -type d | wc -l)
+  if [[ -n "$dry" ]]; then echo "would install $n package versions from $src -> $NUGET_DIR"; return 0; fi
+  (cd "$src" && tar --owner=0 --group=0 -cf - .) \
+    | vm "set -e; sudo rm -rf '$NUGET_DIR.new'; sudo install -d -m 755 '$NUGET_DIR.new'
+          sudo tar -C '$NUGET_DIR.new' --no-same-owner -xf -; sudo chmod -R u=rwX,go=rX '$NUGET_DIR.new'
+          sudo rm -rf '$NUGET_DIR'; sudo mv '$NUGET_DIR.new' '$NUGET_DIR'
+          echo \"installed \$(find '$NUGET_DIR' -mindepth 2 -maxdepth 2 -type d | wc -l) package versions in $NUGET_DIR\""
+}
+
 seed_umod() {   # $1 = dir of <sha1>.cs files (copied from a workstation's raidable-bases-sdg/.cache/umod), $2 = --dry-run
   # SDG-RUST tools/build.py reads plugins from .cache/umod (gitignored) and the sandbox mounts the clone read-only,
   # so the cache is seeded here. Every file must hash to its own name and be named by a plugins.lock on origin.
@@ -320,6 +343,7 @@ case "$cmd" in
   install-vm) vm true || die "cannot reach $VM with $KEY"; do_install vm "${1:-}" ;;
   setup-sandbox) vm true || die "cannot reach $VM with $KEY"; setup_sandbox "${1:-}" ;;
   install-tools) vm true || die "cannot reach $VM with $KEY"; install_tools "${1:-}" ;;
+  seed-nuget) vm true || die "cannot reach $VM with $KEY"; seed_nuget "${1:-}" "${2:-}" ;;
   seed-umod) vm true || die "cannot reach $VM with $KEY"; seed_umod "${1:-}" "${2:-}" ;;
   probe) vm "bash -s -- '${1:-SDG-ARMA3}'" < "$F/agent-runner-probes.sh" ;;
   *) sed -n '2,21p' "$0"; exit 2 ;;

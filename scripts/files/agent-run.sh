@@ -59,6 +59,13 @@ if [[ "$scriptmode" == 1 ]]; then
       scriptenv=(--setenv=RUNNER_REF="$RUNNER_REF" --setenv=RUNNER_BRANCH="$RUNNER_BRANCH")
     else echo "agent-run: RUNNER_REF/RUNNER_BRANCH malformed" >&2; exit 2; fi
   fi
+  # The wall time and claim time, so the script can stop in time to write its report (SDG-RUST#9, 2026-11-02).
+  for v in RUNNER_WALL_MINUTES RUNNER_STARTED_EPOCH; do
+    if [[ -n "${!v:-}" ]]; then
+      [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "agent-run: $v must be a number" >&2; exit 2; }
+      scriptenv+=(--setenv="$v=${!v}")
+    fi
+  done
 fi
 
 # Per-repo sandbox user + egress (egress.conf, one table -> systemd IPAddressAllow here, nftables per uid+port).
@@ -142,7 +149,8 @@ fi
 # '|' (values may contain spaces). SDG-RUST's lab tools find the checkout through SDG_RUST_MAIN (without it SDG-RUST#2
 # failed with DEPLOY FAILED, 2026-10-31) and may touch only SDG_PTERO_SERVERS (lab-env.sh defaults to 156). Roles:
 # 156 pve integration, 152 pvp integration, 154/155/157 dev; never 141 (owner, 2026-11-02, with #65).
-declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157" )
+# SDG_NUGET_CACHE: the read-only NuGet package folder for the unit tests (78 seed-nuget; no nuget.org egress).
+declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157|SDG_NUGET_CACHE=/opt/sdg-tools/nuget/sdg-rust" )
 repoenv=()
 IFS='|' read -ra fixed <<<"${REPO_FIXED_ENV[$name]:-}"
 for kv in "${fixed[@]}"; do [[ -n "$kv" ]] && repoenv+=(--setenv="$kv"); done
