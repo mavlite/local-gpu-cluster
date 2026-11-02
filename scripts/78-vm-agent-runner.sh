@@ -145,6 +145,7 @@ do_diff() {
   else printf 'DRIFT  vm   sqfvm %s missing or not the pinned build at %s (install-tools)\n' "$ver" "$dst"; drift=1; fi
   local dver ddir dlink
   read -r dver ddir dlink <<<"$(lock_dotnet | cut -d' ' -f1,4,5)"
+  [[ -n "$dver" ]] || die "dotnet entry missing from $TOOLS_LOCK"
   if [[ "$(vm "readlink -f '$dlink' 2>/dev/null; '$dlink' --version 2>/dev/null")" == "$ddir/dotnet"$'\n'"$dver" ]]
   then printf 'ok     vm   dotnet SDK %s at %s (%s)\n' "$dver" "$ddir" "$dlink"
   else printf 'DRIFT  vm   dotnet SDK %s missing or %s does not point at it (install-tools)\n' "$dver" "$dlink"; drift=1; fi
@@ -231,12 +232,13 @@ print(*(d[k] for k in ("version","url","sha256","member","member_sha256","instal
 
 lock_dotnet() {   # -> "version url sha512 install_dir link"
   python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["dotnet"]
-print(*(d[k] for k in ("version","url","sha512","install_dir","link")))' "$LOCK"
+print(*(d[k] for k in ("version","url","sha512","install_dir","link")))' "$TOOLS_LOCK"
 }
 
 install_dotnet() {   # $1 = --dry-run or empty. The SDK tarball, sha512-checked on the host, unpacked on the VM.
   local dry="${1:-}" ver url sha dir link t
   read -r ver url sha dir link <<<"$(lock_dotnet)"
+  [[ -n "$ver" && -n "$dir" && -n "$link" ]] || die "dotnet entry missing from $TOOLS_LOCK"
   if [[ "$(vm "'$dir/dotnet' --version 2>/dev/null")" == "$ver" ]]; then echo "ok: dotnet SDK $ver already at $dir"
   elif [[ -n "$dry" ]]; then echo "would install dotnet SDK $ver -> $dir"; return 0
   else
