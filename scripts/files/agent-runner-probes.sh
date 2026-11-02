@@ -33,7 +33,7 @@ expect fail "read /etc/agent-runner/router.key"        'cat /etc/agent-runner/ro
 expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/ptero-156.env'
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
-  expect ok   "SDG_PTERO_* present for SDG-RUST (3 names)" 'n=$(compgen -e | grep -c "^SDG_PTERO_"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_PTERO_* secrets present for SDG-RUST (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vc "^SDG_PTERO_SERVERS$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
   expect ok   "SDG_PTERO_SERVERS is the five lab servers" '[ "$SDG_PTERO_SERVERS" = "152 154 155 156 157" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "SDG_RUST_MAIN is the checkout (/work/SDG-RUST)" 'echo "$SDG_RUST_MAIN"; [ "$SDG_RUST_MAIN" = /work/SDG-RUST ] && [ -d "$SDG_RUST_MAIN/tools/lab" ]'
 else
