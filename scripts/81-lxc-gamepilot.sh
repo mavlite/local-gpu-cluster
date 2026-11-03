@@ -13,7 +13,7 @@
 #   provision                   proxy settings, packages, the pinned claude CLI (host-downloaded, sha256-checked),
 #                               then `dotnet`
 #   dotnet                      the pinned .NET 8 SDK (host-downloaded, sha512-checked) at /opt/dotnet/<ver>,
-#                               linked as /usr/local/bin/dotnet; NuGet restores go through the proxy
+#                               linked as /usr/local/bin/dotnet and /usr/bin/dotnet; NuGet restores go through the proxy
 #   clone BUNDLE SHA            /opt/gamepilot from a git bundle (the repo is private; the CT has no GitHub
 #                               credentials until the owner adds one), checked at SHA, then deploy/install.sh
 #   verify                      allowed hosts answer through the proxy, everything else is refused
@@ -45,9 +45,11 @@ MANIFEST=(
   "ct|gamepilot-ct-sudoers|/etc/sudoers.d/gamepilot-proxy|root:root|440"
 )
 BRIDGE_STANZA=$'auto vmbrgp\niface vmbrgp inet static\n\taddress 10.82.0.254/24\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.disable_ipv6=1\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.forwarding=0'
-# qm/pct settings the conductor depends on (checked by diff, set by create)
-CT_EXPECT=("hostname:gamepilot" "unprivileged:1" "cores:2" "memory:4096" "onboot:1"
-           "net0:bridge=vmbrgp" "net0:firewall=1" "net0:ip=10.82.0.10/24" "rootfs:size=20G")
+# qm/pct settings the conductor depends on (checked by diff, set by create). Size: owner resized live 2026-11-03.
+CT_EXPECT=("hostname:gamepilot" "unprivileged:1" "cores:4" "memory:8192" "swap:512" "onboot:1"
+           "net0:bridge=vmbrgp" "net0:firewall=1" "net0:ip=10.82.0.10/24" "rootfs:size=40G")
+# One line appended to the CT's /etc/bash.bashrc (provision; checked by diff): non-login shells get the profile snippet.
+BASHRC_HOOK='[ -r /etc/profile.d/gamepilot-proxy.sh ] && . /etc/profile.d/gamepilot-proxy.sh  # gamepilot (81)'
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 # A command in CT 160 with exactly the environment a systemd unit there gets (the proxy via DefaultEnvironment).
@@ -124,7 +126,7 @@ do_create() {
   if pct status "$CT" >/dev/null 2>&1; then echo "ok: CT $CT exists"
   else
     pct create "$CT" "$TEMPLATE" --hostname "$HOSTNAME_CT" --unprivileged 1 --features nesting=1 \
-      --cores 2 --memory 4096 --swap 512 --rootfs local-lvm:20 --onboot 1 --ostype debian \
+      --cores 4 --memory 8192 --swap 512 --rootfs local-lvm:40 --onboot 1 --ostype debian \
       --net0 "name=eth0,bridge=$BR,firewall=1,ip=$CT_IP,gw=$CT_GW" --nameserver 127.0.0.1   # no DNS: proxy only
     echo "created CT $CT"
   fi
@@ -134,7 +136,9 @@ do_create() {
 
 do_provision() {
   push_where ct
-  in_ct "$CT" systemctl daemon-reexec          # pick up DefaultEnvironment (the proxy) for every unit
+  # pct enter / pct exec shells are non-login and never read profile.d: hook the same snippet into bash.bashrc.
+  in_ct "$CT" sh -c "grep -qxF '$BASHRC_HOOK' /etc/bash.bashrc || printf '%s\n' '$BASHRC_HOOK' >> /etc/bash.bashrc"
+  in_ct "$CT" systemctl daemon-reexec         # pick up DefaultEnvironment (the proxy) for every unit
   in_ct "$CT" sh -c '! command -v visudo >/dev/null || visudo -c -q'   # a bad sudoers drop-in would lock sudo
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q update
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q -y install "${DEBS[@]}"
@@ -172,8 +176,10 @@ print(d["version"], d["url"], d["sha512"], d["install_dir"], d["link"])' "$LOCK"
       rm -f /root/dotnet-sdk.tar.gz; chmod -R go-w '$dir.tmp'; rm -rf '$dir'; mv '$dir.tmp' '$dir'"
     echo "installed dotnet SDK $ver -> $dir (sha512 verified)"
   fi
+  # /usr/bin too, so dotnet is found even on pct exec's short PATH (/sbin:/bin:/usr/sbin:/usr/bin)
   in_ct "$CT" ln -sfn "$dir/dotnet" "$link"
-  in_ct "$CT" env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 "$link" --version | sed 's/^/dotnet --version: /'
+  in_ct "$CT" ln -sfn "$dir/dotnet" /usr/bin/dotnet
+  in_ct "$CT" env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 dotnet --version | sed 's/^/dotnet --version: /'
 }
 
 do_clone() {
@@ -239,6 +245,8 @@ do_diff() {
     || { echo "DRIFT  host  vmbrgp missing from /etc/network/interfaces"; drift=1; }
   /usr/local/sbin/gamepilot-net.sh check 2>/dev/null && echo "ok     host  SNAT 10.82.0.0/24" \
     || { echo "DRIFT  host  SNAT 10.82.0.0/24 missing"; drift=1; }
+  in_ct "$CT" grep -qxF "$BASHRC_HOOK" /etc/bash.bashrc 2>/dev/null && echo "ok     ct    /etc/bash.bashrc sources the proxy snippet" \
+    || { echo "DRIFT  ct    /etc/bash.bashrc lacks the gamepilot hook (81 provision)"; drift=1; }
   local cfg q k v; cfg=$(pct config "$CT" 2>/dev/null || true)
   for q in "${CT_EXPECT[@]}"; do
     k=${q%%:*}; v=${q#*:}

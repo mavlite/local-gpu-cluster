@@ -9,12 +9,12 @@ provides. Request: #66.
 
 | | |
 |---|---|
-| Container | CT 160 `gamepilot`: unprivileged LXC, Debian 12, 2 cores, 4 GB, 512 MB swap, 20 GB on `local-lvm`, onboot |
+| Container | CT 160 `gamepilot`: unprivileged LXC, Debian 12, 4 cores, 8 GB, 512 MB swap, 40 GB on `local-lvm`, onboot (owner resized from 2 cores / 4 GB / 20 GB on 2026-11-03) |
 | Network | bridge `vmbrgp` 10.82.0.254/24 (in `/etc/network/interfaces`), CT at 10.82.0.10, SNAT to 192.168.6.175 (`gamepilot-net.service`) |
 | Egress | **only** the allowlisting proxy `192.168.6.155:3129` on LXC 155 (`gamepilot-proxy.service`, a second tinyproxy instance next to the redteam one on 3128) |
 | Firewall | `160.fw`: inbound DROP, outbound REJECT, one rule: tcp to 192.168.6.155:3129. No DNS, no LAN, no router, no runner (10.81) |
-| Allowlist | `github.com`, `api.github.com`, `api.anthropic.com`, `claude.ai`, `console.anthropic.com`, `platform.claude.com` (claude login, added 2026-10-31), `deb.debian.org`, `security.debian.org` |
-| Software | `python3`, `python3-yaml`, `git`, `gh` (Debian 2.23), `curl`, `sudo`; `claude` pinned in `gamepilot-tools.lock.json` at `/usr/local/bin/claude` |
+| Allowlist | `github.com`, `api.github.com`, `api.anthropic.com`, `claude.ai`, `console.anthropic.com`, `platform.claude.com` (claude login, added 2026-10-31), `deb.debian.org`, `security.debian.org`, `api.nuget.org` (NuGet restores for code jobs, added 2026-11-03) |
+| Software | `python3`, `python3-yaml`, `git`, `gh` (Debian 2.23), `curl`, `sudo`, `libicu72`; pinned in `gamepilot-tools.lock.json`: `claude` at `/usr/local/bin/claude`, the .NET 8 SDK 8.0.427 at `/opt/dotnet/8.0.427` (linked from `/usr/local/bin/dotnet` and `/usr/bin/dotnet`, the same pin as VM 178) |
 | Code | `/opt/gamepilot` = SDG-GAMEPILOT `main`, origin set to GitHub. `deploy/install.sh` was run; **the timer is not enabled** |
 
 **Why an LXC, not the VM #66 asked for:** every service here runs in an LXC. VM 178 is the one exception, for
@@ -31,11 +31,20 @@ both allowlists.
 - systemd units, including the conductor's own unit and the runbook's `systemd-run` checks: the `DefaultEnvironment`
   in `system.conf.d`.
 - `sudo` sessions: a sudoers `env_file` and `env_keep`.
-- Interactive shells: `/etc/profile.d`.
+- Login shells (`su -`, `bash -l`): `/etc/profile.d/gamepilot-proxy.sh`.
+- `pct enter` / `pct exec` shells: these are **non-login** with `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so they never
+  read profile.d. `81 provision` appends one line to `/etc/bash.bashrc` that sources the same snippet, which also puts
+  `/usr/local/bin` on the PATH (`claude`, `dotnet`). A one-shot `pct exec 160 -- cmd` runs no bash at all: it has no
+  proxy and the short PATH (`dotnet` works there through `/usr/bin/dotnet`; use `bash -lc 'cmd'` for anything else).
 - apt: `apt.conf.d`.
 
 **claude CLI settings:** `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` (owner, 2026-10-31). The last turns off the claude.ai connectors on the owner's account (Gmail, Drive and so on, reached via `mcp-proxy.anthropic.com`), so triage jobs cannot reach them. That host stays off the allowlist, as does `downloads.claude.ai`. The binary is
 updated from the host; telemetry hosts are not on the allowlist.
+
+**.NET SDK (2026-11-03):** `81 dotnet` (also run by `81 provision`) downloads Microsoft's SDK tarball on the host,
+checks its sha512 against the lock, and unpacks it in the CT. Microsoft's download hosts (`builds.dotnet.microsoft.com`,
+`dotnetcli.azureedge.net`) stay **refused** by the proxy; only `api.nuget.org` is allowed, for package restores.
+`DOTNET_CLI_TELEMETRY_OPTOUT=1` and `DOTNET_NOLOGO=1` are set for units, sudo sessions and shells.
 
 **Budget:** `claude -p` on this CT uses the Claude login of the `gamepilot` user, the owner's Max subscription. It
 does **not** go through the router's escalation broker, so the broker's $7/day and $150/month caps do not apply.
@@ -49,7 +58,8 @@ From the Proxmox host: `pct enter 160`, or `pct exec 160 -- <command>`. Inbound 
 ```
 scripts/81-lxc-gamepilot.sh diff        # read-only drift check (files on host/155/CT, bridge, SNAT, CT settings)
 scripts/81-lxc-gamepilot.sh verify      # allowed hosts tunnel, others get 403, direct routes are blocked
-scripts/81-lxc-gamepilot.sh provision   # re-apply proxy settings, packages, the pinned claude
+scripts/81-lxc-gamepilot.sh provision   # re-apply proxy settings, the bash.bashrc hook, packages, pinned claude + dotnet
+scripts/81-lxc-gamepilot.sh dotnet      # only the pinned .NET SDK (idempotent)
 ```
 
 - **Allow a new host** (the panel VPN and Discord come later): add a line to `files/gamepilot-proxy-allowlist`, run
@@ -59,6 +69,11 @@ scripts/81-lxc-gamepilot.sh provision   # re-apply proxy settings, packages, the
   1. Bump `version`, `url` and `sha256` in `files/gamepilot-tools.lock.json`, from
      `https://downloads.claude.ai/claude-code-releases/<version>/manifest.json`, platform `linux-x64`.
   2. Run `81 provision`.
+- **Update dotnet:** bump `version`, `runtime`, `url`, `sha512` and `install_dir` in the lock's `dotnet` entry, from
+  `https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json` (rid `linux-x64`), keeping it in step
+  with VM 178's `agent-runner-tools.lock.json`. Then run `81 dotnet`.
+- **Resize the CT:** change it live (`pct set` / `pct resize`), then update `CT_EXPECT` and `do_create` in `81`
+  and the Shape table above, or `81 diff` reports drift.
 - **Re-clone the code:** the repo is private and the CT has no GitHub credentials until the owner writes
   `/etc/gamepilot/gh-token`. So `81 clone BUNDLE SHA` takes a `git bundle` made on a machine with access. After the
   token exists, `git fetch` inside the CT works through the proxy.
