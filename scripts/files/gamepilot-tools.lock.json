@@ -1,9 +1,18 @@
 {
-  "_comment": "claude CLI on CT 160, installed by 81-lxc-gamepilot.sh provision: downloaded and sha256-checked on the Proxmox host (the CT reaches only the allowlisting proxy). Release manifest: https://downloads.claude.ai/claude-code-releases/<version>/manifest.json, platform linux-x64. Bump version + sha256 together.",
+  "_comment": "Pinned tools on CT 160 (claude CLI, .NET SDK), installed by 81-lxc-gamepilot.sh provision: downloaded and sha256-checked on the Proxmox host (the CT reaches only the allowlisting proxy). Release manifest: https://downloads.claude.ai/claude-code-releases/<version>/manifest.json, platform linux-x64. Bump version + sha256 together.",
   "claude": {
     "version": "2.1.309",
     "url": "https://downloads.claude.ai/claude-code-releases/2.1.309/linux-x64/claude",
     "sha256": "4d704a8aecbe038affa3000f498ae17c1b4f753add8facb8764120affc99b658",
     "install_path": "/usr/local/bin/claude"
+  },
+  "dotnet": {
+    "_comment": "Microsoft .NET 8 SDK for GamePilot code jobs (owner request 2026-11-03), the same pin as VM 178 (agent-runner-tools.lock.json). Downloaded and sha512-checked on the host, so the CT's proxy never allows Microsoft's download host. Bump version, url and sha512 together.",
+    "version": "8.0.427",
+    "runtime": "8.0.33",
+    "url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-linux-x64.tar.gz",
+    "sha512": "85725692f465f5024b9b42a159a29d9f73e8c57ad9e8bfe1e7028a505d18031d68931e8aa3f9de44145b08170dde897c8a78e1aa18d4219698b6891af7095d39",
+    "install_dir": "/opt/dotnet/8.0.427",
+    "link": "/usr/local/bin/dotnet"
   }
 }

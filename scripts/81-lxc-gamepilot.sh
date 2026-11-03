@@ -10,7 +10,10 @@
 #   host                        SNAT unit + CT firewall (160.fw) on the host
 #   proxy                       the gamepilot tinyproxy instance on LXC 155 (its own port, allowlist, pid, log)
 #   create                      pct create CT 160 if absent, start it
-#   provision                   proxy settings, packages, the pinned claude CLI (host-downloaded, sha256-checked)
+#   provision                   proxy settings, packages, the pinned claude CLI (host-downloaded, sha256-checked),
+#                               then `dotnet`
+#   dotnet                      the pinned .NET 8 SDK (host-downloaded, sha512-checked) at /opt/dotnet/<ver>,
+#                               linked as /usr/local/bin/dotnet; NuGet restores go through the proxy
 #   clone BUNDLE SHA            /opt/gamepilot from a git bundle (the repo is private; the CT has no GitHub
 #                               credentials until the owner adds one), checked at SHA, then deploy/install.sh
 #   verify                      allowed hosts answer through the proxy, everything else is refused
@@ -24,7 +27,7 @@ F="$LGC_DIR/files"
 CT=160; HOSTNAME_CT=gamepilot; PROXY_CT=155
 BR=vmbrgp; BR_ADDR=10.82.0.254/24; CT_IP=10.82.0.10/24; CT_GW=10.82.0.254
 TEMPLATE="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
-DEBS=(python3 python3-yaml git gh curl ca-certificates sudo)   # sudo: the GamePilot runbook uses it
+DEBS=(python3 python3-yaml git gh curl ca-certificates sudo libicu72)   # sudo: the runbook; libicu72: dotnet
 LOCK="$F/gamepilot-tools.lock.json"
 
 # where|repo file|installed path|owner:group|mode   (where: host, proxy = CT 155, ct = CT 160)
@@ -146,8 +149,31 @@ print(d["version"], d["url"], d["sha256"], d["install_path"])' "$LOCK")
     pct push "$CT" "$t/claude" "$dst" --user root --group root --perms 0755
     rm -rf "$t"; echo "installed claude $ver -> $dst (sha256 verified)"
   fi
+  do_dotnet
   # pct exec has a short PATH without /usr/local/bin; check with the PATH a systemd unit gets.
-  in_ct "$CT" env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'for b in python3 git gh claude; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
+  in_ct "$CT" env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'for b in python3 git gh claude dotnet; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
+}
+
+# The .NET SDK for GamePilot code jobs: Microsoft's tarball, sha512-checked on the host and unpacked in the CT, so the
+# CT's proxy never needs Microsoft's download host. NuGet restores go through the proxy (api.nuget.org is allowlisted).
+do_dotnet() {
+  local ver url sha dir link t
+  read -r ver url sha dir link < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["dotnet"]
+print(d["version"], d["url"], d["sha512"], d["install_dir"], d["link"])' "$LOCK")
+  [[ -n "$ver" && -n "$dir" && -n "$link" ]] || die "dotnet entry missing from $LOCK"
+  if [[ "$(in_ct "$CT" sh -c "'$dir/dotnet' --version 2>/dev/null")" == "$ver" ]]; then echo "ok: dotnet SDK $ver already at $dir"
+  else
+    t=$(mktemp -d)
+    curl -fsSL --retry 2 -o "$t/sdk.tar.gz" "$url"
+    echo "$sha  $t/sdk.tar.gz" | sha512sum -c --quiet || { rm -rf "$t"; die "dotnet SDK sha512 mismatch"; }
+    pct push "$CT" "$t/sdk.tar.gz" /root/dotnet-sdk.tar.gz --user root --group root --perms 0600
+    rm -rf "$t"
+    in_ct "$CT" sh -c "set -e; rm -rf '$dir.tmp'; install -d -m 755 '$dir.tmp'; tar -xzf /root/dotnet-sdk.tar.gz -C '$dir.tmp' --no-same-owner
+      rm -f /root/dotnet-sdk.tar.gz; chmod -R go-w '$dir.tmp'; rm -rf '$dir'; mv '$dir.tmp' '$dir'"
+    echo "installed dotnet SDK $ver -> $dir (sha512 verified)"
+  fi
+  in_ct "$CT" ln -sfn "$dir/dotnet" "$link"
+  in_ct "$CT" env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 "$link" --version | sed 's/^/dotnet --version: /'
 }
 
 do_clone() {
@@ -171,12 +197,14 @@ do_verify() {
   local u r fail=0
   # %{http_connect} is the proxy's answer to CONNECT: 200 = tunnel opened (allowlisted), 403 = refused by the filter.
   # The site's own status after that (claude.ai may well say 403 to a bare HEAD) is reported, not judged.
-  for u in https://api.github.com https://github.com https://api.anthropic.com https://claude.ai https://console.anthropic.com; do
+  for u in https://api.github.com https://github.com https://api.anthropic.com https://claude.ai https://console.anthropic.com \
+           https://api.nuget.org/v3/index.json; do
     r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "200 "* && "${r#* }" != 000 ]]; then echo "PASS  allowed  $u -> tunnel 200, site HTTP ${r#* }"
     else echo "FAIL  allowed  $u -> ${r:-no answer}"; fail=1; fi
   done
-  for u in https://example.com https://registry.npmjs.org https://objects.githubusercontent.com; do
+  for u in https://example.com https://registry.npmjs.org https://objects.githubusercontent.com \
+           https://builds.dotnet.microsoft.com https://dotnetcli.azureedge.net; do
     r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "403 "* ]]; then echo "PASS  refused  $u (proxy CONNECT 403)"
     else echo "FAIL  refused  $u -> ${r:-no answer}"; fail=1; fi
@@ -229,6 +257,7 @@ case "$cmd" in
   proxy) do_proxy ;;
   create) do_create ;;
   provision) do_provision ;;
+  dotnet) do_dotnet ;;
   clone) do_clone "$@" ;;
   verify) do_verify ;;
   diff) do_diff ;;
