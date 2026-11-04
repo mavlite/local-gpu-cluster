@@ -211,6 +211,16 @@ agent. **2026-10-30: 18/18 passed.**
   - On the VM: `ip -br -4 addr show tun0` (expect 10.60.56.10).
   - `curl -s http://192.168.6.153:8000/healthz | jq .active_chat_profile`, and `gh auth status`.
   - `agent-run ~/work "Reply with exactly the word: ready"`.
+- **After a host reboot, check the NAT units.** On 2026-11-04 `agent-runner-net.service` failed at boot: `iptables`
+  without a wait hit `/run/xtables.lock` (exit 4), so the 10.81 SNAT rule was missing and VM 178 had no GitHub or
+  router. The dispatcher then fails every run with `error connecting to api.github.com` and `healthz unreadable`.
+  - Check on the host: `systemctl --failed`, then `iptables -w -t nat -S POSTROUTING | grep 10.81`.
+  - Fix: `systemctl restart agent-runner-net.service`, then from the VM
+    `curl -s -o /dev/null -w '%{http_code}\n' http://192.168.6.153:8000/healthz`.
+  - `agent-runner-net.sh`, `gamepilot-net.sh` and `tester-vm-dnat.sh` now use `iptables -w 60`. Tested by holding the
+    lock by hand (the old command returns 4, the new script waits and succeeds); no real reboot has tested it yet.
+    Restarting the unit drops the SNAT rule for a moment, so don't do it during a task.
+- **Restore integration server 156 (pve) when it is frozen.** See the section below.
 - **Drift:** `scripts/78-vm-agent-runner.sh diff` on the host.
 - **Router key:** `systemctl list-timers agent-runner-key-renew.timer`. Force a renewal on the host with
   `/usr/local/sbin/agent-runner-key-renew --force`.
@@ -224,6 +234,49 @@ agent. **2026-10-30: 18/18 passed.**
   3. Revoke the `agent-runner` certificate in OPNsense (VPN revocation list) and disable its override.
   4. Remove the runner key from the panel through SDG-IAC's Ansible.
   5. `qm stop 178`.
+
+### Restoring integration server 156 (done 2026-11-04)
+
+156 is the pve integration server, and its normal content is `main`'s pve **test** build. The panel can say `running`
+while the server is frozen, so don't trust the power state. These are the signs:
+
+- `RUST_SERVER=156 bash tools/lab/server-alive.sh` prints `SERVER NOT RESPONDING`.
+- The panel's `resources` show CPU near 3% (a healthy server sits far higher; 155 read 122%).
+- The last lines of `oxide/logs/oxide_<date>.txt` are `[CSharp] Started Oxide.Compiler`, and the compiler log ends
+  `Pushing job N back to parent`.
+
+Run everything in the SDG-RUST sandbox, never by hand on the panel, with the runner idle:
+
+```
+AGENT_MAX_SECONDS=3000 AGENT_RUN_SHELL=1 agent-run /home/runner/work/SDG-RUST "<commands>"
+```
+
+1. `bash tools/lab/server-lock.sh acquire <owner> 156 1`. A heartbeat older than 30 minutes is stale and this breaks it.
+   Release the lock when finished, on every exit path.
+2. Take a mark with `ptero 156 logmark`, then restart: `ptero 156 power restart`. `ensure-running.sh` refuses
+   integration servers by design, so 156 needs this direct call (`. tools/lab/rust-servers.sh` defines `ptero`). The
+   restart of a frozen server took about 10 minutes before the new process appeared.
+3. If the build on the server is stale, deploy **and then expect to restart again**:
+   `RUST_SERVER=156 bash tools/lab/rust-deploy-wt.sh /work/SDG-RUST dist-test --profile pve --build-root "$(mktemp -d)"`.
+   On 2026-11-04 the upload completed but froze 156 again: it printed `SERVER NOT RESPONDING` and exited 1 before it
+   reached its stale-file cleanup and config reloads. A second restart without re-uploading then booted cleanly.
+4. Don't treat the first console answer as ready: 156 answered about a minute after the process started, with plugin
+   init still running. Wait for these after the mark, then confirm:
+   - `ptero 156 log "$mark" 'Grid initialization completed' 1` (end of plugin init);
+   - `ptero 156 log "$mark" 'Loaded plugin SDG' 20`: all 10 SDG plugins at the expected versions;
+   - `server-alive.sh` still `alive` 5 minutes later, past `Shutting down compiler because idle shutdown`;
+   - `oxide/data/SdgProfile/profile.json` shows `profile: pve` and the expected `built` sha;
+   - `ptero 156 ls oxide/data/RaidableBases/Profiles` has no stale profiles, because that deploy stopped before its
+     cleanup (on 2026-11-04: `RaidBases.json` and `t1_pool` to `t4_pool`).
+
+Cause not established. The freezes on 11-03 and 11-04 both followed a sync after the compiler had shut down on idle:
+the compiler started again, finished a compile, then the server went silent. 155 took a full upload without freezing
+on 2026-11-03, so idle shutdown alone doesn't explain it. Until it's understood, expect a deploy to 156 to need the
+restart in step 3.
+
+**How 156 got here:** until SDG-RUST #17, the runner's single SFTP login carried 156's short id, so file operations
+for 155 went to 156 (SDG-RUST #9 runs 4-6). That also left a shared lock named `checks-155` on 156. The probe "Wings
+SFTP lands on the target server" (`78 probe SDG-RUST`) now catches that login mistake.
 
 ## Open items
 
