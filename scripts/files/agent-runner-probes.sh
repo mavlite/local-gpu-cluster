@@ -37,6 +37,17 @@ if [[ "$REPO" == SDG-RUST ]]; then
   expect ok   "SDG_NUGET_CACHE holds the unit-test packages, read-only" '[ -f "$SDG_NUGET_CACHE/xunit/2.9.2/.nupkg.metadata" ] && ! touch "$SDG_NUGET_CACHE/x" 2>/dev/null && echo "$SDG_NUGET_CACHE"'
   expect ok   "SDG_PTERO_SERVERS is the five lab servers" '[ "$SDG_PTERO_SERVERS" = "152 154 155 156 157" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "SDG_RUST_MAIN is the checkout (/work/SDG-RUST)" 'echo "$SDG_RUST_MAIN"; [ "$SDG_RUST_MAIN" = /work/SDG-RUST ] && [ -d "$SDG_RUST_MAIN/tools/lab" ]'
+  # A Wings SFTP login picks ONE server from its username; a login pinned to 156 once sent every file op for 155 to 156
+  # (SDG-RUST #9 runs 4-6). Per server: the SFTP view of oxide/plugins must equal the panel API's view of that server.
+  expect ok   "Wings SFTP lands on the target server (SFTP = panel view, each lab server)" 'cd /work/SDG-RUST/tools/lab && . ./rust-servers.sh || exit 1; bad=0
+    for id in $SDG_PTERO_SERVERS; do
+      l=$(ptero "$id" ls oxide/plugins 2>/dev/null | sed "s:/\$::" | sort)
+      [ -n "$l" ] || { printf "%s=NO-SFTP-LIST " "$id"; bad=1; continue; }
+      s=$(md5sum <<<"$l")
+      a=$(python3 -c "import json,sys; sys.path.insert(0,\".\"); import ptero; print(\"\n\".join(sorted(x[\"attributes\"][\"name\"] for x in json.loads(ptero.api(sys.argv[1],\"GET\",\"files/list?directory=%2Foxide%2Fplugins\"))[\"data\"])))" "$(rust_server_uuid "$id")" 2>/dev/null | md5sum)
+      # md5sum of "<<<" and of a pipe both see the list plus one trailing newline, so equal lists hash equal
+      if [ "$s" = "$a" ]; then printf "%s=ok " "$id"; else printf "%s=DIFFERENT " "$id"; bad=1; fi
+    done; [ "$bad" = 0 ]'
 else
   expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
   expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
