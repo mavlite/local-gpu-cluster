@@ -279,9 +279,11 @@ Use this instead of `rust-deploy-wt.sh`, which uploads to a running server. That
 upload completed, then the helper printed `SERVER NOT RESPONDING` and exited 1 before its stale-file cleanup and config
 reloads. A restart without re-uploading then booted cleanly.
 
-**Not yet run as a whole sequence.** The build command is tested, and a stopped server accepts SFTP uploads per
-`ensure-running.sh`. This route is meant to stop anything compiling mid-upload. The freeze is intermittent, so one clean
-boot supports that idea without proving it.
+**Tested once, 2026-11-04, at 397307c:** stop took 16 s and the 872-file upload 48 s; plugin init finished 3 minutes
+after start, and all 10 SDG plugins loaded. The console still answered after a 5-minute soak. About 10 minutes in all,
+and the stale check found nothing to remove. This route is meant to stop anything compiling mid-upload. The
+freeze is intermittent, so one clean run supports that idea without proving it. `rust-deploy-wt.sh`, and so
+`rust-integrate.sh`, still upload to a running server.
 
 ```
 . tools/lab/rust-servers.sh; export RUST_SERVER=156
