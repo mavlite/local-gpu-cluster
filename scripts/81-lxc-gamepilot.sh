@@ -10,7 +10,10 @@
 #   host                        SNAT unit + CT firewall (160.fw) on the host
 #   proxy                       the gamepilot tinyproxy instance on LXC 155 (its own port, allowlist, pid, log)
 #   create                      pct create CT 160 if absent, start it
-#   provision                   proxy settings, packages, the pinned claude CLI (host-downloaded, sha256-checked)
+#   provision                   proxy settings, packages, the pinned claude CLI (host-downloaded, sha256-checked),
+#                               then `dotnet`
+#   dotnet                      the pinned .NET 8 SDK (host-downloaded, sha512-checked) at /opt/dotnet/<ver>,
+#                               linked as /usr/local/bin/dotnet and /usr/bin/dotnet; NuGet restores go through the proxy
 #   clone BUNDLE SHA            /opt/gamepilot from a git bundle (the repo is private; the CT has no GitHub
 #                               credentials until the owner adds one), checked at SHA, then deploy/install.sh
 #   verify                      allowed hosts answer through the proxy, everything else is refused
@@ -24,7 +27,7 @@ F="$LGC_DIR/files"
 CT=160; HOSTNAME_CT=gamepilot; PROXY_CT=155
 BR=vmbrgp; BR_ADDR=10.82.0.254/24; CT_IP=10.82.0.10/24; CT_GW=10.82.0.254
 TEMPLATE="local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst"
-DEBS=(python3 python3-yaml git gh curl ca-certificates sudo)   # sudo: the GamePilot runbook uses it
+DEBS=(python3 python3-yaml git gh curl ca-certificates sudo libicu72)   # sudo: the runbook; libicu72: dotnet
 LOCK="$F/gamepilot-tools.lock.json"
 
 # where|repo file|installed path|owner:group|mode   (where: host, proxy = CT 155, ct = CT 160)
@@ -42,9 +45,11 @@ MANIFEST=(
   "ct|gamepilot-ct-sudoers|/etc/sudoers.d/gamepilot-proxy|root:root|440"
 )
 BRIDGE_STANZA=$'auto vmbrgp\niface vmbrgp inet static\n\taddress 10.82.0.254/24\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.disable_ipv6=1\n\tpost-up sysctl -qw net.ipv6.conf.vmbrgp.forwarding=0'
-# qm/pct settings the conductor depends on (checked by diff, set by create)
-CT_EXPECT=("hostname:gamepilot" "unprivileged:1" "cores:2" "memory:4096" "onboot:1"
-           "net0:bridge=vmbrgp" "net0:firewall=1" "net0:ip=10.82.0.10/24" "rootfs:size=20G")
+# qm/pct settings the conductor depends on (checked by diff, set by create). Size: owner resized live 2026-11-03.
+CT_EXPECT=("hostname:gamepilot" "unprivileged:1" "cores:4" "memory:8192" "swap:512" "onboot:1"
+           "net0:bridge=vmbrgp" "net0:firewall=1" "net0:ip=10.82.0.10/24" "rootfs:size=40G")
+# One line appended to the CT's /etc/bash.bashrc (provision; checked by diff): non-login shells get the profile snippet.
+BASHRC_HOOK='[ -r /etc/profile.d/gamepilot-proxy.sh ] && . /etc/profile.d/gamepilot-proxy.sh  # gamepilot (81)'
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 # A command in CT 160 with exactly the environment a systemd unit there gets (the proxy via DefaultEnvironment).
@@ -121,7 +126,7 @@ do_create() {
   if pct status "$CT" >/dev/null 2>&1; then echo "ok: CT $CT exists"
   else
     pct create "$CT" "$TEMPLATE" --hostname "$HOSTNAME_CT" --unprivileged 1 --features nesting=1 \
-      --cores 2 --memory 4096 --swap 512 --rootfs local-lvm:20 --onboot 1 --ostype debian \
+      --cores 4 --memory 8192 --swap 512 --rootfs local-lvm:40 --onboot 1 --ostype debian \
       --net0 "name=eth0,bridge=$BR,firewall=1,ip=$CT_IP,gw=$CT_GW" --nameserver 127.0.0.1   # no DNS: proxy only
     echo "created CT $CT"
   fi
@@ -131,7 +136,9 @@ do_create() {
 
 do_provision() {
   push_where ct
-  in_ct "$CT" systemctl daemon-reexec          # pick up DefaultEnvironment (the proxy) for every unit
+  # pct enter / pct exec shells are non-login and never read profile.d: hook the same snippet into bash.bashrc.
+  in_ct "$CT" sh -c "grep -qxF '$BASHRC_HOOK' /etc/bash.bashrc || printf '%s\n' '$BASHRC_HOOK' >> /etc/bash.bashrc"
+  in_ct "$CT" systemctl daemon-reexec         # pick up DefaultEnvironment (the proxy) for every unit
   in_ct "$CT" sh -c '! command -v visudo >/dev/null || visudo -c -q'   # a bad sudoers drop-in would lock sudo
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q update
   in_ct "$CT" env DEBIAN_FRONTEND=noninteractive apt-get -q -y install "${DEBS[@]}"
@@ -146,8 +153,33 @@ print(d["version"], d["url"], d["sha256"], d["install_path"])' "$LOCK")
     pct push "$CT" "$t/claude" "$dst" --user root --group root --perms 0755
     rm -rf "$t"; echo "installed claude $ver -> $dst (sha256 verified)"
   fi
+  do_dotnet
   # pct exec has a short PATH without /usr/local/bin; check with the PATH a systemd unit gets.
-  in_ct "$CT" env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'for b in python3 git gh claude; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
+  in_ct "$CT" env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin sh -c 'for b in python3 git gh claude dotnet; do printf "%s: " $b; command -v $b; done; python3 -c "import yaml; print(\"python3-yaml\", yaml.__version__)"; gh --version | head -1; claude --version'
+}
+
+# The .NET SDK for GamePilot code jobs: Microsoft's tarball, sha512-checked on the host and unpacked in the CT, so the
+# CT's proxy never needs Microsoft's download host. NuGet restores go through the proxy (api.nuget.org is allowlisted).
+do_dotnet() {
+  local ver url sha dir link t
+  read -r ver url sha dir link < <(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["dotnet"]
+print(d["version"], d["url"], d["sha512"], d["install_dir"], d["link"])' "$LOCK")
+  [[ -n "$ver" && -n "$dir" && -n "$link" ]] || die "dotnet entry missing from $LOCK"
+  if [[ "$(in_ct "$CT" sh -c "'$dir/dotnet' --version 2>/dev/null")" == "$ver" ]]; then echo "ok: dotnet SDK $ver already at $dir"
+  else
+    t=$(mktemp -d)
+    curl -fsSL --retry 2 -o "$t/sdk.tar.gz" "$url"
+    echo "$sha  $t/sdk.tar.gz" | sha512sum -c --quiet || { rm -rf "$t"; die "dotnet SDK sha512 mismatch"; }
+    pct push "$CT" "$t/sdk.tar.gz" /root/dotnet-sdk.tar.gz --user root --group root --perms 0600
+    rm -rf "$t"
+    in_ct "$CT" sh -c "set -e; rm -rf '$dir.tmp'; install -d -m 755 '$dir.tmp'; tar -xzf /root/dotnet-sdk.tar.gz -C '$dir.tmp' --no-same-owner
+      rm -f /root/dotnet-sdk.tar.gz; chmod -R go-w '$dir.tmp'; rm -rf '$dir'; mv '$dir.tmp' '$dir'"
+    echo "installed dotnet SDK $ver -> $dir (sha512 verified)"
+  fi
+  # /usr/bin too, so dotnet is found even on pct exec's short PATH (/sbin:/bin:/usr/sbin:/usr/bin)
+  in_ct "$CT" ln -sfn "$dir/dotnet" "$link"
+  in_ct "$CT" ln -sfn "$dir/dotnet" /usr/bin/dotnet
+  in_ct "$CT" env DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 dotnet --version | sed 's/^/dotnet --version: /'
 }
 
 do_clone() {
@@ -171,12 +203,14 @@ do_verify() {
   local u r fail=0
   # %{http_connect} is the proxy's answer to CONNECT: 200 = tunnel opened (allowlisted), 403 = refused by the filter.
   # The site's own status after that (claude.ai may well say 403 to a bare HEAD) is reported, not judged.
-  for u in https://api.github.com https://github.com https://api.anthropic.com https://claude.ai https://console.anthropic.com; do
+  for u in https://api.github.com https://github.com https://api.anthropic.com https://claude.ai https://console.anthropic.com \
+           https://api.nuget.org/v3/index.json; do
     r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "200 "* && "${r#* }" != 000 ]]; then echo "PASS  allowed  $u -> tunnel 200, site HTTP ${r#* }"
     else echo "FAIL  allowed  $u -> ${r:-no answer}"; fail=1; fi
   done
-  for u in https://example.com https://registry.npmjs.org https://objects.githubusercontent.com; do
+  for u in https://example.com https://registry.npmjs.org https://objects.githubusercontent.com \
+           https://builds.dotnet.microsoft.com https://dotnetcli.azureedge.net; do
     r=$(in_unit /usr/bin/curl -sI -o /dev/null -w '%{http_connect} %{http_code}' -m 20 "$u" || true)
     if [[ "$r" == "403 "* ]]; then echo "PASS  refused  $u (proxy CONNECT 403)"
     else echo "FAIL  refused  $u -> ${r:-no answer}"; fail=1; fi
@@ -211,6 +245,8 @@ do_diff() {
     || { echo "DRIFT  host  vmbrgp missing from /etc/network/interfaces"; drift=1; }
   /usr/local/sbin/gamepilot-net.sh check 2>/dev/null && echo "ok     host  SNAT 10.82.0.0/24" \
     || { echo "DRIFT  host  SNAT 10.82.0.0/24 missing"; drift=1; }
+  in_ct "$CT" grep -qxF "$BASHRC_HOOK" /etc/bash.bashrc 2>/dev/null && echo "ok     ct    /etc/bash.bashrc sources the proxy snippet" \
+    || { echo "DRIFT  ct    /etc/bash.bashrc lacks the gamepilot hook (81 provision)"; drift=1; }
   local cfg q k v; cfg=$(pct config "$CT" 2>/dev/null || true)
   for q in "${CT_EXPECT[@]}"; do
     k=${q%%:*}; v=${q#*:}
@@ -229,6 +265,7 @@ case "$cmd" in
   proxy) do_proxy ;;
   create) do_create ;;
   provision) do_provision ;;
+  dotnet) do_dotnet ;;
   clone) do_clone "$@" ;;
   verify) do_verify ;;
   diff) do_diff ;;
