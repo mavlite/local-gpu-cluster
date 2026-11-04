@@ -235,48 +235,103 @@ agent. **2026-10-30: 18/18 passed.**
   4. Remove the runner key from the panel through SDG-IAC's Ansible.
   5. `qm stop 178`.
 
-### Restoring integration server 156 (done 2026-11-04)
+### Integration server 156: freezes, recovery and deploys
 
 156 is the pve integration server, and its normal content is `main`'s pve **test** build. The panel can say `running`
 while the server is frozen, so don't trust the power state. These are the signs:
 
 - `RUST_SERVER=156 bash tools/lab/server-alive.sh` prints `SERVER NOT RESPONDING`.
 - The panel's `resources` show CPU near 3% (a healthy server sits far higher; 155 read 122%).
-- The last lines of `oxide/logs/oxide_<date>.txt` are `[CSharp] Started Oxide.Compiler`, and the compiler log ends
+- The last line of `oxide/logs/oxide_<date>.txt` is `[CSharp] Started Oxide.Compiler`, and the compiler log ends
   `Pushing job N back to parent`.
 
-Run everything in the SDG-RUST sandbox, never by hand on the panel, with the runner idle:
+Run the commands below in the SDG-RUST sandbox, never by hand on the panel, with the runner idle. `ptero` comes from
+`. tools/lab/rust-servers.sh`.
 
 ```
 AGENT_MAX_SECONDS=3000 AGENT_RUN_SHELL=1 agent-run /home/runner/work/SDG-RUST "<commands>"
 ```
 
+#### 1. Capture evidence before any restart
+
+A restart destroys most of this, and the cause is still open, so capture it first.
+
+- From the sandbox: CPU and uptime from the panel's `resources`; the end of `oxide.compiler_<date>.log` and
+  `oxide_<date>.txt`, read through the panel API as well as SFTP.
+- From the node, which the sandbox can't reach (use SDG-IAC's route from the workstation): whether the `Oxide.Compiler`
+  process is alive, the thread states of it and `RustDedicated`, `oom_kill` in the container's `memory.events`, and the
+  node's `dmesg`.
+- If the freeze followed an upload: when the upload finished, compared with the `Started Oxide.Compiler` line.
+
+#### 2. Recover a frozen server (content already current)
+
+Tested 2026-11-04.
+
 1. `bash tools/lab/server-lock.sh acquire <owner> 156 1`. A heartbeat older than 30 minutes is stale and this breaks it.
    Release the lock when finished, on every exit path.
-2. Take a mark with `ptero 156 logmark`, then restart: `ptero 156 power restart`. `ensure-running.sh` refuses
-   integration servers by design, so 156 needs this direct call (`. tools/lab/rust-servers.sh` defines `ptero`). The
-   restart of a frozen server took about 10 minutes before the new process appeared.
-3. If the build on the server is stale, deploy **and then expect to restart again**:
-   `RUST_SERVER=156 bash tools/lab/rust-deploy-wt.sh /work/SDG-RUST dist-test --profile pve --build-root "$(mktemp -d)"`.
-   On 2026-11-04 the upload completed but froze 156 again: it printed `SERVER NOT RESPONDING` and exited 1 before it
-   reached its stale-file cleanup and config reloads. A second restart without re-uploading then booted cleanly.
-4. Don't treat the first console answer as ready: 156 answered about a minute after the process started, with plugin
-   init still running. Wait for these after the mark, then confirm:
-   - `ptero 156 log "$mark" 'Grid initialization completed' 1` (end of plugin init);
-   - `ptero 156 log "$mark" 'Loaded plugin SDG' 20`: all 10 SDG plugins at the expected versions;
-   - `server-alive.sh` still `alive` 5 minutes later, past `Shutting down compiler because idle shutdown`;
-   - `oxide/data/SdgProfile/profile.json` shows `profile: pve` and the expected `built` sha;
-   - `ptero 156 ls oxide/data/RaidableBases/Profiles` has no stale profiles, because that deploy stopped before its
-     cleanup (on 2026-11-04: `RaidBases.json` and `t1_pool` to `t4_pool`).
+2. `mark=$(ptero 156 logmark)`, then `ptero 156 power restart`. `ensure-running.sh` refuses integration servers by
+   design, so 156 needs this direct call. The new process appeared about 10 minutes after the restart command.
+3. Verify (section 4), then release the lock.
 
-Cause not established. The freezes on 11-03 and 11-04 both followed a sync after the compiler had shut down on idle:
-the compiler started again, finished a compile, then the server went silent. 155 took a full upload without freezing
-on 2026-11-03, so idle shutdown alone doesn't explain it. Until it's understood, expect a deploy to 156 to need the
-restart in step 3.
+#### 3. Deploy a new build: stop, upload, start
 
-**How 156 got here:** until SDG-RUST #17, the runner's single SFTP login carried 156's short id, so file operations
-for 155 went to 156 (SDG-RUST #9 runs 4-6). That also left a shared lock named `checks-155` on 156. The probe "Wings
-SFTP lands on the target server" (`78 probe SDG-RUST`) now catches that login mistake.
+Use this instead of `rust-deploy-wt.sh`, which uploads to a running server. That route froze 156 on 2026-11-04: the
+upload completed, then the helper printed `SERVER NOT RESPONDING` and exited 1 before its stale-file cleanup and config
+reloads. A restart without re-uploading then booted cleanly.
+
+**Not yet run as a whole sequence.** The build command is tested, and a stopped server accepts SFTP uploads per
+`ensure-running.sh`. This route is meant to stop anything compiling mid-upload. The freeze is intermittent, so one clean
+boot supports that idea without proving it.
+
+```
+. tools/lab/rust-servers.sh; export RUST_SERVER=156
+bash tools/lab/server-lock.sh acquire <owner> 156 1
+ptero 156 read oxide/data/SdgProfile/profile.json   # must say pve: this route does no profile switch
+b=$(mktemp -d); umod=$b/.cache/umod; [ -d .cache/umod ] && umod=$PWD/.cache/umod
+RBGEN_UMOD_OFFLINE=1 RBGEN_POOL_CACHE=$b/.cache/pool RBGEN_UMOD_CACHE=$umod \
+  python tools/build.py --profile pve --test --out-root "$b"
+mark=$(ptero 156 logmark)
+ptero 156 power stop                                # then wait until `bash tools/lab/rstate.sh` says "state offline"
+ptero 156 put-tree "$b/dist-test-pve/oxide" oxide
+```
+
+The upload only adds and overwrites files, so remove what the new build no longer ships. Compare `Sdg*.cs` in
+`ptero 156 ls oxide/plugins` with `$b/dist-test-pve/oxide/plugins`, and `ptero 156 ls oxide/data/RaidableBases/Profiles`
+with the same folder in the build. Delete any extra with `ptero 156 rm <dir> <file>`. Then `ptero 156 power start`,
+verify (section 4), and release the lock. Config reloads aren't needed, because the boot reads everything from disk.
+
+#### 4. Verify
+
+Don't treat the first console answer as ready: 156 answered about a minute after the process started, with plugin init
+still running. Wait for these after the mark:
+
+- `ptero 156 log "$mark" 'Grid initialization completed' 1` (end of plugin init);
+- `ptero 156 log "$mark" 'Loaded plugin SDG' 20`: all 10 SDG plugins at the expected versions;
+- `server-alive.sh` still `alive` 5 minutes later, past `Shutting down compiler because idle shutdown`;
+- `oxide/data/SdgProfile/profile.json` shows `profile: pve` and the expected `built` sha;
+- `ptero 156 ls oxide/data/RaidableBases/Profiles` has no stale profiles (on 2026-11-04: `RaidBases.json` and `t1_pool`
+  to `t4_pool`).
+
+#### What's known about the freeze
+
+The cause is not established.
+
+- **It's intermittent on 156.** It froze on 11-01, 11-03 and 11-04. Per the SDG-RUST session's record, the compiler also
+  started fine several times on 11-01, with a 97/0 pve run in between. So 155's one clean upload (#9 run 7, its first
+  real one) doesn't show the two servers differ; they share a node.
+- **Probably not the plugin code.** Per the same record, plugins, config, data and `build.py` don't differ between
+  3149642, which passed that run, and 397307c.
+- **Where it stops:** on 11-04 the compiler finished job 1 (`compiled 1/1`, `AutomatedEvents.cs`, `Pushing job 1 back to
+  parent`) and nothing followed. On 11-03 it stopped the same way after a 3/3 job 2. On 155's run 7, jobs ran straight on
+  from job 1. That and the CPU near 3% suggest `RustDedicated` deadlocks handling a result, rather than the compiler dying
+  mid-compile. This is unproven: process, thread and `oom_kill` data have not been captured for any freeze.
+- **Possible trigger:** `put-tree` overwrites 872 files one at a time, so Oxide's watcher may start compiling mid-upload.
+  On 11-04 job 1 held only the first file alphabetically, which fits. It doesn't explain the uploads that worked.
+
+**How 156 got hit in #9:** until SDG-RUST #17, the runner's single SFTP login carried 156's short id, so file operations
+for 155 went to 156 (runs 4-6), including 155's "frozen" console checks, which were reading 156's log. That also left a
+shared lock named `checks-155` on 156. The probe "Wings SFTP lands on the target server" (`78 probe SDG-RUST`) now
+catches that login mistake.
 
 ## Open items
 
