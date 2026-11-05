@@ -59,11 +59,11 @@ SEQA_GATEWAY="${SEQA_GATEWAY:-192.168.6.1}"
 # The tester VM (73-vm-tester-firewall.sh) is the one other guest expected to be filtered.
 TESTER_VMID="${TESTER_VMID:-172}"
 # Probed after the change to prove host services still answer. Derived from the
-# monitor's own config, as 73-vm-tester-firewall.sh does: cluster-monitor binds
+# monitor's own config, as 73-vm-tester-firewall.sh does: live-dashboard binds
 # the LAN address only, so the old 127.0.0.1 default could never answer and
 # warned on every run. An explicit SEQA_HOST_PROBE_URL always wins.
 SEQA_HOST_PROBE_URL="${SEQA_HOST_PROBE_URL:-}"
-SEQA_MONITOR_CONFIG="${SEQA_MONITOR_CONFIG:-/etc/cluster-monitor.json}"
+SEQA_MONITOR_CONFIG="${SEQA_MONITOR_CONFIG:-/etc/live-dashboard.json}"
 if [[ -z "$SEQA_HOST_PROBE_URL" && -f "$SEQA_MONITOR_CONFIG" ]]; then
   SEQA_HOST_PROBE_URL="$(python3 -c "
 import json, sys
@@ -111,7 +111,7 @@ enable: 1
 EOF
 
 step "4 — keep this host open"
-# Deliberate. The host runs cluster-monitor, node metrics, SSH and the web UI,
+# Deliberate. The host runs live-dashboard, node metrics, SSH and the web UI,
 # and nothing about confining a guest requires filtering the host itself.
 # Removing this file, or flipping IN to DROP, will cut your own management
 # access to a headless machine.
@@ -163,7 +163,7 @@ else
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$SEQA_HOST_PROBE_URL" || true)"
   [[ "$code" == "200" ]] \
     && ok "host services still answering ($SEQA_HOST_PROBE_URL -> $code)" \
-    || warn "host probe $SEQA_HOST_PROBE_URL returned '$code' — check cluster-monitor before walking away"
+    || warn "host probe $SEQA_HOST_PROBE_URL returned '$code' — check live-dashboard before walking away"
 fi
 
 step "done"

@@ -130,7 +130,7 @@ RATE_LIMIT_TAVILY = os.environ.get("RATE_LIMIT_TAVILY", "30/minute")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 TAVILY_URL = os.environ.get("TAVILY_URL", "https://api.tavily.com/search")
 # Usage/quota endpoint. Unlike /search this is NOT billed by Tavily, so it is
-# safe to poll on a timer — which is exactly what the cluster monitor does.
+# safe to poll on a timer.
 TAVILY_USAGE_URL = os.environ.get("TAVILY_USAGE_URL", "https://api.tavily.com/usage")
 
 # Search-response cache. The reporting page runs an identical query set for

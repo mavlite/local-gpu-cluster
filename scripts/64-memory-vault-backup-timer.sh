@@ -3,9 +3,7 @@
 #
 # Installs a HOST systemd timer that runs the pg_dump backup INSIDE LXC 156
 # via `pct exec`. Host placement (not an in-156 timer) keeps all scheduled
-# jobs visible on the PVE host alongside rag-refresh.timer, and matches what
-# the cluster-monitor's `backup_timer` check probes (host-side
-# `systemctl is-active memory-vault-backup.timer`).
+# jobs visible on the PVE host alongside rag-refresh.timer.
 #
 # Components installed:
 #   LXC 156:/usr/local/bin/memory-vault-backup.sh   — the pg_dump script (pushed)
@@ -82,8 +80,7 @@ systemctl enable --now memory-vault-backup.timer
 
 step "64.3 — Disable any pre-existing in-LXC timer (avoid double backups)"
 # Earlier Memory Vault deploys may have installed an in-156 timer of the same
-# name. The host timer supersedes it (and is the one the cluster-monitor can
-# see), so disable the in-container one to prevent duplicate nightly dumps.
+# name. The host timer supersedes it, so disable the in-container one to prevent duplicate nightly dumps.
 if pct exec "$MEMVAULT_VMID" -- systemctl is-enabled memory-vault-backup.timer >/dev/null 2>&1; then
   pct exec "$MEMVAULT_VMID" -- systemctl disable --now memory-vault-backup.timer
   ok "Disabled in-LXC $MEMVAULT_VMID memory-vault-backup.timer (superseded by host timer)"

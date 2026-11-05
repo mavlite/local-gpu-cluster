@@ -1,7 +1,7 @@
 # Cluster Monitor — Design Spec
 
 - **Date:** 2026-06-19
-- **Status:** Approved (design) — pending implementation plan
+- **Status:** Superseded by the live dashboard (`docs/superpowers/specs/2026-10-16-live-dashboard-design.md`). Stopped 2026-10-16; code removed 2026-11-04. Kept as a record of the design.
 - **Scope:** An always-on, read-only health/metrics dashboard for the local GPU cluster
   (Proxmox host + GPUs + LXCs 151/153/154/155/156 + their services), running as a
   systemd service on the Proxmox host. Surfaces silent failures fast and tracks

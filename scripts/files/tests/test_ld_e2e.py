@@ -65,22 +65,24 @@ def test_stream_over_http_with_journal_request(tmp_path, monkeypatch):
 
 def test_deploy_script_shape():
     s = _script()
-    for needle in ("install)", "side-by-side)", "cutover)", "rollback)", "status)",
-                   "/opt/live-dashboard/live_dashboard", "/etc/live-dashboard.json", "/var/lib/live-dashboard",
-                   "/root/live-dashboard-rollback.sh", "systemctl disable --now cluster-monitor",
-                   "systemctl enable --now cluster-monitor", '"bind_port": 8889', '"bind_port": 8888',
+    for needle in ("install)", "start)", "revert)", "status)",
+                   "DEST=/opt/live-dashboard", "/etc/live-dashboard.json", "/var/lib/live-dashboard",
                    "set -euo pipefail", "EUID", "live_dashboard.prev", "/healthz",
                    "import live_dashboard.main", "sys.version_info >= (3, 11)"):
         assert needle in s, needle
-    # cutover must roll back itself when the dashboard does not answer on :8888
-    cut = s.split("cutover)", 1)[1].split("rollback)", 1)[0]
-    gate = cut.index("if ! wait_health 8888")
-    assert "check_sources 8888" in cut[gate:cut.index("then", gate)]
-    assert gate < cut.index('bash "$ROLLBACK"') < cut.index("exit 1", gate)
-    assert "ROLLBACK FAILED" in cut
-    # side-by-side must refuse unless cluster-monitor is still active, before touching anything
-    sbs = s.split("side-by-side)", 1)[1].split("cutover)", 1)[0]
-    assert sbs.index("is-active --quiet cluster-monitor") < sbs.index("install_files")
+    # The old monitor is gone: no mode or generated script may try to stop or restore it.
+    for gone in ("cluster-monitor", "side-by-side", "cutover", "live-dashboard-rollback", "ROLLBACK"):
+        assert gone not in s, gone
+    # start must fail loudly when the dashboard does not come up healthy on :8888
+    st = s.split("start)", 1)[1].split("revert)", 1)[0]
+    gate = st.index("if ! wait_health 8888")
+    assert "check_sources 8888" in st[gate:st.index("then", gate)]
+    assert gate < st.index("exit 1", gate)
+    assert st.index("install_files") < st.index("write_cfg 8888") < st.index("systemctl restart live-dashboard") < gate
+    # revert must refuse when there is no previous install, before removing the current one
+    rv = s.split("revert)", 1)[1].split("status)", 1)[0]
+    assert rv.index('-d "$DEST/live_dashboard.prev"') < rv.index('rm -rf "$DEST/live_dashboard"')
+    assert "wait_health 8888" in rv
     u = open(os.path.join(ROOT, "files", "live-dashboard.service"), encoding="utf-8").read()
     assert "python3 -m live_dashboard.main --config /etc/live-dashboard.json" in u
     assert "WorkingDirectory=/opt/live-dashboard" in u and "Restart=always" in u
@@ -89,6 +91,23 @@ def test_deploy_script_shape():
     unit_lines = [ln.strip() for ln in u.splitlines() if not ln.lstrip().startswith("#")]
     assert "NoNewPrivileges=true" not in unit_lines
     assert not any(ln.startswith("User=") for ln in unit_lines)
+
+
+def test_firewall_canaries_probe_the_live_dashboard():
+    # The firewall scripts derive their "host services still answer" URL from a service's config. The retired
+    # monitor's config must not be the source: a missing file silently skips the canary.
+    for name, var in (("73-vm-tester-firewall.sh", "TESTER_MONITOR_CONFIG"),
+                      ("71-vm-se-qa-firewall.sh", "SEQA_MONITOR_CONFIG")):
+        with open(os.path.join(ROOT, name), encoding="utf-8") as f:
+            text = f.read()
+        assert var + ':-/etc/live-dashboard.json}' in text, name
+        assert "cluster-monitor" not in text, name
+
+
+def test_retired_monitor_files_are_gone():
+    for rel in ("63-cluster-monitor.sh", "files/cluster_monitor.py", "files/cluster-monitor.service",
+                "files/tests/test_cluster_monitor.py"):
+        assert not os.path.exists(os.path.join(ROOT, rel)), rel
 
 
 def test_deploy_config_template_passes_validate_config():
@@ -198,10 +217,10 @@ def test_check_sources_gives_up_after_about_15_seconds():
     assert "sources not ok: journal" in err
 
 
-def test_cutover_enables_the_unit_so_8888_survives_a_reboot():
-    cut = _script().split("cutover)", 1)[1].split("rollback)", 1)[0]
-    assert "systemctl enable live-dashboard" in cut
-    assert cut.index("systemctl enable live-dashboard") < cut.index("systemctl restart live-dashboard")
+def test_start_enables_the_unit_so_8888_survives_a_reboot():
+    st = _script().split("start)", 1)[1].split("revert)", 1)[0]
+    assert "systemctl enable live-dashboard" in st
+    assert st.index("systemctl enable live-dashboard") < st.index("systemctl restart live-dashboard")
 
 
 def test_unit_stops_on_bad_config_and_limits_restarts():

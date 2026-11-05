@@ -24,7 +24,7 @@ This is the V620-only revision. An earlier hybrid topology (V620 + RTX 3060) and
 | 155 `mcp-stack` | Docker host for MCP servers + Python MCP bridge | `mcp-sdg.service` (port 3004) exposes `sdg-documentation` + `vcf-reference` workspaces via SSE; Docker compose stack optional | 192.168.6.155 |
 | 156 `memory-vault` | Shared persistent memory (Postgres 16/pgvector + dashboard) | `memory-vault` (8000, LAN) + `memory-vault-bridge` (3005, MCP Streamable HTTP at `/mcp`) | 192.168.6.223 (DHCP) |
 | VM 178 `agent-runner` | Headless agent host: local Qwen agents (opencode) run lab playbooks from GitHub issues in SDG-RUST / SDG-ARMA3; a 5-minute dispatcher timer claims `runner:ready` issues. Isolated bridge `vmbrar`, PVE firewall default-DROP, scoped router key (one chat lane slot) | `agent-runner-dispatch.timer`, `agent-run` wrapper; OpenVPN to the SDG panel only | 10.81.0.10 (egress 192.168.6.78) |
-| host | Host services: fan-control bridge (V620 shroud fans by GPU temp), cluster-monitor (dashboard + health checks, 8888), swap-webhook (router-triggered profile swaps, 9100), RAG refresh + memvault backup timers | `v620-fan-bridge.service`, `cluster-monitor.service`, `swap-webhook.service`, RAG refresh timer, memvault backup timer | 192.168.6.175 |
+| host | Host services: fan-control bridge (V620 shroud fans by GPU temp), live-dashboard (inference dashboard, 8888), swap-webhook (router-triggered profile swaps, 9100), RAG refresh + memvault backup timers | `v620-fan-bridge.service`, `live-dashboard.service`, `swap-webhook.service`, RAG refresh timer, memvault backup timer | 192.168.6.175 |
 
 ### Models
 
