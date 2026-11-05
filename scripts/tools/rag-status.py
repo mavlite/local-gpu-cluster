@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """rag-status.py — one screen showing the state of every RAG source.
 
-The cluster-monitor dashboard (http://192.168.6.175:8888/) covers the
-infrastructure — GPUs, LXC memory, upstreams, timers — but carries a single
-RAG check: "rag_refresh: last run 4.7h ago". That says nothing about whether a
+The live dashboard (http://192.168.6.175:8888/) covers inference and the GPUs
+and has no RAG view: it says nothing about whether a
 source is fully ingested, mid-backfill, halted awaiting review, or quietly
 holding documents that were uploaded but never attached.
 

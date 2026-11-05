@@ -49,16 +49,15 @@ TESTER_BRIDGE="${TESTER_BRIDGE:-sdxguest}"
 # The host-side interface the DNAT and the IPv6-forwarding check apply to.
 TESTER_UPLINK="${TESTER_UPLINK:-vmbr0}"
 # Probed after the change to prove host services still answer. Derived from
-# cluster-monitor's own config (/etc/cluster-monitor.json) rather than
-# hardcoded: cluster-monitor binds whatever "bind_host"/"bind_port" say --
+# live-dashboard's own config (/etc/live-dashboard.json) rather than
+# hardcoded: live-dashboard binds whatever "bind_host"/"bind_port" say --
 # on this host that is the LAN IP, not loopback -- so a hardcoded
 # 127.0.0.1 can never answer, and a hardcoded LAN IP would be wrong on any
-# other host. Same idiom 63-cluster-monitor.sh already uses to read this
-# file back. If the config is missing, there is nothing to derive a URL
+# other host. If the config is missing, there is nothing to derive a URL
 # from and the probe is skipped (with a warning) rather than treated as
 # fatal for a condition that was never checkable.
 TESTER_HOST_PROBE_URL="${TESTER_HOST_PROBE_URL:-}"
-TESTER_MONITOR_CONFIG="${TESTER_MONITOR_CONFIG:-/etc/cluster-monitor.json}"
+TESTER_MONITOR_CONFIG="${TESTER_MONITOR_CONFIG:-/etc/live-dashboard.json}"
 
 require_cmd pve-firewall iptables systemctl qm python3
 

@@ -268,10 +268,8 @@ others get refreshed.
     python3 scripts/tools/rag-status.py --workspace vcf-reference
     python3 scripts/tools/rag-status.py --watch 60   # redraw during a backfill
 
-The cluster-monitor dashboard at http://192.168.6.175:8888/ covers the
-infrastructure -- GPUs, LXC memory, upstreams, timers -- but carries a single
-RAG check, `rag_refresh: last run Nh ago`. That is true and nearly useless: it
-says nothing about whether a source is fully ingested, mid-backfill, halted
+The live dashboard at http://192.168.6.175:8888/ covers inference and the GPUs
+and has no RAG view: it says nothing about whether a source is fully ingested, mid-backfill, halted
 awaiting review, or holding documents that were uploaded and never attached.
 
 `rag-status.py` shows TRACKED / FETCHED / PENDING per source, last successful

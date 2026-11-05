@@ -72,11 +72,9 @@ inside 156 via `pct exec`, and runs one backup immediately to validate:
 ```bash
 LGC_DIR=scripts bash scripts/64-memory-vault-backup-timer.sh
 ```
-Host placement keeps scheduled jobs visible alongside `rag-refresh.timer` and matches
-what the cluster-monitor `backup_timer` check probes (`systemctl is-active
-memory-vault-backup.timer` on the host). The installer also **disables any
+Host placement keeps scheduled jobs visible alongside `rag-refresh.timer`. The installer also **disables any
 pre-existing in-156 `memory-vault-backup.timer`** (earlier deploys installed one
-inside the container, where the host monitor can't see it) so backups don't run
+inside the container) so backups don't run
 twice. Verify:
 ```bash
 systemctl list-timers memory-vault-backup.timer --no-pager   # NEXT/LAST populated

@@ -471,23 +471,21 @@ The host died at 17:57:27 and rebooted.
 
 **Why the kernel log is no help:** these cards are firmware-locked with no
 overdrive or thermal-reporting path, so `journalctl | grep -i thermal` comes back
-**empty**. The only temperature record is the cluster monitor's own sampling.
+**empty**.
 
-```bash
-# Temperature history around an incident (ts is epoch UTC)
-sqlite3 /var/lib/cluster-monitor/state.db \
-  "SELECT id, datetime(ts,'unixepoch'), value FROM samples
-   WHERE id LIKE 'gpu_temp%' AND ts > strftime('%s','now','-2 hours') ORDER BY ts;"
-```
-
-`gpu_temp_N` simply **stops appearing** at the moment the card drops — that gap is
-the timestamp of the failure.
+**Nothing records GPU temperature history today.** The cluster monitor held the only
+record; it stopped on 2026-10-16 and was removed on 2026-11-04. The live dashboard
+keeps 15 minutes of samples in memory, so the run-up to a host crash is lost. In the
+monitor's data, `gpu_temp_N` simply **stopped appearing** at the moment the card
+dropped, and that gap was the timestamp of the failure.
 
 **Note the die was in spec.** Navi 21 throttles at 110C; GPU 1 died at ~100C. A
 die within spec should not fall off the bus, which points at memory or VRM rather
 than the core — hence the memory sensor below.
 
-**The metrics, and what each one tells you** (added 2026-09-11):
+**The metrics, and what each one tells you** (added 2026-09-11). The retired monitor
+computed these, so nothing evaluates the thresholds now; use them as a reference when
+reading the sensors by hand:
 
 | Metric | Thresholds | Means |
 |---|---|---|
@@ -501,8 +499,7 @@ delta stays flat. A *widening* delta under load means heat is not crossing from
 die to heatsink — the thermal-paste pump-out signature. That is the signal to
 repaste (PTM7950 is phase-change and does not pump out). Thresholds are
 **provisional**: there was no load baseline for this pair when they were set, so
-they are deliberately wide. Tighten them once `gpu_temp_delta_N` has history under
-sustained load.
+they are deliberately wide.
 
 **Card asymmetry is the leading indicator.** Over 24 h under load GPU 1 ran a mean
 +4.5C hotter than GPU 0 with a **+28C peak**, and the divergence opened ~17 minutes
