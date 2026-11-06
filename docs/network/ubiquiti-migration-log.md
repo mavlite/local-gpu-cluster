@@ -187,8 +187,12 @@ What this settles:
     as long as `172.16.10.1` stays the CRS309's VLAN 10 address, which the design keeps.
   - Phase 3 needs to know which NIC is `vlan10`'s parent and which is in `br0`. That cable goes
     to the 8 PoE carrying VLAN 10 tagged, and the other stays on the Google Fiber router.
-- Still to come from the owner: the UniFi backup, `vlan10`'s parent NIC, `br0`'s members, and
-  Docker `default-address-pools`.
+- UniFi backup (owner, 2026-11-06 10:20 local):
+  `~/Downloads/unifi_os_backup_1793982015391_6fe86d40-03db-4b9a-8593-30f9f45c1231.unifi`,
+  185,200 bytes, sha256 prefix `dcfa48c267da85fd`. Not committed (a UniFi backup holds
+  credentials). This is Phase 1's rollback point.
+- Still to come from the owner: `vlan10`'s parent NIC, `br0`'s members, and Docker
+  `default-address-pools`.
 
 ### VCF health baseline (2026-11-06 01:06 UTC, read-only)
 
