@@ -1,0 +1,51 @@
+# Live route table, read 2026-11-05 (the static default route is not in /export output)
+Flags: D - dynamic; X - disabled, I - inactive, A - active; 
+c - connect, s - static, r - rip, b - bgp, o - ospf, i - is-is, d - dhcp, v - vpn, m - modem, y - bgp-mpls-vpn;
+H - hw-offloaded; + - ecmp 
+ 0  As   dst-address=0.0.0.0/0 routing-table=main gateway=192.168.6.1 
+         immediate-gw=192.168.6.1%bridge distance=1 scope=30 target-scope=10 
+
+   DAc   dst-address=172.16.10.0/24 routing-table=main gateway=Mgmt-VLAN10 
+         immediate-gw=Mgmt-VLAN10 distance=0 scope=10 target-scope=5 
+         local-address=172.16.10.1%Mgmt-VLAN10 
+
+   DAc   dst-address=172.16.20.0/24 routing-table=main gateway=vMotion-VLAN20 
+         immediate-gw=vMotion-VLAN20 distance=0 scope=10 target-scope=5 
+         local-address=172.16.20.1%vMotion-VLAN20 
+
+   DAc   dst-address=172.16.30.0/24 routing-table=main gateway=vSAN-VLAN30 
+         immediate-gw=vSAN-VLAN30 distance=0 scope=10 target-scope=5 
+         local-address=172.16.30.1%vSAN-VLAN30 
+
+   DAc   dst-address=172.16.40.0/24 routing-table=main gateway=TEP-VLAN40 
+         immediate-gw=TEP-VLAN40 distance=0 scope=10 target-scope=5 
+         local-address=172.16.40.1%TEP-VLAN40 
+
+   DAc   dst-address=172.16.50.0/24 routing-table=main gateway=T0-VLAN50 
+         immediate-gw=T0-VLAN50 distance=0 scope=10 target-scope=5 
+         local-address=172.16.50.1%T0-VLAN50 
+
+   DAc   dst-address=172.16.60.0/24 routing-table=main gateway=VM-Mgmt-VLAN60 
+         immediate-gw=VM-Mgmt-VLAN60 distance=0 scope=10 target-scope=5 
+         local-address=172.16.60.1%VM-Mgmt-VLAN60 
+
+   DAc   dst-address=172.16.70.0/24 routing-table=main gateway=DevVM1-VLAN70 
+         immediate-gw=DevVM1-VLAN70 distance=0 scope=10 target-scope=5 
+         local-address=172.16.70.1%DevVM1-VLAN70 
+
+   DAc   dst-address=172.16.71.0/24 routing-table=main gateway=DevVM2-VLAN71 
+         immediate-gw=DevVM2-VLAN71 distance=0 scope=10 target-scope=5 
+         local-address=172.16.71.1%DevVM2-VLAN71 
+
+   DAc   dst-address=172.16.72.0/24 routing-table=main gateway=DevVM3-VLAN72 
+         immediate-gw=DevVM3-VLAN72 distance=0 scope=10 target-scope=5 
+         local-address=172.16.72.1%DevVM3-VLAN72 
+
+   DAc   dst-address=172.16.99.0/24 routing-table=main gateway=Provision-VLAN99
+         immediate-gw=Provision-VLAN99 distance=0 scope=10 target-scope=5 
+         local-address=172.16.99.1%Provision-VLAN99 
+
+   DAc   dst-address=192.168.6.0/24 routing-table=main gateway=bridge 
+         immediate-gw=bridge distance=0 scope=10 target-scope=5 
+         local-address=192.168.6.11%bridge 
+
