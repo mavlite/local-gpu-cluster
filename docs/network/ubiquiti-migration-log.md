@@ -295,7 +295,11 @@ may be a combo with the SFP+.
       still stable an hour later.
 - [ ] Internet from a UniFi client: `curl -sI https://example.com` → `HTTP/` (owner runs it on a
       UniFi client).
-- [ ] `Lab-VLAN10` shows no gateway and no DHCP (owner screenshot of the network list).
+- [x] `Lab-VLAN10` shows no gateway and no DHCP (owner screenshot of the network list,
+      2026-11-06, after the network restart). All four lab networks are present as created.
+      The list also holds pre-existing `CleanRoom-Mgmt` (VLAN 2, `10.83.2.0/24`) and
+      `CleanRoom-Talos` (VLAN 3, `10.83.3.0/24`). Neither VLAN is used on the CRS309 (10-72), so
+      there's no clash, but keep both off the CRS309 DAC port profile in Phase 2.
 - [x] Home side unaffected: the Proxmox host and the workstation still reach the lab through
       `192.168.6.11`. The builder pings `172.16.10.150` from Proxmox and checks vCenter `:443`.
       2026-11-06, run after the cable move and again after the restart: 0% loss (~1.5 ms),
