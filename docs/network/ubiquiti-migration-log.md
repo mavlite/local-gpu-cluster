@@ -293,8 +293,14 @@ may be a combo with the SFP+.
 - [x] All three switches adopted and online, addresses unchanged (Flex 2.5G 5 `10.83.1.2`, 8 PoE
       `10.83.1.148`, Flex Mini `10.83.1.189`). Owner screenshot of UniFi Devices, 2026-11-06,
       still stable an hour later.
-- [ ] Internet from a UniFi client: `curl -sI https://example.com` → `HTTP/` (owner runs it on a
-      UniFi client).
+- [x] Internet from a UniFi client: `curl -sI https://example.com` → `HTTP/` (owner runs it on a
+      UniFi client). Substituted 2026-11-06 with the UCG's own check, since no UniFi client was to
+      hand: WAN `192.168.6.89` via Google Fiber 99.67 % up, speed test 937 Mbps down, latency
+      8-9 ms (Microsoft, Google, Cloudflare), uptime 1 h 40 m. This proves the gateway's egress,
+      not a client's; the WAN side was not changed in this phase. The first client on
+      `Lab-Services` (Task 6) repeats the curl.
+- UCG banner "IPv6 detected on WAN1 — Enable": left off. IPv6 is out of scope for this
+  migration; enabling it would add a second address family to every network's firewall review.
 - [x] `Lab-VLAN10` shows no gateway and no DHCP (owner screenshot of the network list,
       2026-11-06, after the network restart). All four lab networks are present as created.
       The list also holds pre-existing `CleanRoom-Mgmt` (VLAN 2, `10.83.2.0/24`) and
