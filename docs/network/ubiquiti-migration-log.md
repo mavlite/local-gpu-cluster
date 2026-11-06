@@ -169,8 +169,26 @@ What this settles:
   the UCG WAN (Phase 5), which takes either the freed CSS610 Port1 cable's router port or the
   freed TrueNAS port, and one TrueNAS home-LAN port. That's enough; the Step 1 stop condition
   doesn't trigger.
-- Still to come from the owner: the UniFi backup, and TrueNAS's VLAN 10 netmask and Docker
-  `default-address-pools`.
+- TrueNAS network (owner screenshot, "DR NAS", 2026-11-06). Hostname
+  `truenas.knowledgeondemand.net`.
+
+  | Interface | Address | MAC |
+  |---|---|---|
+  | `enp1s0` | none (member or parent) | `78:55:36:07:23:c9` |
+  | `enp2s0` | none (member or parent) | `78:55:36:07:23:c8` |
+  | `vlan10` | `172.16.10.50/24` | |
+  | `br0` | `192.168.6.170/24` | (bridge; ARP shows `c6:6d:0c:79:47:40`) |
+
+  - Static routes: `172.16.0.0/16 via 172.16.10.1` and `172.16.99.0/24 via 172.16.10.1` (the
+    CRS309's VLAN 10 gateway).
+  - Default route `192.168.6.1`. DNS `1.1.1.1` and `8.8.8.8`, not `dns01`, so TrueNAS doesn't
+    resolve lab names.
+  - The VLAN 10 netmask is `/24`, the same as the lab's. Both routes keep working after the move
+    as long as `172.16.10.1` stays the CRS309's VLAN 10 address, which the design keeps.
+  - Phase 3 needs to know which NIC is `vlan10`'s parent and which is in `br0`. That cable goes
+    to the 8 PoE carrying VLAN 10 tagged, and the other stays on the Google Fiber router.
+- Still to come from the owner: the UniFi backup, `vlan10`'s parent NIC, `br0`'s members, and
+  Docker `default-address-pools`.
 
 ### VCF health baseline (2026-11-06 01:06 UTC, read-only)
 
