@@ -164,3 +164,22 @@ the owner brings the stack up.
 
 TrueNAS `http://172.16.10.50:8080/` did not answer from the workstation (HTTP 000) at the same
 time.
+
+### Host NICs and VDS teaming (2026-11-06, vCenter, read-only)
+
+Every host shows only the X520 ports: `vmnic0` and `vmnic1`, `ixgben`, 10000 Mb, PCI
+`0000:01:00.0`/`.1`. The RTL8125 is not visible to ESX 9.1.1, so Phase 7 needs the Realtek Fling.
+
+VDS `lab01-cluster-001-vds-001`, MTU 9000, uplinks `uplink1` and `uplink2`. Teaming today, the
+rollback record for Phase 6:
+
+| Port group | VLAN | Policy | Active | Standby |
+|---|---|---|---|---|
+| `SDDC-DPortGroup-Mgmt` | 10 | load-based | uplink1, uplink2 | none |
+| `SDDC-DPortGroup-VM-Mgmt` | 10 | load-based | uplink1, uplink2 | none |
+| `SDDC-DPortGroup-VSAN` | 30 | load-based | uplink1, uplink2 | none |
+| `SDDC-DPortGroup-vMotion` | 20 | load-based | uplink1, uplink2 | none |
+| `dev-vm1/2/3-vlan70/71/72` | 70-72 | source port ID | uplink2, uplink1 | none |
+
+`SDDC-DPortGroup-VM-Mgmt` is on VLAN 10, not VLAN 60. NSX TEP teaming is set in NSX and was not
+read here.
