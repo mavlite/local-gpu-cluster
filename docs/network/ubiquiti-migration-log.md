@@ -290,10 +290,42 @@ may be a combo with the SFP+.
 
 ### Builder checks after the owner applies
 
-- [ ] All three switches adopted and online, addresses unchanged (Flex 2.5G 5 `10.83.1.2`, 8 PoE
-      `10.83.1.148`, Flex Mini `10.83.1.189`). Owner screenshot of UniFi Devices.
+- [x] All three switches adopted and online, addresses unchanged (Flex 2.5G 5 `10.83.1.2`, 8 PoE
+      `10.83.1.148`, Flex Mini `10.83.1.189`). Owner screenshot of UniFi Devices, 2026-11-06,
+      still stable an hour later.
 - [ ] Internet from a UniFi client: `curl -sI https://example.com` → `HTTP/` (owner runs it on a
       UniFi client).
 - [ ] `Lab-VLAN10` shows no gateway and no DHCP (owner screenshot of the network list).
-- [ ] Home side unaffected: the Proxmox host and the workstation still reach the lab through
+- [x] Home side unaffected: the Proxmox host and the workstation still reach the lab through
       `192.168.6.11`. The builder pings `172.16.10.150` from Proxmox and checks vCenter `:443`.
+      2026-11-06, run after the cable move and again after the restart: 0% loss (~1.5 ms),
+      vCenter HTTP 200, route via `192.168.6.11`.
+
+### As applied (2026-11-06)
+
+The cabling ended up different from step 6, with the same result: the 8 PoE is the first switch
+after the gateway.
+
+| Link | Planned | As applied |
+|---|---|---|
+| UCG LAN → 8 PoE | UCG port 2 → 8 PoE port 2 | UCG **port 1** → 8 PoE **port 8** (PoE off) |
+| Flex 2.5G 5 → 8 PoE | port 5 → 8 PoE port 8 (unchanged) | port 5 → 8 PoE **port 2**, PoE++ (powers the Flex 2.5G 5) |
+| Flex Mini → 8 PoE | port 1 → 8 PoE port 1 | unchanged |
+| UCG WAN | port 5 → CSS610 Port2 | unchanged until Phase 5 |
+
+The reserved 8 PoE ports (3, 4, 10) are still free. Flex 2.5G 5 ports 1 and 2 link at 2.5G to
+the Minisforum RTL8125s; port 3 had no link at 14:54 (check in Phase 7).
+
+**Incident: the Flex 2.5G 5 flapped online/offline after the move.**
+- 14:46 both switches dropped (the 8 PoE then reached the gateway through the Flex 2.5G 5);
+  14:48 both reconnected. From about 15:03 the Flex 2.5G 5 kept showing online for moments,
+  then offline, while its LED stayed solid blue, its link stayed at 2.5G and it drew 4.6 W.
+- Ruled out: PoE (on, drawing power), the Flex 2.5G 5's port 5 settings (native
+  CoreNetwork-Mgmt, Allow All, no profile, STP on), and a PoE power cycle of 8 PoE port 2 (no
+  change).
+- The controller kept listing its parent as the old "Cloud Gateway Ultra Port 2", and no port
+  on it showed the uplink marker.
+- Cleared by the owner restarting the whole UniFi network. Afterwards the parent reads
+  "8 PoE Port 2", and it was stable an hour later. Root cause not confirmed; a stale
+  controller view of the old path is the likeliest.
+- Lab traffic was unaffected throughout: VCF management runs over the CRS309.
