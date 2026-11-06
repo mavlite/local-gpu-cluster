@@ -250,3 +250,50 @@ rollback record for Phase 6:
 
 `SDDC-DPortGroup-VM-Mgmt` is on VLAN 10, not VLAN 60. NSX TEP teaming is set in NSX and was not
 read here.
+
+## Phase 1: UniFi layout (steps written 2026-11-06)
+
+Rollback point: the UniFi backup above (`sha256 dcfa48c267da85fd`). Nothing in this phase
+touches the CRS309, the CSS610, the Google Fiber router or the VCF hosts.
+
+### Owner steps, in order
+
+1. **Turn off automatic firmware updates.** UniFi Network → Settings → Control Plane → Updates:
+   turn automatic updates off for the UCG and all devices.
+2. **Create `Lab-Transit`.** Settings → Networks → New Virtual Network:
+   - Name `Lab-Transit`, Router `UCG Ultra`, Gateway IP/Subnet `10.83.80.1/29`, VLAN ID `80`
+   - DHCP mode **None**; leave Isolate Network off
+3. **Create the VLAN 10 network (layer 2 only).** New Virtual Network, Router
+   **Third-party Gateway**, name `Lab-VLAN10`, VLAN ID `10`. UniFi gives it no gateway and no
+   DHCP. The CRS309 stays VLAN 10's gateway (`172.16.10.1`).
+4. **Create `Lab-Services`.** New Virtual Network:
+   - Router `UCG Ultra`, Gateway `10.83.81.1/24`, VLAN ID `81`
+   - DHCP Server on, range `10.83.81.100`-`10.83.81.199`; reservations are added in Task 6 for
+     `mgmt`, Panel, Wings01, traefik and `dns01`
+5. **Create `Lab-Emergency`.** New Virtual Network, Router `UCG Ultra`, Gateway
+   `10.83.82.1/24`, VLAN ID `82`, DHCP mode **None** (host addresses are static in Phase 7).
+6. **Move the gateway link (the only disruptive step, about 1 minute).**
+   - Unplug the cable from Flex 2.5G 5 **port 4**, keeping the UCG end on UCG port 2.
+   - Plug it into Flex 2.5G 8 PoE **port 2**, set to the default port profile (all networks)
+     with PoE off.
+   - The switches re-adopt within a few minutes.
+
+Ports reserved on the 8 PoE for later phases: port 3 for TrueNAS (Phase 3), port 4 for `mgmt`
+(Task 6), port 10 SFP+ for the CRS309 DAC (Phase 2). Leave the 10G RJ45 port empty, because it
+may be a combo with the SFP+.
+
+### Rollback
+
+- Move the gateway cable back to Flex 2.5G 5 port 4.
+- Delete `Lab-Transit`, `Lab-VLAN10`, `Lab-Services` and `Lab-Emergency`.
+- If anything else changed, restore the backup above.
+
+### Builder checks after the owner applies
+
+- [ ] All three switches adopted and online, addresses unchanged (Flex 2.5G 5 `10.83.1.2`, 8 PoE
+      `10.83.1.148`, Flex Mini `10.83.1.189`). Owner screenshot of UniFi Devices.
+- [ ] Internet from a UniFi client: `curl -sI https://example.com` → `HTTP/` (owner runs it on a
+      UniFi client).
+- [ ] `Lab-VLAN10` shows no gateway and no DHCP (owner screenshot of the network list).
+- [ ] Home side unaffected: the Proxmox host and the workstation still reach the lab through
+      `192.168.6.11`. The builder pings `172.16.10.150` from Proxmox and checks vCenter `:443`.
