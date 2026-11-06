@@ -163,7 +163,9 @@ What this settles:
   per `.superpowers/2026-09-22-host-cleanup-and-esxi-ping.md`), which is why
   `172.16.10.50:8080` didn't answer on 2026-11-05.
 - Google Fiber router LAN ports (owner, 2026-11-06): one goes to the VCF lab (the CSS610 Port1
-  cable), and two go to TrueNAS. One TrueNAS cable can come out. Ports needed after the move:
+  cable), one to the Proxmox GPU host (`192.168.6.175`, which stays put), and two to TrueNAS.
+  The workstation (`192.168.6.226`) isn't on a router port, so it's on Wi-Fi or another path on
+  the router side; the CSS610 sees it through Port1. One TrueNAS cable can come out. Ports needed after the move:
   the UCG WAN (Phase 5), which takes either the freed CSS610 Port1 cable's router port or the
   freed TrueNAS port, and one TrueNAS home-LAN port. That's enough; the Step 1 stop condition
   doesn't trigger.
