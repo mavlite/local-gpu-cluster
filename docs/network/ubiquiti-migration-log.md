@@ -99,6 +99,18 @@ under `Documents/GitHub` names their addresses. `dns01`'s VLAN 10 leg most likel
 CRS309 through the home-LAN uplink, since VLAN 10 is tagged there; confirm with the CSS610 port
 map.
 
+### Users of `192.168.6.197` and `192.168.6.167` (2026-11-06, read-only)
+
+- Repo: `docs/vcf-deployment-reference.md:224,253,255`, `docs/vcf-lab-build-record.md:377`,
+  `scripts/vcf-ca/New-Dns01RollbackClone.ps1:47` (`$MgmtHost = '192.168.6.167'` default) and
+  `scripts/vcf-ca/README.md:158`. The script default must change when `mgmt`'s `vmk0` gets its
+  UniFi address (Task 6).
+- Lab CA (`knowledgeondemand-LabRoot-CA`, read from vCenter's certificate): CDP and AIA are LDAP
+  plus `http://pki.knowledgeondemand.net/CertEnroll/…`. Queried from the Proxmox host (the
+  workstation VPN blocks DNS), `pki` and `dns01.knowledgeondemand.net` both resolve to
+  `172.16.10.150` from either `dns01` address. Revocation checks don't depend on
+  `192.168.6.197`.
+
 ### CSS610 (owner screenshots, 2026-11-05)
 
 CSS610-8G-2S+IN, SwOS Lite 2.20, at `192.168.6.10` (MAC `2C:C8:1B:9C:02:49`). Backup:
@@ -129,6 +141,15 @@ What this settles:
   the router's LAN switch, the CSS610 Port1 and SFP+1. That path is fragile and unconfirmed;
   `http://172.16.10.50:8080/` did not answer from the workstation on 2026-11-05.
 
+### Owner answers (2026-11-06)
+
+- **Teleport is not set up yet.** The spec's current state says "Teleport VPN is enabled", but
+  there's no client subnet to admit. The emergency network's Teleport source (spec lines 168,
+  290, 386) waits until the owner configures Teleport, and the phase that builds the emergency
+  path records the subnet then.
+- Google Fiber router port map, port forwards, UniFi backup, TrueNAS VLAN 10 netmask and Docker
+  `default-address-pools`: owner to send.
+
 ### VCF health baseline (2026-11-06 01:06 UTC, read-only)
 
 - Hosts `hyp01`-`hyp03`: connected, not in maintenance mode, overall green; vSAN healthy,
@@ -139,7 +160,9 @@ What this settles:
   on `lab01-datacenter` and `vsan-lab01`), raised 2026-09-26 at build time.
 
 `hyp02`'s stale NSX node was fixed on 2026-11-06 before this baseline (see the NSX section below).
-`hyp02` cut out twice on 2026-11-05 at the hardware level; the owner reseated its power cable.
+`hyp02` cut out three times on 2026-11-05/06 at the hardware level. The cause was a physically
+blocked CPU fan (thermal protection under vSAN resync load). The owner cleared it, and the next
+full vSAN resync finished without a cut. It's not a network issue.
 
 ### CRS309 clock (2026-11-06 01:07 UTC)
 

@@ -369,7 +369,8 @@ a previous attempt, wipe vSAN ESA leftovers per host: `esxcli vsan cluster leave
 
 ## Gaps
 
-- No RouterOS export of the CRS309 (VLANs, bridge/PVID, DHCP, TFTP, firewall, NAT).
+- ~~No RouterOS export of the CRS309~~: captured 2026-11-05 as
+  `docs/network/crs309-export-2026-11.rsc` (read-only `/export terse`, secret-scanned).
 - The iPXE EMBED script and its build aren't in the repo.
 - The submitted SddcSpec JSON, validation output and task IDs aren't committed.
 - No script for the Installer deployment (procedure lives in this doc and the bring-up
