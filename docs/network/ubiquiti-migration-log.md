@@ -147,8 +147,28 @@ What this settles:
   there's no client subnet to admit. The emergency network's Teleport source (spec lines 168,
   290, 386) waits until the owner configures Teleport, and the phase that builds the emergency
   path records the subnet then.
-- Google Fiber router port map, port forwards, UniFi backup, TrueNAS VLAN 10 netmask and Docker
-  `default-address-pools`: owner to send.
+- Google Fiber router port forwards (owner screenshot, 2026-11-06). UPnP is off. There are two
+  rules, both TCP single-port:
+
+  | WAN port | Target | Target port | What it is |
+  |---|---|---|---|
+  | 20422 | `192.168.6.170` | 22 | TrueNAS SSH (`br0 192.168.6.170`; ARP MAC `c6:6d:0c:79:47:40`) |
+  | 21422 | `192.168.6.175` | 21422 | Proxmox host → DNAT to dev VM `10.78.0.10:22` (file copy) |
+
+  There's **no forward to the panel stack** (`.181`, `.203`, `.60`), so moving it needs no
+  Google Fiber forward changes. If TrueNAS's home-LAN address changes in Phase 3, the 20422 rule
+  must follow it. Observation for the owner: TrueNAS SSH is reachable from the internet through
+  20422.
+- TrueNAS also serves the offline depot on its home-LAN address (`http://192.168.6.170:8080`,
+  per `.superpowers/2026-09-22-host-cleanup-and-esxi-ping.md`), which is why
+  `172.16.10.50:8080` didn't answer on 2026-11-05.
+- Google Fiber router LAN ports (owner, 2026-11-06): one goes to the VCF lab (the CSS610 Port1
+  cable), and two go to TrueNAS. One TrueNAS cable can come out. Ports needed after the move:
+  the UCG WAN (Phase 5), which takes either the freed CSS610 Port1 cable's router port or the
+  freed TrueNAS port, and one TrueNAS home-LAN port. That's enough; the Step 1 stop condition
+  doesn't trigger.
+- Still to come from the owner: the UniFi backup, and TrueNAS's VLAN 10 netmask and Docker
+  `default-address-pools`.
 
 ### VCF health baseline (2026-11-06 01:06 UTC, read-only)
 
