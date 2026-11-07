@@ -1,0 +1,9 @@
+PCPU performance statistics {
+   PCPU core busy (current frequency): -1 %
+   PCPU core busy (maximum frequency): -1 %
+   APERF/MPERF ratio: -1 %
+   APERF reading:565115497405
+   MPERF reading:270057413775
+   Halted time: 594731986 usec
+   True if P-State timer is running:0
+}

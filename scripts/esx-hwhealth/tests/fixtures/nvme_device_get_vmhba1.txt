@@ -1,0 +1,85 @@
+Controller Identify Info:
+   PCIVID: 0x144d
+   PCISSVID: 0x144d
+   Serial Number: S3TNNE1JC00721      
+   Model Number: SAMSUNG MZVLB512HAJQ-000L7              
+   Firmware Revision: 5L2QEXA7
+   Recommended Arbitration Burst: 2
+   IEEE OUI Identifier: 002538
+   Controller Associated with an SR-IOV Virtual Function: false
+   Controller Associated with a PCI Function: true
+   NVM Subsystem May Contain Two or More Controllers: false
+   NVM Subsystem Contains Only One Controller: true
+   NVM Subsystem May Contain Two or More PCIe Ports: false
+   NVM Subsystem Contains Only One PCIe Port: true
+   Max Data Transfer Size: 9
+   Controller ID: 4
+   Version: 1.2
+   RTD3 Resume Latency: 100000 us
+   RTD3 Entry Latency: 8000000 us
+   Optional Firmware Activation Event Support: false
+   Optional Namespace Attribute Changed Event Support: false
+   Host Identifier Support: false
+   Namespace Management and Attachment Support: false
+   Firmware Activate and Download Support: true
+   Format NVM Support: true
+   Security Send and Receive Support: true
+   Abort Command Limit: 7
+   Async Event Request Limit: 3
+   Firmware Activate Without Reset Support: true
+   Firmware Slot Number: 3
+   The First Slot Is Read-only: false
+   Telemetry Log Page Support: false
+   Command Effects Log Page Support: true
+   SMART/Health Information Log Page per Namespace Support: true
+   Error Log Page Entries: 63
+   Number of Power States Support: 4
+   Format of Admin Vendor Specific Commands Is Same: true
+   Format of Admin Vendor Specific Commands Is Vendor Specific: false
+   Autonomous Power State Transitions Support: true
+   Warning Composite Temperature Threshold: 354
+   Critical Composite Temperature Threshold: 355
+   Max Time for Firmware Activation: 0 * 100ms
+   Host Memory Buffer Preferred Size: 0 * 4KB
+   Host Memory Buffer Min Size: 0 * 4KB
+   Total NVM Capacity: 0x773c256000
+   Unallocated NVM Capacity: 0x0
+   Access Size: 0 * 512B
+   Total Size: 0 * 128KB
+   Authentication Method: 0
+   Number of RPMB Units: 0
+   Keep Alive Support: 0
+   Max Submission Queue Entry Size: 64 Bytes
+   Required Submission Queue Entry Size: 64 Bytes
+   Max Completion Queue Entry Size: 16 Bytes
+   Required Completion Queue Entry Size: 16 Bytes
+   Max Outstanding Commands: 0
+   Number of Namespaces: 1
+   Reservation Support: false
+   Save/Select Field in Set/Get Feature Support: true
+   Write Zeroes Command Support: true
+   Dataset Management Command Support: true
+   Write Uncorrectable Command Support: true
+   Compare Command Support: true
+   Fused Operation Support: false
+   Cryptographic Erase as Part of Secure Erase Support: true
+   Cryptographic Erase and User Data Erase to All Namespaces: false
+   Cryptographic Erase and User Data Erase to One Particular Namespace: true
+   Format Operation to All Namespaces: false
+   Format Opertaion to One Particular Namespace: true
+   Volatile Write Cache Is Present: true
+   Atomic Write Unit Normal: 1023 Logical Blocks
+   Atomic Write Unit Power Fail: 0 Logical Blocks
+   Format of All NVM Vendor Specific Commands Is Same: true
+   Format of All NVM Vendor Specific Commands Is Vendor Specific: false
+   Atomic Compare and Write Unit: 0
+   SGL Address Specify Offset Support: false
+   MPTR Contain SGL Descriptor Support: false
+   SGL Length Able to Larger than Data Amount: false
+   SGL Length Shall Be Equal to Data Amount: true
+   Byte Aligned Contiguous Physical Buffer of Metadata Support: false
+   SGL Bit Bucket Descriptor Support: false
+   SGL Keyed SGL Data Block Descriptor Support: false
+   SGL for NVM Command Set Support: false
+   NVM Subsystem NVMe Qualified Name: 
+   NVM Subsystem NVMe Qualified Name (hex format): 

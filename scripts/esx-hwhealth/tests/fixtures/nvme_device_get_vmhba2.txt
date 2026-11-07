@@ -1,0 +1,85 @@
+Controller Identify Info:
+   PCIVID: 0xc0a9
+   PCISSVID: 0xc0a9
+   Serial Number: 25124F123D48        
+   Model Number: CT1000P310SSD2                          
+   Firmware Revision: V8CR001 
+   Recommended Arbitration Burst: 6
+   IEEE OUI Identifier: 00a075
+   Controller Associated with an SR-IOV Virtual Function: false
+   Controller Associated with a PCI Function: true
+   NVM Subsystem May Contain Two or More Controllers: false
+   NVM Subsystem Contains Only One Controller: true
+   NVM Subsystem May Contain Two or More PCIe Ports: false
+   NVM Subsystem Contains Only One PCIe Port: true
+   Max Data Transfer Size: 6
+   Controller ID: 0
+   Version: 1.4
+   RTD3 Resume Latency: 100000 us
+   RTD3 Entry Latency: 5000000 us
+   Optional Firmware Activation Event Support: true
+   Optional Namespace Attribute Changed Event Support: false
+   Host Identifier Support: false
+   Namespace Management and Attachment Support: false
+   Firmware Activate and Download Support: true
+   Format NVM Support: true
+   Security Send and Receive Support: true
+   Abort Command Limit: 3
+   Async Event Request Limit: 7
+   Firmware Activate Without Reset Support: true
+   Firmware Slot Number: 2
+   The First Slot Is Read-only: false
+   Telemetry Log Page Support: true
+   Command Effects Log Page Support: true
+   SMART/Health Information Log Page per Namespace Support: false
+   Error Log Page Entries: 254
+   Number of Power States Support: 4
+   Format of Admin Vendor Specific Commands Is Same: true
+   Format of Admin Vendor Specific Commands Is Vendor Specific: false
+   Autonomous Power State Transitions Support: true
+   Warning Composite Temperature Threshold: 359
+   Critical Composite Temperature Threshold: 361
+   Max Time for Firmware Activation: 50 * 100ms
+   Host Memory Buffer Preferred Size: 16384 * 4KB
+   Host Memory Buffer Min Size: 16384 * 4KB
+   Total NVM Capacity: 0x0
+   Unallocated NVM Capacity: 0x0
+   Access Size: 31 * 512B
+   Total Size: 0 * 128KB
+   Authentication Method: 0
+   Number of RPMB Units: 1
+   Keep Alive Support: 0
+   Max Submission Queue Entry Size: 64 Bytes
+   Required Submission Queue Entry Size: 64 Bytes
+   Max Completion Queue Entry Size: 16 Bytes
+   Required Completion Queue Entry Size: 16 Bytes
+   Max Outstanding Commands: 256
+   Number of Namespaces: 1
+   Reservation Support: false
+   Save/Select Field in Set/Get Feature Support: true
+   Write Zeroes Command Support: false
+   Dataset Management Command Support: true
+   Write Uncorrectable Command Support: true
+   Compare Command Support: true
+   Fused Operation Support: false
+   Cryptographic Erase as Part of Secure Erase Support: false
+   Cryptographic Erase and User Data Erase to All Namespaces: false
+   Cryptographic Erase and User Data Erase to One Particular Namespace: true
+   Format Operation to All Namespaces: false
+   Format Opertaion to One Particular Namespace: true
+   Volatile Write Cache Is Present: true
+   Atomic Write Unit Normal: 255 Logical Blocks
+   Atomic Write Unit Power Fail: 0 Logical Blocks
+   Format of All NVM Vendor Specific Commands Is Same: true
+   Format of All NVM Vendor Specific Commands Is Vendor Specific: false
+   Atomic Compare and Write Unit: 0
+   SGL Address Specify Offset Support: false
+   MPTR Contain SGL Descriptor Support: false
+   SGL Length Able to Larger than Data Amount: false
+   SGL Length Shall Be Equal to Data Amount: true
+   Byte Aligned Contiguous Physical Buffer of Metadata Support: false
+   SGL Bit Bucket Descriptor Support: false
+   SGL Keyed SGL Data Block Descriptor Support: false
+   SGL for NVM Command Set Support: false
+   NVM Subsystem NVMe Qualified Name: nqn.2016-08.com.micron:nvme:nvm-subsystem-sn-25124F123D48
+   NVM Subsystem NVMe Qualified Name (hex format): 6E716E2E323031362D30382E636F6D2E6D6963726F6E3A6E766D653A6E766D2D73756273797374656D2D736E2D323531323446313233443438
