@@ -405,9 +405,9 @@ Port4, DAC → CSS610 SFP+1, both TrueNAS cables → Google Fiber router. Power 
 
 ### Builder checks after the owner applies
 
-- [ ] UniFi: 8 PoE port 5 sees the Google Fiber router (`00:bc:2f:31:ad:c0`), port 4 `mgmt`
-      (`1c:69:7a:6d:2d:32`), port 10 the CRS309; all switches still online. *(Owner to confirm
-      in UniFi.)*
+- [x] UniFi (owner screenshot, 2026-11-07): UCG Ultra, Flex 2.5G 5 (uplink 8 PoE port 2), 8 PoE
+      (uplink UCG port 1) and Flex Mini (uplink 8 PoE port 1) all online. The per-port MACs
+      weren't read.
 - [x] From Proxmox (2026-11-07): `192.168.6.11` (CRS309), `.167` (`mgmt`, HTTPS 200), `.197`
       (`dns01`), `.203`, `.60`, `.181` (panel stack) and `.170` (TrueNAS) answer ping. `.89`
       (UCG WAN) does not answer ping, but ARP resolves it to the UCG WAN MAC
@@ -415,10 +415,12 @@ Port4, DAC → CSS610 SFP+1, both TrueNAS cables → Google Fiber router. Power 
       a pass.
 - [ ] From Proxmox through the CRS309 (route `172.16.10.1 via 192.168.6.11`): `172.16.10.1` and
       `172.16.10.150` (`dns01`, VLAN 10 through 8 PoE ports 10 and 4) answer; the depot
-      `http://192.168.6.170:8080/` returns HTTP 200. **Not passed:** `172.16.10.21` (`mgmt`
-      `vmk1`) and `172.16.10.50` (TrueNAS `vlan10`) don't answer. Neither answered before the
-      swap either. Open question: which TrueNAS NIC is `vlan10`'s parent?
-- [ ] UCG still online with internet (dashboard), now through 8 PoE port 6. *(Owner to confirm.)*
+      `http://192.168.6.170:8080/` returns HTTP 200. `172.16.10.50` (TrueNAS `vlan10`) answers
+      ping with 0% loss, and the depot also returns 200 on `http://172.16.10.50:8080/`, once
+      `enp2s0` was cabled to 8 PoE port 7 (see below). **Still open:** `172.16.10.21` (`mgmt`
+      `vmk1`) doesn't answer. It didn't before the swap either; check it once the lab is
+      powered on.
+- [x] UCG online, uplink "Google Fiber" (owner screenshot, 2026-11-07), now through 8 PoE port 6.
 
 ### As applied (2026-11-06 to 2026-11-07)
 
@@ -430,10 +432,11 @@ well:
 |---|---|---|---|---|
 | 1 | Flex Mini | default | Allow All | as is |
 | 2 | Flex 2.5G 5 | default | Allow All | PoE++ |
-| 3 | TrueNAS (`br0` NIC) | `Home-LAN` | `Lab-VLAN10` only | off |
+| 3 | TrueNAS `enp1s0` (`78:55:36:07:23:c9`, `br0` member) | `Home-LAN` | `Lab-VLAN10` only | off |
 | 4 | `mgmt` ESXi | `Home-LAN` | `Lab-VLAN10` only | off |
 | 5 | Google Fiber router (the only cable from it) | `Home-LAN` | Block All | off |
 | 6 | UCG Ultra port 5 (WAN), name `UCG-WAN` | `Home-LAN` | Block All | off |
+| 7 | TrueNAS `enp2s0` (`78:55:36:07:23:c8`, parent of `vlan10`), name `TrueNAS-vlan10` | `Home-LAN` | `Lab-VLAN10` only | off |
 | 8 | UCG Ultra port 1 (LAN) | default | Allow All | off |
 | 10 (SFP+) | CRS309 `sfp-sfpplus1` (DAC) | `Home-LAN` | `Lab-VLAN10` only | n/a |
 
@@ -443,6 +446,10 @@ well:
   home side of the 8 PoE (`mgmt`, TrueNAS, the CRS309) until the cable goes back. Never plug
   the UCG WAN into an 8 PoE port that is still on the default network: that loops the UCG's
   WAN onto its own LAN.
+- TrueNAS uses two cables, not one: `vlan10` is parented on `enp2s0`, not `br0`, so on the
+  CSS610 that NIC must have had its own cable. This corrects the one-cable assumption in the
+  Phase 1b introduction. `enp2s0` has no untagged address, so sharing `Home-LAN` with `br0`
+  causes no loop.
 - The CSS610 is out of service, and the VCF lab stayed powered off throughout.
 - Rollback is the same as above, but the UCG WAN cable goes back from 8 PoE port 6 to
   CSS610 Port2.
