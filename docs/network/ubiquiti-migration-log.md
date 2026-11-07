@@ -406,10 +406,43 @@ Port4, DAC → CSS610 SFP+1, both TrueNAS cables → Google Fiber router. Power 
 ### Builder checks after the owner applies
 
 - [ ] UniFi: 8 PoE port 5 sees the Google Fiber router (`00:bc:2f:31:ad:c0`), port 4 `mgmt`
-      (`1c:69:7a:6d:2d:32`), port 10 the CRS309; all switches still online.
-- [ ] From Proxmox: `192.168.6.11` (CRS309), `.167` (`mgmt`), `.197` (`dns01`), `.203`, `.60`,
-      `.181` (panel stack), `.170` (TrueNAS) and `.89` (UCG WAN) answer.
-- [ ] From Proxmox through the CRS309: `172.16.10.150` (`dns01`), `172.16.10.21` (`mgmt` `vmk1`)
-      and `172.16.10.50` (TrueNAS `vlan10`) answer; the depot `http://192.168.6.170:8080/`
-      returns HTTP 200.
-- [ ] UCG still online with internet (dashboard), now on the direct router cable.
+      (`1c:69:7a:6d:2d:32`), port 10 the CRS309; all switches still online. *(Owner to confirm
+      in UniFi.)*
+- [x] From Proxmox (2026-11-07): `192.168.6.11` (CRS309), `.167` (`mgmt`, HTTPS 200), `.197`
+      (`dns01`), `.203`, `.60`, `.181` (panel stack) and `.170` (TrueNAS) answer ping. `.89`
+      (UCG WAN) does not answer ping, but ARP resolves it to the UCG WAN MAC
+      `58:d6:1f:71:2c:8d` (REACHABLE). UniFi gateways drop WAN ping by default, so this counts as
+      a pass.
+- [ ] From Proxmox through the CRS309 (route `172.16.10.1 via 192.168.6.11`): `172.16.10.1` and
+      `172.16.10.150` (`dns01`, VLAN 10 through 8 PoE ports 10 and 4) answer; the depot
+      `http://192.168.6.170:8080/` returns HTTP 200. **Not passed:** `172.16.10.21` (`mgmt`
+      `vmk1`) and `172.16.10.50` (TrueNAS `vlan10`) don't answer. Neither answered before the
+      swap either. Open question: which TrueNAS NIC is `vlan10`'s parent?
+- [ ] UCG still online with internet (dashboard), now through 8 PoE port 6. *(Owner to confirm.)*
+
+### As applied (2026-11-06 to 2026-11-07)
+
+The owner has **one** cable from the Google Fiber router, not the two that steps 3 and 4 assumed.
+That cable feeds the home network into 8 PoE port 5, and the UCG's WAN now hangs off the 8 PoE as
+well:
+
+| 8 PoE port | Device | Native | Tagged | PoE |
+|---|---|---|---|---|
+| 1 | Flex Mini | default | Allow All | as is |
+| 2 | Flex 2.5G 5 | default | Allow All | PoE++ |
+| 3 | TrueNAS (`br0` NIC) | `Home-LAN` | `Lab-VLAN10` only | off |
+| 4 | `mgmt` ESXi | `Home-LAN` | `Lab-VLAN10` only | off |
+| 5 | Google Fiber router (the only cable from it) | `Home-LAN` | Block All | off |
+| 6 | UCG Ultra port 5 (WAN), name `UCG-WAN` | `Home-LAN` | Block All | off |
+| 8 | UCG Ultra port 1 (LAN) | default | Allow All | off |
+| 10 (SFP+) | CRS309 `sfp-sfpplus1` (DAC) | `Home-LAN` | `Lab-VLAN10` only | n/a |
+
+- **Dependency:** the UCG's internet now passes through the 8 PoE. If the 8 PoE reboots or its
+  port 6 profile changes, the UCG loses its WAN. While the UCG has no WAN, adopt or configure
+  the switches by moving the Google Fiber cable to UCG port 5 for a while. That cuts off the
+  home side of the 8 PoE (`mgmt`, TrueNAS, the CRS309) until the cable goes back. Never plug
+  the UCG WAN into an 8 PoE port that is still on the default network: that loops the UCG's
+  WAN onto its own LAN.
+- The CSS610 is out of service, and the VCF lab stayed powered off throughout.
+- Rollback is the same as above, but the UCG WAN cable goes back from 8 PoE port 6 to
+  CSS610 Port2.
