@@ -487,3 +487,50 @@ Same results as the power-on check above:
   - NTP synchronised.
   - `172.16.10.21` and `.150` reach on-link with 0% loss.
 - UCG WAN `.89`: ARP resolves to `58:d6:1f:71:2c:8d`, ping dropped as usual.
+
+## CRS309 `tagged=all` cleanup (applied by the builder at the owner's request, 2026-11-07 14:30 CST)
+
+Before, VLANs 10, 20-60 and 70-72 had `tagged=all`. That interface list put them on every port,
+including the home uplink `sfp-sfpplus1` and the unconnected `ether1` and `sfp-sfpplus8`. VLAN 99
+was already per port and is unchanged. `192.168.6.11` stays on `sfp-sfpplus1` untagged (VLAN 1),
+so this change could not cut the management path.
+
+After:
+
+```
+/interface bridge vlan set [find vlan-ids=10] tagged=bridge,sfp-sfpplus1,sfp-sfpplus2,sfp-sfpplus3,sfp-sfpplus4,sfp-sfpplus5,sfp-sfpplus6,sfp-sfpplus7
+/interface bridge vlan set [find vlan-ids=20|30|40|50|60|70|71|72] tagged=bridge,sfp-sfpplus2,sfp-sfpplus3,sfp-sfpplus4,sfp-sfpplus5,sfp-sfpplus6,sfp-sfpplus7
+```
+
+(The second line is shorthand. Each VLAN ID was set with its own command.)
+
+Only VLAN 10 now leaves on the uplink to the 8 PoE, which matches the 8 PoE's port 10 profile.
+vSAN, TEP, vMotion, T0, VM-Mgmt and the dev VLANs stay on the host ports.
+`docs/network/crs309-export-2026-11.rsc` is the 2026-11-05 snapshot, before this change.
+
+**Safety net:** a one-shot `/system scheduler` entry was set to put `tagged=all` back at 14:40.
+It was removed at 14:31 after the checks passed.
+
+**Rollback:** `/interface bridge vlan set [find vlan-ids=<id>] tagged=all` for each of the nine IDs.
+
+**Checks after the change:**
+
+- From the CRS309, 0% loss to:
+  - the hosts `172.16.10.141/.143/.145`, vCenter `.129`, `dns01` `.150`, TrueNAS `.50` and
+    `mgmt` `vmk1` `.21`;
+  - vSAN `172.16.30.20-.22`;
+  - TEP `172.16.40.20/.21/.24`;
+  - the dev VMs `172.16.70.10`, `.71.10` and `.72.10`;
+  - `192.168.6.1` and `.175`.
+
+  vMotion had no ARP neighbours to test; the healthy vSAN covers the host ports.
+- vSAN healthy with three members, hosts green, NSX `STABLE`, all transport nodes `success`,
+  collection `SUCCESS`.
+- vCenter UI 200, SDDC Manager 301, depot on `172.16.10.50` 200, `mgmt` 200, `dns01` resolves
+  `vcsa.lab…`.
+
+**Router log (seen while checking):**
+
+- 13:26 "rebooted without proper shutdown" was the owner's power-off for the cable cleanup.
+- 07:30 had a burst of TFTP "permission denied" errors (PXE). It predates this change and is
+  unexplained.
