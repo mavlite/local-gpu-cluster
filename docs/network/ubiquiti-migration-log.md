@@ -472,3 +472,18 @@ Matches the 2026-11-06 baseline:
   that range don't go back through the CRS309. Likely cause: asymmetric routing, by design and
   present before the migration. Not a migration fault; nothing to fix.
 
+
+### After the owner's cable cleanup and full lab power cycle (2026-11-07, read-only)
+
+Same results as the power-on check above:
+
+- All home, `mgmt`, TrueNAS and lab addresses answer.
+- vCenter UI, NSX, SDDC Manager, Ops and the depot return HTTP 200/30x on both addresses.
+- `dns01` resolves lab and internet names.
+- Hosts green, vSAN healthy with three members, NSX `STABLE`, all transport nodes `success`.
+  The only alarm is the known yellow one from 09-26.
+- CRS309:
+  - `sfp-sfpplus1`-`7` link-ok at 10 Gbps; `sfp-sfpplus8` and `ether1` no link, as before.
+  - NTP synchronised.
+  - `172.16.10.21` and `.150` reach on-link with 0% loss.
+- UCG WAN `.89`: ARP resolves to `58:d6:1f:71:2c:8d`, ping dropped as usual.
