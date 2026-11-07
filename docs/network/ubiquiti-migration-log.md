@@ -453,3 +453,22 @@ well:
 - The CSS610 is out of service, and the VCF lab stayed powered off throughout.
 - Rollback is the same as above, but the UCG WAN cable goes back from 8 PoE port 6 to
   CSS610 Port2.
+
+### Lab power-on check after the swap (2026-11-07, read-only)
+
+Matches the 2026-11-06 baseline:
+
+- vCenter: `hyp01`-`hyp03` connected, not in maintenance mode, overall green. vSAN healthy with
+  three members. The only alarm is the known yellow storage policy alarm from 09-26.
+- NSX: management and control cluster `STABLE`. Transport nodes `hyp01`, `hyp02` (`4aa47fb6-…`)
+  and `hyp03` `success`; collection `720030c6-…` `SUCCESS`.
+- From Proxmox through the CRS309: the hosts (`.145`, `.143`, `.141`), vCenter `.129` (UI 200),
+  NSX `.131`/`.132`, SDDC Manager `.133`, Ops `.122`/`.123`, licsrv `.134`, fleet `.116`,
+  platform `.120`, `dns01` `.150` and TrueNAS `.50` all answer. `dns01` resolves `vcsa.lab…`
+  and `example.com`.
+- `mgmt` `vmk1` `172.16.10.21`: the CRS309 pings it on-link with 0% loss, and ARP resolves it on
+  `Mgmt-VLAN10` (`00:50:56:69:38:07`). VLAN 10 to `mgmt` works. It doesn't answer from
+  `192.168.6.x`. `mgmt` has `192.168.6.0/24` directly connected on `vmk0`, so replies to
+  that range don't go back through the CRS309. Likely cause: asymmetric routing, by design and
+  present before the migration. Not a migration fault; nothing to fix.
+
