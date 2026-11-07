@@ -339,3 +339,77 @@ the Minisforum RTL8125s; port 3 had no link at 14:54 (check in Phase 7).
   "8 PoE Port 2", and it was stable an hour later. Root cause not confirmed; a stale
   controller view of the old path is the likeliest.
 - Lab traffic was unaffected throughout: VCF management runs over the CRS309.
+
+## Phase 1b: swap the CSS610 for the 8 PoE (owner decision, 2026-11-06)
+
+**Owner's decision:** retire the CSS610 now, with the VCF lab powered off, and re-IP nothing.
+The 8 PoE takes over the CSS610's job like for like: it carries the home network (as a layer-2
+network, `Home-LAN`, VLAN 6, no UniFi gateway or DHCP) and VLAN 10 side by side. The CRS309 keeps
+`192.168.6.11` and its default route via `192.168.6.1`, Proxmox and the workstation keep their
+`172.16.0.0/16 via 192.168.6.11` routes, and `mgmt`, `dns01`, Panel, Wings01, traefik and
+TrueNAS keep every address. Routing the lab behind the UCG (Lab-Transit) becomes a later,
+cable-free change; Task 6's re-IP is optional, not required.
+
+The CRS309 still sends every lab VLAN tagged on `sfp-sfpplus1` (`tagged=all`). The 8 PoE drops
+any VLAN that isn't in a port's tagged list, so only VLAN 10 crosses. Cleaning up `tagged=all`
+remains worthwhile but isn't a precondition.
+
+TrueNAS normally sits on the CSS610 with `br0` (home network, untagged) and `vlan10` (tagged) on
+one cable; it is on the Google Fiber router only temporarily. It goes to the 8 PoE with the same
+profile as `mgmt`, which should also bring back `172.16.10.50`.
+
+### Port layout after the swap
+
+| 8 PoE port | Device | Native | Tagged | PoE |
+|---|---|---|---|---|
+| 1 | Flex Mini | default | Allow All | as is |
+| 2 | Flex 2.5G 5 | default | Allow All | PoE++ |
+| 3 | TrueNAS (`br0` NIC) | `Home-LAN` | `Lab-VLAN10` only | off |
+| 4 | `mgmt` ESXi | `Home-LAN` | `Lab-VLAN10` only | off |
+| 5 | Google Fiber router (home network feed) | `Home-LAN` | Block All | off |
+| 8 | UCG Ultra LAN | default | Allow All | off |
+| 10 (SFP+) | CRS309 `sfp-sfpplus1` (DAC) | `Home-LAN` | `Lab-VLAN10` only | n/a |
+
+Google Fiber router LAN ports afterwards: UCG WAN (the cable that was in CSS610 Port1), Proxmox,
+the `Home-LAN` feed to 8 PoE port 5, and one spare.
+
+### Owner steps
+
+Preparation (no disruption):
+
+1. **Create `Home-LAN`.** Settings → Networks → New Virtual Network, Router **Third-party
+   Gateway**, VLAN ID `6`. If DHCP Guarding is offered, trust only `192.168.6.1`.
+2. **Set 8 PoE ports 3, 4, 5 and 10** as in the table: Native VLAN `Home-LAN`; Tagged VLAN
+   Management **Custom** with only `Lab-VLAN10` (ports 3, 4, 10) or **Block All** (port 5);
+   PoE off. Then re-open each port and check the tagged list still holds only `Lab-VLAN10`
+   (custom lists can silently gain or exclude new networks).
+
+Cutover (the home network on the CSS610 drops for a few minutes; the lab is off):
+
+3. **UCG WAN.** Unplug the CSS610 Port2 ↔ UCG port 5 cable at both ends and keep it. Move the
+   Google Fiber cable from CSS610 Port1 into **UCG port 5**.
+4. **Home network feed.** Unplug one TrueNAS cable from the Google Fiber router. Use the cable
+   kept from step 3 to connect that router port to **8 PoE port 5**.
+5. **CRS309.** Move the DAC from CSS610 SFP+1 to **8 PoE port 10** (the CRS309 end stays in
+   `sfp-sfpplus1`).
+6. **`mgmt`.** Move its cable from CSS610 Port4 to **8 PoE port 4**.
+7. **TrueNAS.** Unplug its remaining router cable. Connect the NIC that is a member of `br0`
+   (TrueNAS → Network → `br0`) to **8 PoE port 3**.
+8. Power off the CSS610.
+
+### Rollback
+
+Put the cables back: Google Fiber → CSS610 Port1, UCG port 5 → CSS610 Port2, `mgmt` → CSS610
+Port4, DAC → CSS610 SFP+1, both TrueNAS cables → Google Fiber router. Power the CSS610 on.
+`Home-LAN` and the port settings can stay; nothing uses them once the cables are back.
+
+### Builder checks after the owner applies
+
+- [ ] UniFi: 8 PoE port 5 sees the Google Fiber router (`00:bc:2f:31:ad:c0`), port 4 `mgmt`
+      (`1c:69:7a:6d:2d:32`), port 10 the CRS309; all switches still online.
+- [ ] From Proxmox: `192.168.6.11` (CRS309), `.167` (`mgmt`), `.197` (`dns01`), `.203`, `.60`,
+      `.181` (panel stack), `.170` (TrueNAS) and `.89` (UCG WAN) answer.
+- [ ] From Proxmox through the CRS309: `172.16.10.150` (`dns01`), `172.16.10.21` (`mgmt` `vmk1`)
+      and `172.16.10.50` (TrueNAS `vlan10`) answer; the depot `http://192.168.6.170:8080/`
+      returns HTTP 200.
+- [ ] UCG still online with internet (dashboard), now on the direct router cable.
