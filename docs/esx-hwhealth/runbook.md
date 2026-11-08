@@ -48,6 +48,26 @@ esxcli software sources component list -d /tmp/t6/out/lab-hwhealth-0.1.0-1-bundl
 
 Files must be LF (the builder refuses CRLF). Copy the bundle back off the host and delete `/tmp/t6`.
 
+### Build record
+
+**1.0.0-1, 2026-11-08 12:00 UTC.** Built on `esx-hwh-lab` from commit `3a30b3c`
+(`git archive 3a30b3c:scripts/esx-hwhealth`), which includes the stop-signal hold around the
+SMN write window.
+
+- `lab-hwhealth-1.0.0-1-bundle.zip`, 24609 bytes,
+  sha256 `3c986f674ec7a05437bfc305de23890b89ef3a002fa6a2f67621823a5cb8fa46`.
+- `lab-hwhealth-1.0.0-1.vib`, 18522 bytes,
+  sha256 `85d6908df248f04923b4cf0000b3bab86687200448aa7f8100939d7c7b4aa286`.
+- `esxcli software sources component list -d` reports `lab-hwhealth 1.0.0-1`, vendor `lab`,
+  CommunitySupported.
+- Fresh install on `esx-hwh-lab` with `component apply`: "Operation finished successfully",
+  Reboot Required false, sampler running.
+- After `/etc/init.d/health restart`, `esxcli system health report list` showed `lab.hwHealth`.
+- `stop` took 1.68 s; `start` brought the sampler back.
+- The first sample after install timed out on CPU and NVMe (20 s budget), as the Round 1 runs did;
+  the next sample succeeded.
+- The nested host proves plumbing only, not sensors.
+
 ## Go/no-go evidence for the owner
 
 ### a. First real-host run, hyp01, 2026-11-08 03:18-03:20 UTC
