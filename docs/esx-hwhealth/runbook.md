@@ -58,8 +58,8 @@ Code at `cde1820`, approved by the owner. One manual `lab_hwhealth.py --stdout` 
 - `--stdout` run: exit 0 in 2.65 s, status 0, supported true, `tctl_c` 77.75, `ccd_c` [70.375, 72.25],
   `package_w` 83.7 W, 32 `eff_mhz` values (min 4246.5, avg 4726.1, max 4961.5).
 - NVMe: vmhba0, vmhba1, vmhba2 at 44/45/43 C; wctemp 86/81/86; cctemp 88/82/88. `errors` [].
-- After: SMN index `0x00000000`. A hand SMN read gave `0x7f9b0000` = 78.5 C, within 3 C of the
-  plugin. Index `0x00000000` again. `vmkwarning.log` still 1806 lines. The `/tmp` copy was removed.
+- After: SMN index `0x00000000`. A hand SMN read gave `0x7f9b0000` = 78.5 C, 0.75 C above the
+  plugin's 77.75 C. Index `0x00000000` again. `vmkwarning.log` still 1806 lines. The `/tmp` copy was removed.
 
 ### b. SMN race risk (spec, "SMN safety rule")
 
@@ -71,7 +71,11 @@ Mitigations in the code:
 - the index is restored to 0 in a `finally`;
 - the root-complex gate: SMN is touched only when config offset 0x0 reads `0x14d81022`;
 - only the three SMN addresses are used;
-- runs are at least 60 s apart.
+- our own readers are serialised: the sampler and any manual `--stdout` run take an exclusive,
+  non-blocking `flock` on `/var/run/lab-hwhealth-smn.lock` around the whole SMN section (index
+  check through restore). If it is held, that run skips the temperatures with "smn locked by
+  another reader" and never waits or writes the index. The lock does not cover vmkernel or any
+  other tool, and the zero-byte lock file stays in `/var/run` until reboot.
 
 ### c. Acceptance level
 
@@ -166,3 +170,8 @@ component, reinstall it (and re-check acceptance level).
 - Any manual root run without `-B` could write `__pycache__`; the entrypoints set
   `sys.dont_write_bytecode`, so this should not happen.
 - The component is not tested on real hyp02 or hyp03 hardware: TODO.
+- If the `finally` restore of the SMN index itself fails, nothing recovers it: every later run
+  reports "smn index busy" until a reboot. A hand restore (`vsish -e set
+  /hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr/0x60 0x0`) is allowed only
+  after reading the index and confirming it is one of the project's three addresses (`0x59800`,
+  `0x59b08`, `0x59b0c`); any other value belongs to someone else, so leave it alone.
