@@ -5,6 +5,7 @@ AMD Raphael root complex; the index is read first and left alone if non-zero; it
 restored to 0. Our own readers are serialised by an exclusive, non-blocking lock file.
 """
 import os
+import signal
 from contextlib import contextmanager
 from typing import Sequence
 
@@ -76,6 +77,33 @@ def default_lock():
     return flock_lock()
 
 
+@contextmanager
+def _sigterm_deferred():
+    """Hold SIGTERM for the duration of the block, then deliver it to the original handler
+    (or re-raise it under the default disposition).
+
+    The sampler turns SIGTERM into SystemExit; raised inside the restore's vsish call it would
+    abandon the write and leave the index non-zero. signal.signal only works on the main thread;
+    elsewhere the block runs undeferred, as before.
+    """
+    pending = []
+    try:
+        previous = signal.signal(signal.SIGTERM, lambda signum, frame: pending.append(signum))
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    if not pending:
+        return
+    if callable(previous):
+        previous(pending[0], None)
+    elif previous == signal.SIG_DFL:
+        signal.raise_signal(pending[0])  # default action (terminate) now that the index is 0
+
+
 def _get(run: Runner, reg: str) -> int:
     out = run(["vsish", "-e", "get", f"{ROOT_CFG}/{reg}"], _TIMEOUT)
     return int(out.strip(), 16)
@@ -103,5 +131,6 @@ def read_smn(run: Runner, addrs: Sequence[int], lock=None) -> dict[int, int]:
                 _set_index(run, addr)
                 result[addr] = _get(run, "0x64")
         finally:
-            _set_index(run, 0)
+            with _sigterm_deferred():
+                _set_index(run, 0)
     return result

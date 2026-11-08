@@ -1,3 +1,5 @@
+import signal
+
 import pytest
 
 from fakes import FakeRunner
@@ -71,3 +73,65 @@ def test_smn_refuses_a_foreign_root_complex_before_any_write(root_id):
 
 def test_smn_unsupported_is_not_mistaken_for_busy():
     assert not issubclass(SmnUnsupported, SmnBusy)
+
+
+class _TermDuringRestore(FakeRunner):
+    """Delivers SIGTERM (through whatever handler is installed) as the restore write starts."""
+
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.restore_completed = False
+
+    def __call__(self, argv, timeout):
+        if tuple(argv) == set60("0x0"):
+            handler = signal.getsignal(signal.SIGTERM)
+            if callable(handler):
+                handler(signal.SIGTERM, None)
+            out = super().__call__(argv, timeout)
+            self.restore_completed = True
+            return out
+        return super().__call__(argv, timeout)
+
+
+def _raise_exit(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+def test_sigterm_during_restore_is_deferred_until_index_is_zero():
+    previous = signal.signal(signal.SIGTERM, _raise_exit)
+    try:
+        run = _TermDuringRestore({GET0: RAPHAEL, GET60: "0x00000000\n", set60("0x59800"): "",
+                                  GET64: "0x7d3b0000\n", set60("0x0"): ""})
+        with pytest.raises(SystemExit) as exc:
+            read_smn(run, [TCTL])
+        assert run.restore_completed
+        assert exc.value.code == 128 + signal.SIGTERM
+        assert signal.getsignal(signal.SIGTERM) is _raise_exit
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_restore_without_sigterm_keeps_handler_and_result():
+    previous = signal.signal(signal.SIGTERM, _raise_exit)
+    try:
+        run = FakeRunner({GET0: RAPHAEL, GET60: "0x00000000\n", set60("0x59800"): "",
+                          GET64: "0x7d3b0000\n", set60("0x0"): ""})
+        assert read_smn(run, [TCTL]) == {0x59800: 0x7D3B0000}
+        assert signal.getsignal(signal.SIGTERM) is _raise_exit
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_sigterm_during_restore_with_default_handler_is_re_raised_after_restore(monkeypatch):
+    raised = []
+    previous = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        run = _TermDuringRestore({GET0: RAPHAEL, GET60: "0x00000000\n", set60("0x59800"): "",
+                                  GET64: "0x7d3b0000\n", set60("0x0"): ""})
+        monkeypatch.setattr(signal, "raise_signal",
+                            lambda signum: raised.append((signum, run.restore_completed)))
+        read_smn(run, [TCTL])
+        assert raised == [(signal.SIGTERM, True)]
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, previous)
