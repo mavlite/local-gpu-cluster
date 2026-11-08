@@ -1,0 +1,1 @@
+{"vmw.ntpHealth": {"structured": {"importance": 0, "name": "vmw.ntpHealth", "status": 0, "tags": ["connectivity"], "time": "2026-11-07T22:47:32+00:00"}, "unstructured": {"firewall_rule_enabled": true, "ntp_peer_server": "", "ntp_servers": ["172.16.10.150"], "ntp_time_insync": false, "ntp_time_offset_ms": 0.0, "ntp_time_service_enabled": true, "ntpd_PID": 2099196}}}

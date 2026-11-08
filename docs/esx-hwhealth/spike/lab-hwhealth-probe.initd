@@ -1,0 +1,16 @@
+#!/bin/sh
+# chkconfig: on 99 01
+# S2 spike: boot-time probe run from a VIB init script (sampler-fallback feasibility).
+B=/hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr
+case "$1" in
+  start)
+    {
+      date; echo "my domain:"; ps -Z -c | grep -e 'lab-hwhealth-probe' | grep -v grep
+      v=$(vsish -e get $B/0x60); echo "get 0x60 rc=$? v=$v"
+      vsish -e set $B/0x60 "$v"; echo "set 0x60 rc=$?"
+      vsish -e get /hardware/msr/pcpu/0/addr/0xC0010299; echo "msr rc=$?"
+      esxcli nvme device list; echo "nvme rc=$?"
+    } > /var/run/lab-hwhealth-probe.txt 2>&1
+    ;;
+esac
+exit 0

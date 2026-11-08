@@ -1,0 +1,1 @@
+VSISHCmdGetInt():Get failed: Not supported
