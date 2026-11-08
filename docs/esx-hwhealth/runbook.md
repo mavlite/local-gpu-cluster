@@ -99,6 +99,7 @@ derived from the drives' documentation (spec "Thresholds"; research in
   "vsantraceFailover ramdisk is full" flood, the only new lines were NSX/netsched port messages at
   15:25:50 and 15:32:14. Those are the `esx-hwh-lab` VM's port connecting and disconnecting.
 - **hyp01 has now drifted from its vLCM cluster image.** A remediation would remove the component.
+  Resolved 2026-11-08: the component was added to the cluster image, and hyp01 scans COMPLIANT.
 
 ## Go/no-go evidence for the owner
 
@@ -146,22 +147,79 @@ Re-check `Disabled` on all three hosts before install:
 Remote reads need an `OBSERVABILITY` ClientProfile entitlement on each host. A dedicated local user
 with only that entitlement is preferred to root. vCenter does **not** proxy host reports
 (`/api/esx/observability/reports` returns 404; none of its vAPI services is observability).
-Decision: TODO owner.
+Decision (owner, 2026-11-08): grant it. Done on **hyp01** for the `root` profile (`LU###root`, which
+`list` does not show but `get` returns): `client_profiles.update` with grants
+`[IDENTITY_MGMT, OBSERVABILITY]`, after which `reports.get lab.hwHealth` from the workstation returns
+the report. hyp02 and hyp03 (granted by the owner with the same `update`, 2026-11-08 ~18:30 UTC):
+`get after` shows `[IDENTITY_MGMT, OBSERVABILITY]` on both; `reports.list` and `reports.get vmw.ntpHealth`
+now return data, and `reports.get lab.hwHealth` returns `not_found` until the component is installed.
+A dedicated least-privilege user for the Operations pack remains open (Task 8).
 
 ## Rollout (owner)
 
 Plan Task 7, Steps 2-5. Each step: TODO paste real output.
 
-- [ ] **Baseline.** Per host: `esxcli software acceptance get`, `secureBoot.py -s`,
+- [x] **Baseline** (read-only, owner-approved, 2026-11-08 18:25 UTC). Per host: `esxcli software acceptance get`, `secureBoot.py -s`,
   `vsish -e get /hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr/0x0`,
-  `wc -l /var/log/vmkwarning.log`. TODO: paste real output.
-- [ ] **Depot.** Upload the bundle to the vLCM depot and add the component to the cluster image.
-  Confirm the depot kept `configSchemas/` (the S4 note). TODO: paste real output.
+  `wc -l /var/log/vmkwarning.log`. hyp03's SSH was started for the read and stopped afterwards.
+
+  | | hyp02 | hyp03 |
+  |---|---|---|
+  | ESXi | 9.1.1 build 25714478 | 9.1.1 build 25714478 |
+  | Acceptance | PartnerSupported | PartnerSupported |
+  | Secure Boot | Disabled | Disabled |
+  | Root complex (0x0) | `0x14d81022` | `0x14d81022` |
+  | SMN index (0x60) | `0x00000000` | `0x00000000` |
+  | CPU family / model | 0x19 / 0x61, 16C/32T | 0x19 / 0x61, 16C/32T |
+  | vmkwarning lines (non-vsantrace) | 1786 (1) | 2407 (2) |
+  | lab-hwhealth / lab report | none / none | none / none |
+  | NVMe | vmhba0 CT4000P310SSD8, vmhba1 MZVLB512HAJQ-000L7, vmhba2 CT1000P310SSD2 | same models |
+  | NVMe temp / spare / used | 43/43/42 °C, 100 %, 1/2/0 % | 42/42/37 °C, 100 %, 1/4/0 % |
+  | Critical warning / media errors | none / 0 | none / 0 |
+
+  The non-vsantrace lines are all `NetDVS: Failed to sync data from client com.vmware.common.port.statistics`.
+- [x] **Depot** (2026-11-08). The bundle (sha256 `29f9f031…dcb962`) is kept at
+  `PROD/esx/lab-hwhealth/` on the NAS depot, served as
+  `http://172.16.10.50:8080/esx/lab-hwhealth/lab-hwhealth-1.0.1-1-bundle.zip`. vCenter imported it as
+  offline depot `E461E583…` (PULL), and depot content lists `lab-hwhealth 1.0.1-1`.
+  `lab01-cluster-001`'s image now carries the component (draft validate + commit, image commit 9;
+  validation warned only that the compatibility data is out of date). A first draft
+  committed with no change (commit 7) because the add call's body was wrong; it is harmless.
+  The REST add takes the bare version string as the body: `PUT …/drafts/<d>/software/components/lab-hwhealth`
+  with `"1.0.1-1"`.
+
+  Compliance scan after the commit: hyp01 COMPLIANT (no impact); hyp02 and hyp03 INCOMPATIBLE:
+  "Acceptance level(s) of component(s) 'lab-hwhealth' are 'CommunitySupported' …, which are incompatible
+  with the host's acceptance level 'PartnerSupported'." Lower each host to CommunitySupported before
+  remediating it.
 - [ ] **hyp01.** Maintenance mode, remediate, then watch `vmkernel.log` and `vmkwarning.log` for
   30 min. TODO: paste real output.
-- [ ] **hyp02**, same steps. TODO: paste real output.
-- [ ] **hyp03**, same steps. TODO: paste real output.
-- [ ] **Verify** with the S3 remote recipe below. TODO: paste real output.
+- [x] **hyp02** (2026-11-08, owner-approved). devvm02 and devvm03 were shut down via guest tools first
+  (15 s). Acceptance set to `community` through vCenter (`UpdateHostImageAcceptanceLevel`). The vLCM
+  check for host-26 passed with warnings only (HCL, stale compatibility data, powered-off local VMs).
+  `apply` for host-26 succeeded in 26 s **without maintenance mode** (the VIB is live-install), so no
+  VM moved. Afterwards:
+  - `lab.hwHealth` was missing until `/etc/init.d/health restart` (as expected for a new plugin).
+  - **Finding: the CPU readings failed** — `rapl`, `eff_mhz`, `tctl_c`, `ccd_c` all
+    `Operation not permitted`; NVMe worked. A vLCM live install runs the init script's `start` from
+    vLCM's own (restricted) security domain, and the sampler inherits it. On hyp01 the install ran
+    from an SSH shell, so the sampler had the unrestricted domain.
+  - Workaround, proven: `/etc/init.d/lab-hwhealth restart` from SSH. 70 s later: Tctl 74.4 °C,
+    CCD 71.4/74.1 °C, 84.9 W, eff avg 4743 MHz, `errors` empty, SMN index 0. A reboot should give the
+    same result because init scripts run at boot, but that is not yet shown after a vLCM install.
+  - Code fix to do: the init script should start the sampler in a domain that permits the reads
+    rather than inheriting the caller's, or vLCM installs need the restart step.
+- [x] **hyp03** (2026-11-08, run by the owner). Acceptance `partner` → `community`; check passed with
+  warnings only; `apply` for host-28 succeeded in 26 s without maintenance mode. SSH started, then
+  `health` and `lab-hwhealth` restarted from SSH: `lab.hwHealth` listed, Tctl 75.9 °C, CCD 65.8/68.4 °C,
+  88.3 W, `errors []`, NVMe 42/42/37 °C, SMN index 0. SSH stopped again.
+- [x] **Verify** (2026-11-08 ~18:46 UTC). The S3 remote recipe from the workstation returns
+  `lab.hwHealth` on all three hosts with CPU readings and `errors []` (Tctl 78.4 / 74.4 / 74.8 °C).
+  Cluster compliance scan: `lab01-cluster-001` COMPLIANT, every host `lab-hwhealth` 1.0.1-1 COMPLIANT.
+
+**After any vLCM install or remediation of this component, until the init script is fixed:** run
+`/etc/init.d/health restart; /etc/init.d/lab-hwhealth restart` from SSH on each host, then check that
+the CPU fields are present and `errors` is empty.
 
 A live `component apply` runs the init script's `start`, so the sampler needs no manual start
 (Task 6, section 2). healthd still launches a **newly installed** plugin only after

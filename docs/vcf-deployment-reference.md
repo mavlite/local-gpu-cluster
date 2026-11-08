@@ -85,9 +85,12 @@ readings. Names: report `lab.hwHealth`; component and VIB `lab-hwhealth`; plugin
 `lab_hwhealth`. It reports CPU Tctl and CCD temperatures, package W, effective MHz per
 core, and NVMe health.
 
-**Not yet installed on hyp01-hyp03.** The rollout is pending the owner's go/no-go. At
-install it needs the host acceptance level set to `CommunitySupported` (hyp01 reported
-`PartnerSupported` on 2026-11-07; hyp02/hyp03: TODO baseline), and an `OBSERVABILITY` ClientProfile entitlement for remote reads.
+**Installed on hyp01-hyp03 (1.0.1-1, 2026-11-08)** through the `lab01-cluster-001` vLCM image
+(cluster COMPLIANT). All three hosts are at acceptance level `CommunitySupported`, and `root` has the
+`OBSERVABILITY` ClientProfile entitlement for remote reads. The bundle lives on the NAS depot at
+`http://172.16.10.50:8080/esx/lab-hwhealth/` and is imported into vLCM as an offline depot.
+After any vLCM install or remediation, restart `health` and `lab-hwhealth` from SSH on each host;
+otherwise the CPU readings fail (see the runbook).
 Runbook: [esx-hwhealth/runbook.md](esx-hwhealth/runbook.md).
 
 ### VMkernel adapters ✓
