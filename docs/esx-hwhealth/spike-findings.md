@@ -561,3 +561,185 @@ The report files are `/var/lib/vmware/osdata/healthd/lab.hwHealth-{0,1,2}.json` 
 `lab.hwHealth.json`. healthd does not prune them, so uninstall must delete them. No reboot was needed for
 install, update or remove. The bare VIB path (`esxcli software vib install|update|remove`) behaves the
 same.
+
+## Task 6 — packaging proof
+
+Nested host `esx-hwh-lab` (ESXi 9.1.1 build 25714478, Python 3.11.15), 2026-11-08 UTC, driven over vCenter
+Guest Operations. Builder: `scripts/esx-hwhealth/packaging/build_component.py`, run on the nested host with
+its own `esximage` (`python packaging/build_component.py /tmp/t6/out 0.1.0-1`). The base schema is
+discovered at build time (`esx-base-9.1.1_0.25714478-schema.json`), not hardcoded.
+
+**Finding: a payload tar must declare its directories.** The first apply failed with
+`[LiveInstallationError] ... secureMount.py ... tardisk ... PermissionError: [Errno 1] Operation not
+permitted: '/tardisks/labhwh.t00'`. The real cause is in `vmkernel.log`:
+`VisorFSTar: 3016: Boot image is corrupted prevented creating tardisk`. The spike's tar had no directory
+entries and worked only because every file went into an existing directory. This payload creates
+`usr/lib/vmware/healthd/lab-hwhealth/hwhealth/`. With a `0755` directory entry for every parent, ahead of
+its files, the install goes through. The host asked for a reboot after the failed apply and got one.
+Covered by `test_payload_tar_has_a_directory_entry_before_each_file`.
+
+### 1. Build and VIB members (final code)
+
+```
+vib    /tmp/t6/out/lab-hwhealth-0.1.0-1.vib 15874
+bundle /tmp/t6/out/lab-hwhealth-0.1.0-1-bundle.zip 21890
+ar magic: !<arch>
+member descriptor.xml     2241 bytes
+member sig.pkcs7           0 bytes
+member labhwh          13444 bytes
+descriptor name: lab-hwhealth
+descriptor version: 0.1.0-1
+descriptor vendor: lab
+descriptor acceptance-level: community
+descriptor live-install-allowed: true
+descriptor live-remove-allowed: true
+payload 0o555   1513 etc/init.d/lab-hwhealth
+payload 0o444  31075 usr/lib/vmware/configmanager/schemas/lab-hwhealth-0.1.0-1-schema.json
+payload 0o444    280 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/__init__.py
+payload 0o444   6018 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/collect.py
+payload 0o444   1434 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/decode.py
+payload 0o444   3044 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/evaluate.py
+payload 0o444   4834 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/readers.py
+payload 0o444   1216 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/runner.py
+payload 0o444   1338 usr/lib/vmware/healthd/lab-hwhealth/hwhealth/smn.py
+payload 0o555   2111 usr/lib/vmware/healthd/lab-hwhealth/lab_hwhealth_sampler.py
+payload 0o555   4178 usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py
+['index.xml', 'vendor-index.xml', 'metadata.zip', 'vib20/lab-hwhealth/lab_bootbank_lab-hwhealth_0.1.0-1.vib']
+['vendor-index.xml', 'vmware.xml', 'vibs/lab-hwhealth-4309359132049054419.xml', 'bulletins/lab-hwhealth_0.1.0-1.xml', 'configSchemas/lab-hwhealth-0.1.0-1-schema.json']
+Name          Display Name         Version  Display Version  Vendor  Creation Date  Acceptance Level
+lab-hwhealth  Lab hardware health  0.1.0-1  0.1.0-1          lab     11-08-2026     CommunitySupported
+```
+The member list comes from a small Python ar reader on the host, because ESXi has no `ar`. The payload also
+holds 12 `0o755` directory entries (`etc`, `etc/init.d`, `usr`, … `usr/lib/vmware/healthd/plugins/bin`), not
+repeated above.
+
+### 2. Apply and restart
+
+```
+$ esxcli software component apply -d /tmp/t6/out/lab-hwhealth-0.1.0-1-bundle.zip
+   Message: Operation finished successfully.
+   Components Installed: lab-hwhealth_0.1.0-1
+   Reboot Required: false
+-r-xr-xr-x    1 root     root          1513 Jan  1  1970 /etc/init.d/lab-hwhealth
+-r-xr-xr-x    1 root     root          4178 Jan  1  1970 /usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py
+/usr/lib/vmware/healthd/lab-hwhealth:  hwhealth/  lab_hwhealth_sampler.py
+$ /etc/init.d/lab-hwhealth status          (right after apply, nothing else run)
+lab-hwhealth sampler is running
+$ configstorecli schema get -c esx -g health -k lab_hwhealth   rc=0
+$ /etc/init.d/health restart
+```
+**The live install runs the init script's `start`,** so the sampler needs no manual start and no reboot.
+healthd still needs the restart before it launches a new plugin, as S4 found.
+
+### 3. The sampler runs in superDom and writes the cache
+
+```
+$ ps -Z -c | grep lab_hwhealth
+264579  264579  python   0    /bin/python -B /usr/lib/vmware/healthd/lab-hwhealth/lab_hwhealth_sampler.py
+$ ps -Z -c | grep /bin/healthd
+264722  264722  healthd  63   /usr/lib/vmware/healthd/bin/healthd -r /var/lib/vmware/osdata/healthd
+$ ls -l /usr/lib/vmware/healthd-config/lab-hwhealth/
+-rw-r--r--    1 root     root           578 Nov  8 01:03 cache.json
+```
+The sampler runs in domain 0 (superDom) and healthd in domain 63 (healthdDom). The sampler created the cache
+directory itself.
+
+**The nested CPU reports family 25 / model 97,** because CPUID passes through from hyp01. So the cache has
+`"supported": true`, not the `false` the task expected. The readings are empty or are errors:
+- `eff_mhz` entries are `null` ("core halted").
+- `tctl_c` and `ccd_c` fail with "smn index busy" (the virtual 440BX index register reads `0x00800080`).
+- `package_w` is `0.0`.
+- The NVMe entry is the virtual disk, with `temp_c` 30.
+
+Those errors make the report WARNING.
+
+### 4. The plugin, under healthd in healthdDom, reads the sampler's cache
+
+This closes S2's "inferred" item: a cache written from superDom under `/usr/lib/vmware/healthd-config/`
+is readable by the plugin in healthdDom. It also proves the plugin builds the real `HealthPlugin`
+subclass and sends through it: `sendReport` returned True, and the exit code is 0.
+```
+healthd.log:
+  Plugin configuration: Name: lab_hwhealth, Enabled: true, frequency: fast, resourceGroup: healthd-plugins, maxLifetime: 30
+  Launching binary: /usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py ++group=healthd-plugins,mem=40 -u http://!vmwLocalSocketHealthd
+  Plugin launched: lab_hwhealth. 264154
+  Plugin 264154 exited with exit code: 0
+$ esxcli system health report get -r lab.hwHealth            (first pass, 00:50:56)
+{"lab.hwHealth": {"structured": {"status": 1, "magnitude": 3, "importance": 2, "tags": [], "name": "lab.hwHealth",
+ "time": "2026-11-08T00:50:56.632621+00:00"}, "unstructured": {"schema": 1, "cpu": {"family": 25, "model": 97,
+ "supported": true, "package_w": 0.0, "eff_mhz": [null, null, null, null]}, "nvme": [{"adapter": "vmhba1",
+ "model": "VMware Virtual NVMe Disk", "temp_c": 30, "spare_pct": 100, "used_pct": 0, "critical_warning": 0,
+ "media_errors": 0, "wctemp_c": null, "cctemp_c": null}], "errors": [{"reading": "eff_mhz[0]", "reason": "core halted"},
+ {"reading": "eff_mhz[1]", ...}, {"reading": "eff_mhz[2]", ...}, {"reading": "eff_mhz[3]", ...},
+ {"reading": "tctl_c", "reason": "smn index busy"}, {"reading": "ccd_c", "reason": "smn index busy"}],
+ "sampled_at": "2026-11-08T00:50:10.630883+00:00", "duration_ms": 1845}}}
+```
+- The `unstructured` block is the sampler's cache: its `sampled_at` (00:50:10) is 46 s before the plugin ran.
+- There is no `"reading": "cache"` error, so the plugin did not take the missing, stale or unreadable path.
+- No `VmkAccess ... healthdDom ... Access denied` lines appeared after the spike's own; the plugin execs
+  nothing.
+- Status is 1 (WARNING) and magnitude 3 (LARGE). `tags` is `[]` because healthd uses its built-in defaults
+  (S1).
+
+The second pass, with the final code, gave the same result: report at 01:03:15, status 1, magnitude 3.
+
+### 5. Reboot
+
+After a reboot (one per code pass), the sampler and the report came back without help.
+```
+jumpstart: executing start plugin: lab-hwhealth / lab-hwhealth started.     (01:10:06)
+$ ps -Z -c | grep lab_hwhealth
+263418  263418  python   0    /bin/python -B /usr/lib/vmware/healthd/lab-hwhealth/lab_hwhealth_sampler.py
+$ esxcli system health report list | grep lab
+lab.hwHealth              2026-11-08T01:10:36+00:00
+report at 01:10:36: "cpu": {"supported": false}, errors cpu/nvme "IO error: [Errno 111] Connection refused"
+cache at 01:11:     "cpu": {"family": 25, "model": 97, "supported": true, ...}, nvme vmhba1 present
+```
+Early in boot, `esxcli` fails. This time it was refused; on the first pass it was a `timeout` and a 503. So
+the first report after boot carries those errors. The loop recovers by itself within about a minute, as
+designed.
+
+Some cycles also returned `nvme: timeout` (about 20 s): on the first pass, shortly after install and soon
+after boot.
+
+### 6. Remove
+
+```
+$ esxcli software component remove -n lab-hwhealth
+   Message: Operation finished successfully.
+   Components Removed: lab-hwhealth_0.1.0-1
+   Reboot Required: false
+component/vib list | grep lab: (none)
+$ ps -Z -c | grep lab_hwhealth                       (none: the live remove runs the init script's stop)
+plugin file, init script: No such file or directory; schema get rc=180 (1204)
+$ rm -f /var/lib/vmware/osdata/healthd/lab.hwHealth*     (lab.hwHealth-0.json, -1.json, lab.hwHealth.json)
+$ /etc/init.d/health restart
+$ esxcli system health report list | grep lab           grep rc=1
+$ esxcli system health report get -r lab.hwHealth
+ Unknown report: lab.hwHealth
+leftovers: /usr/lib/vmware/healthd-config/lab-hwhealth, /var/run/lab-hwhealth-sampler.pid,
+           /var/run/log/lab-hwhealth-sampler.log, /tardisks/labhwh*: all absent
+```
+**RAM-only leftovers:**
+- **First pass:** the sampler wrote `hwhealth/__pycache__/*.pyc` into the RAM overlay of the read-only
+  tree. The cache and an empty log also stayed behind. The init script now runs `python -B`, and `stop`
+  removes the cache, its directory and an empty log. The second pass confirmed both fixes.
+- **Both passes:** `component remove` leaves the empty directories `/usr/lib/vmware/healthd/lab-hwhealth/hwhealth/`.
+  They are dated at boot or install time, not 1970. So visorfs creates a tardisk's new directories in the
+  root ramdisk and doesn't drop them at unmount. They are empty, gone at the next reboot, and can't be
+  cleaned from the VIB, because the stop hook runs while the tardisk is still mounted. They were removed by
+  hand with `rm -rf`.
+
+### 7. State left
+
+- Component removed. Report files and stray directories deleted. `/tmp/t6` removed.
+- Acceptance is still `CommunitySupported` and `vmtoolsdShellDom` is still `disabled`, both as Task 1B
+  left them.
+- The VM is **powered off**.
+
+**Uninstall runbook:**
+1. `esxcli software component remove -n lab-hwhealth`
+2. `rm -f /var/lib/vmware/osdata/healthd/lab.hwHealth*`
+3. `/etc/init.d/health restart`
+4. Optional: `rm -rf /usr/lib/vmware/healthd/lab-hwhealth`. It removes empty directories in RAM; a reboot
+   clears them too.

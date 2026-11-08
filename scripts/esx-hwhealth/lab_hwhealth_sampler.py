@@ -11,9 +11,14 @@ import sys
 import tempfile
 import time
 
-from hwhealth.collect import collect
-from hwhealth.runner import subprocess_runner
-from lab_hwhealth import CACHE
+# Same guard as the plugin: the installed package lives next to this file on the host.
+INSTALL_DIR = "/usr/lib/vmware/healthd/lab-hwhealth"
+if os.path.isdir(INSTALL_DIR) and INSTALL_DIR not in sys.path:
+    sys.path.insert(0, INSTALL_DIR)
+
+from hwhealth import CACHE  # noqa: E402
+from hwhealth.collect import collect  # noqa: E402
+from hwhealth.runner import subprocess_runner  # noqa: E402
 
 INTERVAL_S = 60
 

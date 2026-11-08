@@ -12,11 +12,17 @@ import os
 import sys
 import time
 
-from hwhealth.collect import collect
-from hwhealth.evaluate import ERROR, WARNING, evaluate
-from hwhealth.runner import subprocess_runner
+# On the host the package sits outside healthd's scanned plugins/bin; on the workstation the
+# directory does not exist and the normal import path is used.
+INSTALL_DIR = "/usr/lib/vmware/healthd/lab-hwhealth"
+if os.path.isdir(INSTALL_DIR) and INSTALL_DIR not in sys.path:
+    sys.path.insert(0, INSTALL_DIR)
 
-CACHE = "/usr/lib/vmware/healthd-config/lab-hwhealth/cache.json"
+from hwhealth import CACHE  # noqa: E402  (re-exported: tests and the sampler share one path)
+from hwhealth.collect import collect  # noqa: E402
+from hwhealth.evaluate import ERROR, WARNING, evaluate  # noqa: E402
+from hwhealth.runner import subprocess_runner  # noqa: E402
+
 MAX_AGE_S = 180
 PLUGIN_NAME = "lab_hwhealth"
 REPORT_NAME = "lab.hwHealth"
