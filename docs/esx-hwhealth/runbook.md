@@ -68,6 +68,38 @@ SMN write window.
   the next sample succeeded.
 - The nested host proves plumbing only, not sensors.
 
+**1.0.1-1, 2026-11-08 15:2x UTC.** Built from commit `5983f5d`. It adds the NVMe thresholds
+derived from the drives' documentation (spec "Thresholds"; research in
+`nvme-thresholds-research.md`), the Critical Warning bit mask, and `spare_threshold_pct`.
+
+- `lab-hwhealth-1.0.1-1-bundle.zip`, 25361 bytes,
+  sha256 `29f9f031cd01df7ee8e69c2f492b6c3e64afc055d75b41d2e452b95197dcb962`.
+- `lab-hwhealth-1.0.1-1.vib`, 19276 bytes,
+  sha256 `343696c72af9ca16f936bc96a75f3d08dfac59591886feb64c9169bffe9068d5`.
+- In-place `component apply` over 1.0.0-1 on `esx-hwh-lab`: "Components Removed:
+  lab-hwhealth_1.0.0-1", Reboot Required false, sampler running.
+
+## hyp01 test install (owner-approved, 2026-11-08)
+
+- **Baseline, 15:14 UTC:** PartnerSupported; Secure Boot Disabled; root complex `0x14d81022`;
+  SMN index `0x00000000`; no lab-hwhealth component.
+- **flock proof.** A second process held `/var/run/lab-hwhealth-smn.lock`. While it held the lock,
+  `--stdout` reported `tctl_c` and `ccd_c` as "smn locked by another reader" and the index stayed
+  `0x00000000`. After release, the run read Tctl 78.875, CCD [65.375, 79.5] and 87.28 W, with no errors.
+- **Real-SIGTERM proof.** 20 `--stdout` runs were each sent TERM at 0.05-2.6 s. All exited
+  -15 and every one left the index at `0x00000000`.
+- **15:16 UTC install of 1.0.0-1.** `esxcli software acceptance set --level=CommunitySupported`,
+  then `component apply` (Reboot Required false). After `/etc/init.d/health restart`, the report
+  `lab.hwHealth` appeared.
+  - healthd runs the plugin every 5 min (15:16:35, 15:21:35, 15:26:35, 15:31:35) and keeps
+    `lab.hwHealth-{0,1,2}.json`.
+- **15:33 UTC in-place update to 1.0.1-1** (no health restart). The cache carries
+  `spare_threshold_pct` 5/10/5.
+- **New vmkwarning lines were checked; none came from lab-hwhealth.** Apart from the existing
+  "vsantraceFailover ramdisk is full" flood, the only new lines were NSX/netsched port messages at
+  15:25:50 and 15:32:14. Those are the `esx-hwh-lab` VM's port connecting and disconnecting.
+- **hyp01 has now drifted from its vLCM cluster image.** A remediation would remove the component.
+
 ## Go/no-go evidence for the owner
 
 ### a. First real-host run, hyp01, 2026-11-08 03:18-03:20 UTC
