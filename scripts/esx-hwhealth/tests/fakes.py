@@ -19,7 +19,7 @@ class FakeRunner:
         if key not in self.responses:
             raise AssertionError(f"unexpected call: {key}")
         value = self.responses[key]
-        if isinstance(value, Exception):
+        if isinstance(value, BaseException):
             raise value
         return value
 

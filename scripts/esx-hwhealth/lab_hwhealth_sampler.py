@@ -7,6 +7,7 @@ boot hostd answers 503 to esxcli, so the first cycles can carry errors and later
 import argparse
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -45,7 +46,20 @@ def run_once(run, path: str) -> None:
         raise
 
 
-def main(argv, run=subprocess_runner, sleep=time.sleep, max_cycles=None) -> int:
+def _on_sigterm(signum, frame):
+    """Turn SIGTERM into SystemExit so every finally (the SMN index restore above all) runs."""
+    raise SystemExit(128 + signum)
+
+
+def install_sigterm_handler() -> None:
+    # CPython has no SIGTERM handler by default: a plain `kill` would end the process at once
+    # and skip read_smn's finally, leaving the SMN index set until reboot.
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def main(argv, run=subprocess_runner, sleep=time.sleep, max_cycles=None,
+         setup_signals=install_sigterm_handler) -> int:
+    setup_signals()
     parser = argparse.ArgumentParser(prog="lab_hwhealth_sampler")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--cache", default=CACHE)

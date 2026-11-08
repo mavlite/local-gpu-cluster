@@ -1,8 +1,19 @@
 import json
 import os
+import signal
+
+import pytest
 
 import lab_hwhealth_sampler as sampler
 from fake_host import Host
+
+
+@pytest.fixture(autouse=True)
+def _keep_sigterm_handler():
+    """main() installs a SIGTERM handler; give pytest its own back after each test."""
+    original = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, original)
 
 
 def test_sampler_atomic_write(tmp_path, monkeypatch):
@@ -59,3 +70,29 @@ def test_loop_runs_two_cycles_and_survives_errors(tmp_path, capsys, monkeypatch)
     assert rc == 0 and calls["n"] == 2 and sleeps == [60]
     assert "cycle failed" in capsys.readouterr().err
     assert path.exists()
+
+
+def test_main_installs_a_sigterm_handler_that_raises_system_exit(tmp_path):
+    # I1: CPython has no SIGTERM handler by default, so `kill` would skip read_smn's finally.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    assert sampler.main(["--once", "--cache", str(tmp_path / "c.json")], run=Host()) == 0
+    handler = signal.getsignal(signal.SIGTERM)
+    assert callable(handler) and handler not in (signal.SIG_DFL, signal.SIG_IGN)
+    with pytest.raises(SystemExit):
+        handler(signal.SIGTERM, None)
+
+
+def test_main_calls_the_injected_signal_setup_first(tmp_path):
+    order = []
+    host = Host()
+    sampler.main(["--once", "--cache", str(tmp_path / "c.json")],
+                 run=lambda argv, t: order.append("run") or host(argv, t),
+                 setup_signals=lambda: order.append("setup"))
+    assert order[0] == "setup" and "run" in order
+
+
+def test_importing_the_sampler_does_not_install_a_handler():
+    import importlib
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    importlib.reload(sampler)
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL

@@ -135,7 +135,18 @@ case "$1" in
     ;;
   stop)
     if running; then
-      kill "$(cat "$PIDFILE")"
+      pid="$(cat "$PIDFILE")"
+      # TERM makes the sampler raise SystemExit, so its finally restores the SMN index. Wait
+      # (about 5 s at most) for it to exit before removing its files; never SIGKILL it.
+      kill -TERM "$pid"
+      n=0
+      while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do
+        sleep 1
+        n=$((n + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "{NAME} sampler $pid still running after TERM"
+      fi
     fi
     # stop also runs at `component remove`: leave no cache, empty log or cache dir behind
     rm -f "$PIDFILE" "$CACHE"

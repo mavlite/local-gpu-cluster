@@ -46,3 +46,12 @@ def test_smn_multiple_addresses():
     run = FakeRunner({GET60: "0x0\n", set60(hex(CCD[0])): "", set60(hex(CCD[1])): "",
                       GET64: "0x00000010\n", set60("0x0"): ""})
     assert read_smn(run, list(CCD)) == {CCD[0]: 0x10, CCD[1]: 0x10}
+
+
+@pytest.mark.parametrize("exc", [SystemExit(143), KeyboardInterrupt()])
+def test_smn_restores_index_when_the_process_is_told_to_exit(exc):
+    # I1: the sampler's SIGTERM handler raises SystemExit; the finally must still restore 0.
+    run = FakeRunner({GET60: "0x00000000\n", set60("0x59800"): "", GET64: exc, set60("0x0"): ""})
+    with pytest.raises(type(exc)):
+        read_smn(run, [TCTL])
+    assert run.argvs[-1] == set60("0x0")

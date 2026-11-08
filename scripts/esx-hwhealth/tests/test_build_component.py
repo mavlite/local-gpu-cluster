@@ -215,3 +215,15 @@ def test_entrypoints_never_write_bytecode_on_the_host(module_name, monkeypatch):
     assert sys.path[0] == module.INSTALL_DIR
     monkeypatch.undo()
     importlib.reload(module)
+
+
+def test_init_stop_waits_for_the_sampler_before_cleaning_up():
+    # I1: stop sends TERM and waits (bounded) so the sampler's finally restores the SMN index
+    # before the cache, temp files and directory are removed.
+    stop = bc.init_script().split("  stop)")[1].split(";;")[0]
+    assert 'kill -TERM "$pid"' in stop
+    loop = 'while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do'
+    assert loop in stop
+    assert "sleep 1" in stop.split(loop)[1].split("done")[0]
+    assert "kill -9" not in stop and "kill -KILL" not in stop  # SIGKILL would skip the restore
+    assert stop.index(loop) < stop.index('rm -f "$PIDFILE" "$CACHE"')
