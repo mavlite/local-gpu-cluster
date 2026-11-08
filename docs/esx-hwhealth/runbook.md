@@ -239,6 +239,17 @@ Plan Task 7, Steps 2-5. Each step: TODO paste real output.
 - [x] **Verify** (2026-11-08 ~18:46 UTC). The S3 remote recipe from the workstation returns
   `lab.hwHealth` on all three hosts with CPU readings and `errors []` (Tctl 78.4 / 74.4 / 74.8 °C).
   Cluster compliance scan: `lab01-cluster-001` COMPLIANT, every host `lab-hwhealth` 1.0.1-1 COMPLIANT.
+- [x] **Upgrade to 1.0.2-1** (2026-11-08 19:30-19:37 UTC, owner-approved, no SSH needed). Bundle
+  published to `http://172.16.10.50:8080/esx/lab-hwhealth/lab-hwhealth-1.0.2-1-bundle.zip` (sha256
+  `c3c8af55…f414`), imported as offline depot `D1276354…`; image commit 11 sets 1.0.2-1. The scan showed
+  all three hosts NON_COMPLIANT with NO_IMPACT. Each host: vLCM `apply`, then from vCenter
+  `RefreshServices` + `RestartService("lab-hwhealth")`.
+  - hyp01 right after `apply`: sampler in domain **102** (settingsdDom, the same ID as the settingsd
+    process). This reproduces the bug on real hardware.
+  - After the vCenter restart: domain **0**; Tctl 77.5 °C, CCD 79.6/64.5 °C, 85.0 W, `errors []`,
+    SMN index 0. hyp02 likewise: domain 0, fresh sample, `errors []`.
+  - Remote reads on all three: CPU readings present, `errors []` (Tctl 77.9 / 74.5 / 74.8 °C).
+    Cluster COMPLIANT, every host `lab-hwhealth` 1.0.2-1.
 
 ### After a vLCM install
 
