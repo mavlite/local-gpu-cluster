@@ -10,14 +10,13 @@ from datetime import datetime, timezone
 from .decode import ccd_c, effective_mhz, energy_delta_j, rapl_energy_unit_j, tctl_c
 from .readers import read_cpu_identity, read_nvme, read_perf, read_rapl
 from .runner import CommandError, Runner
-from .smn import CCD, ROOT_CFG, TCTL, SmnBusy, read_smn
+from .smn import CCD, RAPHAEL_ROOT_ID, ROOT_CFG, TCTL, SmnBusy, SmnUnsupported, read_smn
 
 SCHEMA = 1
 SUPPORTED = ("AuthenticAMD", 25, 97)  # vendor, family, model
 _SAMPLE_GAP_S = 1.0
-# Root complex vendor/device at PCI 0:0.0 config 0x0: AMD (0x1022) Raphael (0x14d8). SMN is only
-# touched on this part; a VM can pass family 25 / model 97 through on a virtual (Intel) root complex.
-RAPHAEL_ROOT_ID = 0x14D81022
+# SMN is only touched on an AMD Raphael root complex (RAPHAEL_ROOT_ID, checked again in read_smn);
+# a VM can pass family 25 / model 97 through on a virtual (Intel) root complex.
 _ROOT_ID_TIMEOUT_S = 10.0
 
 
@@ -163,6 +162,9 @@ def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped):
         errors.extend(ccd_errors)
     except SmnBusy:
         errors.extend([_err("tctl_c", "smn index busy"), _err("ccd_c", "smn index busy")])
+    except SmnUnsupported:
+        problem = "root complex not supported"
+        errors.extend([_err("tctl_c", problem), _err("ccd_c", problem)])
     except (CommandError, ValueError) as exc:
         errors.extend([_err("tctl_c", _reason(exc)), _err("ccd_c", _reason(exc))])
 

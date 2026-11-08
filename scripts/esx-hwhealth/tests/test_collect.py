@@ -218,3 +218,21 @@ def test_package_power_window_is_the_time_between_the_rapl_energy_reads():
     window = energy_at[1] - energy_at[0]
     assert window == pytest.approx(1.0)
     assert u["cpu"]["package_w"] == pytest.approx(round(host.joules / window, 2))
+
+
+def test_read_smn_root_complex_refusal_is_reported_like_collects_own_check():
+    # M4: if read_smn's own root-complex gate refuses, collect reports it and nothing is written.
+    host, clock = make()
+    seen = []
+
+    def flip(argv):
+        if tuple(argv) == ROOT_ID_GET:
+            seen.append(argv)
+            if len(seen) == 2:  # the second read is read_smn's own check
+                host.root_id = 0x71928086
+    host.on_call = flip
+    u = run_collect(host, clock)
+    reasons = {e["reading"]: e["reason"] for e in u["errors"]}
+    assert reasons == {"tctl_c": "root complex not supported", "ccd_c": "root complex not supported"}
+    assert len(seen) == 2
+    assert not [c for c in host.calls if c[:3] == ("vsish", "-e", "set")]
