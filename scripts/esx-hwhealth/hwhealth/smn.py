@@ -77,31 +77,47 @@ def default_lock():
     return flock_lock()
 
 
-@contextmanager
-def _sigterm_deferred():
-    """Hold SIGTERM for the duration of the block, then deliver it to the original handler
-    (or re-raise it under the default disposition).
+# Signals that would end a reader while the index is non-zero: the init script's TERM, Ctrl-C in
+# a manual --stdout run, and a hang-up of that shell. SIGHUP does not exist on Windows (tests).
+_HELD_SIGNALS = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, n))
 
-    The sampler turns SIGTERM into SystemExit; raised inside the restore's vsish call it would
-    abandon the write and leave the index non-zero. signal.signal only works on the main thread;
-    elsewhere the block runs undeferred, as before.
+
+def _deliver(signum: int, handler) -> None:
+    if callable(handler):
+        handler(signum, None)
+    elif handler == signal.SIG_DFL:
+        signal.raise_signal(signum)  # the default action (terminate) now that the index is 0
+    # SIG_IGN: the signal was being ignored anyway.
+
+
+@contextmanager
+def _signals_held():
+    """Hold _HELD_SIGNALS for the block, then hand the first one that arrived to its original
+    handler, also when the block raises.
+
+    Taken before the first index write, so a signal that lands before the hold finds the index
+    still 0, and one that lands inside it waits until the index is restored. The cost: a stop
+    waits for the in-flight vsish calls (milliseconds normally, the 10 s timeout at worst).
+    signal.signal only works on the main thread; elsewhere the block runs unheld.
     """
-    pending = []
+    pending: list[int] = []
+    previous: dict = {}
     try:
-        previous = signal.signal(signal.SIGTERM, lambda signum, frame: pending.append(signum))
+        for signum in _HELD_SIGNALS:
+            previous[signum] = signal.signal(signum, lambda n, frame: pending.append(n))
     except ValueError:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
         yield
         return
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, previous)
-    if not pending:
-        return
-    if callable(previous):
-        previous(pending[0], None)
-    elif previous == signal.SIG_DFL:
-        signal.raise_signal(pending[0])  # default action (terminate) now that the index is 0
+        for signum, handler in previous.items():
+            # None means a handler installed outside Python; fall back to the default action.
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+        if pending:
+            _deliver(pending[0], previous[pending[0]])
 
 
 def _get(run: Runner, reg: str) -> int:
@@ -126,11 +142,11 @@ def read_smn(run: Runner, addrs: Sequence[int], lock=None) -> dict[int, int]:
         if _get(run, "0x60") != 0:
             raise SmnBusy("SMN index register is in use")
         result: dict[int, int] = {}
-        try:
-            for addr in addrs:
-                _set_index(run, addr)
-                result[addr] = _get(run, "0x64")
-        finally:
-            with _sigterm_deferred():
+        with _signals_held():
+            try:
+                for addr in addrs:
+                    _set_index(run, addr)
+                    result[addr] = _get(run, "0x64")
+            finally:
                 _set_index(run, 0)
     return result
