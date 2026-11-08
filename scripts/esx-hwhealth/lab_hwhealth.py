@@ -15,8 +15,12 @@ import time
 # On the host the package sits outside healthd's scanned plugins/bin; on the workstation the
 # directory does not exist and the normal import path is used.
 INSTALL_DIR = "/usr/lib/vmware/healthd/lab-hwhealth"
-if os.path.isdir(INSTALL_DIR) and INSTALL_DIR not in sys.path:
-    sys.path.insert(0, INSTALL_DIR)
+if os.path.isdir(INSTALL_DIR):
+    # Shipped files carry mtime 0: a .pyc from any root run would look current after a
+    # same-size update, so never write one on the host.
+    sys.dont_write_bytecode = True
+    if INSTALL_DIR not in sys.path:
+        sys.path.insert(0, INSTALL_DIR)
 
 from hwhealth import CACHE  # noqa: E402  (re-exported: tests and the sampler share one path)
 from hwhealth.collect import collect  # noqa: E402

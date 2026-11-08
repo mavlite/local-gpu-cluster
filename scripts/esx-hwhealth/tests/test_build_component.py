@@ -195,3 +195,23 @@ def test_init_script_leaves_nothing_behind():
 def test_init_cache_path_matches_the_package():
     import hwhealth
     assert bc.CACHE == hwhealth.CACHE
+
+
+@pytest.mark.parametrize("module_name", ["lab_hwhealth", "lab_hwhealth_sampler"])
+def test_entrypoints_never_write_bytecode_on_the_host(module_name, monkeypatch):
+    # Shipped files all have mtime 0, so a .pyc written by any root run (e.g. --stdout) would be
+    # taken as current after a same-size in-place update. On the host the entrypoints turn
+    # bytecode writes off before importing hwhealth (nested proof, Task 6 round 1).
+    import importlib
+    import os
+    import sys
+    module = importlib.import_module(module_name)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(os.path, "isdir", lambda p: p == module.INSTALL_DIR or real_isdir(p))
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    importlib.reload(module)
+    assert sys.dont_write_bytecode is True
+    assert sys.path[0] == module.INSTALL_DIR
+    monkeypatch.undo()
+    importlib.reload(module)

@@ -743,3 +743,140 @@ leftovers: /usr/lib/vmware/healthd-config/lab-hwhealth, /var/run/lab-hwhealth-sa
 3. `/etc/init.d/health restart`
 4. Optional: `rm -rf /usr/lib/vmware/healthd/lab-hwhealth`. It removes empty directories in RAM; a reboot
    clears them too.
+
+### Round 1: reinstall, in-place update, root-complex gate (2026-11-08, one boot)
+
+The whole round ran in **one boot** of the nested host (03:22 to 03:49 UTC). The leftover directories were
+not deleted between steps. `r1_check.sh` prints the component, sampler, tree, cache, healthd and report
+state after each step. Its output is shown below, cut down only where lines repeat.
+
+#### R18: SMN only on the AMD Raphael root complex
+
+`collect()` now GETs `ROOT_CFG/0x0` first. It touches SMN only if the value is `0x14d81022`. Any other
+value, or a failed read, skips the temperatures with an error entry, and no SMN call is made. On the
+nested host, after the first apply:
+```
+$ vsish -e get /hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr/0x0
+0x71928086                                   (Intel 440BX: the virtual root complex)
+$ python /tmp/t6/trace.py      (one live collect() as root, every runner call recorded)
+pciConfigReg/set calls:
+   vsish -e get /hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr/0x0
+vsish set calls: 0
+errors: [{"reading": "tctl_c", "reason": "root complex not supported"}, {"reading": "ccd_c", "reason": "root complex not supported"}]
+sampler cache 03:29:42 and report 03:30:17 (status 1, magnitude 3) carry the same two errors
+```
+The only `pciConfigReg` access is the ID read: no index GET, no `vsish set`, no data GET. Earlier passes
+read the index (`smn index busy`). The value `0x14d81022` comes from the controller ruling (R18). It is not
+in the hyp01 fixtures or in Task 1A section 1. Confirm it on hyp01 at rollout with a read-only
+`vsish -e get …/addr/0x0`.
+
+#### A. Apply `0.1.0-1` (first install this boot)
+
+```
+(no lab component before apply)
+$ esxcli software component apply -d /tmp/t6/out1/lab-hwhealth-0.1.0-1-bundle.zip
+   Components Installed: lab-hwhealth_0.1.0-1      Reboot Required: false
+$ /etc/init.d/health restart
+=== check: A (03:30:37)  component 0.1.0-1; sampler is running (pid 264034, domain 0, python -B);
+    cache 03:29:42; report lab.hwHealth 03:30:17 status 1 magnitude 3
+```
+
+#### B. Remove (no purge, no `rm -rf`)
+
+```
+$ esxcli software component remove -n lab-hwhealth
+   Components Removed: lab-hwhealth_0.1.0-1        Reboot Required: false
+=== check: B (03:35:33)
+component list: (none); /etc/init.d/lab-hwhealth: not found; (no sampler process)
+/usr/lib/vmware/healthd/lab-hwhealth/hwhealth/  (leftover dir, holding __pycache__ from trace.py, see below)
+cache.json: No such file or directory (the init script's stop removed it)
+report list: lab.hwHealth 2026-11-08T03:31:58  (stale until purged, as in S4)
+```
+
+#### C. Apply `0.1.0-1` again, same boot, over the leftover directories
+
+```
+$ esxcli software component apply -d /tmp/t6/out1/lab-hwhealth-0.1.0-1-bundle.zip
+   Message: Operation finished successfully.
+   Components Installed: lab-hwhealth_0.1.0-1      Reboot Required: false
+$ grep -c 'Boot image is corrupted' /var/log/vmkernel.log
+1                     (unchanged: that one is the 00:45 failure from the first pass, before the directory fix)
+$ /etc/init.d/health restart
+=== check: C (03:38:35)
+component 0.1.0-1; sampler is running (pid 265407, domain 0)
+cache 03:37:56, errors tctl_c/ccd_c "root complex not supported"
+report lab.hwHealth 03:38:20 {'status': 1, 'magnitude': 3, ...}
+```
+Declaring directories that already exist is fine. An earlier remove-and-reapply ran at 03:30:59 and
+03:31:15 (`esxupdate.log`: `component.remove`, `component.apply`). It also succeeded, but its transcript
+was lost to an output redirect, so it was repeated above.
+
+#### D. In-place update `0.1.0-1` → `0.1.0-2` (`component apply`)
+
+```
+$ cat /var/run/lab-hwhealth-sampler.pid                        265407
+$ esxcli software component apply -d /tmp/t6/out2/lab-hwhealth-0.1.0-2-bundle.zip
+   Components Installed: lab-hwhealth_0.1.0-2
+   Components Removed: lab-hwhealth_0.1.0-1
+   Reboot Required: false
+$ cat /var/run/lab-hwhealth-sampler.pid                        265835   (the update ran stop, then start)
+$ esxcli software vib list | grep lab
+lab-hwhealth                   0.1.0-2                                 lab     CommunitySupported  2026-11-08    host
+$ configstorecli schema get -c esx -g health -k lab_hwhealth   rc=0
+=== check: D (03:40:59)  component 0.1.0-2; sampler is running (pid 265835); cache 03:41:16; report 03:40:39 status 1 magnitude 3
+```
+
+#### Finding: `__pycache__` survives updates, and shipped files have mtime 0
+
+At B, C and D there was a `hwhealth/__pycache__/` dated 03:30. It was written by **`trace.py`**, a root
+`python` run that imported the installed package without `-B`. The product did not write it: the sampler
+runs `-B` and healthdDom can't write the tree. But any manual root run (for example the documented
+`lab_hwhealth.py --stdout`) would write it the same way.
+
+That directory survived remove, reapply and update. Every shipped file has mtime `Jan 1 1970`, and a
+`.pyc` is validated by the source's mtime and size. So **inferred, not demonstrated:** after an update that
+changes a module without changing its size, Python would keep running the old bytecode.
+
+Fix: both entrypoints set `sys.dont_write_bytecode = True` on the host, before importing `hwhealth`
+(test `test_entrypoints_never_write_bytecode_on_the_host`). It was proven with one more update.
+
+#### E. In-place update to `0.1.0-3` (bytecode fix), then a manual root run
+
+```
+$ rm -rf .../hwhealth/__pycache__   (the trace.py artefact)
+$ esxcli software component apply -d /tmp/t6/out3/lab-hwhealth-0.1.0-3-bundle.zip
+   Components Installed: lab-hwhealth_0.1.0-3
+   Components Removed: lab-hwhealth_0.1.0-2
+   Reboot Required: false
+$ /usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py --stdout   (manual root run, no -B)
+{"structured": {"status": 1, "magnitude": 3, "tags": ["hardware"], "reasons": ["cpu readings missing"]}, "unstructured": {...
+$ find /usr/lib/vmware/healthd/lab-hwhealth -name __pycache__
+(end of find)                                   (none written)
+=== check: E (03:45:35)  component 0.1.0-3; sampler is running (pid 266295); cache 03:44:37
+healthd.log: Launching plugin: lab_hwhealth at 03:45:39 -> report list: lab.hwHealth 2026-11-08T03:45:39
+```
+The 03:45:39 report came from healthd's scheduled run of the 0.1.0-3 plugin, with **no health restart**
+after the update. That matches S1: an updated plugin is picked up without one.
+
+#### F. Final remove, purge, clean
+
+```
+$ esxcli software component remove -n lab-hwhealth
+   Components Removed: lab-hwhealth_0.1.0-3        Reboot Required: false
+$ rm -f /var/lib/vmware/osdata/healthd/lab.hwHealth*   (lab.hwHealth-0.json, -1.json, -2.json, lab.hwHealth.json)
+$ /etc/init.d/health restart
+=== check: F (03:47:17)
+component list: (none); (no sampler process); cache.json: No such file or directory
+report list: (none)
+$ esxcli system health report get -r lab.hwHealth
+ Unknown report: lab.hwHealth
+leftovers: healthd-config/lab-hwhealth, pidfile, sampler log, init script, plugin file: all absent; schema rc=180
+/usr/lib/vmware/healthd/lab-hwhealth/hwhealth/: empty directories only -> rm -rf (with /tmp/t6)
+```
+
+#### Power state (vCenter, after the guest shutdown)
+
+```
+2026-11-08T03:49:28Z
+vCenter 172.16.10.129: vm=esx-hwh-lab moid=vm-47001 host=hyp01.lab.knowledgeondemand.net powerState=poweredOff bootTime=None toolsRunningStatus=guestToolsNotRunning
+```

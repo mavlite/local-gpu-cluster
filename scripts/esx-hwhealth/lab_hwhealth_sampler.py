@@ -13,8 +13,12 @@ import time
 
 # Same guard as the plugin: the installed package lives next to this file on the host.
 INSTALL_DIR = "/usr/lib/vmware/healthd/lab-hwhealth"
-if os.path.isdir(INSTALL_DIR) and INSTALL_DIR not in sys.path:
-    sys.path.insert(0, INSTALL_DIR)
+if os.path.isdir(INSTALL_DIR):
+    # Shipped files carry mtime 0: a .pyc from any root run would look current after a
+    # same-size update, so never write one on the host.
+    sys.dont_write_bytecode = True
+    if INSTALL_DIR not in sys.path:
+        sys.path.insert(0, INSTALL_DIR)
 
 from hwhealth import CACHE  # noqa: E402
 from hwhealth.collect import collect  # noqa: E402
