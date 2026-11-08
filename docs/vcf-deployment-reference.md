@@ -78,6 +78,18 @@ burst load; see the build record's known-issues section.
 Switch ports are `vmnic0` / `vmnic1`, both on the single CRS309 — there is no switch
 redundancy.
 
+### Hardware health component (`lab-hwhealth`)
+
+A community-supported ESX component that adds a healthd report with CPU and NVMe sensor
+readings. Names: report `lab.hwHealth`; component and VIB `lab-hwhealth`; plugin key
+`lab_hwhealth`. It reports CPU Tctl and CCD temperatures, package W, effective MHz per
+core, and NVMe health.
+
+**Not yet installed on hyp01-hyp03.** The rollout is pending the owner's go/no-go. At
+install it needs the host acceptance level set to `CommunitySupported` (the hosts are
+`PartnerSupported`), and an `OBSERVABILITY` ClientProfile entitlement for remote reads.
+Runbook: [esx-hwhealth/runbook.md](esx-hwhealth/runbook.md).
+
 ### VMkernel adapters ✓
 
 | vmk | Service | Network | hyp01 | hyp02 | hyp03 | MTU |
