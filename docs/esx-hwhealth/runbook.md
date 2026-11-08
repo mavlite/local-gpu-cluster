@@ -25,6 +25,7 @@ Install layout:
 | `/usr/lib/vmware/healthd/lab-hwhealth/hwhealth/` | the Python package |
 | `/usr/lib/vmware/healthd/lab-hwhealth/lab_hwhealth_sampler.py` | sampler, run with `python -B` |
 | `/etc/init.d/lab-hwhealth` | starts and stops the sampler |
+| `/etc/vmware/service/lab-hwhealth.xml` | hostd service entry, so vCenter can restart the sampler (1.0.2-1+) |
 | `/usr/lib/vmware/configmanager/schemas/lab-hwhealth-<ver>-schema.json` | ConfigStore schema |
 
 Reports are stored in `/var/lib/vmware/osdata/healthd/lab.hwHealth*`.
@@ -78,6 +79,28 @@ derived from the drives' documentation (spec "Thresholds"; research in
   sha256 `343696c72af9ca16f936bc96a75f3d08dfac59591886feb64c9169bffe9068d5`.
 - In-place `component apply` over 1.0.0-1 on `esx-hwh-lab`: "Components Removed:
   lab-hwhealth_1.0.0-1", Reboot Required false, sampler running.
+
+**1.0.2-1, 2026-11-08 19:00 UTC.** Built from commit `36b802b` (rebased as `b22f70b`, same tree for
+`scripts/esx-hwhealth`). It adds `etc/vmware/service/lab-hwhealth.xml`, which registers the init
+script as a hostd service so vCenter can restart the sampler in superDom (see "After a vLCM install").
+
+- `lab-hwhealth-1.0.2-1-bundle.zip`, 25552 bytes,
+  sha256 `c3c8af55b8bb39cc1a2f405f695f335b2cdb01c182a3f149d416077582c5f414`.
+- `lab-hwhealth-1.0.2-1.vib`, 19488 bytes,
+  sha256 `a32b7c83ccea0686ad201cd805b38cf516e90d8ec76053abd79c3eaa1feaf208`.
+- esximage accepted the extra path for a community VIB.
+- Nested proof on `esx-hwh-lab` (domain IDs from `ps -cZ`; 0 = superDom):
+  - In-place apply over 1.0.1-1, from the guest-ops shell (domain 123): sampler in domain **0**
+    (esxcli goes through hostd, so its `start` gets superDom).
+  - `/etc/init.d/lab-hwhealth restart` straight from that shell: sampler in domain **123**, a
+    stand-in for the vLCM case.
+  - hostd API from the host itself: `RefreshServices`, then `serviceInfo` lists
+    `lab-hwhealth` (running, policy `on`, source package `lab-hwhealth`); `RestartService` moved
+    the sampler from domain **123 to 0**.
+  - From a clean state (component removed, which also removes the XML; hostd restarted; then a
+    live apply), `RefreshServices` alone was enough for hostd to list the service. No hostd restart.
+  - `vim-cmd hostsvc/start_service|stop_service` are not a test of this: they take a firewall
+    ruleset name and answer "This ruleset is not used by any service".
 
 ## hyp01 test install (owner-approved, 2026-11-08)
 
@@ -217,15 +240,26 @@ Plan Task 7, Steps 2-5. Each step: TODO paste real output.
   `lab.hwHealth` on all three hosts with CPU readings and `errors []` (Tctl 78.4 / 74.4 / 74.8 °C).
   Cluster compliance scan: `lab01-cluster-001` COMPLIANT, every host `lab-hwhealth` 1.0.1-1 COMPLIANT.
 
-**After any vLCM install or remediation of this component, until the init script is fixed:** run
-`/etc/init.d/health restart; /etc/init.d/lab-hwhealth restart` from SSH on each host, then check that
-the CPU fields are present and `errors` is empty.
+### After a vLCM install
 
-A live `component apply` runs the init script's `start`, so the sampler needs no manual start
-(Task 6, section 2). healthd still launches a **newly installed** plugin only after
-`/etc/init.d/health restart` or a reboot. Whether vLCM remediation runs that restart is
-unproven: after remediating, check `esxcli system health report list | grep lab` and restart
-healthd if the report is missing.
+Why: which security domain the init script's `start` runs in depends on who runs it. At boot, from
+an SSH shell, through `esxcli`, or from hostd (`hostdDom` has `-d initObj superDom file_exec grant`,
+and `/etc/init.d/*` is labelled `initObj`) it gets superDom. vLCM applies through settingsd;
+`settingsdDom` has no exec transition and grants neither `MSR_READ` nor the PCI write, so the
+sampler inherits a domain where `rapl`, `eff_mhz`, `tctl_c` and `ccd_c` fail with
+"Operation not permitted" (hyp02, 2026-11-08). NVMe still works.
+
+**1.0.2-1 and later (hostd service):** after each vLCM remediation, from vCenter, per host:
+`HostServiceSystem.RefreshServices()` then `RestartService(id="lab-hwhealth")`. No SSH. Then
+check that the CPU fields are present and `errors` is empty (the remote read in "Verify").
+
+**1.0.1-1:** run `/etc/init.d/lab-hwhealth restart` from SSH on each host.
+
+**First install only, any version:** healthd needs `/etc/init.d/health restart` (SSH) or a reboot
+before it launches a new plugin. An upgrade keeps the plugin path, so it does not need this.
+
+A live `component apply` runs the init script's `start` (Task 6, section 2). vLCM remediation does
+not restart healthd: on hyp02 and hyp03 the report was missing until `/etc/init.d/health restart`.
 
 ## Verify
 
