@@ -489,9 +489,11 @@ with only `OBSERVABILITY` (one ClientProfile per host), not root. Only root was 
   "remote call timed out".
 - `POST /api/session`: 400.
 
-**From the workstation, against the real host hyp01** (read-only requests after authenticating; no
-configuration or grants changed). **Disclosure:** all authenticated calls in this paragraph went beyond
-the nested-VM approval. They used credential keys `LAB_ESX_USER` / `LAB_ESX_PASS` (key names only).
+**From the workstation, against the real host hyp01** (requests after authenticating (token create
+and session attempts are POSTs); no configuration or grants changed). **Disclosure:** all calls in this
+paragraph went beyond the nested-VM approval: the authenticated calls, and the single unauthenticated
+GET against hyp01 listed below. The authenticated calls used credential keys `LAB_ESX_USER` /
+`LAB_ESX_PASS` (key names only).
 - The workstation created an ESX JWT on hyp01, then called `reports.get vmw.ntpHealth` and
   `client_profiles.list`.
 - Before that, on the same host and with the same keys: Basic-auth GETs of
