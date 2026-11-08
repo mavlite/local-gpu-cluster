@@ -27,6 +27,17 @@ class NvmeHealth:
     media_errors: int
     wctemp_c: int | None
     cctemp_c: int | None
+    spare_threshold_pct: int | None = None
+
+
+# esxcli's named Critical Warning flags, mapped to the NVMe base spec's bit positions.
+_CRITICAL_WARNING_BITS = (
+    ("Available Spare Space Below Threshold", 0x01),
+    ("Temperature Warning", 0x02),
+    ("NVM Subsystem Reliability Degradation", 0x04),
+    ("Read Only Mode", 0x08),
+    ("Volatile Memory Backup Device Failure", 0x10),
+)
 
 
 def _vsish_get(path: str) -> list[str]:
@@ -114,31 +125,35 @@ def _threshold_c(raw: str | None) -> int | None:
     return k - 273 if k > 0 else None
 
 
+def _optional_pct(raw: str | None) -> int | None:
+    """An optional "N %" field: None when absent or unparseable, so it never fails the drive."""
+    try:
+        return int(raw.split()[0]) if raw else None
+    except (ValueError, IndexError):
+        return None
+
+
 def _read_one_nvme(run: Runner, adapter: str) -> NvmeHealth:
     smart = _fields(run(_nvme_smart_argv(adapter), _TIMEOUT))
     ident = _fields(run(_nvme_get_argv(adapter), _TIMEOUT))
     argv = _nvme_smart_argv(adapter)
     try:
-        crit = any(
-            smart[k] == "true"
-            for k in (
-                "Available Spare Space Below Threshold",
-                "Temperature Warning",
-                "NVM Subsystem Reliability Degradation",
-                "Read Only Mode",
-                "Volatile Memory Backup Device Failure",
-            )
-        )
+        crit = 0
+        for name, bit in _CRITICAL_WARNING_BITS:
+            if smart[name] == "true":
+                crit |= bit
+        spare_threshold = smart.get("Available Spare Threshold")
         return NvmeHealth(
             adapter=adapter,
             model=ident["Model Number"],
             temp_c=_kelvin_to_c(smart["Composite Temperature"]),
             spare_pct=int(smart["Available Spare"].split()[0]),
             used_pct=int(smart["Percentage Used"].split()[0]),
-            critical_warning=int(crit),
+            critical_warning=crit,
             media_errors=int(smart["Media Errors"], 16),
             wctemp_c=_threshold_c(ident.get("Warning Composite Temperature Threshold")),
             cctemp_c=_threshold_c(ident.get("Critical Composite Temperature Threshold")),
+            spare_threshold_pct=_optional_pct(spare_threshold),
         )
     except _Implausible as exc:
         raise CommandError(argv, str(exc)) from exc

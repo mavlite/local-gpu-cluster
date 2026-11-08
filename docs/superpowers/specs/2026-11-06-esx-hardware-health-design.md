@@ -152,7 +152,8 @@ sensor provider is not an option. The `healthd` plugin route is what is left.
           "eff_mhz": [4810, 4795, "…one per logical CPU"],
           "eff_mhz_summary": {"min": 3900, "avg": 4800, "max": 5300}},
   "nvme": [{"adapter": "vmhba2", "model": "CT4000P310", "temp_c": 41,
-            "spare_pct": 100, "used_pct": 1, "critical_warning": 0, "media_errors": 0}],
+            "spare_pct": 100, "spare_threshold_pct": 5, "used_pct": 1,
+            "critical_warning": 0, "media_errors": 0, "wctemp_c": 86, "cctemp_c": 88}],
   "errors": [{"reading": "ccd_c[1]", "reason": "valid bit clear"}],
   "sampled_at": "2026-11-06T15:40:00Z", "duration_ms": 1300
 }
@@ -161,20 +162,43 @@ sensor provider is not an option. The `healthd` plugin route is what is left.
 These field names are the contract with the Operations pack. Changing one means bumping
 `schema`.
 
+`critical_warning` is the NVMe Critical Warning bit mask, built from esxcli's named flags:
+0x01 spare below threshold, 0x02 temperature, 0x04 reliability degraded, 0x08 read-only,
+0x10 volatile memory backup failed. `spare_threshold_pct` is the drive's own Available Spare
+Threshold, or null when the drive doesn't report it. Both changed in 1.0.1 with `schema` kept
+at 1, because no consumer existed yet. The only earlier install was 1.0.0-1 on hyp01, for
+testing, which reported `critical_warning` as 0 or 1.
+
 **Builder's call: no throttle percentage in v1.** The effective clock is the
 APERF/MPERF-weighted clock over the sampling window, measured only while the core was not
 halted, per logical CPU plus a summary. It drops for idle and power-state reasons as well as
 heat, so v1 charts it but **nothing alerts on it**; alerts are on temperature only. A real
 throttle signal (for example the PROCHOT or HTC status in SMN) is a v2 question.
 
-### Thresholds (builder's defaults; owner may change)
+### Thresholds
+
+The CPU rows are the builder's defaults. The NVMe rows were approved by the owner on 2026-11-08 and
+come from the drives' documentation (hyp01: Crucial P310 1 TB and 4 TB, Samsung PM981 512 GB):
+
+- 70 °C is the vendor operating maximum. It is quoted from secondary sources, because the
+  datasheets were not reachable.
+- The P310 throttles at about 81 °C (CDRLabs measurement), below its 86 °C WCTEMP. A warning at
+  WCTEMP would therefore fire only after throttling had begun, so WCTEMP is the ERROR level.
+- Spare uses each drive's own Available Spare Threshold: P310 5 %, PM981 10 %.
+- NVMe defines `used_pct` 100 as rated endurance consumed. The 80 % warning is a judgement call.
+- Media errors count unrecovered data-integrity errors. Error-log entries are not alerted on:
+  the PM981 has 475 of them with 0 media errors.
+- These thresholds catch wear and heat, not sudden failure. The lab's memory-tier drives failed
+  with clean SMART data.
 
 | Reading | WARNING | ERROR |
 |---|---|---|
 | Tctl / any CCD | ≥ 90 °C | ≥ 95 °C (the part trips near 100 °C) |
-| NVMe temp | ≥ the drive's warning composite temperature (WCTEMP) if reported, else 70 °C | ≥ the critical composite temperature (CCTEMP), else 80 °C |
-| NVMe critical warning | — | any bit set |
-| NVMe spare | ≤ 20 % | ≤ 10 % |
+| NVMe temp | ≥ 70 °C | ≥ the drive's warning composite temperature (WCTEMP), else 80 °C |
+| NVMe critical warning | any bit outside 0x01-0x10 | any of bits 0x01-0x10 (each named in the reason) |
+| NVMe spare | ≤ the drive's spare threshold + 10 points | < the drive's spare threshold (10 % if not reported) |
+| NVMe endurance used (`used_pct`) | ≥ 80 % | ≥ 100 % |
+| NVMe media errors | — | > 0 |
 | CPU unsupported or all CPU readings missing | WARNING | — |
 
 ### SMN safety rule

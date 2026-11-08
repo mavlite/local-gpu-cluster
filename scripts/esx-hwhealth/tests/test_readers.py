@@ -74,11 +74,53 @@ def test_nvme_from_fixtures():
     assert [d.adapter for d in drives] == ["vmhba0", "vmhba1", "vmhba2"]
     d0 = drives[0]
     assert d0 == NvmeHealth(adapter="vmhba0", model="CT4000P310SSD8", temp_c=41, spare_pct=100,
-                            used_pct=1, critical_warning=0, media_errors=0, wctemp_c=86, cctemp_c=88)
+                            used_pct=1, critical_warning=0, media_errors=0, wctemp_c=86, cctemp_c=88,
+                            spare_threshold_pct=5)
+    assert drives[1].spare_threshold_pct == 10
     d1 = drives[1]
     assert (d1.model, d1.temp_c, d1.used_pct, d1.wctemp_c, d1.cctemp_c) == (
         "SAMSUNG MZVLB512HAJQ-000L7", 41, 11, 81, 82)
     assert (drives[2].temp_c, drives[2].model) == (38, "CT1000P310SSD2")
+
+
+@pytest.mark.parametrize("field,bit", [
+    ("Available Spare Space Below Threshold", 1),
+    ("Temperature Warning", 2),
+    ("NVM Subsystem Reliability Degradation", 4),
+    ("Read Only Mode", 8),
+    ("Volatile Memory Backup Device Failure", 16),
+])
+def test_nvme_critical_warning_is_the_nvme_bitmask(field, bit):
+    r = nvme_responses()
+    assert f"{field}: false" in r[smart("vmhba1")]
+    r[smart("vmhba1")] = r[smart("vmhba1")].replace(f"{field}: false", f"{field}: true")
+    drives, _ = read_nvme(FakeRunner(r))
+    assert drives[1].critical_warning == bit
+
+
+def test_nvme_two_critical_warning_flags_combine():
+    r = nvme_responses()
+    for field in ("Temperature Warning", "Read Only Mode"):
+        r[smart("vmhba1")] = r[smart("vmhba1")].replace(f"{field}: false", f"{field}: true")
+    drives, _ = read_nvme(FakeRunner(r))
+    assert drives[1].critical_warning == 2 | 8
+
+
+def test_nvme_missing_spare_threshold_is_none():
+    r = nvme_responses()
+    r[smart("vmhba1")] = chr(10).join(l for l in r[smart("vmhba1")].splitlines()
+                                   if "Available Spare Threshold" not in l)
+    drives, _ = read_nvme(FakeRunner(r))
+    assert drives[1].spare_threshold_pct is None and drives[1].spare_pct == 100
+
+
+def test_nvme_malformed_spare_threshold_is_none_not_a_failed_drive():
+    r = nvme_responses()
+    r[smart("vmhba1")] = r[smart("vmhba1")].replace("Available Spare Threshold: 10 %",
+                                                    "Available Spare Threshold: n/a")
+    drives, errors = read_nvme(FakeRunner(r))
+    assert errors == []
+    assert drives[1].spare_threshold_pct is None and drives[1].temp_c == 41
 
 
 def test_nvme_zero_threshold_is_none():
@@ -125,5 +167,5 @@ def test_nvme_one_critical_warning_flag_sets_critical_warning():
         "Read Only Mode: false", "Read Only Mode: true")
     assert "Read Only Mode: true" in r[smart("vmhba0")]
     drives, errors = read_nvme(FakeRunner(r))
-    assert errors == [] and drives[0].critical_warning == 1
+    assert errors == [] and drives[0].critical_warning == 0x08  # NVMe bit 3, read-only
     assert [d.critical_warning for d in drives[1:]] == [0, 0]
