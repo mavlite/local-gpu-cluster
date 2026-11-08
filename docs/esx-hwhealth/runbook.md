@@ -253,6 +253,14 @@ sampler inherits a domain where `rapl`, `eff_mhz`, `tctl_c` and `ccd_c` fail wit
 `HostServiceSystem.RefreshServices()` then `RestartService(id="lab-hwhealth")`. No SSH. Then
 check that the CPU fields are present and `errors` is empty (the remote read in "Verify").
 
+Notes on the service entry:
+- It has no firewall `<ruleset>` because the sampler opens no port. It shows in the host's Services
+  list without a firewall tie-in.
+- `<service id="0000">` is an index within the file, not a key. Every stock single-service file
+  (`dpd`, `fdm`, `hbrsrv`, `vltd`, `vpxa`) uses `0000` too (hyp01, 2026-11-08).
+- After `component remove`, hostd keeps listing the service until the next `RefreshServices` or
+  hostd restart.
+
 **1.0.1-1:** run `/etc/init.d/lab-hwhealth restart` from SSH on each host.
 
 **First install only, any version:** healthd needs `/etc/init.d/health restart` (SSH) or a reboot
