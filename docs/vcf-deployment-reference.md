@@ -86,8 +86,8 @@ readings. Names: report `lab.hwHealth`; component and VIB `lab-hwhealth`; plugin
 core, and NVMe health.
 
 **Not yet installed on hyp01-hyp03.** The rollout is pending the owner's go/no-go. At
-install it needs the host acceptance level set to `CommunitySupported` (the hosts are
-`PartnerSupported`), and an `OBSERVABILITY` ClientProfile entitlement for remote reads.
+install it needs the host acceptance level set to `CommunitySupported` (hyp01 reported
+`PartnerSupported` on 2026-11-07; hyp02/hyp03: TODO baseline), and an `OBSERVABILITY` ClientProfile entitlement for remote reads.
 Runbook: [esx-hwhealth/runbook.md](esx-hwhealth/runbook.md).
 
 ### VMkernel adapters ✓

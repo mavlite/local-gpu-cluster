@@ -75,7 +75,8 @@ Mitigations in the code:
 
 ### c. Acceptance level
 
-PartnerSupported to **CommunitySupported** on hyp01-hyp03 (the VIB is community-level).
+The VIB is community-level, so each host needs **CommunitySupported**. hyp01 reported
+PartnerSupported on 2026-11-07; hyp02 and hyp03 are to be confirmed in the baseline.
 Decision: TODO owner.
 
 ### d. Secure Boot
