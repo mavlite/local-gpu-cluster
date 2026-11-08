@@ -74,6 +74,16 @@ def _nvme_checks(index, drive):
     return [c for c in checks if c[1] is not None]
 
 
+def _nvme_error_checks(errors):
+    """A drive (or the whole NVMe step) that could not be read is a WARNING, never silent."""
+    checks = []
+    for entry in errors:
+        reading = str((entry or {}).get("reading") or "")
+        if reading.startswith("nvme"):
+            checks.append((WARNING, f"{reading} unreadable: {entry.get('reason')}"))
+    return checks
+
+
 def evaluate(u: dict) -> tuple[int, list[str]]:
     """Return the overall status and a human-readable reason for each alerting reading.
 
@@ -82,6 +92,7 @@ def evaluate(u: dict) -> tuple[int, list[str]]:
     checks = _cpu_checks(u.get("cpu") or {})
     for index, drive in enumerate(u.get("nvme") or []):
         checks.extend(_nvme_checks(index, drive))
+    checks.extend(_nvme_error_checks(u.get("errors") or []))
 
     status = max((level for level, _ in checks), default=OK)
     reasons = [reason for _, reason in checks]

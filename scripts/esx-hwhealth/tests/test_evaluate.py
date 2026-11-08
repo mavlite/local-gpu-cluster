@@ -151,3 +151,32 @@ def test_input_is_not_mutated():
     before = copy.deepcopy(u)
     evaluate(u)
     assert u == before
+
+
+def test_one_unreadable_nvme_drive_warns_with_its_reason():
+    u = _sample()
+    u["errors"] = [{"reading": "nvme[vmhba1]", "reason": "temperature not plausible"}]
+    status, reasons = evaluate(u)
+    assert status >= WARNING
+    assert "nvme[vmhba1] unreadable: temperature not plausible" in reasons
+
+
+def test_step_level_nvme_budget_error_warns():
+    u = _sample()
+    u["nvme"] = []
+    u["errors"] = [{"reading": "nvme", "reason": "budget"}]
+    assert evaluate(u) == (WARNING, ["nvme unreadable: budget"])
+
+
+def test_non_nvme_errors_do_not_change_the_status():
+    u = _sample()
+    u["errors"] = [{"reading": "eff_mhz[3]", "reason": "core halted"}]
+    assert evaluate(u) == (OK, [])
+
+
+def test_nvme_error_does_not_lower_an_error_status():
+    u = _sample()
+    u["nvme"][0]["critical_warning"] = 1
+    u["errors"] = [{"reading": "nvme[vmhba1]", "reason": "budget"}]
+    status, reasons = evaluate(u)
+    assert status == ERROR and "nvme[vmhba1] unreadable: budget" in reasons
