@@ -76,6 +76,8 @@ All by hand from the ESX shell (`vsish`, Python 3.11 that ships with ESX). No VI
 Decode rules (from the Linux `k10temp` driver, matched to the readings above):
 
 - Tctl: `t = ((v >> 21) & 0x7ff) * 0.125`; if bit 19 (`CUR_TEMP_RANGE_SEL`) is set, `t -= 49`.
+  As in `k10temp`, `t -= 49` also applies when bits 17:16 (`CUR_TEMP_TJ_SEL`) are `0b11`, even
+  with bit 19 clear (subtracted once either way).
   `k10temp`'s offset table has no entry for family 19h, so it reports Tctl as Tdie for this part.
 - CCD: valid only if bit 11 is set; `t = (v & 0x7ff) * 0.125 - 49`.
 - RAPL: energy unit `= 2^-((unit >> 8) & 0x1f)` J. Package power = Δenergy / Δt, with the 32-bit

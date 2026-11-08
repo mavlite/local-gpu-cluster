@@ -27,3 +27,11 @@ def test_effective_mhz():
 
 def test_effective_mhz_zero_mperf():
     assert effective_mhz(2495.3, 5, 0) is None
+
+def test_tctl_tj_sel_both_bits_subtracts_49_without_bit_19():
+    # k10temp: CUR_TEMP_TJ_SEL (bits 17:16) == 0b11 also selects the -49 range.
+    assert tctl_c((600 << 21) | (0b11 << 16)) == pytest.approx(75.0 - 49)
+    assert tctl_c((600 << 21) | (0b01 << 16)) == pytest.approx(75.0)
+    assert tctl_c((600 << 21) | (0b10 << 16)) == pytest.approx(75.0)
+    # bit 19 and TJ_SEL together subtract only once
+    assert tctl_c((600 << 21) | (1 << 19) | (0b11 << 16)) == pytest.approx(75.0 - 49)

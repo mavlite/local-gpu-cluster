@@ -5,6 +5,7 @@ in docs/superpowers/specs/2026-11-06-esx-hardware-health-design.md ("Decode rule
 """
 
 CUR_TEMP_RANGE_SEL_BIT = 1 << 19
+CUR_TEMP_TJ_SEL_MASK = 0b11 << 16
 CCD_VALID_BIT = 1 << 11
 ENERGY_COUNTER_MOD = 2 ** 32
 
@@ -12,7 +13,8 @@ ENERGY_COUNTER_MOD = 2 ** 32
 def tctl_c(raw: int) -> float:
     """Decode the Tctl temperature from a F19h THERMAL_CONTROL register value."""
     temp = ((raw >> 21) & 0x7FF) * 0.125
-    if raw & CUR_TEMP_RANGE_SEL_BIT:
+    # k10temp: the -49 range applies when RANGE_SEL is set or TJ_SEL (bits 17:16) is 0b11.
+    if raw & CUR_TEMP_RANGE_SEL_BIT or raw & CUR_TEMP_TJ_SEL_MASK == CUR_TEMP_TJ_SEL_MASK:
         temp -= 49
     return temp
 
