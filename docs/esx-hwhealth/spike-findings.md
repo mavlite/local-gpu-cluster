@@ -9,12 +9,27 @@
   sandbox on the same host, so this is a permission denial, not "not supported on virtual hardware".
   The plugin *can* read PCI config registers and `/power/pcpu/N/perf` in-process through
   `import vmware.vsi`. A boot-time `/etc/init.d` script shipped in the same community VIB runs in
-  `superDom` (domain 0), where the SMN write and the MSR read both work. The plugin can read a cache
-  file from `/var/lib/vmware/osdata/healthd/` (persistent OSData) or from `/usr/lib/vmware/healthd-config/`
-  (RAM; the directory must be created at runtime). It can't read `/var/run` or `/tmp`.
+  `superDom` (domain 0), where the SMN write and the MSR read both work. What was proven about the cache:
+  a root-owned `0644` file **created by root from the guest-ops shell** (domain `vmtoolsdShellDom`,
+  enforcement disabled), **not by the sampler**, was readable from healthdDom at
+  `/var/lib/vmware/osdata/healthd/` (persistent OSData) and at `/usr/lib/vmware/healthd-config/` (RAM;
+  the directory must be created at runtime). It was not readable at `/var/run` or `/tmp`. The cache
+  location moved off `/var/run`, which the earlier plan used, because healthdDom can't read it: the boot
+  probe's own `/var/run/lab-hwhealth-probe.txt`, written from superDom, gave `PermissionError(1)` in the
+  plugin. That a file the **sampler (superDom) writes** at one of the readable paths is then readable
+  from healthdDom is **inferred, to be proven in Task 6 on the nested host**.
+- **Naming:**
+  - plugin file: `lab_hwhealth.py`;
+  - ConfigStore and healthd key: `lab_hwhealth`, derived from the file name;
+  - VIB and component name: `lab-hwhealth`;
+  - report name: `lab.hwHealth`.
+
+  This refines the plan's "Plugin key and VIB name `lab-hwhealth`": the key must be the underscore form
+  that matches the file stem.
 - **S1 registration: a VIB that ships two files.** One is the plugin,
-  `/usr/lib/vmware/healthd/plugins/bin/<key>.py`. The other is a ConfigStore schema,
-  `/usr/lib/vmware/configmanager/schemas/<vib>-<ver>-schema.json`, for `esx/health/<key>`. esximage
+  `/usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py` (key `lab_hwhealth`). The other is a ConfigStore
+  schema, `/usr/lib/vmware/configmanager/schemas/lab-hwhealth-<ver>-schema.json`, for
+  `esx/health/lab_hwhealth`. esximage
   turns the schema into a `ConfigSchema:` VIB tag and loads it at live install. healthd finds plugins
   by **scanning `plugins/bin/` at start**, and the ConfigStore key is the file name without its
   extension. A config object is **not required**: with only the schema, healthd logs "Failed to locate
@@ -388,11 +403,18 @@ nvme rc=1
 ```
 - At chkconfig 99, hostd isn't serving yet, so `esxcli` gets a 503. The sampler must retry `esxcli`
   later, or start its loop after boot completes.
-- Where the plugin can read the sampler's cache file (v4 plugin, 00:00:49 and 00:02:57):
+- Where the plugin can read a cache file (v4 plugin, 00:00:49 and 00:02:57). The test files
+  (`{"t": 1}` / `{"t": 2}`, root, `0644`) were **created by root from the guest-ops shell**
+  (`vmtoolsdShellDom`, enforcement disabled), not by the sampler:
   - `/var/lib/vmware/osdata/healthd/…`: ok.
-  - `/usr/lib/vmware/healthd-config/…`: ok, once the sampler has created the directory; it is RAM, so
-    no disk wear.
-  - `/var/run/…` and `/tmp/…`: `PermissionError(1)`.
+  - `/usr/lib/vmware/healthd-config/…`: ok, once the directory existed (created from the same shell);
+    it is RAM, so no disk wear.
+  - `/var/run/lab-hwhealth/cache.json` and `/tmp/…`: `PermissionError(1)`. The boot probe's own
+    `/var/run/lab-hwhealth-probe.txt`, which **was** written from superDom, also gave
+    `PermissionError(1)`. So the denial is by path, and that is why the cache moved off `/var/run`.
+- **Not yet proven:** that a file the sampler writes from superDom at one of the readable paths is then
+  readable from healthdDom. That is inferred from the path-based policy, and is **to be proven in Task 6
+  on the nested host**.
 
 **Decision: sampler fallback.**
 - A boot-started sampler, shipped in the same VIB as an `etc/init.d` script, does the SMN, MSR and
@@ -459,7 +481,12 @@ with only `OBSERVABILITY` (one ClientProfile per host), not root. Only root was 
   "remote call timed out".
 - `POST /api/session`: 400.
 
-**From the workstation, against the real host hyp01** (read-only, no grants changed):
+**From the workstation, against the real host hyp01** (read-only, no grants changed). **Disclosure:**
+this was an authentication to a real host that went beyond the nested-VM approval. Using credential keys
+`LAB_ESX_USER` / `LAB_ESX_PASS` (key names only), the workstation created an ESX JWT on hyp01 and called
+`reports.get vmw.ntpHealth` and `client_profiles.list`. Earlier probes on the same host were unauthenticated
+or Basic-auth GETs and `POST /api/session` attempts, all of which returned 400 or timed out. No
+configuration was changed on hyp01.
 - Token `create`: OK, 3-part JWT.
 - `reports.get vmw.ntpHealth`: `unauthorized`. hyp01's ClientProfiles are `svc-vcf-hyp01`, `dkvsd-user`,
   two vCenter OIDC issuer profiles and SSO `TrustedAdmins`; none is for `root`.
