@@ -96,8 +96,15 @@ def read_perf(run: Runner, pcpu: int) -> tuple[int, int]:
     return vals["APERF reading"], vals["MPERF reading"]
 
 
+class _Implausible(ValueError):
+    """A reading that parsed but cannot be a real temperature (0 K or below)."""
+
+
 def _kelvin_to_c(raw: str) -> int:
-    return int(raw.split()[0]) - 273
+    k = int(raw.split()[0])
+    if k <= 0:
+        raise _Implausible("temperature not plausible")
+    return k - 273
 
 
 def _threshold_c(raw: str | None) -> int | None:
@@ -133,6 +140,8 @@ def _read_one_nvme(run: Runner, adapter: str) -> NvmeHealth:
             wctemp_c=_threshold_c(ident.get("Warning Composite Temperature Threshold")),
             cctemp_c=_threshold_c(ident.get("Critical Composite Temperature Threshold")),
         )
+    except _Implausible as exc:
+        raise CommandError(argv, str(exc)) from exc
     except (KeyError, ValueError, IndexError) as exc:
         raise CommandError(argv, f"unparseable nvme output: {exc!r}") from exc
 

@@ -99,3 +99,31 @@ def test_nvme_one_drive_fails():
 def test_nvme_list_failure_propagates():
     with pytest.raises(CommandError):
         read_nvme(FakeRunner({LIST: CommandError(list(LIST), "x")}))
+
+
+@pytest.mark.parametrize("kelvin", ["0 K", "-5 K"])
+def test_nvme_non_positive_kelvin_temperature_is_an_error_not_a_value(kelvin):
+    r = nvme_responses()
+    r[smart("vmhba1")] = r[smart("vmhba1")].replace(
+        "Composite Temperature: 314 K", f"Composite Temperature: {kelvin}")
+    assert f"Composite Temperature: {kelvin}" in r[smart("vmhba1")]
+    drives, errors = read_nvme(FakeRunner(r))
+    assert [d.adapter for d in drives] == ["vmhba0", "vmhba2"]
+    assert errors == [{"reading": "nvme[vmhba1]", "reason": "temperature not plausible"}]
+
+
+def test_nvme_negative_threshold_is_none():
+    r = nvme_responses()
+    r[get("vmhba0")] = r[get("vmhba0")].replace("Threshold: 359", "Threshold: -1")
+    drives, _ = read_nvme(FakeRunner(r))
+    assert drives[0].wctemp_c is None and drives[0].cctemp_c == 88
+
+
+def test_nvme_one_critical_warning_flag_sets_critical_warning():
+    r = nvme_responses()
+    r[smart("vmhba0")] = r[smart("vmhba0")].replace(
+        "Read Only Mode: false", "Read Only Mode: true")
+    assert "Read Only Mode: true" in r[smart("vmhba0")]
+    drives, errors = read_nvme(FakeRunner(r))
+    assert errors == [] and drives[0].critical_warning == 1
+    assert [d.critical_warning for d in drives[1:]] == [0, 0]
