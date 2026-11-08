@@ -37,6 +37,7 @@ def _expected_paths():
         "usr/lib/vmware/healthd/plugins/bin/lab_hwhealth.py",
         f"{PKG}/lab_hwhealth_sampler.py",
         "etc/init.d/lab-hwhealth",
+        "etc/vmware/service/lab-hwhealth.xml",
         f"usr/lib/vmware/configmanager/schemas/lab-hwhealth-{VERSION}-schema.json",
         *package,
     ])
@@ -227,3 +228,28 @@ def test_init_stop_waits_for_the_sampler_before_cleaning_up():
     assert "sleep 1" in stop.split(loop)[1].split("done")[0]
     assert "kill -9" not in stop and "kill -KILL" not in stop  # SIGKILL would skip the restore
     assert stop.index(loop) < stop.index('rm -f "$PIDFILE" "$CACHE"')
+
+
+def test_service_xml_registers_the_init_script_with_hostd(tmp_path):
+    # hostd runs init scripts (initObj) in superDom; vLCM's settingsdDom cannot. Registering the
+    # init script as a hostd service lets vCenter restart the sampler in the right domain.
+    import xml.etree.ElementTree as ET
+    bc.stage(tmp_path, VERSION, TEMPLATE)
+    raw = (tmp_path / "etc/vmware/service/lab-hwhealth.xml").read_bytes()
+    assert b"\r" not in raw
+    root = ET.fromstring(raw)
+    assert root.tag == "ConfigRoot"
+    services = root.findall("service")
+    assert len(services) == 1
+    svc = services[0]
+    assert svc.findtext("id") == "lab-hwhealth"          # = /etc/init.d/<id>
+    assert svc.findtext("initfilename") is None          # the id already names the init script
+    assert svc.findtext("required") == "false"
+    assert svc.findtext("uninstallable") == "true"
+    assert svc.findtext("packagename") == "lab-hwhealth"
+    assert svc.findtext("ruleset") is None               # no firewall ruleset: it opens no port
+
+
+def test_service_xml_is_read_only(tmp_path):
+    files = bc.payload_files(VERSION, TEMPLATE)
+    assert files["etc/vmware/service/lab-hwhealth.xml"][1] == bc.READ

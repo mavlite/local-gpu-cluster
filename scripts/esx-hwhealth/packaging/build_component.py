@@ -13,6 +13,7 @@ Payload (R17):
   usr/lib/vmware/healthd/lab-hwhealth/hwhealth/*.py            the package (healthdDom rx tree)
   usr/lib/vmware/healthd/lab-hwhealth/lab_hwhealth_sampler.py  boot sampler, run by the init script
   etc/init.d/lab-hwhealth                                      starts/stops the sampler (superDom)
+  etc/vmware/service/lab-hwhealth.xml                          registers the init script with hostd
   usr/lib/vmware/configmanager/schemas/lab-hwhealth-<ver>-schema.json   ConfigStore esx/health/lab_hwhealth
 Community VIBs may not ship etc/vmware/default-config/, so healthd runs the plugin on its
 built-in defaults.
@@ -42,6 +43,7 @@ PLUGIN_PATH = f"usr/lib/vmware/healthd/plugins/bin/{KEY}.py"
 PKG_DIR = f"usr/lib/vmware/healthd/{NAME}"
 SAMPLER_PATH = f"{PKG_DIR}/lab_hwhealth_sampler.py"
 INIT_PATH = f"etc/init.d/{NAME}"
+SERVICE_PATH = f"etc/vmware/service/{NAME}.xml"
 SCHEMAS_DIR = Path("/usr/lib/vmware/configmanager/schemas")
 PIDFILE = "/var/run/lab-hwhealth-sampler.pid"
 SAMPLER_LOG = "/var/run/log/lab-hwhealth-sampler.log"
@@ -175,12 +177,36 @@ exit 0
 """
 
 
+def service_xml() -> str:
+    """hostd service entry for the init script (same shape as the stock dpd/vltd entries).
+
+    Which domain the init script runs in depends on who runs it. At boot, from an SSH shell,
+    or from hostd (its policy maps initObj files to superDom), it gets superDom. A vLCM live
+    install runs `start` from settingsd, whose settingsdDom has no exec transition and lacks
+    MSR_READ and the PCI write, so the sampler inherits a domain where the CPU reads fail
+    (hyp02, 2026-11-08). Registered as a hostd service, the sampler can then be restarted from
+    vCenter (HostServiceSystem.RefreshServices + RestartService) in superDom, without SSH.
+    """
+    return f"""<ConfigRoot>
+   <!-- {NAME}: boot sampler for the {REPORT} healthd plugin -->
+   <service id="0000">
+      <id>{NAME}</id>
+      <required>false</required>
+      <uninstallable>true</uninstallable>
+      <packagename>{NAME}</packagename>
+      <packagedescription>Lab hardware health: sampler for the {REPORT} healthd report.</packagedescription>
+   </service>
+</ConfigRoot>
+"""
+
+
 def payload_files(version: str, template: dict) -> dict:
     """Install path (no leading /) -> (bytes, mode). Exactly what the VIB ships."""
     files = {
         PLUGIN_PATH: (read_lf(SRC / "lab_hwhealth.py"), EXEC),
         SAMPLER_PATH: (read_lf(SRC / "lab_hwhealth_sampler.py"), EXEC),
         INIT_PATH: (init_script().encode(), EXEC),
+        SERVICE_PATH: (service_xml().encode(), READ),
         schema_install_path(version): (schema_text(version, template).encode(), READ),
     }
     for src in sorted((SRC / "hwhealth").glob("*.py")):
