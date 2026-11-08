@@ -73,6 +73,13 @@ def test_nvme_temp_error_at_the_drive_wctemp():
     assert _status(_nvme(temp_c=81, wctemp_c=81, cctemp_c=82))[0] == ERROR
 
 
+def test_nvme_wctemp_below_70_is_the_error_line():
+    assert _status(_nvme(temp_c=59, wctemp_c=60)) == (OK, [])
+    status, reasons = _status(_nvme(temp_c=60, wctemp_c=60))
+    assert status == ERROR
+    assert any("temp_c 60 >= 60" in r for r in reasons)
+
+
 def test_nvme_temp_error_defaults_to_80_without_wctemp():
     assert _status(_nvme(temp_c=79))[0] == WARNING
     status, reasons = _status(_nvme(temp_c=80, wctemp_c=None))
@@ -87,6 +94,7 @@ def test_nvme_each_known_critical_warning_bit_is_an_error_and_named():
         status, reasons = _status(_nvme(critical_warning=bit))
         assert status == ERROR, bit
         assert any(f"critical_warning {name}" in r for r in reasons), (bit, reasons)
+        assert not any("unknown" in r for r in reasons), (bit, reasons)
 
 
 def test_nvme_unknown_critical_warning_bit_warns():

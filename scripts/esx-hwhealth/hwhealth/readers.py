@@ -125,6 +125,14 @@ def _threshold_c(raw: str | None) -> int | None:
     return k - 273 if k > 0 else None
 
 
+def _optional_pct(raw: str | None) -> int | None:
+    """An optional "N %" field: None when absent or unparseable, so it never fails the drive."""
+    try:
+        return int(raw.split()[0]) if raw else None
+    except (ValueError, IndexError):
+        return None
+
+
 def _read_one_nvme(run: Runner, adapter: str) -> NvmeHealth:
     smart = _fields(run(_nvme_smart_argv(adapter), _TIMEOUT))
     ident = _fields(run(_nvme_get_argv(adapter), _TIMEOUT))
@@ -145,7 +153,7 @@ def _read_one_nvme(run: Runner, adapter: str) -> NvmeHealth:
             media_errors=int(smart["Media Errors"], 16),
             wctemp_c=_threshold_c(ident.get("Warning Composite Temperature Threshold")),
             cctemp_c=_threshold_c(ident.get("Critical Composite Temperature Threshold")),
-            spare_threshold_pct=None if spare_threshold is None else int(spare_threshold.split()[0]),
+            spare_threshold_pct=_optional_pct(spare_threshold),
         )
     except _Implausible as exc:
         raise CommandError(argv, str(exc)) from exc

@@ -114,6 +114,15 @@ def test_nvme_missing_spare_threshold_is_none():
     assert drives[1].spare_threshold_pct is None and drives[1].spare_pct == 100
 
 
+def test_nvme_malformed_spare_threshold_is_none_not_a_failed_drive():
+    r = nvme_responses()
+    r[smart("vmhba1")] = r[smart("vmhba1")].replace("Available Spare Threshold: 10 %",
+                                                    "Available Spare Threshold: n/a")
+    drives, errors = read_nvme(FakeRunner(r))
+    assert errors == []
+    assert drives[1].spare_threshold_pct is None and drives[1].temp_c == 41
+
+
 def test_nvme_zero_threshold_is_none():
     r = nvme_responses()
     r[get("vmhba0")] = r[get("vmhba0")].replace("Threshold: 359", "Threshold: 0")
