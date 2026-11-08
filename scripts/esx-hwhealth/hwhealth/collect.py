@@ -10,11 +10,15 @@ from datetime import datetime, timezone
 from .decode import ccd_c, effective_mhz, energy_delta_j, rapl_energy_unit_j, tctl_c
 from .readers import read_cpu_identity, read_nvme, read_perf, read_rapl
 from .runner import CommandError, Runner
-from .smn import CCD, TCTL, SmnBusy, read_smn
+from .smn import CCD, ROOT_CFG, TCTL, SmnBusy, read_smn
 
 SCHEMA = 1
 SUPPORTED = ("AuthenticAMD", 25, 97)  # vendor, family, model
 _SAMPLE_GAP_S = 1.0
+# Root complex vendor/device at PCI 0:0.0 config 0x0: AMD (0x1022) Raphael (0x14d8). SMN is only
+# touched on this part; a VM can pass family 25 / model 97 through on a virtual (Intel) root complex.
+RAPHAEL_ROOT_ID = 0x14D81022
+_ROOT_ID_TIMEOUT_S = 10.0
 
 
 def _utc_now() -> str:
@@ -65,6 +69,16 @@ def _eff_summary(slots):
     if not vals:
         return None
     return {"min": min(vals), "avg": round(sum(vals) / len(vals), 1), "max": max(vals)}
+
+
+def _root_complex_problem(run):
+    """None if the root complex is AMD Raphael, else the reason to skip every SMN access."""
+    try:
+        out = run(["vsish", "-e", "get", f"{ROOT_CFG}/0x0"], _ROOT_ID_TIMEOUT_S)
+        root_id = int(out.strip(), 16)
+    except (CommandError, ValueError) as exc:
+        return _reason(exc)
+    return None if root_id == RAPHAEL_ROOT_ID else "root complex not supported"
 
 
 def _smn_temps(run):
@@ -136,6 +150,10 @@ def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped):
 
     if spent():
         skipped("tctl_c", "ccd_c")
+        return
+    problem = _root_complex_problem(run)
+    if problem is not None:
+        errors.extend([_err("tctl_c", problem), _err("ccd_c", problem)])
         return
     try:
         cpu["tctl_c"], cpu["ccd_c"], ccd_errors = _smn_temps(run)

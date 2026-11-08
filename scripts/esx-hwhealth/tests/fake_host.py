@@ -28,6 +28,7 @@ class Host:
         self.family, self.model = family, model
         self.index = 0
         self.index_reg = 0  # what a GET of the index register returns while non-zero
+        self.root_id = 0x14D81022  # root complex vendor/device (AMD Raphael), addr/0x0
         self.energy_calls = 0
         self.perf_calls = {}
         self.joules = 150.47
@@ -68,6 +69,8 @@ class Host:
             if n > 1:
                 a, m = self.aperf2(p, a, m)
             return PERF_TEMPLATE.format(a=a, m=m)
+        if path == f"{ROOT_CFG}/0x0":
+            return "0xNone" if self.root_id is None else f"0x{self.root_id:08x}"
         if path == f"{ROOT_CFG}/0x60":
             return hex(self.index_reg or self.index)
         if path == f"{ROOT_CFG}/0x64":

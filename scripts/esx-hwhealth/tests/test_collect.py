@@ -147,3 +147,55 @@ def test_nvme_list_failure_is_recorded():
     assert u["nvme"] == []
     assert u["errors"] == [{"reading": "nvme",
                             "reason": "Connection failed: 503 Service Unavailable"}]
+
+
+ROOT_ID_GET = ("vsish", "-e", "get", "/hardware/pci/seg/0/bus/0/slot/0/func/0/pciConfigReg/size/4/addr/0x0")
+
+
+def _smn_calls(host):
+    return [c for c in host.calls if c[0] == "vsish" and "pciConfigReg" in c[3] and c != ROOT_ID_GET]
+
+
+@pytest.mark.parametrize("root_id", [0x71928086, 0x71908086, 0x14E81022, 0x0])
+def test_foreign_root_complex_makes_no_smn_call(root_id):
+    # R18: the nested VM passes family 25 / model 97 through; its root complex is an Intel 440BX.
+    host, clock = make()
+    host.root_id = root_id
+    u = run_collect(host, clock)
+    reasons = {e["reading"]: e["reason"] for e in u["errors"]}
+    assert reasons == {"tctl_c": "root complex not supported", "ccd_c": "root complex not supported"}
+    assert "tctl_c" not in u["cpu"] and "ccd_c" not in u["cpu"]
+    assert ROOT_ID_GET in host.calls
+    assert _smn_calls(host) == []  # no index GET, no vsish set, no data GET
+    assert not [c for c in host.calls if c[:3] == ("vsish", "-e", "set")]
+    assert "package_w" in u["cpu"] and len(u["nvme"]) == 3
+
+
+def test_root_complex_read_failure_skips_smn_with_its_message():
+    host, clock = make()
+
+    def fail(argv):
+        if tuple(argv) == ROOT_ID_GET:
+            raise CommandError(argv, "Operation not permitted")
+    host.on_call = fail
+    u = run_collect(host, clock)
+    reasons = {e["reading"]: e["reason"] for e in u["errors"]}
+    assert reasons == {"tctl_c": "Operation not permitted", "ccd_c": "Operation not permitted"}
+    assert _smn_calls(host) == []
+
+
+def test_raphael_root_complex_is_checked_before_the_first_smn_access():
+    host, clock = make()
+    u = run_collect(host, clock)
+    assert u["errors"] == [] and u["cpu"]["tctl_c"] == pytest.approx(76.125)
+    first_smn = host.calls.index(_smn_calls(host)[0])
+    assert host.calls.index(ROOT_ID_GET) < first_smn
+
+
+def test_unparseable_root_complex_id_skips_smn_with_its_message():
+    host, clock = make()
+    host.root_id = None  # the fake then answers "0xNone"
+    u = run_collect(host, clock)
+    reasons = {e["reading"]: e["reason"] for e in u["errors"]}
+    assert set(reasons) == {"tctl_c", "ccd_c"} and "invalid literal" in reasons["tctl_c"]
+    assert _smn_calls(host) == []
