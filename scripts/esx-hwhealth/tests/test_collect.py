@@ -125,7 +125,7 @@ def test_eff_summary_absent_when_no_values():
 def test_value_error_is_recorded_not_raised(monkeypatch):
     host, clock = make()
 
-    def boom(run, addrs):
+    def boom(run, addrs, lock=None):
         raise ValueError("SMN address not allowed")
 
     monkeypatch.setattr("hwhealth.collect.read_smn", boom)

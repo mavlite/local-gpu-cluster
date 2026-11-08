@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from .decode import ccd_c, effective_mhz, energy_delta_j, rapl_energy_unit_j, tctl_c
 from .readers import read_cpu_identity, read_nvme, read_perf, read_rapl
 from .runner import CommandError, Runner
-from .smn import CCD, RAPHAEL_ROOT_ID, ROOT_CFG, TCTL, SmnBusy, SmnUnsupported, read_smn
+from .smn import (CCD, RAPHAEL_ROOT_ID, ROOT_CFG, TCTL, SmnBusy, SmnLocked, SmnUnsupported,
+                  read_smn)
 
 SCHEMA = 1
 SUPPORTED = ("AuthenticAMD", 25, 97)  # vendor, family, model
@@ -80,8 +81,8 @@ def _root_complex_problem(run):
     return None if root_id == RAPHAEL_ROOT_ID else "root complex not supported"
 
 
-def _smn_temps(run):
-    raw = read_smn(run, [TCTL, *CCD])
+def _smn_temps(run, smn_lock):
+    raw = read_smn(run, [TCTL, *CCD], lock=smn_lock)
     ccds, errors = [], []
     for n, addr in enumerate(CCD):
         temp = ccd_c(raw[addr])
@@ -103,7 +104,7 @@ def _sample(run, pcpus, now):
 
 
 def collect(run: Runner, sleep=time.sleep, now=time.monotonic, wall=_utc_now,
-            budget_s: float = 20.0) -> dict:
+            budget_s: float = 20.0, smn_lock=None) -> dict:
     start = now()
     run = _budgeted(run, now, start, budget_s)
     spent = lambda: now() - start >= budget_s  # noqa: E731
@@ -128,7 +129,7 @@ def collect(run: Runner, sleep=time.sleep, now=time.monotonic, wall=_utc_now,
                                       f"{ident.family} model {ident.model}"))
 
     if cpu.get("supported"):
-        _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped)
+        _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped, smn_lock)
 
     try:
         if spent():
@@ -144,7 +145,7 @@ def collect(run: Runner, sleep=time.sleep, now=time.monotonic, wall=_utc_now,
             "sampled_at": wall(), "duration_ms": int((now() - start) * 1000)}
 
 
-def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped):
+def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped, smn_lock):
     if spent():
         skipped("rapl", "eff_mhz")
     else:
@@ -158,10 +159,12 @@ def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped):
         errors.extend([_err("tctl_c", problem), _err("ccd_c", problem)])
         return
     try:
-        cpu["tctl_c"], cpu["ccd_c"], ccd_errors = _smn_temps(run)
+        cpu["tctl_c"], cpu["ccd_c"], ccd_errors = _smn_temps(run, smn_lock)
         errors.extend(ccd_errors)
     except SmnBusy:
         errors.extend([_err("tctl_c", "smn index busy"), _err("ccd_c", "smn index busy")])
+    except SmnLocked as exc:  # another of our readers is mid-read: skip, never wait
+        errors.extend([_err("tctl_c", str(exc)), _err("ccd_c", str(exc))])
     except SmnUnsupported:
         problem = "root complex not supported"
         errors.extend([_err("tctl_c", problem), _err("ccd_c", problem)])
