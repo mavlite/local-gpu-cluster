@@ -94,10 +94,13 @@ def _smn_temps(run):
     return round(tctl_c(raw[TCTL]), 3), ccds, errors
 
 
-def _sample(run, pcpus):
+def _sample(run, pcpus, now):
+    """One RAPL + perf snapshot. The timestamp is taken right after the energy read, so the
+    power window is the time between the two RAPL reads, not skewed by the perf reads."""
     unit_raw, energy = read_rapl(run)
+    energy_at = now()
     perf = [read_perf(run, p) for p in range(pcpus)]
-    return unit_raw, energy, perf
+    return unit_raw, energy, perf, energy_at
 
 
 def collect(run: Runner, sleep=time.sleep, now=time.monotonic, wall=_utc_now,
@@ -166,19 +169,17 @@ def _cpu_readings(run, ident, cpu, errors, sleep, now, spent, skipped):
 
 def _power_and_clocks(run, ident, cpu, errors, sleep, now, spent, skipped):
     try:
-        first = _sample(run, ident.pcpus)
-        t1 = now()
+        first = _sample(run, ident.pcpus, now)
         sleep(_SAMPLE_GAP_S)
         if spent():
             skipped("rapl", "eff_mhz")
             return
-        second = _sample(run, ident.pcpus)
-        t2 = now()
+        second = _sample(run, ident.pcpus, now)
     except (CommandError, ValueError) as exc:
         errors.extend([_err("rapl", _reason(exc)), _err("eff_mhz", _reason(exc))])
         return
 
-    elapsed = t2 - t1
+    elapsed = second[3] - first[3]
     if elapsed > 0:
         unit_j = rapl_energy_unit_j(first[0])
         cpu["package_w"] = round(energy_delta_j(first[1], second[1], unit_j) / elapsed, 2)

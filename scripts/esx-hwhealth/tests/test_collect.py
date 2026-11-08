@@ -199,3 +199,22 @@ def test_unparseable_root_complex_id_skips_smn_with_its_message():
     reasons = {e["reading"]: e["reason"] for e in u["errors"]}
     assert set(reasons) == {"tctl_c", "ccd_c"} and "invalid literal" in reasons["tctl_c"]
     assert _smn_calls(host) == []
+
+
+def test_package_power_window_is_the_time_between_the_rapl_energy_reads():
+    # M1: the 32 perf reads that follow each RAPL read take different times in the two samples
+    # (here only the second sample's are slow); that must not skew the energy window.
+    host, clock = make()
+    energy_at = []
+
+    def slow_perf(argv):
+        if argv[3].startswith("/power/pcpu/") and int(argv[3].split("/")[3]) in host.perf_calls:
+            clock.t += 0.1  # a second-sample perf read
+        if argv[3].endswith("0xC001029B"):
+            energy_at.append(clock.t)  # the fake answers the read at this instant
+    host.on_call = slow_perf
+    u = run_collect(host, clock)
+    assert len(energy_at) == 2
+    window = energy_at[1] - energy_at[0]
+    assert window == pytest.approx(1.0)
+    assert u["cpu"]["package_w"] == pytest.approx(round(host.joules / window, 2))
