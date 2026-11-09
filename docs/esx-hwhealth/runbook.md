@@ -264,6 +264,10 @@ sampler inherits a domain where `rapl`, `eff_mhz`, `tctl_c` and `ccd_c` fail wit
 `HostServiceSystem.RefreshServices()` then `RestartService(id="lab-hwhealth")`. No SSH. Then
 check that the CPU fields are present and `errors` is empty (the remote read in "Verify").
 
+**After a reboot: no action.** The boot-time `start` runs in superDom. Proven on hyp01-hyp03 on
+2026-11-09, after a cold start of the whole lab with 1.0.2-1 installed through vLCM: with no
+intervention, every host reported Tctl 69.5-78.1 °C, 60-72 W, `errors` empty and status OK.
+
 Notes on the service entry:
 - It has no firewall `<ruleset>` because the sampler opens no port. It shows in the host's Services
   list without a firewall tie-in.
