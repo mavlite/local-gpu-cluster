@@ -33,7 +33,8 @@ venv, `scvenv/Scripts/python.exe`. Host IPs: hyp01 `172.16.10.145`, hyp02 `.143`
   88.5 W, 3 NVMe, errors 0); and `client_profiles.list` refused as `unauthorized`. A second `apply`
   changed nothing. `--readonly-role` stays available in case a later host refuses the token
   (`unauthorized`). `unauthenticated` means a wrong password: an existing user keeps its old one.
-- Rollout: hyp01 done 2026-11-09. hyp02 and hyp03 are pending.
+- Rollout: done on all three hosts on 2026-11-09. On hyp02 and hyp03, `apply` passed its post-check
+  and `verify` passed 3/3 (Tctl 77.6 / 73.6 °C, errors 0), with no host role needed on any host.
 - **`apply` refuses before changing anything** when: the host is in lockdown; the connection is not
   host-direct; the user already holds a host role other than ReadOnly; the ClientProfile holds any
   grant other than `OBSERVABILITY`; or the password is below the floor.
@@ -116,7 +117,7 @@ Metric group: `Hardware Health`. `info.*` is the API envelope; `hd.*` is the par
 | `info.status` | `Report\|Status` | 0/1/2 | metric | Map `OK`→0, `WARNING`→1, `ERROR`→2. The plugin's own verdict on the spec thresholds. |
 | `info.status` | `Report\|Status Text` | — | property | The raw string, for the alert text. |
 | `info.last_update_time` | `Report\|Age (min)` | min | metric | now − last_update_time. healthd runs the plugin every 5 min. |
-| `hd.sampled_at` | `Report\|Sample Age (min)` | min | metric | now − sampled_at. The sampler runs every ~60 s. |
+| `hd.sampled_at` | `Report\|Sample Age (min)` | min | metric | now − sampled_at. The sampler runs every ~60 s, but healthd republishes only every 5 min, so up to ~6 min is normal (seen: 5 min 7 s, 2026-11-09). |
 | `hd.errors` | `Report\|Error Count` | count | metric | `len(errors)`. A nonzero value means a reading failed. |
 | `hd.errors[*].reading` + `reason` | `Report\|Errors` | — | property | Joined as `reading: reason; …`. |
 | `hd.duration_ms` | `Report\|Sample Duration (ms)` | ms | metric | |
@@ -163,7 +164,7 @@ names the reading. Severities follow the spec's WARNING/ERROR.
 | NVMe wear | `Endurance Used` ≥ 80 / ≥ 100 | Warning / Critical |
 | NVMe media errors | `Media Errors` > 0 | Critical |
 | Report not OK | `Report\|Status` ≥ 1 (with `Status Text` and `Errors` in the message) | Warning (1) / Critical (2) |
-| Sampler stopped | `Report\|Error Count` > 0 for 2 cycles, or `Sample Age` > 5 min | Warning |
+| Sampler stopped | `Report\|Error Count` > 0 for 2 cycles, or `Sample Age` > 8 min | Warning |
 | Report stale | `Report\|Age` > 15 min (healthd or the plugin stopped) | Warning |
 | Collection failing | MPB adapter instance collection failed (token, network, account removed) | Warning |
 
