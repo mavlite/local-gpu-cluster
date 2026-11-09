@@ -27,10 +27,13 @@ Run it with a Python that has pyVmomi, from the repo root. In this session that 
 venv, `scvenv/Scripts/python.exe`. Host IPs: hyp01 `172.16.10.145`, hyp02 `.143`, hyp03 `.141`.
 `plan` was run against hyp01 on 2026-11-09: not in lockdown, no user, no roles, no profile.
 
-- **Not yet proven: whether a user with no host role can get a vAPI token.** If `verify` reports
-  `FAIL token as svc-hwh-ops: unauthorized`, run `apply --readonly-role`. That adds the built-in
-  ReadOnly role on the host root, which carries no write privilege. `unauthenticated` means a wrong
-  password instead: an existing user keeps its old one. Record which way it went here.
+- **No host role is needed (proven on hyp01, 2026-11-09).** `apply --insecure` created the user and
+  `LU###svc-hwh-ops`; its post-check gave grants `[OBSERVABILITY]` and no host role. `verify` then
+  passed all three checks: the admin view; the report as `svc-hwh-ops` (status OK, Tctl 79.4 °C,
+  88.5 W, 3 NVMe, errors 0); and `client_profiles.list` refused as `unauthorized`. A second `apply`
+  changed nothing. `--readonly-role` stays available in case a later host refuses the token
+  (`unauthorized`). `unauthenticated` means a wrong password: an existing user keeps its old one.
+- Rollout: hyp01 done 2026-11-09. hyp02 and hyp03 are pending.
 - **`apply` refuses before changing anything** when: the host is in lockdown; the connection is not
   host-direct; the user already holds a host role other than ReadOnly; the ClientProfile holds any
   grant other than `OBSERVABILITY`; or the password is below the floor.
