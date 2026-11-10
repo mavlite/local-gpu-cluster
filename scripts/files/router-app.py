@@ -602,14 +602,15 @@ ALIAS_MAP: dict[str, dict] = {
     # profile-match guard must see a mismatch so the auto-swap fires, and a
     # redteam request must never be silently served by the stock model.
     #
-    # Sampling is the stock Qwen3.8 recipe: this build stays close to stock, so
-    # the base model's own card settings apply (the -think variant takes the
-    # thinking recipe). 2026-11-10: this replaces a model-specific dict that
-    # set "repetition_penalty", a key llama-server ignores (its name is
-    # "repeat_penalty"), so the model effectively ran with no penalty and
-    # looped under an agent harness.
+    # Sampling: the non-thinking alias (the one ARTEX / tool-calling harnesses
+    # use) takes REDTEAM_AGENTIC_SAMPLING — the stock Qwen3.8 non-thinking recipe
+    # with temperature lowered to 0.2 for tool-use reliability (HF research: the
+    # abliterated-Qwen3.8 agent-harness guidance is temp 0.1-0.3). The -think
+    # variant keeps the stock thinking recipe. (2026-11-10: a model-specific
+    # dict that set the ignored "repetition_penalty" key was removed — that gap
+    # is why the model looped under an agent harness.)
     "qwen3.8-redteam":       {"backend": "qwen3.8-redteam", "enable_thinking": False, "strip_thinking": True,
-                              "sampling": alias_defaults.QWEN38_NOTHINK_SAMPLING},
+                              "sampling": alias_defaults.REDTEAM_AGENTIC_SAMPLING},
     "qwen3.8-redteam-think": {"backend": "qwen3.8-redteam", "enable_thinking": True,  "strip_thinking": False,
                               "reasoning_effort": "medium",
                               "sampling": alias_defaults.QWEN38_THINK_SAMPLING},

@@ -33,12 +33,27 @@ QWEN36_NOTHINK_SAMPLING = {
     "presence_penalty": 1.5,
 }
 
-# NOTE: the red-team aliases (qwen3.8-redteam[-think]) deliberately reuse the
-# stock QWEN38_*_SAMPLING recipes above — their model is an abliteration of the
-# same base. A model-specific dict was removed 2026-11-10: it set
-# "repetition_penalty", which llama-server ignores (the parameter is
-# "repeat_penalty"), so it never took effect and the model looped under an
-# agent harness.
+# Red-team NON-thinking alias (qwen3.8-redteam) — the one ARTEX and other
+# autonomous tool-calling harnesses use. Stock Qwen3.8 non-thinking recipe
+# EXCEPT temperature is lowered to 0.2 for tool-use reliability.
+#
+# Rationale (2026-11-10, HF research): for agentic/tool-calling work the
+# consensus is low randomness (strict, consistent tool-call formatting). The
+# one numeric source directly on point — the abliterated-Qwen3.8 family card's
+# "Agentic / Long-Context Use (agent harness / pentest framework)" section —
+# recommends temperature 0.1-0.3 ("slight randomness helps break deterministic
+# loops; pure greedy can get stuck"); 0.2 is its midpoint. presence_penalty
+# stays 1.5 (NOT repetition_penalty, which llama-server ignores): loop
+# protection matters more at low temperature, and presence_penalty IS honored.
+# The -think alias keeps the thinking recipe (temp 1.0) — thinking mode is a
+# separate opt-in, not used for autonomous tool calls.
+#
+# (A model-specific dict was removed 2026-11-10 that set "repetition_penalty",
+# a key llama-server ignores, so it never took effect and the model looped.)
+REDTEAM_AGENTIC_SAMPLING = {
+    "temperature": 0.2, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+    "presence_penalty": 1.5,
+}
 
 
 def apply_alias_defaults(body: dict, alias_info: dict) -> dict:
