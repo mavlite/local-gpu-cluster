@@ -248,33 +248,38 @@ get_profile() {
       echo "bartowski/Altworld_Hemmingway-1-GGUF Q6_K hemmingway 1,1 262144 1024 q8_0 tensor draft-mtp 2"
       ;;
     qwen3.8-redteam)
-      # OBLITERATUS Qwen3.8-27B-OBLITERATED V3, Q6_K — the SAME base model as
-      # the qwen3.8 profile with refusal behaviour removed by weight surgery
+      # orcarouter/Qwen3.8-27B-Uncensored, Q6_K — the SAME base model as the
+      # qwen3.8 profile with refusal behaviour removed by weight editing
       # (abliteration). For AUTHORISED penetration testing of the operator's
       # own lab environments: a censored model refuses to write exploit code
       # even against your own boxes, which makes it useless as a red-team
       # assistant.
       #
-      # Replaces huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF (UD-Q6_K_XL)
-      # 2026-10-17. V3 restores the stock MTP head and vision projector
-      # ("Restore MTP + vision from stock with correct tensor naming",
-      # -2.1pp MMLU vs stock) — so the entire tuned qwen3.8 config carries
-      # over UNCHANGED: tensor split, draft-mtp n-max 3, q8_0 KV, 393216 ctx,
-      # 3 slots.
+      # Replaces OBLITERATUS/Qwen3.8-27B-OBLITERATED V3 (2026-11-10), which
+      # looped under an agent harness (ARTEX). An independent comparison of 12
+      # abliterated Qwen3.8-27B builds (abliterlitics.dev, 2026-09) measured
+      # OBLITERATED at -33.6 pts HumanEval / -4.4 pts IFEval vs stock and this
+      # build at -0.6 / +0.4, the best overall of the panel. That comparison
+      # did not test tool calling or agent loops.
       #
-      # Q6_K (22.4 GB) is 1.6 GB LIGHTER than qwen3.8's UD-Q6_K_XL (24.0 GB).
-      # The card calls Q6_K "Great balance"; Q8_0 (29.0 GB) would leave only
-      # ~0.8 GB free on GPU 0 — under the ~3 GB free guideline this file
-      # targets. The card's sampling guidance (rep-pen 1.15, temp 0.1-0.3
-      # agentic, no system prompt, thinking OFF recommended, top_p/k/min_p not
-      # needed) lives in the OpenCode red-team model options, not here.
+      # Same base model, so the qwen3.8 layout is carried over: tensor split,
+      # q8_0 KV, 393216 ctx, 3 slots. draft-mtp n-max 3 assumes the MTP head
+      # is embedded in this GGUF: the author says it is, NOT yet verified on
+      # this cluster — check the first load's log, and set the spec fields to
+      # "none 0" if the head is missing.
+      #
+      # The repo is GATED on Hugging Face (auto-approved): the first load
+      # needs HF_TOKEN in /etc/llamacpp.env on LXC 151.
+      #
+      # Sampling is the stock Qwen3.8 recipe, injected by the router
+      # (alias_defaults.QWEN38_*_SAMPLING).
       #
       # DISTINCT ALIAS on purpose. This must NOT silently serve normal traffic:
       # you swap to it deliberately for pentest work and swap back. Because the
       # chat slot is single-tenant, whatever profile is loaded answers every
       # chat request — so check /healthz active_chat_profile before assuming
       # which model is live (the profile-swap vs client-pinning hazard).
-      echo "OBLITERATUS/Qwen3.8-27B-OBLITERATED Q6_K qwen3.8-redteam 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
+      echo "orcarouter/Qwen3.8-27B-Uncensored-GGUF Q6_K qwen3.8-redteam 1,1 393216 0 q8_0 tensor draft-mtp 3 3"
       ;;
     *)
       return 1
@@ -294,7 +299,7 @@ get_profile_description() {
     devstral-large)  echo "Devstral 2 123B UD-IQ2_M — full-size Mistral code model (~43.5 GB, 64K ctx)" ;;
     qwen3.8)      echo "Qwen3.8-27B UD-Q6_K_XL — DENSE 27B multimodal-capable; tensor-split + MTP spec-decode" ;;
     hemmingway)   echo "Altworld Hemmingway-1 Q6_K — Qwen3.8-27B fine-tune for human-sounding everyday writing (same config/perf as qwen3.8)" ;;
-    qwen3.8-redteam) echo "Qwen3.8-27B-OBLITERATED V3 (OBLITERATUS) Q6_K — uncensored abliteration; AUTHORISED pentest of own lab only (same config/perf as qwen3.8)" ;;
+    qwen3.8-redteam) echo "orcarouter/Qwen3.8-27B-Uncensored Q6_K — uncensored abliteration; AUTHORISED pentest of own lab only (same base model + config/perf as qwen3.8)" ;;
     *)               echo "" ;;
   esac
 }
@@ -310,7 +315,7 @@ get_profile_vram_estimate() {
     devstral-large)  echo "(not yet measured — predicted: ~25.9 GB GPU 0 model+overhead, ~26.5 GB GPU 1 model; 2.2 GB GPU 1 compute headroom at 64K ctx q4_0 KV. MEASURE after first deploy.)" ;;
     qwen3.8)         echo "idle 89% / 62% (26.65 + 18.69 GB); PEAK 89% / 63% — flat under 122K-token prefill stress, 0.2 GB drift, no OOM (validated 2026-08-19, b10509, 262K ctx q8_0 KV, tensor split 1,1, MTP n-3). Decode 49.5 t/s short / 32.6 t/s @122K; prefill 553 t/s @22K." ;;
     hemmingway)      echo "~40.5 GB at 256K + MTP n2 (GPU0 22.4 / GPU1 18.1, measured 2026-10-19); ~10 GB headroom/card, ~44 t/s writing gen, 0.72 draft acceptance. WITH VISION (qwen3.8 mmproj on ROCm1, 2026-10-26): idle 24.0 / 20.5 GB, 49 t/s code gen, 0.85 acceptance" ;;
-    qwen3.8-redteam) echo "measured 2026-10-17 first load, idle, embed+rerank co-resident: GPU0 28.3 GB (87%) / GPU1 24.8 GB (77%); free 3.9 / 7.4 GB — above the ~3 GB guideline. GPU1 sits well above the weight-delta prediction (3 x 128K per-slot KV, kv_unified=false + mmproj on GPU1). Peak under heavy prefill not yet measured — stability pass after a deliberate swap." ;;
+    qwen3.8-redteam) echo "orcarouter Q6_K (~22 GB) ~ stock qwen3.8 footprint, same base model. VRAM not yet re-measured on this build (prior OBLITERATED Q6_K idle 2026-10-17: GPU0 28.3 GB / GPU1 24.8 GB, 3 x 128K per-slot KV + mmproj on GPU1). Re-measure on the first deliberate swap, and confirm the MTP head loaded (draft-mtp assumes it is embedded in this GGUF)." ;;
     *)               echo "(no VRAM data — run stability-test after swap to characterize)" ;;
   esac
 }
@@ -407,12 +412,14 @@ write_config_env() {
     devstral)                mmproj="$DEVSTRAL_MMPROJ"; mmproj_dev="ROCm0"; vision="1" ;;
   esac
   local chat_template=""
-  # The OBLITERATED GGUF ships a stripped chat template with no tools section -> llama-server
-  # silently drops the request's tools array and the model improvises tool calls in prose
-  # (diagnosed 2026-10-18: probe returned finish_reason "stop" + fabricated tool results).
-  # Override with the stock Qwen3.8's full official template (byte copy, same tokenizer and
-  # architecture), staged at /opt/models/chat-templates/ on LXC 151. Every other profile keeps
-  # its GGUF's embedded template.
+  # Pin the stock Qwen3.8 chat template for the red-team profile, rather than trust whatever
+  # is baked into the abliterated GGUF. An abliterated GGUF can ship a stripped template with
+  # no tools section -> llama-server silently drops the request's tools array and the model
+  # improvises tool calls in prose (diagnosed 2026-10-18 on the prior OBLITERATED build: probe
+  # returned finish_reason "stop" + fabricated tool results). orcarouter's template is reported
+  # identical to stock, but pinning the known-good copy keeps tool calling working regardless of
+  # the GGUF. Same tokenizer and architecture, staged at /opt/models/chat-templates/ on LXC 151.
+  # Every other profile keeps its GGUF's embedded template.
   if [[ "$alias" == "qwen3.8-redteam" ]]; then
     chat_template="/opt/models/chat-templates/qwen3.8.jinja"
   fi
