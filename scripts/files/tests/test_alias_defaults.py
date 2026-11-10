@@ -66,6 +66,17 @@ class TestSamplingConstants(unittest.TestCase):
             "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
             "presence_penalty": 1.5})
 
+    def test_redteam_agentic_is_stock_nothink_with_low_temp(self):
+        # 2026-11-10: temp lowered to 0.2 for tool-use reliability (abliterated-
+        # Qwen3.8 agent-harness guidance is 0.1-0.3); everything else is the
+        # stock non-thinking recipe, incl. presence_penalty 1.5 for loop control.
+        self.assertEqual(ad.REDTEAM_AGENTIC_SAMPLING, {
+            "temperature": 0.2, "top_p": 0.8, "top_k": 20, "min_p": 0.0,
+            "presence_penalty": 1.5})
+        base = dict(ad.QWEN38_NOTHINK_SAMPLING)
+        base["temperature"] = 0.2
+        self.assertEqual(ad.REDTEAM_AGENTIC_SAMPLING, base)
+
 
 class TestApplyAliasDefaults(unittest.TestCase):
     def test_rewrites_model_to_backend(self):
@@ -156,10 +167,12 @@ class TestAliasMap(unittest.TestCase):
         # profile for trigger_swap_and_wait().
         #
         # 2026-11-10: the profile's model is orcarouter/Qwen3.8-27B-Uncensored,
-        # whose edit stays close to stock Qwen3.8, so the aliases take the
-        # stock Qwen3.8 sampling recipes (not a model-specific one).
+        # close to stock Qwen3.8. The non-thinking alias (used by ARTEX / tool
+        # harnesses) takes REDTEAM_AGENTIC_SAMPLING (stock nothink with temp 0.2
+        # for tool-use reliability); the -think alias keeps the stock thinking
+        # recipe.
         for alias, thinking, sampling in (
-                ("qwen3.8-redteam", False, "QWEN38_NOTHINK_SAMPLING"),
+                ("qwen3.8-redteam", False, "REDTEAM_AGENTIC_SAMPLING"),
                 ("qwen3.8-redteam-think", True, "QWEN38_THINK_SAMPLING")):
             with self.subTest(alias=alias):
                 entry = self.aliases[alias]
