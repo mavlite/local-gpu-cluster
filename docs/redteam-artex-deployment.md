@@ -187,9 +187,9 @@ old tasks' reports come out in English too; existing start-point nodes were rewr
 
 [`patches/0003-tool-repeat-guard.patch`](../scripts/lxc-artex/patches/0003-tool-repeat-guard.patch)
 adds `agent/repeatguard.go`: once an agent has made the **same tool call (same arguments) and
-got the same result 3 times in a row**, further repeats are refused with a tool error telling
-it to use the result it has and move on. A different call resets the count; a call whose
-result changes (polling) is never refused; each agent run has its own guard. Why: on
+got the same result 3 times within its last 8 calls**, further repeats are refused with a tool error telling
+it to use the result it has and move on. This catches straight runs (A A A) and cycles (A B A B); a call whose
+result changes (polling) is never refused, a call is allowed again once 8 other calls have pushed its repeats out of the window, and each agent run has its own guard. Why: on
 2026-11-10 the planner of task 3 called `list_assets` with one identical DSL **300 times** in
 10 minutes (empty result each time, no reasoning text, ~43k-token prompt per call), and no
 worker ever started. Router sampling penalties cannot stop this — they act within one
