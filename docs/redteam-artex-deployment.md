@@ -126,6 +126,15 @@ Write the task goal by **IP**, not by domain, and add task constraints (Task →
 lock remains the enforcement. Before starting, check the task's scope list and delete any
 IP outside the lock's `TARGETS`.
 
+For the colo, all of this is pre-filled in the ARTEX task template **"Colo pentest
+(IP-scoped)"** ([`task-template-colo.sql`](../scripts/lxc-artex/task-template-colo.sql); apply
+like the label SQL below). It carries the goal, the rules of engagement in the description,
+and task intercept rules: five `exact_ip` **allow** rows (a whitelist — ARTEX's asset gate
+refuses anything else) plus **block** rows for the mail/CDN hostnames. Templates cannot carry
+task constraints or the asset-coverage switch: turn **asset coverage off** on the create form
+(it auto-grows the task scope and exposes `add_task_scope`), and add constraint rows after
+creating if wanted.
+
 Goal template:
 
 > Perform an authorised penetration test of the services on these IP addresses ONLY:
