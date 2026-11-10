@@ -150,20 +150,37 @@ class TestAliasMap(unittest.TestCase):
         self.assertEqual(seen, 6)
 
     def test_redteam_aliases_use_distinct_backend_and_profile_mapping(self):
-        # OBLITERATED V3 (2026-10-17): the redteam aliases must resolve to
-        # their own backend (not "qwen3.8") so the profile-match guard fires
-        # the auto-swap instead of silently serving the stock model, and the
-        # backend must map to a swap profile for trigger_swap_and_wait().
-        for alias, thinking in (("qwen3.8-redteam", False),
-                                ("qwen3.8-redteam-think", True)):
+        # The redteam aliases must resolve to their own backend (not
+        # "qwen3.8") so the profile-match guard fires the auto-swap instead of
+        # silently serving the stock model, and the backend must map to a swap
+        # profile for trigger_swap_and_wait().
+        #
+        # 2026-11-10: the profile's model is orcarouter/Qwen3.8-27B-Uncensored,
+        # whose edit stays close to stock Qwen3.8, so the aliases take the
+        # stock Qwen3.8 sampling recipes (not a model-specific one).
+        for alias, thinking, sampling in (
+                ("qwen3.8-redteam", False, "QWEN38_NOTHINK_SAMPLING"),
+                ("qwen3.8-redteam-think", True, "QWEN38_THINK_SAMPLING")):
             with self.subTest(alias=alias):
                 entry = self.aliases[alias]
                 self.assertEqual(ast.literal_eval(entry["backend"]), "qwen3.8-redteam")
                 self.assertIs(ast.literal_eval(entry["enable_thinking"]), thinking)
                 self.assertEqual(ast.unparse(entry["sampling"]),
-                                 "alias_defaults.OBLITERATED_SAMPLING")
+                                 f"alias_defaults.{sampling}")
         self.assertEqual(_ann_assign_str_dict("BACKEND_TO_PROFILE").get(
             "qwen3.8-redteam"), "qwen3.8-redteam")
+
+    def test_no_sampling_dict_uses_a_key_llama_server_ignores(self):
+        # 2026-11-10: the redteam aliases injected "repetition_penalty", which
+        # llama-server silently ignores (its name is "repeat_penalty"; probed
+        # on /completion: effective repeat_penalty stayed 1.0). The model ran
+        # with no penalty at all and looped under an agent harness.
+        dicts = {n: v for n, v in vars(ad).items()
+                 if n.endswith("_SAMPLING") and isinstance(v, dict)}
+        self.assertTrue(dicts)
+        for name, sampling in dicts.items():
+            with self.subTest(constant=name):
+                self.assertNotIn("repetition_penalty", sampling)
 
     def test_coder_aliases_are_removed(self):
         # 2026-10-26: the coder swap profile was retired; its aliases must not

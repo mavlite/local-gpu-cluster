@@ -33,15 +33,12 @@ QWEN36_NOTHINK_SAMPLING = {
     "presence_penalty": 1.5,
 }
 
-# OBLITERATUS/Qwen3.8-27B-OBLITERATED V3 model card (fetched 2026-10-17):
-# repetition_penalty 1.15 is "Essential", agentic temperature 0.1-0.3
-# (0.2 = mid-range), top_p/top_k/min_p "Not needed" — greedy + rep-pen is
-# the card's recipe, so no other sampling keys are injected. The card gives
-# no per-mode split, so both thinking modes share this dict.
-OBLITERATED_SAMPLING = {
-    "temperature": 0.2,
-    "repetition_penalty": 1.15,
-}
+# NOTE: the red-team aliases (qwen3.8-redteam[-think]) deliberately reuse the
+# stock QWEN38_*_SAMPLING recipes above — their model is an abliteration of the
+# same base. A model-specific dict was removed 2026-11-10: it set
+# "repetition_penalty", which llama-server ignores (the parameter is
+# "repeat_penalty"), so it never took effect and the model looped under an
+# agent harness.
 
 
 def apply_alias_defaults(body: dict, alias_info: dict) -> dict:

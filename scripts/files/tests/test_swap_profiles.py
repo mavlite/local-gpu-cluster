@@ -45,6 +45,15 @@ def test_qwen38_profiles_are_three_slots_of_128k(name):
     assert (p["CTX"], p["PARALLEL"], p["CACHE_REUSE"]) == ("393216", "3", "0")
 
 
+def test_redteam_profile_serves_the_orcarouter_build_with_the_qwen38_layout():
+    # 2026-11-10: replaces OBLITERATUS/Qwen3.8-27B-OBLITERATED (looped under an agent harness;
+    # an independent comparison measured -33.6 pts HumanEval vs stock). Same base model, so the
+    # qwen3.8 layout carries over.
+    p = profile("qwen3.8-redteam")
+    assert (p["REPO"], p["QUANT"], p["ALIAS"]) == ("orcarouter/Qwen3.8-27B-Uncensored-GGUF", "Q6_K", "qwen3.8-redteam")
+    assert (p["SPLIT"], p["KV"], p["SPLIT_MODE"]) == ("1,1", "q8_0", "tensor")
+
+
 def test_other_profiles_stay_single_slot():
     for name in SINGLE_SLOT:
         assert profile(name)["PARALLEL"] == "1", name

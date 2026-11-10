@@ -59,9 +59,10 @@ chat_mmproj_lines() {
 
 # chat_template_lines -- override the chat template embedded in the GGUF.
 #   LLAMA_CHAT_TEMPLATE   path to a jinja template file; empty/unset = use the GGUF's embedded template (old behaviour)
-# Needed for qwen3.8-redteam: the OBLITERATED GGUF ships a stripped template with no tools section, so
+# Used for qwen3.8-redteam: an abliterated GGUF can ship a stripped template with no tools section, so
 # llama-server silently drops the request's tools array and the model improvises tool calls in prose.
-# The stock Qwen3.8's full official template (byte copy, same tokenizer/architecture) restores them.
+# Pinning the stock Qwen3.8's full official template (byte copy, same tokenizer/architecture) keeps
+# tool calling working regardless of what the GGUF embeds.
 chat_template_lines() {
   if [[ -n "${LLAMA_CHAT_TEMPLATE:-}" ]]; then
     printf '    --chat-template-file %s \\\n' "$LLAMA_CHAT_TEMPLATE"
