@@ -96,7 +96,8 @@ pct exec "$CTID" -- bash -c 'cd /root/artex-global && docker compose up -d'
 echo "[5/5] egress lock (hard scope boundary) — install + enable + docker drop-in"
 LOCK_DIR="$(cd "$(dirname "$0")" && pwd)"
 pct push "$CTID" "$LOCK_DIR/redteam-egress-lock.sh" /usr/local/sbin/redteam-egress-lock.sh
-pct exec "$CTID" -- chmod 0755 /usr/local/sbin/redteam-egress-lock.sh
+pct push "$CTID" "$LOCK_DIR/redteam-egress-report.sh" /usr/local/sbin/redteam-egress-report.sh
+pct exec "$CTID" -- chmod 0755 /usr/local/sbin/redteam-egress-lock.sh /usr/local/sbin/redteam-egress-report.sh
 pct exec "$CTID" -- bash -c 'cat > /etc/systemd/system/redteam-egress-lock.service' <<'UNIT'
 [Unit]
 Description=Red-team egress allowlist (ARTEX; targets + model only; hard scope boundary)

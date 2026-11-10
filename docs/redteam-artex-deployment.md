@@ -62,15 +62,46 @@ allows outbound **only** to:
 
 - the 5 colo targets (`38.107.232.37/39/51/103/210`) — the engagement scope
 - `192.168.6.153` — the router (model)
-- `192.168.6.155` — searxng + docs MCP (drop this line for full cluster isolation; ARTEX may not need it)
 - `192.168.6.1:53` — DNS
 - loopback + established/related
 
 Everything else is REJECTed — the broad internet **and** the rest of the cluster
-(`151/154/156` and the Proxmox host `.175`) — so the offensive box cannot scan production
+(`151/154/155/156` and the Proxmox host `.175`) — so the offensive box cannot scan production
 and a compromised target cannot pivot inward. Applied to both `OUTPUT` (host) and
 `DOCKER-USER` (containers — the operative chain, since ARTEX runs entirely in containers).
 IPv6 is rejected.
+
+**`.155` is deliberately not allowed.** It runs a tinyproxy on `:3128` that accepts all of
+`192.168.6.0/24` and forwards to `github.com`, `githubusercontent.com`, `crt.sh`, NVD and
+CIRCL — allowlisting `.155` was an internet path around the lock. ARTEX never used it.
+
+**This lock is the only hard boundary.** ARTEX's own task scope is advisory and widens
+itself: a goal phrased as "`example.com` and any subdomains" makes every subdomain in scope,
+and ARTEX auto-adds whatever IP that subdomain resolves to — including third-party mail
+hosts and CDNs. In the first engagement it ran three top-1000 port scans against the
+domain's mail provider; only this lock stopped them. **Scope engagements by IP**, list
+third-party infrastructure as out of scope in the goal, and remove any out-of-scope IPs from
+the task's scope list.
+
+Rejections use `icmp-admin-prohibited`, not a TCP reset — a reset looks exactly like a
+closed port, and the agent recorded blocked hosts as "1000 closed ports". nmap now reports
+`filtered … admin-prohibited` and curl fails instantly with "Couldn't connect".
+
+The rules are applied atomically (one `iptables-restore` transaction), so a re-run or a
+Docker restart never leaves `DOCKER-USER` momentarily empty.
+
+### Audit: what did the lock reject?
+
+Every new outbound connection the lock rejects is recorded per destination IP, protocol and
+port (with a packet counter, kept 30 days) in the nftables table `inet redteam_egress_audit`.
+Kernel `LOG` is not used because it is suppressed inside an LXC while the host has
+`nf_log_all_netns=0`.
+
+```sh
+pct exec 158 -- /usr/local/sbin/redteam-egress-report.sh           # per destination
+pct exec 158 -- /usr/local/sbin/redteam-egress-report.sh --ports   # per destination/proto/port
+pct exec 158 -- /usr/local/sbin/redteam-egress-report.sh --reset   # clear (start of an engagement)
+```
 
 Persistence: `redteam-egress-lock.service` (oneshot, `After=docker`) +
 `docker.service.d/redteam-egress.conf` `ExecStartPost` that re-applies after every Docker
@@ -83,7 +114,57 @@ pct exec 158 -- docker exec artex-global-artex-1 \
   curl -s -o /dev/null -w '%{http_code}\n' --max-time 6 http://192.168.6.153:8000/healthz   # 200
 pct exec 158 -- docker exec artex-global-artex-1 \
   curl -s -o /dev/null -w '%{http_code}\n' --max-time 6 https://1.1.1.1                      # 000
+pct exec 158 -- docker exec artex-global-artex-1 \
+  curl -s -o /dev/null -w '%{http_code}\n' --max-time 6 -x http://192.168.6.155:3128 https://github.com  # 000
 ```
+
+## Scoping an engagement (goal + constraints)
+
+Write the task goal by **IP**, not by domain, and add task constraints (Task → constraints;
+`allow`/`deny` rows that ARTEX injects at the top of the planner/worker prompt, above its
+"find another entry surface" heuristics). Constraints are prompt-level guidance — the egress
+lock remains the enforcement. Before starting, check the task's scope list and delete any
+IP outside the lock's `TARGETS`.
+
+Goal template:
+
+> Perform an authorised penetration test of the services on these IP addresses ONLY:
+> `<IP list>`. Hostnames under `<domain>` are in scope only while they resolve to one of
+> those IPs. Hostnames that resolve anywhere else (mail providers, CDNs, SaaS) are
+> third-party infrastructure and OUT OF SCOPE — do not scan, probe or connect to them. An
+> egress firewall blocks every out-of-scope IP: "filtered (admin-prohibited)" or an instant
+> "Couldn't connect" on such an IP is the firewall, not the target — note nothing and move
+> on. Locate and identify exploitable vulnerabilities and access beyond intended.
+
+Constraints:
+
+| kind | text |
+|---|---|
+| allow | Test only `<IP list>` and hostnames that resolve to them. |
+| deny | Any connection, scan or request to an IP outside `<IP list>` — including the domain's MX/mail hosts and CDN addresses. |
+| deny | Adding any IP or domain outside `<IP list>` to the task scope or assets. |
+| deny | Re-scanning or widening scans of a host that answered "filtered (admin-prohibited)" / "Couldn't connect" — that is the egress firewall. |
+| deny | Public lookup services (crt.sh, Shodan, search engines) — unreachable from this box. |
+
+## English UI labels
+
+The web UI translates built-in agent names, rule names, asset notes and tool descriptions
+itself, but some seed text stays Chinese: intercept-rule messages, the Report Writing
+trigger message, and prompt-version notes. Apply
+[`i18n-seed-labels-en.sql`](../scripts/lxc-artex/i18n-seed-labels-en.sql) after a fresh
+install (idempotent; only rewrites values still equal to the Chinese seed; no restart):
+
+```sh
+pct push 158 scripts/lxc-artex/i18n-seed-labels-en.sql /root/artex-global/i18n-seed-labels-en.sql
+pct exec 158 -- bash -c 'docker exec -i artex-global-postgres-1 psql -U artex -d artex \
+  -v ON_ERROR_STOP=1 < /root/artex-global/i18n-seed-labels-en.sql'
+```
+
+Still Chinese after that, because the Go server generates it at runtime: conversation titles
+(`工具触发 · …` = "tool trigger"), the `【任务 …】` / `【本次由工具调用触发】` framing of
+triggered runs, and some canned tool-result strings. The agent prompts are left Chinese on
+purpose — upstream treats them as the benchmarked "brain" and only steers the output language
+(`ARTEX_LANG=en`).
 
 ## Access & first-run
 
