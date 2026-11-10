@@ -176,6 +176,13 @@ makes them English; `provision.sh` applies `patches/*.patch` after checking out 
 commit, so the version string ends in `-dirty`. The titles are display-only (never sent to the
 model). Existing rows were renamed in `conversations.title` directly.
 
+[`patches/0002-english-report-and-origin.patch`](../scripts/lxc-artex/patches/0002-english-report-and-origin.patch)
+translates the generated penetration-test / findings report skeleton (headings, labels, CSV
+header — the fork shipped it in **Korean**) and the task graph's start-point text
+(`任务起点：… ；目标：…` → `Task origin: …; Goal: …`). The report is rendered on request, so
+old tasks' reports come out in English too; existing start-point nodes were rewritten in
+`exploration_nodes.payload`. The report tests keep their assertions, now against the English text.
+
 Rebuilding on the live box must work **offline** (the egress lock blocks Docker Hub, the Go
 proxy and npm): build the binary with `GOPROXY=off ARTEX_SKIP_FRONTEND=1`, then layer it onto
 the current image instead of re-running the Dockerfile (its `# syntax=` line makes BuildKit
