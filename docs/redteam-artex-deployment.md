@@ -183,6 +183,19 @@ header — the fork shipped it in **Korean**) and the task graph's start-point t
 old tasks' reports come out in English too; existing start-point nodes were rewritten in
 `exploration_nodes.payload`. The report tests keep their assertions, now against the English text.
 
+### Tool-call repeat guard
+
+[`patches/0003-tool-repeat-guard.patch`](../scripts/lxc-artex/patches/0003-tool-repeat-guard.patch)
+adds `agent/repeatguard.go`: once an agent has made the **same tool call (same arguments) and
+got the same result 3 times in a row**, further repeats are refused with a tool error telling
+it to use the result it has and move on. A different call resets the count; a call whose
+result changes (polling) is never refused; each agent run has its own guard. Why: on
+2026-11-10 the planner of task 3 called `list_assets` with one identical DSL **300 times** in
+10 minutes (empty result each time, no reasoning text, ~43k-token prompt per call), and no
+worker ever started. Router sampling penalties cannot stop this — they act within one
+completion, not across turns — and ARTEX had no guard of its own. Refusals are logged as
+`[tools] repeat guard: refused …` in `docker logs artex-global-artex-1`.
+
 Rebuilding on the live box must work **offline** (the egress lock blocks Docker Hub, the Go
 proxy and npm): build the binary with `GOPROXY=off ARTEX_SKIP_FRONTEND=1`, then layer it onto
 the current image instead of re-running the Dockerfile (its `# syntax=` line makes BuildKit

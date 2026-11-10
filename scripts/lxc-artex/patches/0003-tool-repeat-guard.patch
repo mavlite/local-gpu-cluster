@@ -1,0 +1,251 @@
+diff --git a/agent/assembly.go b/agent/assembly.go
+index e55f986..11e4247 100644
+--- a/agent/assembly.go
++++ b/agent/assembly.go
+@@ -66,8 +66,10 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool)
+ 	// model-conventional spelling still hits the handler while the model keeps
+ 	// seeing only the official names. See issue #19.
+ 	out, def.Deferred = addToolAliases(out, def.Deferred)
++	// One repeat guard per agent run, shared by all its tools (see repeatguard.go).
++	repeats := newRepeatGuard(repeatGuardLimit)
+ 	for i, t := range out {
+-		out[i] = guardPanic(t)
++		out[i] = repeats.wrap(guardPanic(t))
+ 	}
+ 	return out, def, cleanup
+ }
+diff --git a/agent/repeatguard.go b/agent/repeatguard.go
+new file mode 100644
+index 0000000..0bd9065
+--- /dev/null
++++ b/agent/repeatguard.go
+@@ -0,0 +1,98 @@
++package agent
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"log"
++	"sync"
++
++	actool "github.com/Autumn-27/norma/tool"
++)
++
++// repeatGuardLimit is how many times in a row an agent may make the exact same
++// tool call and get the exact same result before further repeats are refused.
++const repeatGuardLimit = 3
++
++// repeatGuard stops an agent from re-issuing one identical tool call forever.
++// A model that gets an uninformative result (e.g. an empty list) can copy its own
++// previous call from the history turn after turn; sampling penalties only act
++// within one completion, so they cannot break a loop that spans turns. Observed
++// 2026-11-10: the planner called list_assets with the same DSL 300 times.
++//
++// The guard keys on tool name + canonical arguments AND on the result, so a
++// polling call whose output changes is never refused, and any different call
++// resets the streak. One guard is shared by all tools of one agent run.
++type repeatGuard struct {
++	mu     sync.Mutex
++	limit  int
++	key    string // tool name + canonical input of the last call
++	result string // digest of that call's result
++	streak int    // consecutive calls with this key and this result
++}
++
++func newRepeatGuard(limit int) *repeatGuard { return &repeatGuard{limit: limit} }
++
++func (g *repeatGuard) wrap(t actool.CoreTool) actool.CoreTool {
++	return &repeatGuardedTool{CoreTool: t, guard: g}
++}
++
++// refuse reports whether a call with key must be refused (and the streak length).
++func (g *repeatGuard) refuse(key string) (bool, int) {
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	return key == g.key && g.streak >= g.limit, g.streak
++}
++
++func (g *repeatGuard) record(key, result string) {
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	if key == g.key && result == g.result {
++		g.streak++
++		return
++	}
++	g.key, g.result, g.streak = key, result, 1
++}
++
++// repeatCallKey canonicalises the JSON input (object keys sorted by re-marshal)
++// so argument order does not hide a repeat.
++func repeatCallKey(name string, in json.RawMessage) string {
++	var v any
++	if err := json.Unmarshal(in, &v); err == nil {
++		if b, err := json.Marshal(v); err == nil {
++			return name + "\x00" + string(b)
++		}
++	}
++	return name + "\x00" + string(in)
++}
++
++func repeatResultKey(res actool.Result, err error) string {
++	h := sha256.New()
++	fmt.Fprintf(h, "%t\x00%s\x00", res.IsError, res.Flatten())
++	if err != nil {
++		h.Write([]byte(err.Error()))
++	}
++	return hex.EncodeToString(h.Sum(nil))
++}
++
++type repeatGuardedTool struct {
++	actool.CoreTool
++	guard *repeatGuard
++}
++
++func (r *repeatGuardedTool) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
++	key := repeatCallKey(r.Name(), in)
++	if refused, n := r.guard.refuse(key); refused {
++		log.Printf("[tools] repeat guard: refused %s (identical call+result %d times in a row)", r.Name(), n)
++		return actool.Errorf(fmt.Sprintf(
++			"Repeated call refused: %s has been called %d times in a row with identical arguments and "+
++				"returned an identical result each time, so calling it again cannot produce new information. "+
++				"Do not repeat this call. Use the result you already have and continue with the next step "+
++				"(a different tool, different arguments, or conclude this step).", r.Name(), n)), nil
++	}
++	res, err := r.CoreTool.Call(ctx, in, tc)
++	r.guard.record(key, repeatResultKey(res, err))
++	return res, err
++}
+diff --git a/agent/repeatguard_test.go b/agent/repeatguard_test.go
+new file mode 100644
+index 0000000..ccb47ec
+--- /dev/null
++++ b/agent/repeatguard_test.go
+@@ -0,0 +1,125 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"testing"
++
++	actool "github.com/Autumn-27/norma/tool"
++)
++
++// fakeTool counts executions; out returns the result text for each call.
++type fakeTool struct {
++	actool.CoreTool // nil: only Name and Call are used
++	name            string
++	calls           int
++	out             func(n int) string
++}
++
++func (f *fakeTool) Name() string { return f.name }
++
++func (f *fakeTool) Call(_ context.Context, _ json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
++	f.calls++
++	return actool.Text(f.out(f.calls)), nil
++}
++
++func constOut(string) func(int) string {
++	return func(int) string { return `{"assets":null,"count":0}` }
++}
++
++func call(t *testing.T, tool actool.CoreTool, in string) actool.Result {
++	t.Helper()
++	res, err := tool.Call(context.Background(), json.RawMessage(in), nil)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	return res
++}
++
++func TestRepeatGuardRefusesAfterLimitIdenticalCallsAndResults(t *testing.T) {
++	ft := &fakeTool{name: "list_assets", out: constOut("")}
++	tool := newRepeatGuard(repeatGuardLimit).wrap(ft)
++	in := `{"dsl":"ip==38.107.232.51","limit":50}`
++	for i := 1; i <= repeatGuardLimit; i++ {
++		if res := call(t, tool, in); res.IsError {
++			t.Fatalf("call %d refused, want executed", i)
++		}
++	}
++	for i := 0; i < 5; i++ {
++		res := call(t, tool, in)
++		if !res.IsError {
++			t.Fatalf("repeat %d executed, want refused", i)
++		}
++	}
++	if ft.calls != repeatGuardLimit {
++		t.Fatalf("tool executed %d times, want %d", ft.calls, repeatGuardLimit)
++	}
++}
++
++func TestRepeatGuardDifferentCallResetsStreak(t *testing.T) {
++	ft := &fakeTool{name: "list_assets", out: constOut("")}
++	tool := newRepeatGuard(repeatGuardLimit).wrap(ft)
++	a, b := `{"dsl":"ip==1.1.1.1"}`, `{"dsl":"ip==2.2.2.2"}`
++	for i := 0; i < repeatGuardLimit; i++ {
++		call(t, tool, a)
++	}
++	if !call(t, tool, a).IsError {
++		t.Fatal("4th identical call executed, want refused")
++	}
++	if call(t, tool, b).IsError {
++		t.Fatal("different call refused, want executed")
++	}
++	if call(t, tool, a).IsError {
++		t.Fatal("call after reset refused, want executed")
++	}
++}
++
++func TestRepeatGuardAllowsPollingWithChangingResult(t *testing.T) {
++	ft := &fakeTool{name: "Bash", out: func(n int) string { return fmt.Sprintf("progress %d%%", n*10) }}
++	tool := newRepeatGuard(repeatGuardLimit).wrap(ft)
++	for i := 1; i <= 10; i++ {
++		if call(t, tool, `{"command":"cat /tmp/scan.progress"}`).IsError {
++			t.Fatalf("poll %d refused although its result changed", i)
++		}
++	}
++}
++
++func TestRepeatGuardSharedAcrossToolsOfOneRun(t *testing.T) {
++	g := newRepeatGuard(repeatGuardLimit)
++	a := g.wrap(&fakeTool{name: "list_assets", out: constOut("")})
++	b := g.wrap(&fakeTool{name: "list_tasks", out: constOut("")})
++	in := `{"x":1}`
++	for i := 0; i < repeatGuardLimit; i++ {
++		call(t, a, in)
++	}
++	if call(t, b, in).IsError {
++		t.Fatal("same args on a different tool refused, want executed")
++	}
++	if call(t, a, in).IsError {
++		t.Fatal("streak should have been reset by the other tool's call")
++	}
++}
++
++func TestRepeatGuardCanonicalisesArgumentOrder(t *testing.T) {
++	ft := &fakeTool{name: "list_assets", out: constOut("")}
++	tool := newRepeatGuard(repeatGuardLimit).wrap(ft)
++	call(t, tool, `{"a":1,"b":2}`)
++	call(t, tool, `{"b":2,"a":1}`)
++	call(t, tool, `{ "a" : 1, "b" : 2 }`)
++	if !call(t, tool, `{"b":2,"a":1}`).IsError {
++		t.Fatal("reordered identical arguments were not recognised as a repeat")
++	}
++}
++
++func TestRepeatGuardSeparateRunsAreIndependent(t *testing.T) {
++	in := `{"dsl":"ip==1.1.1.1"}`
++	first := newRepeatGuard(repeatGuardLimit).wrap(&fakeTool{name: "list_assets", out: constOut("")})
++	for i := 0; i < repeatGuardLimit; i++ {
++		call(t, first, in)
++	}
++	second := newRepeatGuard(repeatGuardLimit).wrap(&fakeTool{name: "list_assets", out: constOut("")})
++	if call(t, second, in).IsError {
++		t.Fatal("a new agent run inherited another run's streak")
++	}
++}
