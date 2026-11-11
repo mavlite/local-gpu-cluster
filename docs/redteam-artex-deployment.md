@@ -255,11 +255,66 @@ printf 'FROM artex:prev\nCOPY dist/amd64/artex /app/artex\n' > /root/artex-patch
 docker build -f /root/artex-patches/Dockerfile.binary-swap -t artex:local . && docker compose up -d artex
 ```
 
-Still Chinese: the `【任务 …】` / `【本次由工具调用触发】` framing inside triggered runs (it is
-the model's input, kept with the Chinese prompts), some canned tool-result strings, and the
-skill bodies. The agent prompts are left Chinese on
-purpose — upstream treats them as the benchmarked "brain" and only steers the output language
-(`ARTEX_LANG=en`).
+Still Chinese in what the model receives: the `【任务 …】` / `【本次由工具调用触发】` framing
+inside triggered runs, the code-owned prompt tails (output-language directive, artifact and
+traffic specs), the wrap-up prompts (`agent/wrapup.go`, partly Korean), tool descriptions, some
+canned tool-result strings, and the skill bodies. These are the model's working instructions;
+upstream treats them as the benchmarked "brain" and only steers the display language
+(`ARTEX_LANG=en`). The eight editable agent prompt BODIES are English — see above.
+
+## Toolbox image
+
+The stock ARTEX image is `python:3.12-slim` plus nmap, curl and Playwright, while upstream's
+design assumes "Kali tooling" (`agent/worker.go`). Behind the egress lock the agents cannot
+install anything, so in task 3 roughly a third of the tokens went into hand-writing an SSH
+client in Python that never completed a handshake, and the SSH conclusions came out weaker
+than they look. [`toolbox/`](../scripts/lxc-artex/toolbox/) bakes a fixed toolset in instead
+of opening the lock to package mirrors.
+
+Built **outside** the lock in a temporary CT that has internet, then moved in by image
+tarball — LXC 158 never gains egress:
+
+```sh
+# in LXC 158: export the image ARTEX currently runs
+pct exec 158 -- bash -c 'docker save artex:local | gzip -1 > /root/artex-images/artex-local-<date>.tar.gz'
+# in the build CT (internet + docker):
+bash toolbox/build.sh artex-local-<date>.tar.gz artex-toolbox-<date>.tar.gz artex:toolbox-<date>
+# back on the Proxmox host:
+bash toolbox/deploy.sh artex-toolbox-<date>.tar.gz artex:toolbox-<date>
+```
+
+`build.sh` writes `requirements.lock`, `apt.lock`, `seclists.sha256` and `TOOLBOX.txt` next to
+the Dockerfile as the record of what went in. Release binaries are sha256-pinned against the
+vendor's published checksum; git-sourced tools are pinned to a commit SHA and the build fails
+if the clone resolves to anything else. `deploy.sh` refuses to run while a task is active,
+tags the outgoing image `artex:pre-toolbox-<date>` for rollback, and re-verifies after the
+restart that the container still has no internet.
+
+Contents, by the gap each one closes: SSH (`ssh`, `sshpass`, `ssh-audit`, `hydra`, `paramiko`
+— no more hand-rolled crypto), web (`ffuf`, `feroxbuster`, `httpx`, `katana`, `nuclei` with
+templates baked in, `nikto`, `sqlmap`, `dalfox`, `arjun`, `wafw00f`), GraphQL (`graphw00f`,
+`clairvoyance` — the wiki has introspection off), `git-dumper`, `masscan`, SMB/AD
+(`smbclient`, `enum4linux-ng`, `netexec`, `impacket`), SNMP, DB clients, game-server clients
+(`a2s`, `rcon`), a SecLists subset at `/usr/share/seclists`, an offline Exploit-DB with
+`searchsploit`, and Metasploit. `cat /opt/TOOLBOX.txt` in the container prints the live
+inventory with versions.
+
+**Rate caps are structural, not advisory.** The targets are live production game and wiki
+servers and tool defaults (hydra 16 tasks, masscan unlimited) are far more aggressive than a
+careful operator. The real binaries move to `/opt/toolbox/real` and `/usr/local/bin/<tool>`
+becomes [`toolbox-ratelimit.sh`](../scripts/lxc-artex/toolbox/toolbox-ratelimit.sh), which
+lowers an over-cap value, applies the cap when the flag is absent, notes either on stderr, and
+passes `--version`/`--help` through untouched. Caps: `hydra -t 4`, `masscan --rate 1000`,
+`ffuf -rate 50 -t 10`, `feroxbuster --rate-limit 50 --threads 10`, `nuclei -rl 50 -c 10`.
+This is enforced in a wrapper rather than an ARTEX intercept rule because those match with
+RE2, which has no lookahead and so cannot detect a *missing* flag.
+
+The [`artex-toolbox` skill](../scripts/lxc-artex/skills/artex-toolbox/SKILL.md) tells the
+agents what exists, that the box is offline so installing will fail, the wordlist paths, the
+caps, and — important for evidence — that Go-based tools ignore the `HTTP_PROXY` variables
+ARTEX injects into Bash and need an explicit `-proxy`/`-x` flag pointing at
+`http://127.0.0.1:8788`, or their traffic is never recorded and findings land with no traffic
+evidence. `skills/` is bind-mounted, so the skill deploys without a rebuild.
 
 ## Access & first-run
 

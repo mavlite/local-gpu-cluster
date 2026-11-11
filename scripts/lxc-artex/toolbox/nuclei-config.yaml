@@ -1,0 +1,4 @@
+# nuclei inside the egress-locked ARTEX container: templates are baked into the image at
+# nuclei's default path (/root/nuclei-templates, pinned release); never try to update
+# them or the engine — those checks would only hit the egress lock.
+disable-update-check: true

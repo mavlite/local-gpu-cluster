@@ -5,6 +5,9 @@ __pycache__/
 
 # Lock files (e.g. local-delegate GPU lease, test lease locks). Never commit live locks.
 *.lock
+# Exception: the ARTEX toolbox image's dependency locks are build RECORDS, not live locks —
+# they pin what went into the image and must be committed for reproducible rebuilds.
+!scripts/lxc-artex/toolbox/*.lock
 
 # Local-only operator notes — contain session state / customer data, not for publishing
 SESSION_HANDOFF.md
