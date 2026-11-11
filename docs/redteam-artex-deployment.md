@@ -207,6 +207,30 @@ Skills list and the agents' skill index show). The skill bodies stay Chinese: th
 model's working instructions, like the prompts. `skills/` is bind-mounted into the container,
 so this takes effect without a rebuild.
 
+### English agent prompts (prompt version 2)
+
+Since 2026-11-11 all eight agents (goals, planner, mainagent, worker, auto, pentest,
+reporter, retester) run on English prompt bodies, saved as **prompt version 2** with the note
+`English (hartex 8b60f82)`; **Restore default** in System → Agents rolls an agent back to the
+Chinese v1. The text comes from [h4nt3r2409/hartex](https://github.com/h4nt3r2409/hartex)
+@ `8b60f82` (AGPL-3.0, an English-only edition of the same upstream), copied into
+[`prompts-en/`](../scripts/lxc-artex/prompts-en/) and applied with
+[`apply-prompts-en.sh`](../scripts/lxc-artex/apply-prompts-en.sh) (mirrors "Save as new
+version"; skips user-edited prompts; re-running is a no-op; no restart — prompts are read from
+the DB on every render). Before use each prompt was checked against our Chinese default: same
+line count, identical Go-template skeleton, same tool/identifier tokens and none added, renders
+with the agent's real vars struct through `renderSystem` (a broken template would silently fall
+back to Chinese), no CJK, no new URLs/IPs, and read in full for added or changed instructions —
+the scope red lines, constraint precedence and "reproduced evidence only" rules are intact. One
+intended difference: the reporter's "write everything in Chinese" became "the user-facing output
+language", which is why earlier finding reports had Chinese headings.
+
+hartex itself was **not** adopted as the codebase: it arrives as one squashed import of an
+unreleased "0.3.16-global.1" with no history to diff against upstream, a single maintainer and
+no external use. Still Chinese in what the model receives: the code-owned prompt tails (output-
+language directive, artifact/traffic specs), the wrap-up prompts (`agent/wrapup.go`, partly
+Korean), tool descriptions and the triggered-run framing.
+
 ### Tool-call repeat guard
 
 [`patches/0003-tool-repeat-guard.patch`](../scripts/lxc-artex/patches/0003-tool-repeat-guard.patch)
