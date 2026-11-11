@@ -157,16 +157,24 @@ Constraints:
 
 ## English UI labels
 
-The web UI translates built-in agent names, rule names, asset notes and tool descriptions
-itself, but some seed text stays Chinese: intercept-rule messages, the Report Writing
-trigger message, and prompt-version notes. Apply
-[`i18n-seed-labels-en.sql`](../scripts/lxc-artex/i18n-seed-labels-en.sql) after a fresh
-install (idempotent; only rewrites values still equal to the Chinese seed; no restart):
+The web UI translates rule names, asset notes and tool descriptions itself, but some seed
+text stays Chinese: intercept-rule messages, the Report Writing trigger message, and
+prompt-version notes. Built-in agent names/descriptions are translated only on screens that go
+through `useAgentLabels()`; elsewhere the raw seed shows (Chinese, and **Korean** for the
+reporter). Apply both SQL files after a fresh install (idempotent; each only rewrites values
+still equal to the seed, so edits made in the UI survive; no restart):
+[`i18n-seed-labels-en.sql`](../scripts/lxc-artex/i18n-seed-labels-en.sql) and
+[`i18n-agent-labels-en.sql`](../scripts/lxc-artex/i18n-agent-labels-en.sql) (agent names,
+descriptions and prompt-variable labels, using the UI's own English strings from
+`web/messages/en.json`). Agents are selected by key, never by name, and the reporter seed runs
+once behind a settings flag, so the English values are not reverted on restart.
 
 ```sh
-pct push 158 scripts/lxc-artex/i18n-seed-labels-en.sql /root/artex-global/i18n-seed-labels-en.sql
-pct exec 158 -- bash -c 'docker exec -i artex-global-postgres-1 psql -U artex -d artex \
-  -v ON_ERROR_STOP=1 < /root/artex-global/i18n-seed-labels-en.sql'
+for f in i18n-seed-labels-en.sql i18n-agent-labels-en.sql; do
+  pct push 158 scripts/lxc-artex/$f /root/artex-global/$f
+  pct exec 158 -- bash -c "docker exec -i artex-global-postgres-1 psql -U artex -d artex \
+    -v ON_ERROR_STOP=1 < /root/artex-global/$f"
+done
 ```
 
 Conversation titles of triggered runs (`工具触发 · …` = "tool trigger", plus the scheduled /
@@ -182,6 +190,22 @@ header — the fork shipped it in **Korean**) and the task graph's start-point t
 (`任务起点：… ；目标：…` → `Task origin: …; Goal: …`). The report is rendered on request, so
 old tasks' reports come out in English too; existing start-point nodes were rewritten in
 `exploration_nodes.payload`. The report tests keep their assertions, now against the English text.
+
+[`patches/0004-english-run-notices.patch`](../scripts/lxc-artex/patches/0004-english-run-notices.patch)
+translates the red "run interrupted" block shown when a task is paused, a run times out or a
+worker is stopped (`（运行被中断：…）`, `终态`, `中断原因`, token/turn lines, and the cause texts
+in `agent/cancelcause.go`), plus the Korean activity-feed dividers (`N차 계획 수립` →
+`Planning round N`, goal breakdown, queue and timeout-wrap-up notices). The dividers are
+display-only; the cause texts can reach the planner as an intent's stop reason, which is fine
+in English. The upstream test that required the dividers to be Korean
+(`runtime_activity_localized_test.go`) now requires them to contain no Hangul or Han, and was
+checked to fail when a divider is reverted to Korean.
+
+[`patches/0005-english-skill-descriptions.patch`](../scripts/lxc-artex/patches/0005-english-skill-descriptions.patch)
+translates the one-line `description:` of the `api-recon` and `scopesentry` skills (what the
+Skills list and the agents' skill index show). The skill bodies stay Chinese: they are the
+model's working instructions, like the prompts. `skills/` is bind-mounted into the container,
+so this takes effect without a rebuild.
 
 ### Tool-call repeat guard
 
@@ -208,7 +232,8 @@ docker build -f /root/artex-patches/Dockerfile.binary-swap -t artex:local . && d
 ```
 
 Still Chinese: the `【任务 …】` / `【本次由工具调用触发】` framing inside triggered runs (it is
-the model's input, kept with the Chinese prompts) and some canned tool-result strings. The agent prompts are left Chinese on
+the model's input, kept with the Chinese prompts), some canned tool-result strings, and the
+skill bodies. The agent prompts are left Chinese on
 purpose — upstream treats them as the benchmarked "brain" and only steers the output language
 (`ARTEX_LANG=en`).
 

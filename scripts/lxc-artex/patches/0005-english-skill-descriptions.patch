@@ -1,0 +1,25 @@
+diff --git a/skills/api-recon/SKILL.md b/skills/api-recon/SKILL.md
+index 18110ac..8ea4052 100644
+--- a/skills/api-recon/SKILL.md
++++ b/skills/api-recon/SKILL.md
+@@ -1,6 +1,6 @@
+ ---
+ name: api-recon
+-description: 收集网站API接口时调用该skill。
++description: Use this skill to collect a website's API endpoints (backend APIs, front-end routes, UI triggers).
+ ---
+ 
+ # API Recon（前端接口侦察）
+diff --git a/skills/scopesentry/SKILL.md b/skills/scopesentry/SKILL.md
+index 793b54b..050732f 100644
+--- a/skills/scopesentry/SKILL.md
++++ b/skills/scopesentry/SKILL.md
+@@ -1,7 +1,7 @@
+ ---
+ 
+ ## name: scopesentry-mcp
+-description: 通过 ScopeSentry MCP 管理安全扫描平台（项目、任务、模板、资产、节点）。在用户提到 ScopeSentry、MCP、API Key、扫描任务、资产查询时使用。
++description: Manage the ScopeSentry security-scanning platform (projects, tasks, templates, assets, nodes) via the ScopeSentry MCP. Use when the user mentions ScopeSentry, MCP, an API key, scan tasks or asset queries.
+ 
+ # ScopeSentry MCP 使用指南
+ 
