@@ -207,6 +207,23 @@ Skills list and the agents' skill index show). The skill bodies stay Chinese: th
 model's working instructions, like the prompts. `skills/` is bind-mounted into the container,
 so this takes effect without a rebuild.
 
+[`patches/0006-compactor-output-language.patch`](../scripts/lxc-artex/patches/0006-compactor-output-language.patch)
+makes the **compactor** honour the configured display language. Every other role gets the
+output-language directive appended automatically (`renderSystem`, or an explicit append in
+`planner.go`), but `compaction.go` built its `llm.CompletionRequest` by hand with a bare
+`compressionSystemPrompt`, so digest bodies came back in that prompt's own language —
+Chinese — whatever `ARTEX_LANG` or the `output_language` setting said. The patch routes it
+through a `compressionSystem()` helper that appends `langDirective(resolveOutputLang())`, and
+adds `agent/compaction_lang_test.go`, which asserts the directive names the selected language
+for every supported locale; the test was checked to fail when the append is removed. The
+compactor is **not** one of the eight DB-backed agents, so prompt version 2 never covered it,
+and it is the only prompt in `agent/` that builds a system prompt without the directive.
+
+Note the **UI** display language is separate and per-browser: it comes from
+`localStorage["artex_locale"]` (`DEFAULT_LOCALE` is `en`), so a Korean-looking timestamp such
+as `오전 4:28` is that browser's setting, not a server or agent problem. Change it in the
+app's language selector.
+
 ### English agent prompts (prompt version 2)
 
 Since 2026-11-11 all eight agents (goals, planner, mainagent, worker, auto, pentest,

@@ -1,0 +1,61 @@
+diff --git a/agent/compaction.go b/agent/compaction.go
+index 2e2e9e8..eeaf46b 100644
+--- a/agent/compaction.go
++++ b/agent/compaction.go
+@@ -513,7 +513,7 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
+ // runs on; thinking disabled (a pure summarization step).
+ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
+ 	req := llm.CompletionRequest{
+-		System:    []string{compressionSystemPrompt},
++		System:    []string{compressionSystem()},
+ 		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
+ 		MaxTokens: 1500,
+ 		Thinking:  "disabled",
+@@ -529,6 +529,16 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
+ 	return body, nil
+ }
+ 
++// compressionSystem returns the §4 body prompt with the output-language directive
++// appended. The prompt body is Chinese operational prose the model reads; the
++// directive is what forces the user-visible digest into the configured display
++// language. Every other role gets this via renderSystem (or, for the planner, an
++// explicit append); this call site builds its CompletionRequest by hand, so without
++// appending here a digest stays Chinese however ARTEX_LANG is set.
++func compressionSystem() string {
++	return compressionSystemPrompt + langDirective(resolveOutputLang())
++}
++
+ // compressionSystemPrompt is the §4 body prompt.
+ const compressionSystemPrompt = `你在压缩一组【彼此关联】的探索节点，产出一段综合结论(body)，供规划者快速掌握"这一片已经探明了什么"。
+ 
+diff --git a/agent/compaction_lang_test.go b/agent/compaction_lang_test.go
+new file mode 100644
+index 0000000..17e0dbc
+--- /dev/null
++++ b/agent/compaction_lang_test.go
+@@ -0,0 +1,25 @@
++package agent
++
++import (
++	"strings"
++	"testing"
++)
++
++// The compactor builds its llm.CompletionRequest by hand rather than going through
++// renderSystem, so the output-language directive has to be appended explicitly. It
++// was not, and digests came back in the prompt body's own language (Chinese)
++// whatever display language was configured. langMarker lives in prompt_test.go.
++func TestCompressionSystemCarriesOutputLanguage(t *testing.T) {
++	t.Cleanup(func() { OutputLanguage = nil })
++	for _, code := range SupportedOutputLangs {
++		code := code
++		OutputLanguage = func() string { return code }
++		got := compressionSystem()
++		if !strings.HasPrefix(got, compressionSystemPrompt) {
++			t.Fatalf("%s: compressionSystem must keep the §4 body prompt intact", code)
++		}
++		if !strings.Contains(got, langMarker[code]) {
++			t.Fatalf("%s: compressionSystem must name the display language (%q); without it digests stay in the prompt's own language", code, langMarker[code])
++		}
++	}
++}
