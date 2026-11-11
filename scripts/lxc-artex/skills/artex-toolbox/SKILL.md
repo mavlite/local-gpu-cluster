@@ -40,6 +40,9 @@ assuming a tool is missing; `command -v <tool>` confirms a single one.
 | Steam / Source game servers | Python `a2s` (queries), `rcon` (console) |
 | Exploit search / code | `searchsploit <term>` (local archive, no network) |
 | Exploitation framework | `msfconsole` (use `-q -x '<commands>; exit'` for one-shot, non-interactive runs) |
+| Cracking a hash you already obtained | `john` - the only **offline** cracker here; `hydra` only tries live services. Feed it `/usr/share/seclists/Passwords/...` |
+| Evidence for **non-HTTP** tests (SSH, game protocols) | `tcpdump` - see below |
+| Archives, XML, JSON, interactive shells | `7z`, `xmlstarlet`, `jq`, `rlwrap` |
 
 **Python** has `requests`, `paramiko`, `cryptography`, `h2`/`hpack`, `websockets`,
 `aiohttp`, `beautifulsoup4`, `lxml`, `pyjwt`, `dnspython`, `impacket`, `a2s`, `rcon`.
@@ -85,8 +88,22 @@ If a tool rejects the proxy's certificate, point it at `$CA` (`--cacert`, `-ca-c
 only when it has no CA option, disable verification for that call. `nuclei` also needs
 `-duc -nc` (no update check, no colour): update checks only hit the blocked firewall.
 
-Non-HTTP work (SSH, SMB, raw TCP, game-server UDP) is not proxy-recorded. That is
-expected - keep the command and its output as evidence instead and say so in the finding.
+## Evidence for non-HTTP work
+
+The proxy only records HTTP. SSH, SMB, raw TCP and game-server UDP produce **no traffic
+evidence at all** unless you capture it. Wrap those tests in `tcpdump`:
+
+```sh
+tcpdump -i any -n -w /app/data/<short-name>.pcap host <target-ip> and port <port> &
+TD=$!
+# ... run the ssh / a2s / rcon test here ...
+kill $TD; wait $TD 2>/dev/null
+```
+
+Write captures under `/app/data/` so they persist, and cite the file in the finding
+alongside the command and its output. If `tcpdump` fails with a permission or
+`CAP_NET_RAW` error, that is the container's capability set - **do not retry it or try to
+install anything**; record the command and output as the evidence and note the gap.
 
 ## Rate limits - these are live production services
 

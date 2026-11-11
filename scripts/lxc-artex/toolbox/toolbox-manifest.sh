@@ -37,6 +37,8 @@ printf '%-14s %s\n' hydra      "$(match_line '^hydra v' hydra -h)"
 printf '%-14s %s\n' netexec    "$(first_line netexec --version)"
 printf '%-14s %s\n' smbclient  "$(match_line 'version' smbclient --version)"
 printf '%-14s %s\n' enum4linux-ng "$(have enum4linux-ng)"
+# john is the only OFFLINE cracker here; hydra is online-only. Wordlists: /usr/share/seclists.
+printf '%-14s %s\n' john       "$(match_line 'John the Ripper' john)"
 echo
 
 echo "## Web"
@@ -65,6 +67,9 @@ printf '%-14s %s\n' snmpwalk   "$(match_line 'version' snmpwalk --version)"
 printf '%-14s %s\n' onesixtyone "$(have onesixtyone)"
 printf '%-14s %s\n' mysql/psql "$(have mysql) / $(have psql)"
 printf '%-14s %s\n' redis-cli  "$(have redis-cli)"
+# tcpdump captures evidence for NON-HTTP tests (ssh, game protocols) that the recording
+# proxy cannot see. Needs CAP_NET_RAW; if it errors, say so in the fact rather than retrying.
+printf '%-14s %s\n' tcpdump    "$(first_line tcpdump --version)"
 echo
 
 echo "## Exploitation"
@@ -86,6 +91,7 @@ for d in mods:
         print(f"  {d:18} MISSING")
 PY
 printf '%-14s %s\n' "shell utils" "$(first_line ps --version) / $(first_line xxd -v) / git $(git --version 2>&1 | awk '{print $3}')"
+printf '%-14s %s\n' "loot/misc"  "7z $(have 7z) | xmlstarlet $(have xmlstarlet) | rlwrap $(have rlwrap) | jq $(have jq)"
 echo
 
 echo "## Data"

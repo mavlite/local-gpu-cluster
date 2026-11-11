@@ -15,6 +15,7 @@ hydra          Hydra v9.4 (c) 2022 by van Hauser/THC & David Maciejak - Please d
 netexec        1.5.1 - Yippie-Ki-Yay - 917fcebc - 1210
 smbclient      Version 4.17.12-Debian
 enum4linux-ng  installed (/usr/local/bin/enum4linux-ng)
+john           John the Ripper password cracker, version 1.9.0
 
 ## Web
 ffuf           ffuf version: 2.3.0
@@ -41,6 +42,7 @@ snmpwalk       NET-SNMP version: 5.9.3
 onesixtyone    installed (/usr/bin/onesixtyone)
 mysql/psql     installed (/usr/bin/mysql) / installed (/usr/bin/psql)
 redis-cli      installed (/usr/bin/redis-cli)
+tcpdump        tcpdump version 4.99.3
 
 ## Exploitation
 msfconsole     Framework Version: 6.5.10-dev-
@@ -64,6 +66,7 @@ python3        Python 3.12.16
   python-a2s         1.4.2
   rcon               2.4.9
 shell utils    ps from procps-ng 4.0.2 / xxd 2022-01-14 by Juergen Weigert et al. / git 2.39.5
+loot/misc      7z installed (/usr/bin/7z) | xmlstarlet installed (/usr/bin/xmlstarlet) | rlwrap installed (/usr/bin/rlwrap) | jq installed (/usr/bin/jq)
 
 ## Data
 nuclei templates  /root/nuclei-templates (14104 templates)

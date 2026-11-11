@@ -155,6 +155,20 @@ RUN set -eu; mkdir -p /usr/share/seclists; cd /usr/share/seclists \
  && rm /tmp/seclists-files.txt \
  && ln -sfn /usr/share/seclists /usr/share/wordlists
 
+# Second apt layer, added after the 2026-11-11 deployment. It is deliberately NOT merged
+# into the apt block above: that block is the base of every layer that follows (pip, pipx,
+# release binaries, metasploit, exploitdb, seclists), so editing it rebuilds all of them and
+# lets unpinned Debian versions drift across the whole image. Appending here keeps the delta
+# to exactly these packages and keeps the rebuild to seconds. Merge the two lists only when
+# a full, deliberate refresh of the image is wanted.
+#   john      - the only OFFLINE cracker; hydra only tries live services
+#   tcpdump   - evidence for non-HTTP tests (ssh, game protocols) the MITM proxy cannot see
+#   7z/xmlstarlet/rlwrap - loot handling and interactive shells
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      john tcpdump p7zip-full xmlstarlet rlwrap \
+ && rm -rf /var/lib/apt/lists/*
+
 # Rate-limit wrappers: the targets are live production services, and tool defaults
 # (hydra 16 tasks, masscan unlimited) are far more aggressive than a careful operator.
 # The real binaries move to /opt/toolbox/real and /usr/local/bin/<tool> becomes the
