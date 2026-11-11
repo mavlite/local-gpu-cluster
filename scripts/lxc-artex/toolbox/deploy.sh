@@ -33,7 +33,17 @@ echo "[3/6] load"
 pin "gunzip -c /root/artex-images/$(basename "$IMG") | docker load"
 
 echo "[4/6] tag the current image for rollback, then switch artex:local"
-pin "docker tag artex:local artex:pre-toolbox-$STAMP"
+# Never reuse an existing rollback tag. A second deploy on the same day would otherwise
+# repoint artex:pre-toolbox-<date> at the image being replaced, destroying the only named
+# pointer back to the image before that — the rollback would land on the wrong one.
+ROLLBACK="artex:pre-toolbox-$STAMP"
+n=2
+while pin "docker image inspect $ROLLBACK >/dev/null 2>&1"; do
+  ROLLBACK="artex:pre-toolbox-$STAMP-$n"
+  n=$((n + 1))
+done
+pin "docker tag artex:local $ROLLBACK"
+echo "      rollback tag: $ROLLBACK"
 pin "docker tag $TAG artex:local"
 pin "docker images artex --format '{{.Tag}}\t{{.Size}}'"
 
@@ -49,9 +59,9 @@ pin "docker exec artex-global-artex-1 sh -c '
   curl -s -o /dev/null -w \"router %{http_code}\n\" http://192.168.6.153:8000/healthz
   head -8 /opt/TOOLBOX.txt'"
 
-cat <<'EOF'
+cat <<EOF
 
 Done. Rollback if needed:
-  pct exec 158 -- bash -c 'docker tag artex:pre-toolbox-<date> artex:local \
+  pct exec 158 -- bash -c 'docker tag $ROLLBACK artex:local \\
     && cd /root/artex-global && docker compose up -d artex'
 EOF
