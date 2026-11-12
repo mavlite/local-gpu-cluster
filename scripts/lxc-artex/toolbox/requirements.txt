@@ -1,0 +1,26 @@
+# Python LIBRARIES baked into the ARTEX toolbox layer — the shared interpreter the agents
+# `import` from in scripts they write. Keep this list import-only: CLI tools with heavy
+# dependency trees (git-dumper, clairvoyance, arjun, wafw00f, netexec) are installed by the
+# Dockerfile through pipx, each in its own venv, so they cannot break these imports.
+#
+# Deliberately NOT here: the Python `httpx` library — it would shadow ProjectDiscovery's
+# `httpx` scanner binary in agents' minds and in $PATH tab-completion. Use requests/aiohttp.
+#
+# Unpinned on the first build; build.sh writes the resolved set to requirements.lock —
+# copy that over this file to rebuild byte-identical versions.
+requests
+paramiko
+cryptography
+h2
+hpack
+websocket-client
+websockets
+aiohttp
+beautifulsoup4
+lxml
+pyjwt
+dnspython
+impacket
+python-a2s
+rcon
+ssh-audit

@@ -54,6 +54,12 @@ pct exec "$CTID" -- bash -c '
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
   systemctl enable --now docker >/dev/null 2>&1'
 
+# Local source patches applied on top of the pinned commit (English UI titles).
+pct exec "$CTID" -- mkdir -p /root/artex-patches
+for p in "$(cd "$(dirname "$0")" && pwd)"/patches/*.patch; do
+  [ -e "$p" ] && pct push "$CTID" "$p" "/root/artex-patches/$(basename "$p")"
+done
+
 echo "[3/5] build artex:local from pinned commit $PINNED (Go 1.26.3 + Node 20)"
 pct exec "$CTID" -- bash -c "
   set -e; export DEBIAN_FRONTEND=noninteractive; cd /root
@@ -70,6 +76,7 @@ pct exec "$CTID" -- bash -c "
   git clone -q https://github.com/jiwoochris/artex-global.git
   cd artex-global && git checkout -q $PINNED
   [ \"\$(git rev-parse HEAD)\" = \"$PINNED\" ] || { echo PIN_MISMATCH; exit 1; }
+  for p in /root/artex-patches/*.patch; do [ -e \"\$p\" ] && git apply \"\$p\"; done
   ARTEX_OUTPUT=dist/amd64/artex ARTEX_TARGET_OS=linux ARTEX_TARGET_ARCH=amd64 PATH=/usr/local/go/bin:\$PATH bash build.sh
   docker build -t artex:local .
   sed -i 's#image: ghcr.io/jiwoochris/artex-global:.*#image: artex:local#' docker-compose.yml"
@@ -96,7 +103,8 @@ pct exec "$CTID" -- bash -c 'cd /root/artex-global && docker compose up -d'
 echo "[5/5] egress lock (hard scope boundary) — install + enable + docker drop-in"
 LOCK_DIR="$(cd "$(dirname "$0")" && pwd)"
 pct push "$CTID" "$LOCK_DIR/redteam-egress-lock.sh" /usr/local/sbin/redteam-egress-lock.sh
-pct exec "$CTID" -- chmod 0755 /usr/local/sbin/redteam-egress-lock.sh
+pct push "$CTID" "$LOCK_DIR/redteam-egress-report.sh" /usr/local/sbin/redteam-egress-report.sh
+pct exec "$CTID" -- chmod 0755 /usr/local/sbin/redteam-egress-lock.sh /usr/local/sbin/redteam-egress-report.sh
 pct exec "$CTID" -- bash -c 'cat > /etc/systemd/system/redteam-egress-lock.service' <<'UNIT'
 [Unit]
 Description=Red-team egress allowlist (ARTEX; targets + model only; hard scope boundary)

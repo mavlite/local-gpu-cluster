@@ -1,0 +1,99 @@
+ARTEX toolbox — offline (egress-locked): do not apt/pip install; use what is here.
+Route HTTP tools through the recording proxy so findings keep traffic evidence.
+
+## Rate caps (enforced — the targets are live production services)
+hydra -t<=4 | masscan --rate<=1000 | ffuf -rate<=50 -t<=10
+feroxbuster --rate-limit<=50 --threads<=10 | nuclei -rl<=50 -c<=10
+A higher value is silently lowered and noted on stderr; omitting the flag applies
+the cap as the default. Real binaries: /opt/toolbox/real (do not call directly).
+
+## Access / credentials
+ssh            OpenSSH_9.2p1 Debian-2+deb12u10, OpenSSL 3.0.22 25 Aug 2026
+sshpass        sshpass 1.09
+ssh-audit      ssh-audit 3.9.0
+hydra          Hydra v9.4 (c) 2022 by van Hauser/THC & David Maciejak - Please do not use in military or 
+netexec        1.5.1 - Yippie-Ki-Yay - 917fcebc - 1210
+smbclient      Version 4.17.12-Debian
+enum4linux-ng  installed (/usr/local/bin/enum4linux-ng)
+john           John the Ripper password cracker, version 1.9.0
+
+## Web
+ffuf           ffuf version: 2.3.0
+feroxbuster    feroxbuster 2.13.1
+httpx          [INF] Current Version: v1.12.0
+katana         [INF] Current version: v1.8.0
+nuclei         [INF] Nuclei Engine Version: v3.11.1
+nikto          Nikto 2.6.1 (LW 2.5)
+sqlmap         1.7.2#stable
+dalfox         Dalfox v3.3.0
+arjun          installed (/usr/local/bin/arjun)
+wafw00f        installed (/usr/local/bin/wafw00f)
+graphw00f      installed (/usr/local/bin/graphw00f)
+clairvoyance   installed (/usr/local/bin/clairvoyance)
+git-dumper     installed (/usr/local/bin/git-dumper)
+testssl.sh         testssl.sh       3.0.8 from https://testssl.sh/
+
+## Network / services
+nmap           Nmap version 7.93 ( https://nmap.org )
+masscan        Masscan version 1.3.2 ( https://github.com/robertdavidgraham/masscan )
+ncat           Ncat: Version 7.93 ( https://nmap.org/ncat )
+socat          socat version 1.7.4.4 on 06 Nov 2022 08:15:51
+snmpwalk       NET-SNMP version: 5.9.3
+onesixtyone    installed (/usr/bin/onesixtyone)
+mysql/psql     installed (/usr/bin/mysql) / installed (/usr/bin/psql)
+redis-cli      installed (/usr/bin/redis-cli)
+tcpdump        tcpdump version 4.99.3
+
+## Exploitation
+msfconsole     Framework Version: 6.5.10-dev-
+searchsploit   installed (/usr/local/bin/searchsploit) — local archive /opt/exploitdb
+
+## Scripting
+python3        Python 3.12.16
+  requests           2.34.2
+  paramiko           5.1.0
+  cryptography       50.0.2
+  h2                 4.4.1
+  hpack              4.2.0
+  websocket-client   1.9.2
+  websockets         17.4
+  aiohttp            3.14.5
+  beautifulsoup4     4.15.0
+  lxml               6.1.3
+  pyjwt              2.15.1
+  dnspython          2.9.2
+  impacket           0.13.1
+  python-a2s         1.4.2
+  rcon               2.4.9
+shell utils    ps from procps-ng 4.0.2 / xxd 2022-01-14 by Juergen Weigert et al. / git 2.39.5
+loot/misc      7z installed (/usr/bin/7z) | xmlstarlet installed (/usr/bin/xmlstarlet) | rlwrap installed (/usr/bin/rlwrap) | jq installed (/usr/bin/jq)
+
+## Data
+nuclei templates  /root/nuclei-templates (14104 templates)
+exploit archive   /opt/exploitdb (46709 entries) — searchsploit <term>
+wordlists         /usr/share/seclists (SecLists 2026.2 subset); /usr/share/wordlists -> seclists
+  Discovery/Web-Content/Common-DB-Backups.txt
+  Discovery/Web-Content/common-api-endpoints-mazen160.txt
+  Discovery/Web-Content/common.txt
+  Discovery/Web-Content/graphql.txt
+  Discovery/Web-Content/quickhits.txt
+  Discovery/Web-Content/raft-medium-directories.txt
+  Discovery/Web-Content/raft-medium-files.txt
+  Discovery/Web-Content/raft-medium-words.txt
+  Discovery/Web-Content/raft-small-directories.txt
+  Discovery/Web-Content/raft-small-files.txt
+  Discovery/Web-Content/raft-small-words.txt
+  Discovery/Web-Content/uri-from-top-55-most-popular-apps.txt
+  Discovery/Web-Content/url-params_from-top-55-most-popular-apps.txt
+  Passwords/Common-Credentials/10k-most-common.txt
+  Passwords/Common-Credentials/500-worst-passwords.txt
+  Passwords/Common-Credentials/darkweb2017_top-10000.txt
+  Passwords/Common-Credentials/probable-v2_top-1575.txt
+  Passwords/Common-Credentials/top-20-common-SSH-passwords.txt
+  Passwords/Common-Credentials/xato-net-10-million-passwords-1000.txt
+  Passwords/Common-Credentials/xato-net-10-million-passwords-10000.txt
+  Passwords/Default-Credentials/cirt-net_collection.txt
+  Passwords/Default-Credentials/default-passwords.csv
+  Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt
+  Usernames/cirt-default-usernames.txt
+  Usernames/top-usernames-shortlist.txt
