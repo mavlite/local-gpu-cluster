@@ -15,6 +15,9 @@
 #   seed-nuget DIR [--dry-run] install SDG-RUST's NuGet package folder (a `dotnet restore --packages` output made on a
 #                              machine with nuget.org access) read-only at /opt/sdg-tools/nuget/sdg-rust; it must hold
 #                              the packages in NUGET_REQUIRED. Tasks get it as SDG_NUGET_CACHE (agent-run).
+#   seed-arma-mods [--dry-run] install the mod archives SDG-ARMA3 builds unpack (files/agent-runner-tools.lock.json,
+#                              arma_mods: downloaded + sha256-checked on the host) read-only on the VM. Tasks get the
+#                              folder as SDG_ARMA_MODS (agent-run).
 #   seed-umod DIR [--dry-run]  copy SDG-RUST's plugin cache (<sha1>.cs, gitignored) into the VM clone; each file must
 #                              hash to its name and be listed by a plugins.lock on origin
 #   probe [REPO]               run scripts/files/agent-runner-probes.sh on the VM: the sandbox's walls, shell + agent
@@ -148,6 +151,17 @@ do_diff() {
   if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1; stat -c '%U:%G %a' '$dst' 2>/dev/null")" == "$msha"$'\n'"root:root 755" ]]
   then printf 'ok     vm   sqfvm %s at %s (sha256 + root:root 755)\n' "$ver" "$dst"
   else printf 'DRIFT  vm   sqfvm %s missing or not the pinned build at %s (install-tools)\n' "$ver" "$dst"; drift=1; fi
+  read -r ver url zsha member msha dst <<<"$(lock_ziptool hemtt)"
+  if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1; stat -c '%U:%G %a' '$dst' 2>/dev/null")" == "$msha"$'\n'"root:root 755" ]]
+  then printf 'ok     vm   hemtt %s at %s (sha256 + root:root 755)\n' "$ver" "$dst"
+  else printf 'DRIFT  vm   hemtt %s missing or not the pinned build at %s (install-tools)\n' "$ver" "$dst"; drift=1; fi
+  local mdir mfile murl msum
+  { read -r mdir || die "no arma_mods entry in $TOOLS_LOCK"; while read -r mfile murl msum; do
+      [[ "$mdir" =~ ^/opt/sdg-tools/[A-Za-z0-9_/-]+$ && "$mfile" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad arma_mods entry '$mdir/$mfile'"
+      if [[ "$(vm "sha256sum '$mdir/$mfile' 2>/dev/null | cut -d' ' -f1" </dev/null)" == "$msum" ]]
+      then printf 'ok     vm   arma mod archive %s (sha256)\n' "$mfile"
+      else printf 'DRIFT  vm   arma mod archive %s missing or changed in %s (seed-arma-mods)\n' "$mfile" "$mdir"; drift=1; fi
+    done; } < <(lock_arma_mods)
   local dver ddir dlink
   read -r dver ddir dlink <<<"$(lock_dotnet | cut -d' ' -f1,4,5)"
   [[ -n "$dver" ]] || die "dotnet entry missing from $TOOLS_LOCK"
@@ -234,9 +248,15 @@ setup_sandbox() {   # $1 = --dry-run or empty. Idempotent.
 }
 
 deb_installed_cmd() { echo "dpkg-query -W -f='\${Status}' '$1' 2>/dev/null | grep -qx 'install ok installed'"; }
-lock_sqfvm() {   # -> "version url sha256 member member_sha256 install_path"
-  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["sqfvm"]
-print(*(d[k] for k in ("version","url","sha256","member","member_sha256","install_path")))' "$TOOLS_LOCK"
+lock_ziptool() {   # $1 = sqfvm|hemtt -> "version url sha256 member member_sha256 install_path"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))[sys.argv[2]]
+print(*(d[k] for k in ("version","url","sha256","member","member_sha256","install_path")))' "$TOOLS_LOCK" "$1"
+}
+lock_sqfvm() { lock_ziptool sqfvm; }
+lock_arma_mods() {   # -> the install dir, then one "file url sha256" line per archive
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1]))["arma_mods"]
+print(d["install_dir"])
+for f in d["files"]: print(f["file"], f["url"], f["sha256"])' "$TOOLS_LOCK"
 }
 
 lock_dotnet() {   # -> "version url sha512 install_dir link"
@@ -264,6 +284,28 @@ install_dotnet() {   # $1 = --dry-run or empty. The SDK tarball, sha512-checked 
     | sed 's/^/dotnet --version: /' || die "dotnet does not run on the VM"
 }
 
+install_ziptool() {   # $1 = sqfvm|hemtt, $2 = --dry-run or empty. One pinned binary out of a release zip.
+  local tool="$1" dry="${2:-}" ver url zsha member msha dst t
+  read -r ver url zsha member msha dst <<<"$(lock_ziptool "$tool")"
+  [[ -n "$ver" && -n "$dst" ]] || die "$tool entry missing from $TOOLS_LOCK"
+  if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1")" == "$msha" ]]; then echo "ok: $tool $ver already at $dst"
+  elif [[ -n "$dry" ]]; then echo "would install $tool $ver -> $dst"
+  else
+    t=$(mktemp -d)
+    curl -fsSL --retry 2 -o "$t/$tool.zip" "$url"
+    echo "$zsha  $t/$tool.zip" | sha256sum -c --quiet || { rm -rf "$t"; die "$tool zip sha256 mismatch"; }
+    # extract ONE named member, by name, to a fixed path (no path from the archive is used)
+    python3 -I -c 'import sys,zipfile; open(sys.argv[3],"wb").write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
+      "$t/$tool.zip" "$member" "$t/$tool.bin"
+    echo "$msha  $t/$tool.bin" | sha256sum -c --quiet || { rm -rf "$t"; die "$tool binary sha256 mismatch"; }
+    base64 -w0 "$t/$tool.bin" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m 755 -o root -g root \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
+    rm -rf "$t"; echo "installed $tool $ver -> $dst (zip + binary sha256 verified)"
+  fi
+  # the version call is its own step: behind a pipe its failure would be hidden by head's exit status
+  [[ -n "$dry" ]] || vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version >/dev/null 2>&1 || exit 1; '$dst' --version 2>&1 | head -3" \
+    || die "$tool does not run on the VM"
+}
+
 install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifies on the host, never on the VM.
   local dry="${1:-}" p need=() t
   for p in "${VM_DEBS[@]}"; do vm "$(deb_installed_cmd "$p")" || need+=("$p"); done
@@ -278,23 +320,9 @@ install_tools() {   # $1 = --dry-run or empty. Idempotent; downloads and verifie
     fi
   else echo "ok: debs ${VM_DEBS[*]} already installed"; fi
 
-  local ver url zsha member msha dst
-  read -r ver url zsha member msha dst <<<"$(lock_sqfvm)"
-  if [[ "$(vm "sha256sum '$dst' 2>/dev/null | cut -d' ' -f1")" == "$msha" ]]; then echo "ok: sqfvm $ver already at $dst"
-  elif [[ -n "$dry" ]]; then echo "would install sqfvm $ver -> $dst"
-  else
-    t=$(mktemp -d)
-    curl -fsSL --retry 2 -o "$t/sqfvm.zip" "$url"
-    echo "$zsha  $t/sqfvm.zip" | sha256sum -c --quiet || { rm -rf "$t"; die "sqfvm zip sha256 mismatch"; }
-    # extract ONE named member, by name, to a fixed path (no path from the archive is used)
-    python3 -I -c 'import sys,zipfile; open(sys.argv[3],"wb").write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' \
-      "$t/sqfvm.zip" "$member" "$t/sqfvm.bin"
-    echo "$msha  $t/sqfvm.bin" | sha256sum -c --quiet || { rm -rf "$t"; die "sqfvm binary sha256 mismatch"; }
-    base64 -w0 "$t/sqfvm.bin" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m 755 -o root -g root \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
-    rm -rf "$t"; echo "installed sqfvm $ver -> $dst (zip + binary sha256 verified)"
-  fi
-  [[ -n "$dry" ]] || vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version 2>&1 | head -3" \
-    || die "sqfvm does not run on the VM"
+  install_ziptool sqfvm "$dry"
+  # HEMTT builds the SDG-ARMA3 mod (a3 build / a3 loop); a3 uses this copy through SDG_ARMA_HEMTT (agent-run).
+  install_ziptool hemtt "$dry"
   install_dotnet "$dry"
 }
 
@@ -315,6 +343,26 @@ seed_nuget() {   # $1 = a `dotnet restore --packages` folder, $2 = --dry-run
           sudo tar -C '$NUGET_DIR.new' --no-same-owner -xf -; sudo chmod -R u=rwX,go=rX '$NUGET_DIR.new'
           sudo rm -rf '$NUGET_DIR'; sudo mv '$NUGET_DIR.new' '$NUGET_DIR'
           echo \"installed \$(find '$NUGET_DIR' -mindepth 2 -maxdepth 2 -type d | wc -l) package versions in $NUGET_DIR\""
+}
+
+# SDG-ARMA3 builds unpack CBA, LAMBS and (for hc.json) ACE from pinned archives; the sandbox has no GitHub, so they
+# are seeded here (SDG-ARMA3#6). a3 checks each file's sha256 again against its own mods.lock.json before use.
+seed_arma_mods() {   # $1 = --dry-run or empty. Idempotent; downloads and verifies on the host, never on the VM.
+  local dry="${1:-}" dir file url sum t
+  { read -r dir || die "no arma_mods entry in $TOOLS_LOCK"
+    [[ "$dir" =~ ^/opt/sdg-tools/[A-Za-z0-9_/-]+$ ]] || die "arma_mods install_dir must be a plain path under /opt/sdg-tools"
+    while read -r file url sum; do
+      [[ "$file" =~ ^[A-Za-z0-9_.-]+$ ]] || die "bad arma mod file name '$file'"
+      if [[ "$(vm "sha256sum '$dir/$file' 2>/dev/null | cut -d' ' -f1" </dev/null)" == "$sum" ]]; then echo "ok: $file already in $dir"
+      elif [[ -n "$dry" ]]; then echo "would install $file -> $dir"
+      else
+        t=$(mktemp -d)
+        curl -fsSL --retry 2 -o "$t/$file" "$url" || { rm -rf "$t"; die "$file download failed"; }
+        echo "$sum  $t/$file" | sha256sum -c --quiet || { rm -rf "$t"; die "$file sha256 mismatch"; }
+        vm "set -e; t=\$(mktemp); trap 'rm -f \"\$t\"' EXIT; cat > \"\$t\"; sudo install -D -m 644 -o root -g root \"\$t\" '$dir/$file'; rm -f \"\$t\"" <"$t/$file"
+        rm -rf "$t"; echo "installed $file -> $dir (sha256 verified)"
+      fi
+    done; } < <(lock_arma_mods)
 }
 
 seed_umod() {   # $1 = dir of <sha1>.cs files (copied from a workstation's raidable-bases-sdg/.cache/umod), $2 = --dry-run
@@ -344,7 +392,8 @@ case "$cmd" in
   setup-sandbox) vm true || die "cannot reach $VM with $KEY"; setup_sandbox "${1:-}" ;;
   install-tools) vm true || die "cannot reach $VM with $KEY"; install_tools "${1:-}" ;;
   seed-nuget) vm true || die "cannot reach $VM with $KEY"; seed_nuget "${1:-}" "${2:-}" ;;
+  seed-arma-mods) vm true || die "cannot reach $VM with $KEY"; seed_arma_mods "${1:-}" ;;
   seed-umod) vm true || die "cannot reach $VM with $KEY"; seed_umod "${1:-}" "${2:-}" ;;
   probe) vm "bash -s -- '${1:-SDG-ARMA3}'" < "$F/agent-runner-probes.sh" ;;
-  *) sed -n '2,21p' "$0"; exit 2 ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac

@@ -9,7 +9,8 @@
 #   - private /tmp (HOME=/tmp/home), /home hidden, /etc/agent-runner and /run/agent-runner inaccessible
 #   - no GitHub credentials (GH_CONFIG_DIR points at an empty dir; the token stays in /etc/agent-runner)
 #   - the router key arrives via a root-only EnvironmentFile that systemd reads before dropping to `agent`;
-#     per-repo lab secrets (SDG-RUST: /etc/agent-runner/ptero-156.env, SDG_PTERO_*) ride along, for that repo only
+#     per-repo lab secrets (SDG-RUST and SDG-ARMA3: /etc/agent-runner/ptero-156.env, SDG_PTERO_*) ride along, for
+#     those repos only
 #   - SDG-ARMA3 only: SSH_AUTH_SOCK = the panel key's ssh-agent (agent-runner-panel-agent.service); `ssh panel`
 #     works through it, the key file itself stays out of reach
 # The model follows the router's loaded chat profile (scoped keys cannot swap it): rag-qwen3.6 -> qwen3.6,
@@ -135,14 +136,19 @@ fi
 # Per-repo lab secrets, passed in exactly like the router key and ONLY for that repo's tasks.
 # Each file may hold only PREFIX_*=value lines (comments/blank ok): anything else is refused, so a secret file
 # can never smuggle LD_PRELOAD, PATH or the like into the sandbox.
-declare -A REPO_ENV_FILE=( [SDG-RUST]=/etc/agent-runner/ptero-156.env )
-declare -A REPO_ENV_PREFIX=( [SDG-RUST]=SDG_PTERO_ )
+# SDG-ARMA3 gets the same file: one panel user (27) is a subuser on both labs, with file permissions only on the Arma
+# servers 158-160. a3's ptero transport keeps the user part of SDG_PTERO_SFTP_USER, adds the target server's short id
+# itself, and touches only SDG_PTERO_SERVERS (never a Rust server).
+declare -A REPO_ENV_FILE=( [SDG-RUST]=/etc/agent-runner/ptero-156.env [SDG-ARMA3]=/etc/agent-runner/ptero-156.env )
+declare -A REPO_ENV_PREFIX=( [SDG-RUST]=SDG_PTERO_ [SDG-ARMA3]=SDG_PTERO_ )
 if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
   f=${REPO_ENV_FILE[$name]}; p=${REPO_ENV_PREFIX[$name]}
   if grep -qvE "^(${p}[A-Z0-9_]+=.*|[[:space:]]*|#.*)$" "$f"; then
     echo "agent-run: $f has a line that is not ${p}*=...; refusing to start" >&2; exit 2
   fi
-  grep -E "^${p}[A-Z0-9_]+=" "$f" | sudo tee -a "$envf" >/dev/null
+  # Never the names the fixed table below sets: an EnvironmentFile line would override --setenv, and one repo's
+  # server list must not reach the other through the shared file.
+  grep -E "^${p}[A-Z0-9_]+=" "$f" | grep -vE "^SDG_PTERO_(SERVERS|SFTP_NODES)=" | sudo tee -a "$envf" >/dev/null
 fi
 
 # Per-repo fixed (non-secret) variables the repo's task docs say the runner provides, NAME=value pairs separated by
@@ -151,6 +157,19 @@ fi
 # 156 pve integration, 152 pvp integration, 154/155/157 dev; never 141 (owner, 2026-11-02, with #65).
 # SDG_NUGET_CACHE: the read-only NuGet package folder for the unit tests (78 seed-nuget; no nuget.org egress).
 declare -A REPO_FIXED_ENV=( [SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157|SDG_NUGET_CACHE=/opt/sdg-tools/nuget/sdg-rust" )
+# SDG-ARMA3 (tools/lab/README.md, "Transports" and "Read-only checkout"): the ptero transport on the lab servers
+# 158-160 only, the shared panel lock as holder `runner`, the panel through sdg-lab-gate (`ssh panel`, the agent's key),
+# each lab node's Wings SFTP address with its pinned host key (play-us2: 158, 160; patron-us2: 159), the pre-installed
+# SQF-VM and HEMTT (install-tools), the read-only mod archives (seed-arma-mods), and every write under /tmp or /results.
+REPO_FIXED_ENV[SDG-ARMA3]='SDG_LAB_TRANSPORT=ptero|SDG_LAB_LOCK=panel|SDG_LAB_LOCK_HOLDER=runner|SDG_LAB_PANEL=gate'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_PANEL_SSH=panel|SDG_PANEL_SSH_KEY=/etc/agent-runner-agent/panel.pub'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_PANEL_KNOWN_HOSTS=/etc/agent-runner-agent/known_hosts_panel|SDG_PTERO_SERVERS=158,159,160'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_PTERO_SFTP_NODES={"game-play-us2":{"addr":"10.60.30.12:2022","fp":"SHA256:VU9PKndlo1kDs8el+FFLUPxYXU+BqoxmKM3Xod5Eckg"},"game-patron-us2":{"addr":"10.60.20.12:2022","fp":"SHA256:MEaWKTE+18HDZs+icHvtDD4MHC/GmKS2MtxsY0rglFY"}}'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_ARMA_SQFVM=/opt/sdg-tools/sqfvm/2026.04.03/sqfvm|SDG_ARMA_HEMTT=/opt/sdg-tools/hemtt/1.22.0/hemtt'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_ARMA_MODS=/opt/sdg-tools/arma/mods|SDG_ARMA_BUILD=/tmp/sdg-arma/build|SDG_ARMA_CACHE=/tmp/sdg-arma/cache'
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_ARMA_LAB_STATE=/tmp/sdg-arma/state|SDG_ARMA_RESULTS=/results'
+# The state folder starts empty in every task and the runner never provisions: the registry comes from the checkout.
+REPO_FIXED_ENV[SDG-ARMA3]+='|SDG_ARMA_SERVERS_SEED=/work/SDG-ARMA3/tools/lab/servers.runner.json'
 repoenv=()
 IFS='|' read -ra fixed <<<"${REPO_FIXED_ENV[$name]:-}"
 for kv in "${fixed[@]}"; do [[ -n "$kv" ]] && repoenv+=(--setenv="$kv"); done

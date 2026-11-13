@@ -16,5 +16,35 @@
     "sha512": "85725692f465f5024b9b42a159a29d9f73e8c57ad9e8bfe1e7028a505d18031d68931e8aa3f9de44145b08170dde897c8a78e1aa18d4219698b6891af7095d39",
     "install_dir": "/opt/dotnet/8.0.427",
     "link": "/usr/local/bin/dotnet"
+  },
+  "hemtt": {
+    "_comment": "HEMTT for SDG-ARMA3 builds (a3 build / a3 loop), mirrors SDG-ARMA3 tools/lab/tools.lock.json (linux). a3 uses it through SDG_ARMA_HEMTT only when the binary's sha256 matches.",
+    "version": "1.22.0",
+    "url": "https://github.com/BrettMayson/HEMTT/releases/download/v1.22.0/linux-x64.zip",
+    "sha256": "27d2ff40b63dee0644954464d8db8c3808b04d6bd88a78959af0e0f7cb59d3e8",
+    "member": "hemtt",
+    "member_sha256": "58c0f2c1d88041ebce24753e920ac80efb7624d28e8af9b7960c669117695770",
+    "install_path": "/opt/sdg-tools/hemtt/1.22.0/hemtt"
+  },
+  "arma_mods": {
+    "_comment": "Mod archives SDG-ARMA3 builds unpack, mirrors SDG-ARMA3 tools/lab/mods.lock.json (file name = <name>-<version>.<ext>). Installed read-only by `78-vm-agent-runner.sh seed-arma-mods` (download + sha256 on the Proxmox host). ace is for arena/suites/hc.json. Antistasi is left out: its suite needs 7z, which the VM does not have.",
+    "install_dir": "/opt/sdg-tools/arma/mods",
+    "files": [
+      {
+        "file": "cba_a3-3.19.0.zip",
+        "url": "https://github.com/CBATeam/CBA_A3/releases/download/v3.19.0/CBA_A3_v3.19.0.zip",
+        "sha256": "68f5ef7265ce41a9f7c70691a59a652de6920a54879d3b69d35ffa9454643e2e"
+      },
+      {
+        "file": "lambs_danger-2.6.2.zip",
+        "url": "https://github.com/nk3nny/LambsDanger/releases/download/2.6.2/@LambsDanger_2_6_2.zip",
+        "sha256": "57e844bb3ee28ccb6d08e51d08748b68476e5c7e0e0a70583b33ab10b82187ac"
+      },
+      {
+        "file": "ace-3.21.2.zip",
+        "url": "https://github.com/acemod/ACE3/releases/download/v3.21.2/ace3_3.21.2.zip",
+        "sha256": "e84a05c97652c4a58919112424df4a13b751e007e1c05271be3881ae7fb66106"
+      }
+    ]
   }
 }
