@@ -36,7 +36,7 @@ import sys
 import time
 import urllib.request
 
-LANE_MODELS = {"rag-qwen3.6": "qwen3.6", "qwen3.8": "qwen3.8-nothink"}   # mirrors agent-run
+LANE_MODELS = {"rag-qwen3.6": "qwen3.6", "qwen3.8": "qwen3.8-think"}   # mirrors agent-run
 LABEL_READY, LABEL_RUNNING = "runner:ready", "runner:running"
 LABEL_DONE, LABEL_BLOCKED, LABEL_CLAUDE = "runner:done", "runner:blocked", "needs-claude"
 # Tiers (owner decision 2026-10-30): tier:a = no servers, tier:b = staff test servers, tier:c = never auto-run.

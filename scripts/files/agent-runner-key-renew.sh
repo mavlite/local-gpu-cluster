@@ -2,7 +2,7 @@
 # Renew the agent runner's router key (LXC 153 router-keys) when it has under RENEW_HOURS left, and push it to the
 # runner VM 178 (/etc/agent-runner/router.key). The key is never printed. Usage: agent-runner-key-renew [--dry-run|--force]
 set -euo pipefail
-NAME=agent-runner ALIASES=qwen3.8-nothink,qwen3.6 TTL=336 RENEW_HOURS=48
+NAME=agent-runner ALIASES=qwen3.8-think,qwen3.6 TTL=336 RENEW_HOURS=48
 RUNNER=runner@10.81.0.10 SSHKEY=/root/.ssh/agent-runner-admin TMP=/root/agent-runner.key.new
 mode=${1:-}
 line=$(pct exec 153 -- /usr/local/sbin/router-keys list | awk -v n="$NAME" '$1==n && $2=="active"')

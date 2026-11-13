@@ -77,14 +77,14 @@ Not managed by the script:
 
 ## Model access
 
-- **Key:** scoped router key `agent-runner` (aliases `qwen3.8-nothink,qwen3.6`, TTL 336 h), file
+- **Key:** scoped router key `agent-runner` (aliases `qwen3.8-think,qwen3.6`, TTL 336 h), file
   `/etc/agent-runner/router.key` on the VM (root:runner 640).
 - **Renewal:** `agent-runner-key-renew.timer` on the **host** runs daily. Under 48 h left, it revokes and
   re-adds the key, pushes it into the VM without printing it, and checks `/v1/models` returns 200. Flags:
   `--dry-run`, `--force`.
 - **Lanes:** scoped keys get `chat slots − 1`. That is 1 on qwen3.6 (2 × 128K), 2 on qwen3.8 (3 × 128K), and 0 on
   any other profile. They can never swap profiles (409 `profile_mismatch`). `agent-run` reads `/healthz` and picks
-  `qwen3.6` or `qwen3.8-nothink`; any other profile exits 75 (lane closed).
+  `qwen3.6` or `qwen3.8-think` (owner, 2026-11-13; `-nothink` before); any other profile exits 75 (lane closed).
 
 ## Agent tooling (VM)
 

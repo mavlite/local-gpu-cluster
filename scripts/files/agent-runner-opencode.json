@@ -23,12 +23,12 @@
             "output": 16384
           }
         },
-        "qwen3.8-nothink": {
-          "name": "qwen3.8-nothink",
+        "qwen3.8-think": {
+          "name": "qwen3.8-think",
           "tools": true,
           "limit": {
             "context": 131072,
-            "output": 16384
+            "output": 32768
           }
         }
       }

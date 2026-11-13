@@ -14,7 +14,7 @@
 #   - SDG-ARMA3 only: SSH_AUTH_SOCK = the panel key's ssh-agent (agent-runner-panel-agent.service); `ssh panel`
 #     works through it, the key file itself stays out of reach
 # The model follows the router's loaded chat profile (scoped keys cannot swap it): rag-qwen3.6 -> qwen3.6,
-# qwen3.8 -> qwen3.8-nothink, anything else -> lane closed, exit 75 so the caller retries later.
+# qwen3.8 -> qwen3.8-think (owner, 2026-11-13; was -nothink), anything else -> lane closed, exit 75 so the caller retries later.
 #
 # Probe mode (runner only, for testing the walls): AGENT_RUN_SHELL=1 agent-run DIR 'shell command' runs
 # /bin/bash -c in the identical sandbox instead of opencode.
@@ -114,7 +114,7 @@ else
   profile=$(curl -s -m 10 http://192.168.6.153:8000/healthz | jq -r '.active_chat_profile // empty')
   case "$profile" in
     rag-qwen3.6) model=router/qwen3.6 ;;
-    qwen3.8)     model=router/qwen3.8-nothink ;;
+    qwen3.8)     model=router/qwen3.8-think ;;
     *) echo "agent-run: router chat profile '${profile:-unknown}' has no lane for scoped keys; retry later" >&2; exit 75 ;;
   esac
 fi
