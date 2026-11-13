@@ -301,8 +301,9 @@ install_ziptool() {   # $1 = sqfvm|hemtt, $2 = --dry-run or empty. One pinned bi
     base64 -w0 "$t/$tool.bin" | vm "t=\$(mktemp) && base64 -d > \"\$t\" && sudo install -D -m 755 -o root -g root \"\$t\" '$dst'; rc=\$?; rm -f \"\$t\"; exit \$rc"
     rm -rf "$t"; echo "installed $tool $ver -> $dst (zip + binary sha256 verified)"
   fi
-  # the version call is its own step: behind a pipe its failure would be hidden by head's exit status
-  [[ -n "$dry" ]] || vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version >/dev/null 2>&1 || exit 1; '$dst' --version 2>&1 | head -3" \
+  # The version call is its own step: behind a pipe its failure would be hidden by head's exit status. Only "cannot
+  # execute" (126, 127) or a signal (128+) fails it: HEMTT 1.22.0 prints its version and exits 1 (seen 2026-11-13).
+  [[ -n "$dry" ]] || vm "ldd '$dst' | grep 'not found' && exit 1; '$dst' --version >/dev/null 2>&1; rc=\$?; [ \$rc -lt 126 ] || exit 1; '$dst' --version 2>&1 | head -3" \
     || die "$tool does not run on the VM"
 }
 

@@ -61,7 +61,7 @@ elif [[ "$REPO" == SDG-ARMA3 ]]; then
   expect ok   "SDG_PTERO_SERVERS is the three Arma lab servers" '[ "$SDG_PTERO_SERVERS" = "158,159,160" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "ptero transport, panel lock as runner, panel through the gate" '[ "$SDG_LAB_TRANSPORT $SDG_LAB_LOCK $SDG_LAB_LOCK_HOLDER $SDG_LAB_PANEL" = "ptero panel runner gate" ]'
   expect ok   "SDG_PTERO_SFTP_NODES names both lab nodes with a pinned key" 'python3 -I -c "import json,os; d=json.loads(os.environ[\"SDG_PTERO_SFTP_NODES\"]); assert sorted(d)==[\"game-patron-us2\",\"game-play-us2\"] and all(v[\"fp\"].startswith(\"SHA256:\") for v in d.values()); print(sorted(d))"'
-  expect ok   "pre-installed SQF-VM and HEMTT run" '"$SDG_ARMA_SQFVM" --version 2>&1 | head -1; "$SDG_ARMA_HEMTT" --version 2>&1 | head -1; [ -x "$SDG_ARMA_SQFVM" ] && [ -x "$SDG_ARMA_HEMTT" ]'
+  expect ok   "pre-installed SQF-VM and HEMTT run" '"$SDG_ARMA_SQFVM" --version 2>&1 | grep -m1 version; "$SDG_ARMA_HEMTT" --version 2>&1 | grep -m1 "^hemtt [0-9]"'
   expect ok   "SDG_ARMA_MODS holds the mod archives, read-only" 'ls "$SDG_ARMA_MODS" | tr "\n" " "; [ -f "$SDG_ARMA_MODS/cba_a3-3.19.0.zip" ] && [ -f "$SDG_ARMA_MODS/lambs_danger-2.6.2.zip" ] && ! touch "$SDG_ARMA_MODS/x" 2>/dev/null'
   expect ok   "build, cache, lab state and results folders are writable" 'for d in "$SDG_ARMA_BUILD" "$SDG_ARMA_CACHE" "$SDG_ARMA_LAB_STATE" "$SDG_ARMA_RESULTS"; do mkdir -p "$d" && touch "$d/.probe" && rm "$d/.probe" || exit 1; done'
   expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
