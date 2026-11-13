@@ -44,7 +44,9 @@ def test_arma_runs_the_ptero_transport_on_the_lab_servers_only():
     # the credentials never sit in the fixed table: they come from the root-only env file
     assert not {"SDG_PTERO_API_KEY", "SDG_PTERO_SFTP_USER", "SDG_PTERO_SFTP_PASSWORD"} & set(e)
     run = _read("agent-run.sh")
-    assert "[SDG-ARMA3]=/etc/agent-runner/ptero-156.env" in run and "[SDG-ARMA3]=SDG_PTERO_ " in run
+    # its own panel user and file: the Rust lab's credentials never reach an Arma task
+    assert "[SDG-ARMA3]=/etc/agent-runner/ptero-arma.env" in run and "[SDG-ARMA3]=SDG_PTERO_ " in run
+    assert run.count("/etc/agent-runner/ptero-156.env") == 2      # the header comment and the SDG-RUST entry
 
 
 def test_every_sftp_node_is_pinned_and_reachable_through_the_egress_table():
@@ -100,6 +102,6 @@ def test_rust_fixed_variables_are_unchanged():
     assert '[SDG-RUST]="SDG_RUST_MAIN=/work/SDG-RUST|SDG_PTERO_SERVERS=152 154 155 156 157|' in _read("agent-run.sh")
 
 
-def test_the_shared_secrets_file_cannot_override_a_repos_server_list():
+def test_a_secrets_file_cannot_override_a_repos_server_list():
     # systemd lets an EnvironmentFile line override --setenv; the fixed table must stay the only source of these two
     assert 'grep -vE "^SDG_PTERO_(SERVERS|SFTP_NODES)="' in _read("agent-run.sh")

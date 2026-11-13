@@ -37,6 +37,7 @@ expect fail "cat > ./probe.txt (cwd = checkout)"       'cat > probe.txt </dev/nu
 expect fail "read /etc/agent-runner/gh-token"          'cat /etc/agent-runner/gh-token'
 expect fail "read /etc/agent-runner/router.key"        'cat /etc/agent-runner/router.key'
 expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/ptero-156.env'
+expect fail "read /etc/agent-runner/ptero-arma.env"    'cat /etc/agent-runner/ptero-arma.env'
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
   expect ok   "SDG_PTERO_* secrets present for SDG-RUST (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vc "^SDG_PTERO_SERVERS$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
@@ -55,7 +56,7 @@ if [[ "$REPO" == SDG-RUST ]]; then
       if [ "$s" = "$a" ]; then printf "%s=ok " "$id"; else printf "%s=DIFFERENT " "$id"; bad=1; fi
     done; [ "$bad" = 0 ]'
 elif [[ "$REPO" == SDG-ARMA3 ]]; then
-  # The same panel user's secrets reach SDG-ARMA3 tasks, for the Arma lab servers only (names printed, never values).
+  # Arma's own panel user's secrets reach SDG-ARMA3 tasks only (names printed, never values).
   expect ok   "SDG_PTERO_* secrets present for SDG-ARMA3 (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vcE "^SDG_PTERO_(SERVERS|SFTP_NODES)$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
   expect ok   "SDG_PTERO_SERVERS is the three Arma lab servers" '[ "$SDG_PTERO_SERVERS" = "158,159,160" ] && echo "$SDG_PTERO_SERVERS"'
   expect ok   "ptero transport, panel lock as runner, panel through the gate" '[ "$SDG_LAB_TRANSPORT $SDG_LAB_LOCK $SDG_LAB_LOCK_HOLDER $SDG_LAB_PANEL" = "ptero panel runner gate" ]'

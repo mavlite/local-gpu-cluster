@@ -9,8 +9,8 @@
 #   - private /tmp (HOME=/tmp/home), /home hidden, /etc/agent-runner and /run/agent-runner inaccessible
 #   - no GitHub credentials (GH_CONFIG_DIR points at an empty dir; the token stays in /etc/agent-runner)
 #   - the router key arrives via a root-only EnvironmentFile that systemd reads before dropping to `agent`;
-#     per-repo lab secrets (SDG-RUST and SDG-ARMA3: /etc/agent-runner/ptero-156.env, SDG_PTERO_*) ride along, for
-#     those repos only
+#     per-repo lab secrets (SDG-RUST: /etc/agent-runner/ptero-156.env, SDG-ARMA3: /etc/agent-runner/ptero-arma.env,
+#     both SDG_PTERO_*) ride along, each for its own repo only
 #   - SDG-ARMA3 only: SSH_AUTH_SOCK = the panel key's ssh-agent (agent-runner-panel-agent.service); `ssh panel`
 #     works through it, the key file itself stays out of reach
 # The model follows the router's loaded chat profile (scoped keys cannot swap it): rag-qwen3.6 -> qwen3.6,
@@ -136,18 +136,16 @@ fi
 # Per-repo lab secrets, passed in exactly like the router key and ONLY for that repo's tasks.
 # Each file may hold only PREFIX_*=value lines (comments/blank ok): anything else is refused, so a secret file
 # can never smuggle LD_PRELOAD, PATH or the like into the sandbox.
-# SDG-ARMA3 gets the same file: one panel user (27) is a subuser on both labs, with file permissions only on the Arma
-# servers 158-160. a3's ptero transport keeps the user part of SDG_PTERO_SFTP_USER, adds the target server's short id
-# itself, and touches only SDG_PTERO_SERVERS (never a Rust server).
-declare -A REPO_ENV_FILE=( [SDG-RUST]=/etc/agent-runner/ptero-156.env [SDG-ARMA3]=/etc/agent-runner/ptero-156.env )
+# SDG-ARMA3 has its own panel user (28), a subuser on the Arma lab servers 158-160 only, with file permissions only
+# (no console, no power), and its own file. Neither repo's credentials open the other's servers (owner, 2026-11-13).
+declare -A REPO_ENV_FILE=( [SDG-RUST]=/etc/agent-runner/ptero-156.env [SDG-ARMA3]=/etc/agent-runner/ptero-arma.env )
 declare -A REPO_ENV_PREFIX=( [SDG-RUST]=SDG_PTERO_ [SDG-ARMA3]=SDG_PTERO_ )
 if [[ -n "${REPO_ENV_FILE[$name]:-}" && -e "${REPO_ENV_FILE[$name]}" ]]; then
   f=${REPO_ENV_FILE[$name]}; p=${REPO_ENV_PREFIX[$name]}
   if grep -qvE "^(${p}[A-Z0-9_]+=.*|[[:space:]]*|#.*)$" "$f"; then
     echo "agent-run: $f has a line that is not ${p}*=...; refusing to start" >&2; exit 2
   fi
-  # Never the names the fixed table below sets: an EnvironmentFile line would override --setenv, and one repo's
-  # server list must not reach the other through the shared file.
+  # Never the names the fixed table below sets: an EnvironmentFile line would override --setenv.
   grep -E "^${p}[A-Z0-9_]+=" "$f" | grep -vE "^SDG_PTERO_(SERVERS|SFTP_NODES)=" | sudo tee -a "$envf" >/dev/null
 fi
 
