@@ -152,6 +152,7 @@ def test_values_from_env_style_secret_files_are_redacted(env, monkeypatch):
 def test_default_secret_files_include_the_rust_lab_secrets(monkeypatch):
     monkeypatch.delenv("DISPATCH_SECRET_FILES", raising=False)
     assert "/etc/agent-runner/ptero-156.env" in d.cfg()["secret_files"]
+    assert "/etc/agent-runner/ptero-arma.env" in d.cfg()["secret_files"]      # the Arma lab user, same redaction
 
 
 def test_headerless_report_is_accepted_and_posted_with_heading(env, monkeypatch):

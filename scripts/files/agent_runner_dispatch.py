@@ -84,7 +84,8 @@ def cfg():
         "mirror_branches": parse_mirrors(os.environ.get("DISPATCH_MIRROR_BRANCHES", "SDG-RUST:upstream")),
         "secret_files": [p for p in os.environ.get(
             "DISPATCH_SECRET_FILES",
-            "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env").split(",") if p],
+            "/etc/agent-runner/router.key,/etc/agent-runner/gh-token,/etc/agent-runner/ptero-156.env,"
+            "/etc/agent-runner/ptero-arma.env").split(",") if p],
     }
 
 

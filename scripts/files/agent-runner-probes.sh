@@ -20,8 +20,14 @@ expect() {   # expect ok|fail "label" "command"
 declare -A SANDBOX_USER=( [SDG-RUST]=agent-rust [SDG-ARMA3]=agent-arma )
 # Lab endpoints (egress.conf) and which repo owns each; every repo must reach its own and only its own.
 # SDG-RUST: panel; Wings SFTP on patron-us2 (155, 156), patron-us1 (152, 154), play-us2 (157).
+# SDG-ARMA3: panel ssh and client API; Wings SFTP on play-us2 (158, 160) and patron-us2 (159).
+# An endpoint both repos own is listed once per owner; one only SDG-RUST owns must stay closed to SDG-ARMA3.
 LAB_ENDPOINTS=("SDG-RUST 10.60.40.10 80" "SDG-RUST 10.60.20.12 2022" "SDG-RUST 10.60.20.11 2022"
-               "SDG-RUST 10.60.30.12 2022" "SDG-ARMA3 10.60.40.10 22")
+               "SDG-RUST 10.60.30.12 2022" "SDG-ARMA3 10.60.40.10 22" "SDG-ARMA3 10.60.40.10 80"
+               "SDG-ARMA3 10.60.30.12 2022" "SDG-ARMA3 10.60.20.12 2022")
+owns() {   # owns REPO IP PORT: is that endpoint in REPO's list?
+  local e; for e in "${LAB_ENDPOINTS[@]}"; do [[ "$e" == "$1 $2 $3" ]] && return 0; done; return 1
+}
 
 echo "== A. shell in the sandbox (the boundary itself)"
 expect ok   "runs as ${SANDBOX_USER[$REPO]:-?}, not in group runner" \
@@ -31,6 +37,7 @@ expect fail "cat > ./probe.txt (cwd = checkout)"       'cat > probe.txt </dev/nu
 expect fail "read /etc/agent-runner/gh-token"          'cat /etc/agent-runner/gh-token'
 expect fail "read /etc/agent-runner/router.key"        'cat /etc/agent-runner/router.key'
 expect fail "read /etc/agent-runner/ptero-156.env"     'cat /etc/agent-runner/ptero-156.env'
+expect fail "read /etc/agent-runner/ptero-arma.env"    'cat /etc/agent-runner/ptero-arma.env'
 # Rust lab secrets reach SDG-RUST tasks only (names printed, never values).
 if [[ "$REPO" == SDG-RUST ]]; then
   expect ok   "SDG_PTERO_* secrets present for SDG-RUST (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vc "^SDG_PTERO_SERVERS$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
@@ -48,6 +55,16 @@ if [[ "$REPO" == SDG-RUST ]]; then
       # md5sum of "<<<" and of a pipe both see the list plus one trailing newline, so equal lists hash equal
       if [ "$s" = "$a" ]; then printf "%s=ok " "$id"; else printf "%s=DIFFERENT " "$id"; bad=1; fi
     done; [ "$bad" = 0 ]'
+elif [[ "$REPO" == SDG-ARMA3 ]]; then
+  # Arma's own panel user's secrets reach SDG-ARMA3 tasks only (names printed, never values).
+  expect ok   "SDG_PTERO_* secrets present for SDG-ARMA3 (3 names)" 'n=$(compgen -e | grep "^SDG_PTERO_" | grep -vcE "^SDG_PTERO_(SERVERS|SFTP_NODES)$"); compgen -e | grep "^SDG_PTERO_" | tr "\n" " "; [ "$n" = 3 ]'
+  expect ok   "SDG_PTERO_SERVERS is the three Arma lab servers" '[ "$SDG_PTERO_SERVERS" = "158,159,160" ] && echo "$SDG_PTERO_SERVERS"'
+  expect ok   "ptero transport, panel lock as runner, panel through the gate" '[ "$SDG_LAB_TRANSPORT $SDG_LAB_LOCK $SDG_LAB_LOCK_HOLDER $SDG_LAB_PANEL" = "ptero panel runner gate" ]'
+  expect ok   "SDG_PTERO_SFTP_NODES names both lab nodes with a pinned key" 'python3 -I -c "import json,os; d=json.loads(os.environ[\"SDG_PTERO_SFTP_NODES\"]); assert sorted(d)==[\"game-patron-us2\",\"game-play-us2\"] and all(v[\"fp\"].startswith(\"SHA256:\") for v in d.values()); print(sorted(d))"'
+  expect ok   "pre-installed SQF-VM and HEMTT run" '"$SDG_ARMA_SQFVM" --version 2>&1 | grep -m1 version; "$SDG_ARMA_HEMTT" --version 2>&1 | grep -m1 "^hemtt [0-9]"'
+  expect ok   "SDG_ARMA_MODS holds the mod archives, read-only" 'ls "$SDG_ARMA_MODS" | tr "\n" " "; [ -f "$SDG_ARMA_MODS/cba_a3-3.19.0.zip" ] && [ -f "$SDG_ARMA_MODS/lambs_danger-2.6.2.zip" ] && ! touch "$SDG_ARMA_MODS/x" 2>/dev/null'
+  expect ok   "build, cache, lab state and results folders are writable" 'for d in "$SDG_ARMA_BUILD" "$SDG_ARMA_CACHE" "$SDG_ARMA_LAB_STATE" "$SDG_ARMA_RESULTS"; do mkdir -p "$d" && touch "$d/.probe" && rm "$d/.probe" || exit 1; done'
+  expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
 else
   expect fail "any SDG_PTERO_* present for $REPO"          'compgen -e | grep "^SDG_PTERO_"'
   expect fail "SDG_RUST_MAIN set for $REPO"                'printenv SDG_RUST_MAIN'
@@ -83,7 +100,8 @@ expect fail "agent: DNS lookup"                        'getent hosts example.com
 expect fail "agent: resolved stub 127.0.0.53:53"       'timeout 5 bash -c "</dev/tcp/127.0.0.53/53"'
 for e in "${LAB_ENDPOINTS[@]}"; do
   read -r owner ip port <<<"$e"
-  if [[ "$owner" == "$REPO" ]]; then want=ok; else want=fail; fi
+  # one check per endpoint: its own entry when this repo owns it, else the other owner's entry (which must fail)
+  if [[ "$owner" == "$REPO" ]]; then want=ok; elif owns "$REPO" "$ip" "$port"; then continue; else want=fail; fi
   # An own endpoint the VM itself cannot reach (no VPN route yet, SDG-IAC) says nothing about the sandbox: skip it.
   if [[ "$want" == ok ]] && ! timeout 8 bash -c "</dev/tcp/$ip/$port" 2>/dev/null; then
     say SKIP "agent: lab endpoint $ip:$port (${owner}'s) -- no path from the VM (VPN route / OPNsense, SDG-IAC)"
